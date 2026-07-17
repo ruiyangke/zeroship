@@ -165,7 +165,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
   update: ["schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
-  backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
+  backfill: ["batchSize", "cursorColumns", "cursorStability", "filter", "name", "schema", "set", "table"].sort(),
   dialectal: ["default", "mysql", "pg", "sqlite"].sort(),
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
   dropView: ["existenceGuard", "materialized", "name", "schema"].sort(),

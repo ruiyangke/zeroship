@@ -2741,7 +2741,9 @@ mod render_tests {
         // behavior is pinned, then the MySQL session budgets are set.
         assert!(
             all.contains("SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode")
-                && all.contains("'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO'")
+                && all.contains(
+                    "'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO'"
+                )
                 && all.contains("SESSION time_zone = '+00:00'")
                 && all.contains("SESSION max_execution_time")
                 && all.contains("innodb_lock_wait_timeout")
@@ -3157,9 +3159,7 @@ mod render_tests {
                 && log.iter().any(|entry| entry == "batch: ROLLBACK")
                 && !log.iter().any(|entry| entry == "batch: COMMIT")
                 && !log.iter().any(|entry| {
-                    entry.contains(
-                        "DELETE FROM `proj_x_migrations`.schema_migrations_inflight",
-                    )
+                    entry.contains("DELETE FROM `proj_x_migrations`.schema_migrations_inflight")
                 }),
             "a partial squash finalization must roll back without clearing recovery evidence: {log:?}"
         );
@@ -3671,7 +3671,18 @@ mod render_tests {
         let spec = BackfillSpec {
             schema: "proj_x".into(),
             table: "users".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::ExternalInvariant {
+                name: "users_id_immutable_during_backfill".into(),
+            },
+            cursor_contract: Some(crate::model::backfill::CursorContract {
+                columns: vec![crate::model::backfill::CursorColumnContract {
+                    name: "id".into(),
+                    scalar_type: crate::model::backfill::CursorScalarType::Int64,
+                    database_type: "bigint".into(),
+                    comparison: crate::model::backfill::CursorComparison::Default,
+                }],
+            }),
             batch_size: 100,
             set_clause: "`done` = TRUE".into(),
             per_row: std::collections::BTreeMap::new(),

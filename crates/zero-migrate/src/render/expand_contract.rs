@@ -520,7 +520,7 @@ impl ExpandContractAuthor {
         // ---- E3: BACKFILL <to> := <from> WHERE <to> IS NULL ----
         //
         // Cursor on the PRIMARY KEY (resolved by the orchestrator / caller as the
-        // backfill's cursor_column), NOT on <to> (the column being populated —
+        // backfill's cursor_columns tuple), NOT on <to> (the column being populated —
         // backfill.rs forbids paging on the mutated column). The backfill is a
         // data-mutation STEP driven by run_backfill during orchestration (v1.3),
         // not raw `up` SQL; we still mint a journaled marker migration for it so
@@ -537,10 +537,12 @@ impl ExpandContractAuthor {
             // is a Confined-profile, single-project online change).
             schema: self.project_schema.clone(),
             table: table.to_string(),
-            // The orchestrator/caller supplies the real PK as cursor_column; we
+            // The orchestrator/caller supplies the real PK as cursor_columns; we
             // default to "id" (the platform's conventional PK) and document that
             // a caller overrides it for a non-`id` PK.
-            cursor_column: "id".to_string(),
+            cursor_columns: vec!["id".to_string()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+            cursor_contract: None,
             batch_size: 1000,
             set_clause: format!("{to_q} = {from_q}"),
             per_row: std::collections::BTreeMap::new(),
@@ -708,6 +710,30 @@ impl ExpandContractAuthor {
 /// The only-`from` arm is `IS DISTINCT FROM`-guarded (NULL-safe). The else arm
 /// is the total catch-all; when nothing changed it is a no-op self-copy, so an
 /// UPDATE that touches neither column is not amplified.
+pub(crate) fn dual_write_function_body(from_q: &str, to_q: &str) -> String {
+    format!(
+        "\nBEGIN\n\
+         \x20   IF TG_OP = 'INSERT' THEN\n\
+         \x20       IF NEW.{to_q} IS NULL AND NEW.{from_q} IS NOT NULL THEN\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from set\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to set / both set (to wins) / both null (no-op)\n\
+         \x20       END IF;\n\
+         \x20   ELSE\n\
+         \x20       -- UPDATE: TOTAL, to wins. Only-from-changed mirrors from→to;\n\
+         \x20       -- to-changed / both-changed / neither-changed all resolve to→from.\n\
+         \x20       IF NEW.{from_q} IS DISTINCT FROM OLD.{from_q}\n\
+         \x20          AND NEW.{to_q} IS NOT DISTINCT FROM OLD.{to_q} THEN\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from changed\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to changed / both changed (to wins) / neither (no-op)\n\
+         \x20       END IF;\n\
+         \x20   END IF;\n\
+         \x20   RETURN NEW;\n\
+         END;\n"
+    )
+}
+
 fn build_dual_write_sql(fn_q: &str, trg_q: &str, tbl_q: &str, from_q: &str, to_q: &str) -> String {
     // The function body. `$zsdw$` dollar-quote so embedded SQL needs no escaping.
     // BEGIN … RETURN NEW: a BEFORE trigger mutates NEW in place (never re-issues
@@ -733,28 +759,9 @@ fn build_dual_write_sql(fn_q: &str, trg_q: &str, tbl_q: &str, from_q: &str, to_q
     // UPDATE: if ONLY `from` changed, mirror `from → to`; otherwise (`to`
     // changed, BOTH changed → to wins, or NEITHER changed → no-op self-copy) the
     // else arm copies `to → from`.
+    let body = dual_write_function_body(from_q, to_q);
     let func = format!(
-        "CREATE OR REPLACE FUNCTION {fn_q}() RETURNS trigger AS $zsdw$\n\
-         BEGIN\n\
-         \x20   IF TG_OP = 'INSERT' THEN\n\
-         \x20       IF NEW.{to_q} IS NULL AND NEW.{from_q} IS NOT NULL THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};   -- only from set\n\
-         \x20       ELSE\n\
-         \x20           NEW.{from_q} := NEW.{to_q};   -- to set / both set (to wins) / both null (no-op)\n\
-         \x20       END IF;\n\
-         \x20   ELSE\n\
-         \x20       -- UPDATE: TOTAL, to wins. Only-from-changed mirrors from→to;\n\
-         \x20       -- to-changed / both-changed / neither-changed all resolve to→from.\n\
-         \x20       IF NEW.{from_q} IS DISTINCT FROM OLD.{from_q}\n\
-         \x20          AND NEW.{to_q} IS NOT DISTINCT FROM OLD.{to_q} THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};   -- only from changed\n\
-         \x20       ELSE\n\
-         \x20           NEW.{from_q} := NEW.{to_q};   -- to changed / both changed (to wins) / neither (no-op)\n\
-         \x20       END IF;\n\
-         \x20   END IF;\n\
-         \x20   RETURN NEW;\n\
-         END;\n\
-         $zsdw$ LANGUAGE plpgsql"
+        "CREATE OR REPLACE FUNCTION {fn_q}() RETURNS trigger AS $zsdw${body}$zsdw$ LANGUAGE plpgsql"
     );
     // The trigger. BEFORE INSERT OR UPDATE, FOR EACH ROW. We attach a single
     // trigger for both events and keep no WHEN clause: Postgres forbids OLD in a
@@ -880,8 +887,8 @@ mod tests {
     fn backfill_cursor_is_pk_not_the_backfilled_column() {
         let plan = author().author(&rename()).expect("author");
         // The backfill pages on the PK ("id"), not on the column it populates.
-        assert_eq!(plan.backfill.cursor_column, "id");
-        assert_ne!(plan.backfill.cursor_column, "email_address");
+        assert_eq!(plan.backfill.cursor_columns, ["id"]);
+        assert_ne!(plan.backfill.cursor_columns, ["email_address"]);
         assert_eq!(plan.backfill.table, "users");
         assert!(plan.backfill.set_clause.contains("\"email_address\""));
         assert!(plan.backfill.set_clause.contains("\"email\""));

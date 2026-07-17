@@ -258,7 +258,11 @@ test("SCHEMA: the table() default propagates onto every recorded op", () => {
     u.insert({ rows: [{ a: 1 }] });
     u.update({ set: { a: (col) => col("a") } });
     u.delete({ where: (col) => col("a").gt(0) });
-    u.backfill({ set: { a: (col) => col("a") } });
+    u.backfill({
+      set: { a: (col) => col("a") },
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+    });
   });
   for (const op of ops) assert.equal(op.schema, "app2", `op ${op.op} must carry the table default schema`);
 });

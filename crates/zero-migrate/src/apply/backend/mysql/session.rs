@@ -642,7 +642,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
                 "mysql migration {version} has inconsistent journal kind \
                  {requested_kind:?} and {} supersession edges",
                 supersedes.len()
-            )))
+            )));
         }
     };
     // Arm the started marker before the `up` runs.

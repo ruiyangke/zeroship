@@ -343,7 +343,9 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
     let backfill = BackfillSpec {
         schema: cfg.project_schema.clone(),
         table: "literal_safety".into(),
-        cursor_column: "id".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
         batch_size: 10,
         set_clause: r#""value" = '\t'"#.into(),
         per_row: BTreeMap::new(),
@@ -411,7 +413,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
           {"op":"insert","table":"samples","columns":["id"],
            "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
           {"op":"backfill","table":"samples","name":"fill_per_row_ids",
-           "cursorColumn":"id","batchSize":2,"set":{
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
              "uuid4":{"perRow":"uuidV4"},
              "uuid7":{"perRow":"uuidV7"},
              "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
@@ -493,7 +495,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let invalid_backfill: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"reject_generic_text_per_row","ops":[
           {"op":"backfill","table":"samples","name":"reject_plain_text_type_id",
-           "cursorColumn":"id","batchSize":2,"set":{
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
              "plain_text":{"perRow":{"typeId":{"prefix":"order"}}}
            }}
         ]}"#,
@@ -568,7 +570,9 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
     let spec = BackfillSpec {
         schema: cfg.project_schema.clone(),
         table: "items".into(),
-        cursor_column: "id".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
         per_row: BTreeMap::new(),
@@ -636,6 +640,117 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
 }
 
 #[compio::test]
+async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohort() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".generated_cursor_items (\
+                 source_key bigint NOT NULL, \
+                 cursor_key bigint GENERATED ALWAYS AS (source_key * 2) STORED NOT NULL UNIQUE, \
+                 value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".generated_cursor_items (source_key, value) \
+             VALUES (1, 'pending'), (2, 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create generated-cursor backfill target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("stored generated cursor backfill");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "generated_cursor_items".into(),
+        cursor_columns: vec!["cursor_key".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 10,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: None,
+        name: "stored generated cursor backfill".into(),
+    };
+
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("a generated cursor component must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("cursor component \"cursor_key\" is generated"),
+        "unexpected generated-cursor error: {error}"
+    );
+
+    let changed: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".generated_cursor_items \
+                  WHERE value <> 'pending'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read generated-cursor target")
+        .try_get("n")
+        .expect("decode changed count");
+    assert_eq!(changed, 0, "generated-cursor refusal precedes mutation");
+
+    let guards: i64 = session
+        .query_one(
+            "SELECT count(*)::bigint AS n \
+               FROM pg_catalog.pg_trigger t \
+               JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = $1 AND c.relname = 'generated_cursor_items' \
+                AND NOT t.tgisinternal",
+            &[cfg.project_schema.as_str().into()],
+        )
+        .await
+        .expect("inspect generated-cursor guards")
+        .try_get("n")
+        .expect("decode guard count");
+    assert_eq!(guards, 0, "refusal precedes guard installation");
+
+    let progress_rows: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                 WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("inspect generated-cursor progress")
+        .try_get("n")
+        .expect("decode progress count");
+    assert_eq!(progress_rows, 0, "refusal precedes cohort capture");
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
 async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     use zero_migrate::driver::SqlSession;
 
@@ -675,7 +790,9 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let spec = BackfillSpec {
         schema: cfg.project_schema.clone(),
         table: "items".into(),
-        cursor_column: "id".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
         per_row: BTreeMap::new(),
@@ -724,7 +841,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let progress = session
         .query_one(
             &format!(
-                "SELECT last_cursor, complete FROM \"{}\".schema_backfills \
+                "SELECT last_cursor::text AS last_cursor, complete FROM \"{}\".schema_backfills \
                  WHERE backfill_id = $1",
                 cfg.pg.meta_schema
             ),
@@ -747,6 +864,969 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
         .batch(&format!("DROP ROLE \"{role}\""))
         .await
         .expect("drop backfill test role");
+}
+
+#[compio::test]
+async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".guarded_items (\
+                 tenant_id bigint NOT NULL, id text COLLATE \"C\" NOT NULL, \
+                 value text NOT NULL, PRIMARY KEY (tenant_id, id)\
+             ); \
+             INSERT INTO \"{schema}\".guarded_items (tenant_id, id, value) VALUES \
+                 (1, 'a', 'pending'), (1, 'b', 'pending'), \
+                 (2, 'a', 'pending'), (2, 'b', 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create composite backfill target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("composite guarded cursor backfill");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "guarded_items".into(),
+        cursor_columns: vec!["tenant_id".into(), "id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 2,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "composite guarded cursor backfill".into(),
+    };
+
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("fault after the first committed batch");
+    assert!(
+        error.to_string().contains("fault-injection"),
+        "unexpected pre-fault failure: {error}"
+    );
+
+    let progress = session
+        .query_one(
+            &format!(
+                "SELECT last_cursor::text AS last_cursor, end_cursor::text AS end_cursor, \
+                        cursor_columns::text AS cursor_columns, guard_trigger, \
+                        guard_installed, guard_cleaned, complete \
+                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("read interrupted progress");
+    let last_cursor: String = progress.try_get("last_cursor").expect("last cursor JSON");
+    let last_cursor: serde_json::Value =
+        serde_json::from_str(&last_cursor).expect("last cursor is tagged JSON");
+    assert_eq!(
+        last_cursor,
+        serde_json::json!([{"int64": "1"}, "b"]),
+        "the first two lexicographic rows must commit atomically with their tuple checkpoint"
+    );
+    let end_cursor: String = progress.try_get("end_cursor").expect("end cursor JSON");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&end_cursor).unwrap(),
+        serde_json::json!([{"int64": "2"}, "b"])
+    );
+    let columns: String = progress
+        .try_get("cursor_columns")
+        .expect("cursorColumns JSON");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&columns).unwrap(),
+        serde_json::json!(["tenant_id", "id"])
+    );
+    assert!(progress.try_get::<_, bool>("guard_installed").unwrap());
+    assert!(!progress.try_get::<_, bool>("guard_cleaned").unwrap());
+    assert!(!progress.try_get::<_, bool>("complete").unwrap());
+    let guard_trigger: String = progress.try_get("guard_trigger").expect("guard name");
+
+    let guard_exists: bool = session
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t \
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                WHERE n.nspname = $1 AND c.relname = 'guarded_items' \
+                  AND t.tgname = $2 AND t.tgenabled = 'A') AS present",
+            &[
+                cfg.project_schema.as_str().into(),
+                guard_trigger.as_str().into(),
+            ],
+        )
+        .await
+        .expect("inspect durable guard")
+        .try_get("present")
+        .expect("guard presence");
+    assert!(guard_exists, "guard must survive the interrupted apply");
+
+    let blocked = session
+        .exec(
+            &format!(
+                "UPDATE \"{}\".guarded_items SET tenant_id = 9 \
+                  WHERE tenant_id = 2 AND id = 'a'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect_err("guard must reject changing any cursor component");
+    assert!(blocked
+        .to_string()
+        .contains("cursor components are immutable"));
+
+    session
+        .exec(
+            &format!(
+                "INSERT INTO \"{}\".guarded_items (tenant_id, id, value) \
+                 VALUES (9, 'new', 'already_done')",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("the established filter invariant permits a non-matching new row");
+
+    backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("resume completes the original bounded cohort");
+
+    let completed = session
+        .query_one(
+            &format!(
+                "SELECT guard_installed, guard_cleaned, complete \
+                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("read completed progress");
+    assert!(!completed.try_get::<_, bool>("guard_installed").unwrap());
+    assert!(completed.try_get::<_, bool>("guard_cleaned").unwrap());
+    assert!(completed.try_get::<_, bool>("complete").unwrap());
+
+    let changed = session
+        .exec(
+            &format!(
+                "UPDATE \"{}\".guarded_items SET tenant_id = 10 \
+                  WHERE tenant_id = 2 AND id = 'a'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("cursor updates are allowed after journaled guard cleanup");
+    assert_eq!(changed, 1);
+    let pending: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*) AS pending FROM \"{}\".guarded_items \
+                  WHERE value = 'pending'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .try_get("pending")
+        .unwrap();
+    assert_eq!(pending, 0);
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn guard_detects_representation_changes_under_case_insensitive_cursor_semantics() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE EXTENSION citext WITH SCHEMA \"{schema}\"; \
+             CREATE TABLE \"{schema}\".case_guard_items (\
+                 amount numeric NOT NULL, event_day date NOT NULL, \
+                 id uuid NOT NULL, label \"{schema}\".citext NOT NULL, \
+                 value text NOT NULL, \
+                 PRIMARY KEY (amount, event_day, id, label)\
+             ); \
+             INSERT INTO \"{schema}\".case_guard_items VALUES \
+                 (1.25, DATE '2026-07-16', \
+                  '00000000-0000-0000-0000-000000000001', 'a', 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create case-insensitive composite cursor target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("representation-sensitive cursor guard");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "case_guard_items".into(),
+        cursor_columns: vec![
+            "amount".into(),
+            "event_day".into(),
+            "id".into(),
+            "label".into(),
+        ],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "representation-sensitive cursor guard".into(),
+    };
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let interrupted = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+    interrupted.expect_err("fault after the first committed batch");
+
+    let blocked = session
+        .exec(
+            &format!(
+                "UPDATE \"{}\".case_guard_items SET label = 'A' WHERE label = 'a'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect_err("case-only cursor change must be blocked despite citext equality");
+    assert!(
+        blocked
+            .to_string()
+            .contains("cursor components are immutable"),
+        "unexpected case-only guard failure: {blocked}"
+    );
+
+    backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("resume verifies then cleans up the representation-sensitive guard");
+    assert_eq!(
+        session
+            .exec(
+                &format!(
+                    "UPDATE \"{}\".case_guard_items SET label = 'A' WHERE label = 'a'",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("case-only update is accepted after durable completion"),
+        1
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_resume_rejects_a_when_false_guard_replacement() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".guard_tamper_items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{}\".guard_tamper_items VALUES (1, 'pending')",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("create guard-tamper target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("guard WHEN-clause tamper");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "guard_tamper_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "guard WHEN-clause tamper".into(),
+    };
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let interrupted = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+    interrupted.expect_err("fault after the guarded batch commits");
+
+    let obligation = session
+        .query_one(
+            &format!(
+                "SELECT guard_trigger, guard_function, guard_marker \
+                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("read durable guard obligation");
+    let trigger: String = obligation.try_get("guard_trigger").expect("guard trigger");
+    let function: String = obligation
+        .try_get("guard_function")
+        .expect("guard function");
+    let marker: String = obligation.try_get("guard_marker").expect("guard marker");
+    session
+        .batch(&format!(
+            "DROP TRIGGER \"{trigger}\" ON \"{schema}\".guard_tamper_items; \
+             CREATE TRIGGER \"{trigger}\" \
+                 BEFORE UPDATE OF id ON \"{schema}\".guard_tamper_items \
+                 FOR EACH ROW WHEN (false) \
+                 EXECUTE FUNCTION \"{meta}\".\"{function}\"(); \
+             ALTER TABLE \"{schema}\".guard_tamper_items \
+                 ENABLE ALWAYS TRIGGER \"{trigger}\"; \
+             COMMENT ON TRIGGER \"{trigger}\" ON \"{schema}\".guard_tamper_items \
+                 IS '{marker}'",
+            schema = cfg.project_schema,
+            meta = cfg.pg.meta_schema,
+        ))
+        .await
+        .expect("replace the guard with an inert lookalike");
+
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("resume must reject an inert lookalike guard");
+    assert!(
+        error
+            .to_string()
+            .contains("cursor guard definition drifted"),
+        "unexpected inert-guard drift error: {error}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".bound_items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             CREATE TABLE \"{schema}\".metadata_items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".bound_items VALUES \
+                 (1, 'pending'), (2, 'pending'), (3, 'pending'); \
+             INSERT INTO \"{schema}\".metadata_items VALUES \
+                 (1, 'pending'), (2, 'pending'), (3, 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create resume-drift targets");
+
+    let bound_version = MigrationId::generate();
+    let bound_checksum = step_checksum("cohort bound corruption");
+    let bound_spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "bound_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "cohort bound corruption".into(),
+    };
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let interrupted = backend
+        .run_backfill_step(
+            &cfg,
+            &bound_version,
+            &bound_checksum,
+            &bound_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+    interrupted.expect_err("fault after the first committed bound batch");
+    session
+        .exec(
+            &format!(
+                "UPDATE \"{}\".schema_backfills \
+                    SET end_cursor = '[{{\"int64\":\"999\"}}]'::jsonb \
+                  WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[bound_version.as_str().into()],
+        )
+        .await
+        .expect("corrupt the durable cohort bound");
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &bound_version,
+            &bound_checksum,
+            &bound_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("resume must reject a changed cohort bound");
+    assert!(
+        error
+            .to_string()
+            .contains("cohort-bound integrity checksum"),
+        "unexpected cohort-bound drift error: {error}"
+    );
+
+    let metadata_version = MigrationId::generate();
+    let metadata_checksum = step_checksum("cursor metadata corruption");
+    let metadata_spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "metadata_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "cursor metadata corruption".into(),
+    };
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let interrupted = backend
+        .run_backfill_step(
+            &cfg,
+            &metadata_version,
+            &metadata_checksum,
+            &metadata_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+    interrupted.expect_err("fault after the first committed metadata batch");
+    session
+        .exec(
+            &format!(
+                "UPDATE \"{}\".schema_backfills \
+                    SET cursor_columns = '[\"other_id\"]'::jsonb \
+                  WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[metadata_version.as_str().into()],
+        )
+        .await
+        .expect("corrupt the durable cursor metadata");
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &metadata_version,
+            &metadata_checksum,
+            &metadata_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("resume must reject changed cursor metadata");
+    assert!(
+        error.to_string().contains("progress cursorColumns drifted"),
+        "unexpected cursor metadata drift error: {error}"
+    );
+
+    for table in ["bound_items", "metadata_items"] {
+        let values = session
+            .query(
+                &format!(
+                    "SELECT value FROM \"{}\".{table} ORDER BY id",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("read interrupted target")
+            .into_iter()
+            .map(|row| row.try_get::<_, String>("value").expect("decode value"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            ["done", "pending", "pending"],
+            "a refused resume must not perform another batch"
+        );
+    }
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".progress_shape_items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{}\".progress_shape_items VALUES (1, 'pending')",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("create progress-shape target");
+
+    let initial_version = MigrationId::generate();
+    let initial_checksum = step_checksum("bootstrap exact progress shape");
+    let initial_spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "progress_shape_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+            name: "progress_shape_items_id_immutable".into(),
+        },
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "bootstrap exact progress shape".into(),
+    };
+    backend
+        .run_backfill_step(
+            &cfg,
+            &initial_version,
+            &initial_checksum,
+            &initial_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("bootstrap the canonical progress table");
+
+    session
+        .batch(&format!(
+            "ALTER TABLE \"{}\".schema_backfills ADD COLUMN stale_extra text; \
+             UPDATE \"{}\".progress_shape_items SET value = 'pending'",
+            cfg.pg.meta_schema, cfg.project_schema
+        ))
+        .await
+        .expect("introduce a harmless-looking stale progress column");
+
+    let rejected_version = MigrationId::generate();
+    let rejected_checksum = step_checksum("reject stale progress shape");
+    let mut rejected_spec = initial_spec;
+    rejected_spec.name = "reject stale progress shape".into();
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &rejected_version,
+            &rejected_checksum,
+            &rejected_spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("an extra progress column is a stale pre-release layout");
+    assert!(
+        error
+            .to_string()
+            .contains("exact current pre-release schema"),
+        "unexpected stale-layout error: {error}"
+    );
+    let value: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".progress_shape_items WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read rejected target")
+        .try_get("value")
+        .expect("decode rejected target");
+    assert_eq!(value, "pending", "shape rejection precedes target writes");
+    let progress_rows: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                  WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[rejected_version.as_str().into()],
+        )
+        .await
+        .expect("read rejected progress")
+        .try_get("n")
+        .expect("decode rejected progress count");
+    assert_eq!(progress_rows, 0);
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".external_items (id bigint PRIMARY KEY, value text); \
+             INSERT INTO \"{}\".external_items VALUES (1, NULL), (2, NULL)",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .unwrap();
+    let version = MigrationId::generate();
+    let checksum = step_checksum("approved external cursor invariant");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "external_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+            name: "external_items_id_is_immutable".into(),
+        },
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" IS NULL".into()),
+        name: "approved external cursor invariant".into(),
+    };
+    backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::None,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("external invariants cannot run without explicit approval");
+    backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("approved external invariant applies");
+    let recorded: String = session
+        .query_one(
+            &format!(
+                "SELECT cursor_stability::text AS stability \
+                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .unwrap()
+        .try_get("stability")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&recorded).unwrap(),
+        serde_json::json!({
+            "mode": "externalInvariant",
+            "name": "external_items_id_is_immutable"
+        })
+    );
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_write_triggers() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".rename_guard_items (\
+                 id bigint PRIMARY KEY, email text\
+             ); \
+             INSERT INTO \"{}\".rename_guard_items VALUES (1, 'a@example.test')",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("create online-rename trigger proof target");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "rename_guard_items".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author trigger-proof rename");
+    let backfill_version = rename
+        .expand
+        .last()
+        .expect("online rename has a backfill marker")
+        .version
+        .clone();
+    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL,
+        0,
+    );
+    let interrupted = engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&step),
+            &["rename_guard_items".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+    interrupted.expect_err("fault after the managed dual-write trigger commits");
+
+    let trigger = session
+        .query_one(
+            "SELECT t.tgname AS trigger_name, p.proname AS function_name \
+               FROM pg_catalog.pg_trigger t \
+               JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+               JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid \
+              WHERE n.nspname = $1 AND c.relname = 'rename_guard_items' \
+                AND NOT t.tgisinternal",
+            &[cfg.project_schema.as_str().into()],
+        )
+        .await
+        .expect("read managed online-rename trigger");
+    let trigger_name: String = trigger.try_get("trigger_name").expect("trigger name");
+    let function_name: String = trigger.try_get("function_name").expect("function name");
+    session
+        .batch(&format!(
+            "ALTER TABLE \"{}\".rename_guard_items \
+                 ENABLE REPLICA TRIGGER \"{trigger_name}\"",
+            cfg.project_schema
+        ))
+        .await
+        .expect("make the dual-write trigger replica-only");
+    let error = engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&step),
+            &["rename_guard_items".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("replica-only dual-write is not a write invariant");
+    assert!(
+        error
+            .to_string()
+            .contains("proven zero-migrate dual-write shape"),
+        "unexpected replica-only trigger error: {error}"
+    );
+
+    session
+        .batch(&format!(
+            "ALTER TABLE \"{schema}\".rename_guard_items \
+                 ENABLE TRIGGER \"{trigger_name}\"; \
+             CREATE OR REPLACE FUNCTION \"{schema}\".\"{function_name}\"() \
+                 RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("replace the managed function with a name-compatible lookalike");
+    let error = engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&step),
+            &["rename_guard_items".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("a zsdw-named function with the wrong body is unproven");
+    assert!(
+        error
+            .to_string()
+            .contains("proven zero-migrate dual-write shape"),
+        "unexpected body-tamper trigger error: {error}"
+    );
+
+    let progress_rows: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                  WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[backfill_version.as_str().into()],
+        )
+        .await
+        .expect("read rejected online-backfill progress")
+        .try_get("n")
+        .expect("decode progress count");
+    assert_eq!(
+        progress_rows, 0,
+        "trigger proof must fail before cohort capture and progress insertion"
+    );
+    let copied: Option<String> = session
+        .query_one(
+            &format!(
+                "SELECT email_address FROM \"{}\".rename_guard_items WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read unmodified rename target")
+        .try_get("email_address")
+        .expect("decode shadow value");
+    assert_eq!(
+        copied, None,
+        "an unproven trigger must prevent backfill writes"
+    );
+
+    drop_schemas(&session, &cfg).await;
 }
 
 // ---------------------------------------------------------------------------

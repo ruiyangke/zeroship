@@ -6,7 +6,7 @@
 //!
 //! - **wire casing** — the op-region (every `Op` struct-variant field, the
 //!   constraint/index/batch/expr-AST/coltype operands) is camelCase, matching
-//!   the normative design's `ifExists` / `cursorColumn` / `batchSize` /
+//!   the normative design's `ifExists` / `cursorColumns` / `batchSize` /
 //!   `referencesTable`; the `MigrationIr` envelope + `flags` stay `snake_case`
 //!   (`ir_version`, `owner_app`, `depends_on`, `requires_approval`). A JS
 //!   builder emitting idiomatic camelCase op fields must round-trip.
@@ -97,26 +97,57 @@ fn drop_table_fields_are_camel_case() {
 
 #[test]
 fn backfill_fields_are_camel_case() {
-    let json = r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":100,
+    let json = r#"{"op":"backfill","table":"t","cursorColumns":["tenant_id","id"],
+        "cursorStability":{"mode":"externalInvariant","name":"keys_are_immutable"},"batchSize":100,
         "set":{"x":{"node":"literal","value":1}},"name":"bf"}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match &op {
         Op::Backfill {
-            cursor_column,
+            cursor_columns,
+            cursor_stability,
             batch_size,
             ..
         } => {
-            assert_eq!(cursor_column, "id");
+            assert_eq!(cursor_columns, &["tenant_id", "id"]);
+            assert!(matches!(
+                cursor_stability,
+                zero_migrate::model::ir::CursorStability::ExternalInvariant { name }
+                    if name == "keys_are_immutable"
+            ));
             assert_eq!(batch_size.get(), 100);
         }
         _ => panic!("expected Backfill"),
     }
     let v = serde_json::to_value(&op).unwrap();
-    assert!(v.get("cursorColumn").is_some(), "must be cursorColumn: {v}");
+    assert!(
+        v.get("cursorColumns").is_some(),
+        "must be cursorColumns: {v}"
+    );
+    assert!(
+        v.get("cursorStability").is_some(),
+        "must be cursorStability: {v}"
+    );
     assert!(v.get("batchSize").is_some(), "must be batchSize: {v}");
     assert!(
-        v.get("cursor_column").is_none(),
+        v.get("cursor_columns").is_none(),
         "snake_case must not appear: {v}"
+    );
+}
+
+#[test]
+fn backfill_rejects_removed_cursor_column_and_missing_stability() {
+    let removed = r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":10,
+        "set":{"x":1},"name":"old"}"#;
+    assert!(
+        serde_json::from_str::<Op>(removed).is_err(),
+        "the removed singular cursorColumn spelling must not deserialize"
+    );
+
+    let missing_stability = r#"{"op":"backfill","table":"t","cursorColumns":["id"],
+        "batchSize":10,"set":{"x":1},"name":"unstable"}"#;
+    assert!(
+        serde_json::from_str::<Op>(missing_stability).is_err(),
+        "cursorStability is required and has no compatibility default"
     );
 }
 
@@ -124,7 +155,8 @@ fn backfill_fields_are_camel_case() {
 fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
     use zero_migrate::model::ir::{BackfillSetValue, PerRowGenerator};
 
-    let json = r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":10,
+    let json = r#"{"op":"backfill","table":"t","cursorColumns":["id"],
+        "cursorStability":{"mode":"guardUpdates"},"batchSize":10,
         "set":{
             "uuid4":{"perRow":"uuidV4"},
             "uuid7":{"perRow":"uuidV7"},
@@ -183,7 +215,8 @@ fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
     );
     assert!(
         serde_json::from_str::<Op>(
-            r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":1,
+            r#"{"op":"backfill","table":"t","cursorColumns":["id"],
+                "cursorStability":{"mode":"guardUpdates"},"batchSize":1,
                 "set":{"x":{"perRow":"uuidV4","extra":true}},"name":"bad"}"#,
         )
         .is_err(),
@@ -477,7 +510,8 @@ fn unknown_constraint_key_is_rejected() {
 
 #[test]
 fn backfill_batch_size_above_2pow53_is_rejected() {
-    let json = r#"{"op":"backfill","table":"t","cursorColumn":"id",
+    let json = r#"{"op":"backfill","table":"t","cursorColumns":["id"],
+        "cursorStability":{"mode":"guardUpdates"},
         "batchSize":9007199254740992,"set":{},"name":"bf"}"#;
     let err = serde_json::from_str::<Op>(json).unwrap_err();
     assert!(
@@ -546,7 +580,8 @@ fn sequence_signed_ints_below_2pow53_accepted() {
 
 #[test]
 fn structural_ints_below_2pow53_accepted() {
-    let json = r#"{"op":"backfill","table":"t","cursorColumn":"id",
+    let json = r#"{"op":"backfill","table":"t","cursorColumns":["id"],
+        "cursorStability":{"mode":"guardUpdates"},
         "batchSize":9007199254740991,"set":{},"name":"bf"}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match op {

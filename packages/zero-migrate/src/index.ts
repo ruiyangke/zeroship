@@ -189,6 +189,7 @@ export type {
   DelArgs,
   BackfillArgs,
   BackfillSetValue,
+  CursorStability,
   CreateViewArgs,
   DropViewArgs,
   ViewQueryBuilder,

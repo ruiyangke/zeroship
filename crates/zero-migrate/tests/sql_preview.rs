@@ -318,9 +318,13 @@ fn online_rename_is_labeled_never_fabricated() {
 fn backfill_is_labeled_never_fabricated() {
     // Backfill needs a `set`/`where`; a minimal valid op.
     let ir = r#"{"ir_version":1,"name":"bf","ops":[
-      {"op":"createTable","name":"codes","columns":[{"name":"code","type":"int"}]},
-      {"op":"backfill","table":"codes","name":"bf_codes","cursorColumn":"code","batchSize":100,
-        "set":{"code":{"node":"literal","value":0}},
+      {"op":"createTable","name":"codes","columns":[
+        {"name":"code","type":"int","nullable":false,"unique":true},
+        {"name":"migrated","type":"int","nullable":true}
+      ]},
+      {"op":"backfill","table":"codes","name":"bf_codes","cursorColumns":["code"],
+       "cursorStability":{"mode":"guardUpdates"},"batchSize":100,
+        "set":{"migrated":{"node":"literal","value":0}},
         "filter":{"node":"binOp","op":"gt",
           "lhs":{"node":"colRef","name":"code"},
           "rhs":{"node":"literal","value":1000}}}
@@ -330,6 +334,33 @@ fn backfill_is_labeled_never_fabricated() {
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("backfill"),
         "backfill must be labeled runtime-resolved:\n{out}"
+    );
+    assert!(
+        out.contains("cursorColumns [\"code\"]")
+            && out.contains("cursor stability guardUpdates")
+            && out.contains("concurrent inserts require"),
+        "preview must expose the tuple, stability mode, and bounded-cohort caveat:\n{out}"
+    );
+}
+
+#[test]
+fn external_cursor_invariant_is_prominent_in_preview() {
+    let ir = r#"{"ir_version":1,"name":"bf_external","ops":[
+      {"op":"createTable","name":"codes","columns":[
+        {"name":"code","type":"int","nullable":false,"unique":true},
+        {"name":"migrated","type":"int","nullable":true}
+      ]},
+      {"op":"backfill","table":"codes","name":"bf_codes","cursorColumns":["code"],
+       "cursorStability":{"mode":"externalInvariant","name":"writers_freeze_code_keys"},
+       "batchSize":100,"set":{"migrated":{"node":"literal","value":0}}}
+    ]}"#;
+    let ir = resolve_envelope_json(ir);
+    let out = render_ir_envelope_sql(&ir, SqlDialect::Postgres, &opts()).expect("preview");
+    assert!(
+        out.contains("CURSOR STABILITY EXTERNAL INVARIANT")
+            && out.contains("writers_freeze_code_keys")
+            && out.contains("explicit destructive approval required"),
+        "external cursor invariant must be operator-prominent:\n{out}"
     );
 }
 

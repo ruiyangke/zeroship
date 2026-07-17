@@ -270,14 +270,14 @@ pub use plan::manifest::{
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
     validate_type_id_prefix, BackfillSetValue, CanonicalOpList, ColType, ColumnOrExpr,
-    CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod, ExclusionOperator,
-    GeneratedCol, IdentityCol, IndexElement, IndexMethod, IndexSortOrder, IndexStorageParams,
-    IrClassification, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride,
-    IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError, MigrationIr, Op,
-    PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator, RefAction, SafeI64,
-    SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions, TableRuntimeOptionsPatch,
-    TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
-    TYPE_ID_MAX_PREFIX_LEN,
+    CommentTarget, CursorStability, EmptyContainerKind, ExclusionElement, ExclusionMethod,
+    ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod, IndexSortOrder,
+    IndexStorageParams, IrClassification, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError,
+    MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator,
+    RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
+    TableRuntimeOptionsPatch, TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION,
+    EXPR_INVALID_NUMERIC, TYPE_ID_MAX_PREFIX_LEN,
 };
 // The fail-closed IR envelope load gate: deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
@@ -314,7 +314,10 @@ pub use model::validate::{
 // The `op.*` DSL plan model. Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`): these are the ordered
 // EXECUTION artifact + its steps.
-pub use model::backfill::BackfillSpec;
+pub use model::backfill::{
+    BackfillSpec, CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
+    CursorTuple, CursorTupleError,
+};
 pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
 pub use render::plan::{
     AppliedPlan, DatabaseFeature, DatabaseRequirements, NotSingleStep, SqliteRebuildSpec,

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::SqliteBackend;
-use zero_migrate::{apply::backend::BackfillError, BackfillSpec};
+use zero_migrate::{apply::backend::BackfillError, BackfillSpec, CursorStability};
 
 /// A process-wide lock serializing every backfill test in this file. The
 /// crash-fuzz test arms the PROCESS-GLOBAL fault registry
@@ -105,7 +105,11 @@ fn spec(batch: u32) -> BackfillSpec {
         // table unqualified. The field is carried for `backfill_id` discrimination.
         schema: "main".to_string(),
         table: "nums".to_string(),
-        cursor_column: "id".to_string(),
+        cursor_columns: vec!["id".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "nums_id_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: batch,
         // val = val + 1: a NON-idempotent transform — a double-apply is VISIBLE
         // (a row would land at val = id + 2). Filter to rows not yet done so the
@@ -203,7 +207,11 @@ async fn sqlite_backfill_rolls_back_when_conflict_ignore_suppresses_a_selected_r
     let s = BackfillSpec {
         schema: "main".to_string(),
         table: "ignored_updates".to_string(),
-        cursor_column: "id".to_string(),
+        cursor_columns: vec!["id".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "ignored_updates_id_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: 2,
         set_clause: "\"unique_value\" = 0, \"done\" = 1".to_string(),
         per_row: Default::default(),
@@ -309,7 +317,8 @@ async fn sqlite_backfill_fault_injected_crash_then_resume_exactly_once() {
     let p = paths("bf_fault");
     let be = backend(&p);
     seed_nums(&be, 500).await;
-    let s = spec(100);
+    let mut s = spec(100);
+    s.cursor_stability = CursorStability::GuardUpdates;
 
     // Arm a crash to fire after the 2nd committed batch (skip = 1 ⇒ fires on the
     // 2nd trip of the point). The point is tripped once per committed batch.
@@ -327,6 +336,19 @@ async fn sqlite_backfill_fault_injected_crash_then_resume_exactly_once() {
     let done = scalar_i64(&be, "SELECT count(*) FROM nums WHERE done = 1").await;
     assert_eq!(done, 200, "exactly 2 committed batches survived the crash");
 
+    // The zero-migrate guard is a durable obligation: a process interruption does
+    // not reopen the cursor-update race before resume.
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    let guard_error = actor
+        .exec("UPDATE nums SET id = 10000 WHERE id = 250")
+        .await
+        .expect_err("the cursor guard survives the interrupted apply");
+    assert!(
+        guard_error.to_string().contains("cursor stability guard"),
+        "{guard_error}"
+    );
+
     // Resume — converges to the same final state, exactly once.
     let resumed = be
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
@@ -339,6 +361,16 @@ async fn sqlite_backfill_fault_injected_crash_then_resume_exactly_once() {
     assert_eq!(
         mismatches, 0,
         "every row incremented EXACTLY once across the fault crash"
+    );
+    actor.set_mode(Mode::EngineJournal).await.unwrap();
+    let triggers = actor
+        .query("SELECT count(*) FROM main.sqlite_schema WHERE type = 'trigger'")
+        .await
+        .expect("inspect guard cleanup");
+    assert_eq!(
+        triggers[0][0].as_deref(),
+        Some("0"),
+        "durable completion cleans up the zero-migrate guard"
     );
 }
 
@@ -403,11 +435,11 @@ async fn sqlite_backfill_complete_rerun_is_noop() {
 // ── fail-closed cursor domains ───────────────────────────────────────────────
 // SQLite values are dynamically typed. Durable checkpoints therefore accept only
 // the table's single-column INTEGER/TEXT primary key with matching live storage
-// classes. A UNIQUE-only key is not the table's paging contract, and REAL cannot be
-// round-tripped through a text progress checkpoint without ordering ambiguity.
+// classes. Exact UNIQUE candidates are supported, but REAL cannot be round-tripped
+// through the tagged cursor checkpoint codec without ordering ambiguity.
 
-/// Seed a table whose requested cursor is REAL and UNIQUE but is not its primary
-/// key. This isolates the single-primary-key gate.
+/// Seed a table whose requested cursor is REAL and UNIQUE. This isolates the
+/// unsupported scalar-domain gate while proving UNIQUE candidates reach it.
 async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
     let actor = be.actor();
     actor.set_mode(Mode::CreatorUp).await.unwrap();
@@ -439,7 +471,11 @@ fn real_spec(batch: u32) -> BackfillSpec {
     BackfillSpec {
         schema: "main".to_string(),
         table: "rnums".to_string(),
-        cursor_column: "rk".to_string(),
+        cursor_columns: vec!["rk".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "rnums_rk_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: batch,
         set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
         per_row: Default::default(),
@@ -449,7 +485,7 @@ fn real_spec(batch: u32) -> BackfillSpec {
 }
 
 #[compio::test]
-async fn sqlite_backfill_rejects_unique_only_cursor() {
+async fn sqlite_backfill_rejects_unsupported_real_unique_cursor() {
     let _g = serial();
     let p = paths("bf_real");
     let be = backend(&p);
@@ -459,9 +495,9 @@ async fn sqlite_backfill_rejects_unique_only_cursor() {
     let error = be
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
-        .expect_err("a UNIQUE-only cursor is not the table primary key");
+        .expect_err("REAL unique cursors have no supported tagged scalar codec");
     assert!(
-        matches!(error, BackfillError::CursorNotUniqueNotNull { .. }),
+        matches!(error, BackfillError::CursorTupleUnavailable { .. }),
         "{error:?}"
     );
     assert_eq!(
@@ -495,7 +531,7 @@ async fn sqlite_backfill_rejects_real_primary_key_cursor() {
         .await
         .expect_err("REAL primary-key cursors are unsupported");
     assert!(
-        matches!(error, BackfillError::CursorNotUniqueNotNull { .. }),
+        matches!(error, BackfillError::CursorTupleUnavailable { .. }),
         "{error:?}"
     );
     assert_eq!(
@@ -525,7 +561,11 @@ async fn sqlite_backfill_rejects_non_utf8_text_keys_before_mutation() {
     let s = BackfillSpec {
         schema: "main".into(),
         table: "text_keys".into(),
-        cursor_column: "k".into(),
+        cursor_columns: vec!["k".into()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "text_keys_k_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: 1,
         set_clause: "\"done\" = 1".into(),
         per_row: Default::default(),
@@ -563,7 +603,11 @@ async fn sqlite_backfill_text_key_with_nul_is_checkpointed_with_binds() {
     let s = BackfillSpec {
         schema: "main".into(),
         table: "text_keys".into(),
-        cursor_column: "k".into(),
+        cursor_columns: vec!["k".into()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "text_keys_k_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: 1,
         set_clause: "\"done\" = 1".into(),
         per_row: Default::default(),
@@ -635,7 +679,11 @@ async fn sqlite_backfill_nocase_cursor_exactly_once() {
     let s = BackfillSpec {
         schema: "main".to_string(),
         table: "ci".to_string(),
-        cursor_column: "k".to_string(),
+        cursor_columns: vec!["k".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "ci_k_is_immutable".to_string(),
+        },
+        cursor_contract: None,
         batch_size: 2,
         set_clause: "\"val\" = (\"val\" + 1)".to_string(),
         per_row: Default::default(),
@@ -676,14 +724,14 @@ async fn sqlite_backfill_rejects_nonunique_cursor() {
     seed_nums(&be, 10).await;
     // Page on `val` — NOT a unique/PK column.
     let mut s = spec(5);
-    s.cursor_column = "val".to_string();
+    s.cursor_columns = vec!["val".to_string()];
     s.set_clause = "\"done\" = 1".to_string();
     let err = be
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
         .unwrap_err();
     assert!(
-        matches!(err, BackfillError::CursorNotUniqueNotNull { .. }),
+        matches!(err, BackfillError::CursorTupleUnavailable { .. }),
         "{err:?}"
     );
 }
@@ -703,7 +751,7 @@ async fn sqlite_backfill_rejects_cursor_mutation() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, BackfillError::CursorColumnMutated { .. }),
+        matches!(err, BackfillError::CursorComponentMutated { .. }),
         "{err:?}"
     );
 }

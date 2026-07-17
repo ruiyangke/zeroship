@@ -1323,7 +1323,8 @@ test("int64() records bigint and string inputs exactly in every migration scalar
     table("t").update({ set: { exactMin: int64(-9_223_372_036_854_775_808n) } });
     table("t").backfill({
       set: { exactMax: int64(max) },
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 1,
       name: "backfill_exact_max",
     });
@@ -1391,7 +1392,8 @@ test("public and engine recorders match for exact int64() scalar values", () => 
     api.table("t").update({ set: { value: api.int64("9223372036854775807") } });
     api.table("t").backfill({
       set: { value: api.int64("-9223372036854775808") },
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 1,
       name: "backfill_int64",
     });
@@ -1811,7 +1813,8 @@ test("DML values preserve an own __proto__ column name", () => {
     });
     table("t").backfill({
       set: ownProto("backfilled"),
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
     });
   });
 
@@ -1841,12 +1844,14 @@ test("backfill remains the batched-write spelling", () => {
     table("t").backfill({
       set: { x: now() },
       where: (col) => col("id").isNotNull(),
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 500,
     }),
   );
   assert.equal(ops[0].op, "backfill");
-  assert.equal(ops[0].cursorColumn, "id");
+  assert.deepEqual(ops[0].cursorColumns, ["id"]);
+  assert.deepEqual(ops[0].cursorStability, { mode: "guardUpdates" });
   assert.equal(ops[0].batchSize, 500);
 });
 
@@ -1865,7 +1870,8 @@ test("perRow generators record backfill-only intent and stay distinct from datab
         ulid: perRowApi.ulid(),
         database_uuid_v4: databaseUuidV4(),
       },
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
     });
   };
 
@@ -1932,6 +1938,8 @@ test("perRow values are rejected from defaults and ordinary DML at record time",
         table("orders").backfill({
           set: { ready: true },
           where: (col) => col("public_id").eq(value as any),
+          cursorColumns: ["id"],
+          cursorStability: { mode: "guardUpdates" },
         }),
       ),
     isBackfillOnlyError,
@@ -1951,7 +1959,11 @@ test("perRow values are rejected from defaults and ordinary DML at record time",
     "a raw literal expression must not hide a per-row descriptor in ordinary DML",
   );
   assert.throws(
-    () => record(() => table("orders").backfill({ set: { public_id: rawLiteral } as any })),
+    () => record(() => table("orders").backfill({
+      set: { public_id: rawLiteral } as any,
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+    })),
     isBackfillOnlyError,
     "only the top-level backfill set value may be a per-row descriptor",
   );
@@ -2008,6 +2020,8 @@ test("complete DML surface records identically and preserves authored order", ()
     widgets.backfill({
       set: { label: "filled" },
       where: (col) => col("label").isNull(),
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
     });
   };
 
@@ -2049,7 +2063,8 @@ test("complete DML surface records identically and preserves authored order", ()
       {
         op: "backfill",
         table: "widgets",
-        cursorColumn: "id",
+        cursorColumns: ["id"],
+        cursorStability: { mode: "guardUpdates" },
         batchSize: 1000,
         set: { label: "filled" },
         filter: {
@@ -3404,12 +3419,46 @@ test("comment records closed COMMENT ON targets through handles and top-level AP
   ]);
 });
 
-test("backfill defaults cursorColumn to 'id' and batchSize to the engine default", () => {
-  const ops = record(() => table("u").backfill({ set: { x: now() } }));
-  assert.equal(ops[0].cursorColumn, "id");
+test("backfill records the required cursor tuple and defaults batchSize", () => {
+  const ops = record(() => table("u").backfill({
+    set: { x: now() },
+    cursorColumns: ["tenant_id", "id"],
+    cursorStability: { mode: "externalInvariant", name: "user_keys_are_immutable" },
+  }));
+  assert.deepEqual(ops[0].cursorColumns, ["tenant_id", "id"]);
+  assert.deepEqual(ops[0].cursorStability, {
+    mode: "externalInvariant",
+    name: "user_keys_are_immutable",
+  });
   assert.equal(typeof ops[0].batchSize, "number");
   assert.equal(ops[0].name, "backfill_u");
   assert.equal(ops[0].set.x.fn, "now");
+});
+
+test("backfill rejects the removed cursorColumn spelling and missing stability", () => {
+  assert.throws(
+    () => record(() => table("u").backfill({
+      set: { x: now() },
+      cursorColumn: "id",
+    } as any)),
+    (e: any) => e.code === "OP_INVALID" && /cursorColumns/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("u").backfill({
+      set: { x: now() },
+      cursorColumn: "legacy_id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+    } as any)),
+    (e: any) => e.code === "OP_INVALID" && /cursorColumn.*removed/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("u").backfill({
+      set: { x: now() },
+      cursorColumns: ["id"],
+    } as any)),
+    (e: any) => e.code === "OP_INVALID" && /cursorStability/.test(e.message),
+  );
 });
 
 test("chain splitPart grammar lint rejects an empty delimiter / non-positive n", () => {

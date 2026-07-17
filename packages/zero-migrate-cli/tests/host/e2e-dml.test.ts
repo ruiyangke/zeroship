@@ -55,9 +55,13 @@ const EXPECTED_ROWS: VisibleRow[] = [
 type BackfillProgress = {
   rowsDone: number;
   batchesDone: number;
-  lastCursor: string;
+  lastCursor: Array<{ int64: string }>;
   complete: boolean;
 };
+
+function normalizeTaggedCursor(value: unknown): BackfillProgress["lastCursor"] {
+  return (typeof value === "string" ? JSON.parse(value) : value) as BackfillProgress["lastCursor"];
+}
 
 async function loadMigration(): Promise<MigrationModule> {
   return import("./mig/20260715000001_complete_dml_flow.ts");
@@ -148,14 +152,25 @@ test("the shared migration authors the complete portable data flow", async () =>
     ["createTable", "insert", "update", "delete", "backfill"],
     "the recorder preserves the user's authored order",
   );
-  const backfill = envelope.ops[4] as { cursorColumn: string; batchSize: number; name: string };
+  const backfill = envelope.ops[4] as {
+    cursorColumns: string[];
+    cursorStability: { mode: string };
+    batchSize: number;
+    name: string;
+  };
   assert.deepEqual(
     {
-      cursorColumn: backfill.cursorColumn,
+      cursorColumns: backfill.cursorColumns,
+      cursorStability: backfill.cursorStability,
       batchSize: backfill.batchSize,
       name: backfill.name,
     },
-    { cursorColumn: "id", batchSize: 1, name: "raise_remaining_scores" },
+    {
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+      batchSize: 1,
+      name: "raise_remaining_scores",
+    },
   );
 });
 
@@ -193,7 +208,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
     return {
       rowsDone: Number(row.rows_done),
       batchesDone: Number(row.batches_done),
-      lastCursor: String(row.last_cursor),
+      lastCursor: normalizeTaggedCursor(row.last_cursor),
       complete: Boolean(row.complete),
     };
   };
@@ -211,7 +226,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
     assert.deepEqual(firstProgress, {
       rowsDone: 2,
       batchesDone: 2,
-      lastCursor: "3",
+      lastCursor: [{ int64: "3" }],
       complete: true,
     });
 
@@ -294,7 +309,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
     return {
       rowsDone: Number(row.rows_done ?? row.ROWS_DONE),
       batchesDone: Number(row.batches_done ?? row.BATCHES_DONE),
-      lastCursor: String(row.last_cursor ?? row.LAST_CURSOR),
+      lastCursor: normalizeTaggedCursor(row.last_cursor ?? row.LAST_CURSOR),
       complete: Number(row.complete ?? row.COMPLETE) === 1,
     };
   };
@@ -312,7 +327,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
     assert.deepEqual(firstProgress, {
       rowsDone: 2,
       batchesDone: 2,
-      lastCursor: "3",
+      lastCursor: [{ int64: "3" }],
       complete: true,
     });
 

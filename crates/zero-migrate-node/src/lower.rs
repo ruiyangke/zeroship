@@ -1186,7 +1186,8 @@ mod tests {
                 {
                     "op": "backfill",
                     "table": "widgets",
-                    "cursorColumn": "id",
+                    "cursorColumns": ["id"],
+                    "cursorStability": { "mode": "guardUpdates" },
                     "batchSize": 1000,
                     "set": {
                         "label": "filled"
@@ -2020,7 +2021,7 @@ mod tests {
             &first.plan.steps[3],
             PlanStep::Backfill { spec, .. }
                 if spec.name == "backfill_widgets"
-                    && spec.cursor_column == "id"
+                    && spec.cursor_columns == ["id"]
                     && spec.batch_size == 1000
         ));
 
@@ -2140,7 +2141,8 @@ mod tests {
             "ops": [{
                 "op": "backfill",
                 "table": "cross_artifact_ids",
-                "cursorColumn": "cursor",
+                "cursorColumns": ["cursor"],
+                "cursorStability": { "mode": "guardUpdates" },
                 "batchSize": 10,
                 "set": {
                     "uuid_id": { "perRow": "uuidV7" },

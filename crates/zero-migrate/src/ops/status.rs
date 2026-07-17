@@ -78,6 +78,12 @@ pub struct PlanStatusManifestStep {
     pub kind: PlanStatusStepKind,
     /// Whether this DDL identity is a genuine journaled repeatable.
     pub repeatable: bool,
+    /// Cursor-stability mode for resumable backfills. `None` for every other
+    /// executable step.
+    pub cursor_stability_mode: Option<String>,
+    /// The explicitly approved application/maintenance invariant name when the
+    /// mode is `externalInvariant`.
+    pub cursor_stability_invariant: Option<String>,
 }
 
 /// A journal-reconcilable projection of one complete [`AppliedPlan`].
@@ -123,6 +129,8 @@ impl PlanStatusManifest {
                 checksum: migration.checksum.clone(),
                 kind,
                 repeatable: migration.flags.repeatable,
+                cursor_stability_mode: None,
+                cursor_stability_invariant: None,
             }
         }
 
@@ -143,18 +151,32 @@ impl PlanStatusManifest {
                     checksum: checksum.clone(),
                     kind: PlanStatusStepKind::Dml,
                     repeatable: false,
+                    cursor_stability_mode: None,
+                    cursor_stability_invariant: None,
                 }),
                 PlanStep::Backfill {
                     version,
                     checksum,
                     spec,
-                } => steps.push(PlanStatusManifestStep {
-                    version: version.clone(),
-                    name: spec.name.clone(),
-                    checksum: checksum.clone(),
-                    kind: PlanStatusStepKind::Backfill,
-                    repeatable: false,
-                }),
+                } => {
+                    let (mode, invariant) = match &spec.cursor_stability {
+                        crate::model::ir::CursorStability::GuardUpdates => {
+                            ("guardUpdates".to_string(), None)
+                        }
+                        crate::model::ir::CursorStability::ExternalInvariant { name } => {
+                            ("externalInvariant".to_string(), Some(name.clone()))
+                        }
+                    };
+                    steps.push(PlanStatusManifestStep {
+                        version: version.clone(),
+                        name: spec.name.clone(),
+                        checksum: checksum.clone(),
+                        kind: PlanStatusStepKind::Backfill,
+                        repeatable: false,
+                        cursor_stability_mode: Some(mode),
+                        cursor_stability_invariant: invariant,
+                    });
+                }
                 PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
                     steps.extend(
                         rename
@@ -243,6 +265,10 @@ pub struct PlanStatusStep {
     pub state: PlanStatusStepState,
     /// The journal checksum when a row/marker exists. Kept for drift diagnostics.
     pub journal_checksum: Option<String>,
+    /// Cursor-stability mode for a resumable backfill.
+    pub cursor_stability_mode: Option<String>,
+    /// Named external invariant prominently retained for operator status.
+    pub cursor_stability_invariant: Option<String>,
 }
 
 /// A net-applied or inflight journal identity absent from every supplied plan.
@@ -675,6 +701,8 @@ pub fn reconcile_applied_plans_with_resolutions(
                 kind: expected.kind,
                 state,
                 journal_checksum,
+                cursor_stability_mode: expected.cursor_stability_mode.clone(),
+                cursor_stability_invariant: expected.cursor_stability_invariant.clone(),
             });
         }
 
@@ -1438,6 +1466,8 @@ mod plan_status_tests {
             checksum: anchor.clone(),
             kind,
             repeatable: false,
+            cursor_stability_mode: None,
+            cursor_stability_invariant: None,
         }
     }
 
@@ -2163,7 +2193,7 @@ mod plan_status_tests {
     }
 
     #[test]
-    fn manifest_projection_retains_dml_and_backfill() {
+    fn manifest_projection_retains_backfill_cursor_stability() {
         let anchor = checksum("artifact");
         let dml_version = id("artifact_dml");
         let backfill_version = id("artifact_backfill");
@@ -2192,7 +2222,11 @@ mod plan_status_tests {
                     spec: BackfillSpec {
                         schema: "app".to_string(),
                         table: "widgets".to_string(),
-                        cursor_column: "id".to_string(),
+                        cursor_columns: vec!["id".to_string()],
+                        cursor_stability: crate::model::ir::CursorStability::ExternalInvariant {
+                            name: "writers_hold_cursor_key".to_string(),
+                        },
+                        cursor_contract: None,
                         batch_size: 100,
                         set_clause: "ready = true".to_string(),
                         per_row: Default::default(),
@@ -2219,5 +2253,25 @@ mod plan_status_tests {
         assert_eq!(projected.steps[0].kind, PlanStatusStepKind::Dml);
         assert_eq!(projected.steps[1].version, backfill_version);
         assert_eq!(projected.steps[1].kind, PlanStatusStepKind::Backfill);
+        assert_eq!(
+            projected.steps[1].cursor_stability_mode.as_deref(),
+            Some("externalInvariant")
+        );
+        assert_eq!(
+            projected.steps[1].cursor_stability_invariant.as_deref(),
+            Some("writers_hold_cursor_key")
+        );
+
+        let status = reconcile_applied_plans(&[projected], &[], &[]).expect("status");
+        assert_eq!(
+            status.plans[0].steps[1].cursor_stability_mode.as_deref(),
+            Some("externalInvariant")
+        );
+        assert_eq!(
+            status.plans[0].steps[1]
+                .cursor_stability_invariant
+                .as_deref(),
+            Some("writers_hold_cursor_key")
+        );
     }
 }

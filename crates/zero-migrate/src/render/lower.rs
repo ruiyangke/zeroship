@@ -31,6 +31,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::analyze::Advisory;
 use crate::guard::{guard_for, GuardConfig, GuardError, MigrationGuard, SqlGuard};
+use crate::model::backfill::{
+    CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
+};
 use crate::model::expr::Expr;
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
@@ -842,6 +845,238 @@ fn snapshot_has_reference_key(snapshot: &TableSnapshot, columns: &[String]) -> b
     })
 }
 
+/// Prove the complete live contract needed to page a bounded cohort. This proof
+/// deliberately consumes catalog facts, not authored hints: an offline preview
+/// can carry `None`, but an executable plan with a table snapshot must pin every
+/// tuple component's nullability, scalar codec, database type, and comparison
+/// semantics before an executor may capture `endCursor`.
+fn cursor_contract_for_snapshot(
+    dialect: SqlDialect,
+    cursor_columns: &[String],
+    snapshot: &TableSnapshot,
+) -> Result<CursorContract, String> {
+    if cursor_columns.is_empty() {
+        return Err("cursorColumns is empty".to_string());
+    }
+    let mut seen = BTreeSet::new();
+    for name in cursor_columns {
+        if !seen.insert(name.as_str()) {
+            return Err(format!("cursor component {name:?} is repeated"));
+        }
+    }
+
+    let columns = cursor_columns
+        .iter()
+        .map(|name| {
+            snapshot
+                .columns
+                .iter()
+                .find(|column| column.name == *name)
+                .ok_or_else(|| format!("cursor component {name:?} does not exist"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(column) = columns.iter().find(|column| column.nullable) {
+        return Err(format!(
+            "cursor component {:?} is nullable; every component must be NOT NULL",
+            column.name
+        ));
+    }
+    if !snapshot_has_reference_key(snapshot, cursor_columns) {
+        return Err(
+            "the exact ordered tuple is not a complete PRIMARY KEY or non-partial UNIQUE B-tree candidate key with default column comparison operators"
+                .to_string(),
+        );
+    }
+
+    let columns = columns
+        .into_iter()
+        .map(|column| cursor_column_contract(dialect, column))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CursorContract { columns })
+}
+
+fn cursor_column_contract(
+    dialect: SqlDialect,
+    column: &ColumnSnapshot,
+) -> Result<CursorColumnContract, String> {
+    let snapshot_database_type = column
+        .data_type
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let scalar_type = cursor_scalar_type(dialect, &snapshot_database_type).ok_or_else(|| {
+        format!(
+            "cursor component {:?} has unsupported ordered type {:?}; its scalar/checkpoint comparison semantics cannot be proven",
+            column.name, column.data_type
+        )
+    })?;
+    // Scalar support is deliberately decided from the original snapshot
+    // spelling above. Only then do we persist the dialect's semantic physical
+    // type: SQLite has exactly the INTEGER/TEXT cursor families, while MySQL's
+    // catalog aliases (INTEGER -> INT, TIMESTAMP -> DATETIME, display widths,
+    // and so on) use the same canonicalizer as its live executor. Keeping the
+    // raw type for scalar inference preserves BIGINT UNSIGNED's Decimal codec.
+    let database_type = match dialect {
+        SqlDialect::Sqlite => match scalar_type {
+            CursorScalarType::Int64 => "integer".to_string(),
+            CursorScalarType::String => "text".to_string(),
+            CursorScalarType::Decimal => {
+                unreachable!("SQLite cursor scalar inference does not admit decimal")
+            }
+        },
+        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(&snapshot_database_type),
+        SqlDialect::Postgres => snapshot_database_type.clone(),
+    };
+
+    let comparison = if dialect == SqlDialect::Mysql
+        && scalar_type == CursorScalarType::String
+        // Classification must use the original type. Canonical CHAR(N) is
+        // `character(N)`, which would otherwise lose the mandatory exact
+        // character-set/collation proof.
+        && mysql_cursor_type_is_character(&snapshot_database_type)
+    {
+        let storage = column.mysql_text_storage.as_ref().ok_or_else(|| {
+            format!(
+                "cursor component {:?} is a MySQL character column but its exact character set and collation are unavailable",
+                column.name
+            )
+        })?;
+        CursorComparison::MysqlText {
+            character_set: storage.character_set.clone(),
+            collation: storage.collation.clone(),
+        }
+    } else if let Some(collation) = &column.collation {
+        CursorComparison::NamedCollation {
+            schema: collation.schema.clone(),
+            name: collation.name.clone(),
+        }
+    } else if column.case_sensitive == Some(false) || database_type == "citext" {
+        CursorComparison::CaseInsensitive
+    } else {
+        CursorComparison::Default
+    };
+
+    Ok(CursorColumnContract {
+        name: column.name.clone(),
+        scalar_type,
+        database_type,
+        comparison,
+    })
+}
+
+fn cursor_scalar_type(dialect: SqlDialect, data_type: &str) -> Option<CursorScalarType> {
+    match dialect {
+        SqlDialect::Postgres => {
+            if type_is_one_of(
+                data_type,
+                &["smallint", "integer", "bigint", "int2", "int4", "int8"],
+            ) {
+                Some(CursorScalarType::Int64)
+            } else if type_is_one_of(data_type, &["numeric", "decimal"]) {
+                Some(CursorScalarType::Decimal)
+            } else if type_is_one_of(
+                data_type,
+                &[
+                    "text",
+                    "citext",
+                    "character",
+                    "character varying",
+                    "char",
+                    "varchar",
+                    "uuid",
+                    "date",
+                    "time",
+                    "time without time zone",
+                    "time with time zone",
+                    "timestamp",
+                    "timestamp without time zone",
+                    "timestamp with time zone",
+                    "timestamptz",
+                ],
+            ) {
+                Some(CursorScalarType::String)
+            } else {
+                None
+            }
+        }
+        SqlDialect::Sqlite => {
+            let upper = data_type.to_ascii_uppercase();
+            if upper.contains("INT") {
+                Some(CursorScalarType::Int64)
+            } else if ["CHAR", "CLOB", "TEXT"]
+                .iter()
+                .any(|fragment| upper.contains(fragment))
+            {
+                Some(CursorScalarType::String)
+            } else {
+                None
+            }
+        }
+        SqlDialect::Mysql => {
+            if type_is_one_of(
+                data_type,
+                &[
+                    "tinyint",
+                    "smallint",
+                    "mediumint",
+                    "int",
+                    "integer",
+                    "bigint",
+                    "year",
+                ],
+            ) {
+                // MySQL's unsigned integer domain reaches 2^64-1, which cannot
+                // fit the signed `int64` tagged scalar. Keep one exact codec for
+                // the whole column domain by using the arbitrary-precision
+                // decimal tag whenever the catalog type is unsigned.
+                if data_type
+                    .split_ascii_whitespace()
+                    .any(|part| part == "unsigned")
+                {
+                    Some(CursorScalarType::Decimal)
+                } else {
+                    Some(CursorScalarType::Int64)
+                }
+            } else if type_is_one_of(data_type, &["decimal", "numeric"]) {
+                Some(CursorScalarType::Decimal)
+            } else if mysql_cursor_type_is_character(data_type)
+                || type_is_one_of(data_type, &["date", "datetime", "timestamp", "time"])
+            {
+                Some(CursorScalarType::String)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn mysql_cursor_type_is_character(data_type: &str) -> bool {
+    type_is_one_of(
+        data_type,
+        &[
+            "char",
+            "varchar",
+            "tinytext",
+            "text",
+            "mediumtext",
+            "longtext",
+        ],
+    )
+}
+
+/// Match a catalog type name plus ordinary modifiers (`varchar(32)`,
+/// `bigint unsigned`, `timestamp(6)`). A prefix is accepted only at a modifier
+/// boundary, so `int` does not accidentally consume `integer`.
+fn type_is_one_of(data_type: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| {
+        data_type == *candidate
+            || data_type
+                .strip_prefix(candidate)
+                .is_some_and(|rest| rest.starts_with('(') || rest.starts_with(' '))
+    })
+}
+
 /// Parse the canonical `PRIMARY KEY (...)` / `UNIQUE (...)` definitions carried
 /// by SQLite catalog snapshots. The parser accepts bare, double-quoted,
 /// backtick-quoted, and bracket-quoted identifiers, but no expressions or trailing
@@ -1249,6 +1484,26 @@ pub enum IrLowerError {
     /// All are hard errors. A DML op is never silently dropped or misapplied.
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlAssemble(#[from] crate::render::dml::DmlError),
+    /// A resumable backfill reached live-schema planning without an exact,
+    /// non-null primary/unique cursor tuple whose scalar and comparison
+    /// semantics the selected executor can preserve.
+    #[error(
+        "planner refused resumable backfill on {schema}.{table} with cursorColumns {columns:?}: {reason}. \
+         Use an explicit path: a one-shot update under a maintenance window, a \
+         target-specific rebuild or temporary surrogate, or creation of a stable \
+         unique cursor in an earlier migration. zero-migrate never pages on an \
+         unstable row locator."
+    )]
+    BackfillCursorUnavailable {
+        /// Effective target schema.
+        schema: String,
+        /// Target table.
+        table: String,
+        /// Authored ordered cursor tuple.
+        columns: Vec<String>,
+        /// The failed live proof.
+        reason: String,
+    },
 }
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution:
@@ -3787,8 +4042,7 @@ impl IrAuthor {
                     && !matches!(self.dialect, SqlDialect::Postgres)
                 {
                     if let Some((mig, statements)) = lowered.immediate_units.first_mut() {
-                        let note =
-                            "/* zero-migrate: partitionBy collapsed to a plain table on this dialect */\n";
+                        let note = "/* zero-migrate: partitionBy collapsed to a plain table on this dialect */\n";
                         if let Some(first) = statements.first_mut() {
                             first.insert_str(0, note);
                         }
@@ -5048,7 +5302,8 @@ impl IrAuthor {
             }
             Op::Backfill {
                 table,
-                cursor_column,
+                cursor_columns,
+                cursor_stability,
                 batch_size,
                 set,
                 filter,
@@ -5057,11 +5312,13 @@ impl IrAuthor {
             } => self.lower_backfill(
                 eff_schema,
                 table,
-                cursor_column,
+                cursor_columns,
+                cursor_stability,
                 batch_size.get(),
                 set,
                 filter.as_ref(),
                 name,
+                live_schema,
             ),
             // Unreachable: lower_one_op only routes the four DML ops here.
             _ => Err(IrLowerError::UnsupportedOp(
@@ -5171,11 +5428,13 @@ impl IrAuthor {
         &self,
         eff_schema: &str,
         table: &str,
-        cursor_column: &str,
+        cursor_columns: &[String],
+        cursor_stability: &crate::model::ir::CursorStability,
         batch_size: u64,
         set: &std::collections::BTreeMap<String, crate::model::ir::BackfillSetValue>,
         filter: Option<&crate::model::expr::Expr>,
         name: &str,
+        live_schema: &LiveSchema,
     ) -> Result<PlanStep, IrLowerError> {
         // The `eff_schema` is the EFFECTIVE schema, ALREADY vetted by the
         // cross-schema scope gate (`permits`, in `lower_one_op`) BEFORE reaching
@@ -5219,10 +5478,35 @@ impl IrAuthor {
         }
         .map_err(IrLowerError::DmlAssemble)?;
         let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
+        // `LiveSchema::table_snapshots` is the unqualified snapshot of the bound
+        // project schema. A widened-scope operation may target a same-named table
+        // in another schema, but this map carries no schema identity with which to
+        // prove that foreign table's cursor contract. Never borrow the project
+        // table's contract: leave it unpinned so the backend must derive and prove
+        // the exact foreign target immediately before execution.
+        let cursor_contract = if eff_schema == self.project_schema {
+            live_schema
+                .table_snapshots
+                .get(table)
+                .map(|snapshot| {
+                    cursor_contract_for_snapshot(self.dialect, cursor_columns, snapshot)
+                })
+                .transpose()
+                .map_err(|reason| IrLowerError::BackfillCursorUnavailable {
+                    schema: eff_schema.to_string(),
+                    table: table.to_string(),
+                    columns: cursor_columns.to_vec(),
+                    reason,
+                })?
+        } else {
+            None
+        };
         let spec = crate::model::backfill::BackfillSpec {
             schema: eff_schema.to_string(),
             table: table.to_string(),
-            cursor_column: cursor_column.to_string(),
+            cursor_columns: cursor_columns.to_vec(),
+            cursor_stability: cursor_stability.clone(),
+            cursor_contract,
             batch_size,
             set_clause: clauses.set_clause,
             per_row,
@@ -8806,6 +9090,287 @@ mod tests {
             .collect()
     }
 
+    fn cursor_test_table(
+        columns: Vec<ColumnSnapshot>,
+        constraints: Vec<ConstraintSnapshot>,
+        indexes: Vec<IndexSnapshot>,
+    ) -> TableSnapshot {
+        TableSnapshot {
+            columns,
+            indexes,
+            constraints,
+            runtime_options: Default::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: None,
+        }
+    }
+
+    #[test]
+    fn live_cursor_planner_proves_single_and_composite_candidate_keys() {
+        let single = cursor_test_table(
+            vec![ColumnSnapshot {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                nullable: false,
+                ..Default::default()
+            }],
+            vec![ConstraintSnapshot {
+                name: "events_pkey".into(),
+                kind: "PRIMARY KEY".into(),
+                definition: "PRIMARY KEY (id)".into(),
+                comment: None,
+            }],
+            vec![],
+        );
+        let contract =
+            cursor_contract_for_snapshot(SqlDialect::Postgres, &["id".to_string()], &single)
+                .expect("single primary key cursor");
+        assert_eq!(contract.columns.len(), 1);
+        assert_eq!(contract.columns[0].scalar_type, CursorScalarType::Int64);
+
+        let composite = cursor_test_table(
+            vec![
+                ColumnSnapshot {
+                    name: "tenant".into(),
+                    data_type: "integer".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnSnapshot {
+                    name: "slug".into(),
+                    data_type: "text".into(),
+                    nullable: false,
+                    collation: Some(crate::model::snapshot::ColumnCollationSnapshot {
+                        schema: Some("pg_catalog".into()),
+                        name: "C".into(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+            vec![],
+            vec![IndexSnapshot::btree(
+                "events_tenant_slug_key",
+                true,
+                vec!["tenant".into(), "slug".into()],
+            )],
+        );
+        let contract = cursor_contract_for_snapshot(
+            SqlDialect::Postgres,
+            &["tenant".to_string(), "slug".to_string()],
+            &composite,
+        )
+        .expect("composite unique cursor");
+        assert_eq!(contract.columns.len(), 2);
+        assert!(matches!(
+            &contract.columns[1].comparison,
+            CursorComparison::NamedCollation { schema: Some(schema), name }
+                if schema == "pg_catalog" && name == "C"
+        ));
+    }
+
+    #[test]
+    fn sqlite_cursor_contract_pins_logical_bigint_to_physical_integer() {
+        let table = cursor_test_table(
+            vec![ColumnSnapshot {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                nullable: false,
+                ..Default::default()
+            }],
+            vec![ConstraintSnapshot {
+                name: "samples_pkey".into(),
+                kind: "PRIMARY KEY".into(),
+                definition: "PRIMARY KEY (id)".into(),
+                comment: None,
+            }],
+            vec![],
+        );
+
+        let sqlite = cursor_contract_for_snapshot(SqlDialect::Sqlite, &["id".to_string()], &table)
+            .expect("SQLite bigint cursor contract");
+        assert_eq!(sqlite.columns[0].scalar_type, CursorScalarType::Int64);
+        assert_eq!(sqlite.columns[0].database_type, "integer");
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            let contract = cursor_contract_for_snapshot(dialect, &["id".to_string()], &table)
+                .expect("non-SQLite bigint cursor contract");
+            assert_eq!(contract.columns[0].scalar_type, CursorScalarType::Int64);
+            assert_eq!(
+                contract.columns[0].database_type, "bigint",
+                "{dialect:?} must retain its existing physical contract spelling"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_cursor_contract_equates_supported_unmanaged_type_aliases() {
+        let desired = cursor_test_table(
+            vec![
+                ColumnSnapshot {
+                    name: "id".into(),
+                    data_type: "bigint".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnSnapshot {
+                    name: "code".into(),
+                    data_type: "text".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+            ],
+            vec![],
+            vec![IndexSnapshot::btree(
+                "samples_id_code_key",
+                true,
+                vec!["id".into(), "code".into()],
+            )],
+        );
+        let unmanaged_live = cursor_test_table(
+            vec![
+                ColumnSnapshot {
+                    name: "id".into(),
+                    data_type: "UNSIGNED BIG INT".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnSnapshot {
+                    name: "code".into(),
+                    data_type: "VARCHAR(191)".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+            ],
+            vec![],
+            vec![IndexSnapshot::btree(
+                "samples_id_code_key",
+                true,
+                vec!["id".into(), "code".into()],
+            )],
+        );
+        let cursor_columns = ["id".to_string(), "code".to_string()];
+        let desired_contract =
+            cursor_contract_for_snapshot(SqlDialect::Sqlite, &cursor_columns, &desired).unwrap();
+        let live_contract =
+            cursor_contract_for_snapshot(SqlDialect::Sqlite, &cursor_columns, &unmanaged_live)
+                .unwrap();
+
+        assert_eq!(desired_contract, live_contract);
+        assert_eq!(desired_contract.columns[0].database_type, "integer");
+        assert_eq!(desired_contract.columns[1].database_type, "text");
+    }
+
+    #[test]
+    fn live_cursor_planner_refuses_unavailable_or_nullable_tuples() {
+        let table = cursor_test_table(
+            vec![
+                ColumnSnapshot {
+                    name: "tenant".into(),
+                    data_type: "integer".into(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnSnapshot {
+                    name: "id".into(),
+                    data_type: "integer".into(),
+                    nullable: true,
+                    ..Default::default()
+                },
+            ],
+            vec![],
+            vec![IndexSnapshot::btree(
+                "events_tenant_id_key",
+                true,
+                vec!["tenant".into(), "id".into()],
+            )],
+        );
+        let nullable = cursor_contract_for_snapshot(
+            SqlDialect::Postgres,
+            &["tenant".to_string(), "id".to_string()],
+            &table,
+        )
+        .expect_err("nullable cursor component");
+        assert!(nullable.contains("NOT NULL"), "{nullable}");
+
+        let incomplete =
+            cursor_contract_for_snapshot(SqlDialect::Postgres, &["tenant".to_string()], &table)
+                .expect_err("unique-key prefix is not a candidate key");
+        assert!(incomplete.contains("exact ordered tuple"), "{incomplete}");
+    }
+
+    #[test]
+    fn mysql_unsigned_cursor_uses_arbitrary_precision_tagged_scalar() {
+        assert_eq!(
+            cursor_scalar_type(SqlDialect::Mysql, "bigint unsigned"),
+            Some(CursorScalarType::Decimal)
+        );
+        assert_eq!(
+            cursor_scalar_type(SqlDialect::Mysql, "bigint"),
+            Some(CursorScalarType::Int64)
+        );
+
+        let integer = cursor_column_contract(
+            SqlDialect::Mysql,
+            &ColumnSnapshot {
+                name: "id".into(),
+                data_type: "integer".into(),
+                nullable: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(integer.scalar_type, CursorScalarType::Int64);
+        assert_eq!(integer.database_type, "int");
+
+        let timestamp = cursor_column_contract(
+            SqlDialect::Mysql,
+            &ColumnSnapshot {
+                name: "created_at".into(),
+                data_type: "timestamp with time zone".into(),
+                nullable: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(timestamp.scalar_type, CursorScalarType::String);
+        assert_eq!(timestamp.database_type, "datetime");
+
+        let unsigned = cursor_column_contract(
+            SqlDialect::Mysql,
+            &ColumnSnapshot {
+                name: "sequence".into(),
+                data_type: "bigint unsigned".into(),
+                nullable: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(unsigned.scalar_type, CursorScalarType::Decimal);
+        assert_eq!(unsigned.database_type, "bigint unsigned");
+
+        let character = cursor_column_contract(
+            SqlDialect::Mysql,
+            &ColumnSnapshot {
+                name: "token".into(),
+                data_type: "char(36)".into(),
+                nullable: false,
+                mysql_text_storage: Some(MysqlTextStorageSnapshot {
+                    character_set: "ascii".into(),
+                    collation: "ascii_bin".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(character.database_type, "character(36)");
+        assert!(matches!(
+            character.comparison,
+            CursorComparison::MysqlText { ref character_set, ref collation }
+                if character_set == "ascii" && collation == "ascii_bin"
+        ));
+    }
+
     /// Extract the `Ddl` migrations from a lowered step list — the flat
     /// `Vec<Migration>` the earlier `lower_guarded` returned, for the
     /// fragment/reassembly tests (all `Ddl`, no online rename).
@@ -8916,7 +9481,8 @@ mod tests {
             "ops": [{
                 "op": "backfill",
                 "table": "orders",
-                "cursorColumn": "cursor",
+                "cursorColumns": ["cursor"],
+                "cursorStability": { "mode": "guardUpdates" },
                 "batchSize": 10,
                 "set": {
                     "public_id": { "perRow": { "typeId": { "prefix": "order" } } }
@@ -8984,7 +9550,8 @@ mod tests {
         let mut backfill = serde_json::json!({
             "op": "backfill",
             "table": "orders",
-            "cursorColumn": "cursor",
+            "cursorColumns": ["cursor"],
+            "cursorStability": { "mode": "guardUpdates" },
             "batchSize": 10,
             "set": {
                 "public_id": { "perRow": { "typeId": { "prefix": "order" } } }
@@ -10486,7 +11053,7 @@ mod tests {
             .unwrap_or_default();
         let json = format!(
             r#"{{"ir_version":1,"name":"bf","owner_app":"app_a","ops":[
-                {{"op":"backfill","table":"t","cursorColumn":"id","batchSize":1000,
+                {{"op":"backfill","table":"t","cursorColumns":["id"],"cursorStability":{{"mode":"guardUpdates"}},"batchSize":1000,
                  "set":{{"v":{{"node":"colRef","name":"v"}}}},
                  "name":"backfill_t"{schema_field}}}
             ]}}"#
@@ -10529,6 +11096,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn foreign_backfill_never_borrows_same_named_project_cursor_contract() {
+        let ir = backfill_ir(Some("app2"));
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
+            crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
+        );
+        let mut live = LiveSchema::default();
+        live.table_snapshots.insert(
+            "t".into(),
+            cursor_test_table(
+                vec![
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        data_type: "bigint".into(),
+                        nullable: false,
+                        ..Default::default()
+                    },
+                    ColumnSnapshot {
+                        name: "v".into(),
+                        data_type: "text".into(),
+                        nullable: true,
+                        ..Default::default()
+                    },
+                ],
+                vec![ConstraintSnapshot {
+                    name: "t_pkey".into(),
+                    kind: "PRIMARY KEY".into(),
+                    definition: "PRIMARY KEY (id)".into(),
+                    comment: None,
+                }],
+                vec![],
+            ),
+        );
+
+        let steps = author
+            .lower_steps(&ir, &live)
+            .expect("a gate-approved foreign backfill lowers");
+        let spec = steps
+            .iter()
+            .find_map(|step| match step {
+                PlanStep::Backfill { spec, .. } => Some(spec),
+                _ => None,
+            })
+            .expect("backfill step");
+        assert_eq!(spec.schema, "app2");
+        assert_eq!(
+            spec.cursor_contract, None,
+            "the unqualified app1.t snapshot cannot prove app2.t; execution must inspect app2.t directly"
+        );
+    }
+
     /// a backfill with a gate-approved foreign
     /// schema runs cross-schema through the resumable path. Before this fix (it
     /// failed closed).
@@ -10536,7 +11154,7 @@ mod tests {
     fn schema_qualified_backfill_runs_cross_schema_pg_regression() {
         let json = r#"{"ir_version":1,"name":"u","owner_app":"app_a","ops":[
             {"op":"backfill","table":"t","schema":"app2",
-             "cursorColumn":"id","batchSize":500,"name":"bf_t",
+             "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":500,"name":"bf_t",
              "set":{"v":{"node":"colRef","name":"v"}},
              "filter":{"node":"colRef","name":"v"}}
         ]}"#;

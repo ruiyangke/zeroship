@@ -2,12 +2,250 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
-use crate::model::ir::PerRowGenerator;
+use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
 
 const CROCKFORD_UPPER: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CROCKFORD_LOWER: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+/// The canonical tagged-scalar representation used by a cursor component.
+///
+/// Database integer families deliberately share one `int64` checkpoint shape:
+/// using the untagged safe-integer JSON spelling for small values and the tagged
+/// spelling for large values would make one column change wire type as paging
+/// crosses the JavaScript-safe boundary. Date/time/UUID and character families
+/// use the ordinary string scalar; their exact database type remains separately
+/// pinned by [`CursorColumnContract::database_type`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorScalarType {
+    /// Canonical `{ "int64": "..." }` scalar.
+    Int64,
+    /// Canonical `{ "decimal": "..." }` scalar.
+    Decimal,
+    /// Ordinary JSON string scalar.
+    String,
+}
+
+/// Comparison semantics that must remain identical for the whole backfill.
+///
+/// This is intentionally catalog-facing rather than a portable collation hint.
+/// Resume compares the exact value recorded at cohort initialization, so a
+/// server-default collation change cannot silently change tuple ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CursorComparison {
+    /// The target's default case-sensitive comparison for this exact type.
+    Default,
+    /// A portable/recovered case-insensitive comparison (`citext`/`NOCASE`).
+    CaseInsensitive,
+    /// An exact PostgreSQL or SQLite named collation.
+    NamedCollation {
+        /// PostgreSQL collation schema; absent for SQLite.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Exact catalog collation name.
+        name: String,
+    },
+    /// Exact MySQL character-set and collation comparison contract.
+    MysqlText {
+        /// Exact catalog character set.
+        character_set: String,
+        /// Exact catalog collation.
+        collation: String,
+    },
+}
+
+/// One position in the ordered cursor tuple.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorColumnContract {
+    /// Cursor column name at this tuple position.
+    pub name: String,
+    /// Canonical tagged-scalar checkpoint family.
+    pub scalar_type: CursorScalarType,
+    /// Exact canonical target type used to cast/bind and detect resume drift.
+    pub database_type: String,
+    /// Exact comparison/collation semantics used by `=`, `>`, and `ORDER BY`.
+    pub comparison: CursorComparison,
+}
+
+/// The planner-proven ordered cursor contract persisted with progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorContract {
+    /// One contract entry per `cursorColumns` position, in declared order.
+    pub columns: Vec<CursorColumnContract>,
+}
+
+impl CursorContract {
+    /// Confirm this contract describes the exact authored tuple.
+    pub fn validate_columns(&self, cursor_columns: &[String]) -> Result<(), CursorTupleError> {
+        let recorded = self
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        let expected = cursor_columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if recorded != expected {
+            return Err(CursorTupleError::Columns {
+                expected: cursor_columns.to_vec(),
+                actual: self
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A typed cursor checkpoint tuple encoded as one JSON scalar array.
+///
+/// The array uses [`IrScalar`]'s existing tagged wire codec verbatim. It is never
+/// joined through a delimiter, so embedded NULs/delimiters and composite values
+/// remain unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorTuple(Vec<IrScalar>);
+
+impl CursorTuple {
+    /// Build and canonicalize a tuple against its planner-proven contract.
+    pub fn new(values: Vec<IrScalar>, contract: &CursorContract) -> Result<Self, CursorTupleError> {
+        if values.len() != contract.columns.len() {
+            return Err(CursorTupleError::Arity {
+                expected: contract.columns.len(),
+                actual: values.len(),
+            });
+        }
+        let values = values
+            .into_iter()
+            .zip(&contract.columns)
+            .enumerate()
+            .map(|(index, (value, column))| {
+                canonical_cursor_scalar(value, column.scalar_type).map_err(|actual| {
+                    CursorTupleError::ScalarType {
+                        index,
+                        expected: column.scalar_type,
+                        actual,
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self(values))
+    }
+
+    /// Decode one JSON scalar array and validate its arity/types.
+    pub fn from_json(value: &str, contract: &CursorContract) -> Result<Self, CursorTupleError> {
+        let values = serde_json::from_str::<Vec<IrScalar>>(value)
+            .map_err(|error| CursorTupleError::Json(error.to_string()))?;
+        if values.len() != contract.columns.len() {
+            return Err(CursorTupleError::Arity {
+                expected: contract.columns.len(),
+                actual: values.len(),
+            });
+        }
+        for (index, (value, column)) in values.iter().zip(&contract.columns).enumerate() {
+            let exact_wire_type = matches!(
+                (column.scalar_type, value),
+                (CursorScalarType::Int64, IrScalar::Int64(_))
+                    | (CursorScalarType::Decimal, IrScalar::Decimal(_))
+                    | (CursorScalarType::String, IrScalar::Str(_))
+            );
+            if !exact_wire_type {
+                return Err(CursorTupleError::ScalarType {
+                    index,
+                    expected: column.scalar_type,
+                    actual: cursor_scalar_kind(value),
+                });
+            }
+        }
+        Self::new(values, contract)
+    }
+
+    /// Encode this tuple through the existing tagged scalar wire codec.
+    pub fn to_json(&self) -> Result<String, CursorTupleError> {
+        serde_json::to_string(&self.0).map_err(|error| CursorTupleError::Json(error.to_string()))
+    }
+
+    /// Borrow the ordered canonical scalar values.
+    #[must_use]
+    pub fn values(&self) -> &[IrScalar] {
+        &self.0
+    }
+
+    /// Consume the tuple into its ordered canonical scalar values.
+    #[must_use]
+    pub fn into_values(self) -> Vec<IrScalar> {
+        self.0
+    }
+}
+
+fn canonical_cursor_scalar(
+    value: IrScalar,
+    expected: CursorScalarType,
+) -> Result<IrScalar, &'static str> {
+    match (expected, value) {
+        (CursorScalarType::Int64, IrScalar::Int(value) | IrScalar::Int64(value)) => {
+            Ok(IrScalar::Int64(value))
+        }
+        (CursorScalarType::Decimal, IrScalar::Decimal(value)) => Ok(IrScalar::Decimal(value)),
+        (CursorScalarType::String, IrScalar::Str(value)) => Ok(IrScalar::Str(value)),
+        (_, value) => Err(cursor_scalar_kind(&value)),
+    }
+}
+
+fn cursor_scalar_kind(value: &IrScalar) -> &'static str {
+    match value {
+        IrScalar::Null => "null",
+        IrScalar::Bool(_) => "bool",
+        IrScalar::Int(_) => "int",
+        IrScalar::Int64(_) => "int64",
+        IrScalar::Decimal(_) => "decimal",
+        IrScalar::Str(_) => "string",
+        IrScalar::Bytes(_) => "bytes",
+    }
+}
+
+/// A malformed typed cursor checkpoint or mismatched resume contract.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CursorTupleError {
+    /// The stored cursor-column tuple changed.
+    #[error("cursor columns changed: expected {expected:?}, found {actual:?}")]
+    Columns {
+        /// Authored tuple.
+        expected: Vec<String>,
+        /// Stored/proven tuple.
+        actual: Vec<String>,
+    },
+    /// The scalar array arity differs from the cursor tuple.
+    #[error("cursor tuple has arity {actual}; expected {expected}")]
+    Arity {
+        /// Contract arity.
+        expected: usize,
+        /// Checkpoint arity.
+        actual: usize,
+    },
+    /// A scalar's tagged wire family differs from its column contract.
+    #[error("cursor tuple position {index} has scalar type {actual}; expected {expected:?}")]
+    ScalarType {
+        /// Zero-based tuple position.
+        index: usize,
+        /// Planner-proven scalar family.
+        expected: CursorScalarType,
+        /// Actual tagged family.
+        actual: &'static str,
+    },
+    /// Malformed tagged-scalar JSON.
+    #[error("invalid cursor tuple JSON: {0}")]
+    Json(String),
+}
 
 /// One per-row generator assignment whose destination contract was validated by
 /// the IR planner.
@@ -67,7 +305,7 @@ impl PerRowAssignment {
 /// The structured definition of a large-table backfill.
 ///
 /// The creator/AI supplies the **target** ([`table`](Self::table)), the ordered
-/// key to page by ([`cursor_column`](Self::cursor_column)), the
+/// key to page by ([`cursor_columns`](Self::cursor_columns)), the
 /// [`batch_size`](Self::batch_size), the per-row transform
 /// ([`set_clause`](Self::set_clause)), and an optional row
 /// [`filter`](Self::filter). The engine owns everything else — the cursor-window
@@ -79,8 +317,14 @@ pub struct BackfillSpec {
     pub schema: String,
     /// The target table — a bare identifier in [`schema`](Self::schema).
     pub table: String,
-    /// The ordered key to page by.
-    pub cursor_column: String,
+    /// The ordered unique key tuple to page by.
+    pub cursor_columns: Vec<String>,
+    /// How cursor immutability is enforced for the operation's whole lifetime.
+    pub cursor_stability: CursorStability,
+    /// Target comparison/type facts proven by live-schema planning. Offline
+    /// structural previews may leave this absent; executable live plans populate
+    /// it and apply revalidates it before every cohort/batch transition.
+    pub cursor_contract: Option<CursorContract>,
     /// Rows per batch.
     pub batch_size: u32,
     /// The authored per-row transform — the body of `UPDATE … SET <here>`.
@@ -105,16 +349,29 @@ impl BackfillSpec {
             self.name.as_str(),
             self.schema.as_str(),
             self.table.as_str(),
-            self.cursor_column.as_str(),
             self.set_clause.as_str(),
             self.filter.as_deref().unwrap_or("\u{0}<none>"),
         ] {
             h.update((field.len() as u64).to_be_bytes());
             h.update(field.as_bytes());
         }
-        // Preserve the pre-feature identity byte-for-byte for ordinary
-        // backfills. The domain marker makes new generator-bearing identities
-        // self-delimiting without orphaning existing progress rows.
+        h.update(b"\0cursorColumns/v1");
+        h.update((self.cursor_columns.len() as u64).to_be_bytes());
+        for column in &self.cursor_columns {
+            h.update((column.len() as u64).to_be_bytes());
+            h.update(column.as_bytes());
+        }
+        h.update(b"\0cursorStability/v1");
+        match &self.cursor_stability {
+            CursorStability::GuardUpdates => h.update(b"guardUpdates"),
+            CursorStability::ExternalInvariant { name } => {
+                h.update(b"externalInvariant");
+                h.update((name.len() as u64).to_be_bytes());
+                h.update(name.as_bytes());
+            }
+        }
+        // Keep generator-bearing identities self-delimiting from every ordinary
+        // transform and from the new cursor/stability domains above.
         if !self.per_row.is_empty() {
             h.update(b"\0perRow/v1");
             h.update((self.per_row.len() as u64).to_be_bytes());
@@ -252,7 +509,9 @@ mod tests {
         let mut spec = BackfillSpec {
             schema: "app".into(),
             table: "events".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: CursorStability::GuardUpdates,
+            cursor_contract: None,
             batch_size: 100,
             set_clause: String::new(),
             per_row: BTreeMap::from([(
@@ -283,5 +542,91 @@ mod tests {
         assert_ne!(v4, v7);
         assert_ne!(v7, type_id);
         assert_ne!(v4, type_id);
+    }
+
+    #[test]
+    fn cursor_tuple_round_trips_tagged_scalars_without_delimiters() {
+        let contract = CursorContract {
+            columns: vec![
+                CursorColumnContract {
+                    name: "tenant_id".into(),
+                    scalar_type: CursorScalarType::Int64,
+                    database_type: "bigint".into(),
+                    comparison: CursorComparison::Default,
+                },
+                CursorColumnContract {
+                    name: "amount".into(),
+                    scalar_type: CursorScalarType::Decimal,
+                    database_type: "numeric(38, 9)".into(),
+                    comparison: CursorComparison::Default,
+                },
+                CursorColumnContract {
+                    name: "external_id".into(),
+                    scalar_type: CursorScalarType::String,
+                    database_type: "text".into(),
+                    comparison: CursorComparison::NamedCollation {
+                        schema: Some("pg_catalog".into()),
+                        name: "C".into(),
+                    },
+                },
+            ],
+        };
+        let tuple = CursorTuple::new(
+            vec![
+                IrScalar::Int(42),
+                IrScalar::Decimal("-12345678901234567890.000000001".into()),
+                IrScalar::Str("embedded\0|,delimiter".into()),
+            ],
+            &contract,
+        )
+        .expect("valid typed tuple");
+
+        let encoded = tuple.to_json().expect("encode tuple");
+        assert_eq!(
+            encoded,
+            r#"[{"int64":"42"},{"decimal":"-12345678901234567890.000000001"},"embedded\u0000|,delimiter"]"#
+        );
+        assert_eq!(
+            CursorTuple::from_json(&encoded, &contract).expect("decode tuple"),
+            tuple
+        );
+    }
+
+    #[test]
+    fn cursor_tuple_rejects_arity_and_scalar_type_drift() {
+        let contract = CursorContract {
+            columns: vec![CursorColumnContract {
+                name: "id".into(),
+                scalar_type: CursorScalarType::Int64,
+                database_type: "bigint".into(),
+                comparison: CursorComparison::Default,
+            }],
+        };
+
+        assert_eq!(
+            CursorTuple::new(Vec::new(), &contract),
+            Err(CursorTupleError::Arity {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(
+            CursorTuple::new(vec![IrScalar::Str("1".into())], &contract),
+            Err(CursorTupleError::ScalarType {
+                index: 0,
+                expected: CursorScalarType::Int64,
+                actual: "string",
+            })
+        );
+
+        assert_eq!(
+            CursorTuple::from_json("[1]", &contract),
+            Err(CursorTupleError::ScalarType {
+                index: 0,
+                expected: CursorScalarType::Int64,
+                actual: "int",
+            }),
+            "resume must reject an untagged integer instead of normalizing a legacy checkpoint"
+        );
     }
 }

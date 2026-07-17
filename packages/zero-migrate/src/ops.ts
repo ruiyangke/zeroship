@@ -26,6 +26,7 @@
 import type {
   BackfillArgs,
   BackfillSetValue,
+  CursorStability,
   CheckBuilder,
   CheckDef,
   CheckExprFn,
@@ -3952,14 +3953,57 @@ function recordDel(table: string, args: DelArgs): void {
   });
 }
 
-const DEFAULT_BACKFILL_CURSOR = "id";
 const DEFAULT_BACKFILL_BATCH = 1000;
 
+function resolveCursorStability(value: unknown): CursorStability {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw structuredError(
+      "OP_INVALID",
+      "backfill({ cursorStability }) must be { mode: \"guardUpdates\" } or " +
+        "{ mode: \"externalInvariant\", name: string }",
+    );
+  }
+  const stability = value as Record<string, unknown>;
+  if (stability.mode === "guardUpdates") {
+    const keys = Object.keys(stability);
+    if (keys.length !== 1 || keys[0] !== "mode") {
+      throw structuredError(
+        "OP_INVALID",
+        "backfill({ cursorStability: { mode: \"guardUpdates\" } }) accepts only the mode field",
+      );
+    }
+    return { mode: "guardUpdates" };
+  }
+  if (stability.mode === "externalInvariant") {
+    const keys = Object.keys(stability).sort();
+    if (keys.length !== 2 || keys[0] !== "mode" || keys[1] !== "name") {
+      throw structuredError(
+        "OP_INVALID",
+        "backfill({ cursorStability: { mode: \"externalInvariant\", name } }) accepts exactly mode and name",
+      );
+    }
+    requireNonEmptyString(stability.name, "backfill({ cursorStability.name })");
+    return { mode: "externalInvariant", name: stability.name };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    "backfill({ cursorStability.mode }) must be \"guardUpdates\" or \"externalInvariant\"",
+  );
+}
+
 function recordBackfill(table: string, args: BackfillArgs): void {
+  if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
+    throw structuredError(
+      "OP_INVALID",
+      "backfill({ cursorColumn }) was removed; use cursorColumns: [\"column\"]",
+    );
+  }
   if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+  requireOrderedColumns(args.cursorColumns, "backfill({ cursorColumns })");
   emitBackfill({
     table,
-    cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
+    cursorColumns: [...args.cursorColumns],
+    cursorStability: resolveCursorStability(args.cursorStability),
     batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
     set: resolveBackfillSet(args.set),
     filter: resolveExpr(args.where),

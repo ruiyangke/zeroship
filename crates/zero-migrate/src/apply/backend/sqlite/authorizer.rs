@@ -213,6 +213,7 @@ fn is_engine_allowed_pragma(name: &str) -> bool {
         "table_info",
         "index_list",
         "index_info",
+        "index_xinfo",
         "foreign_key_list",
     ];
     ENGINE_PRAGMAS.iter().any(|p| name.eq_ignore_ascii_case(p))

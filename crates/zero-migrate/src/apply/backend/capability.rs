@@ -71,24 +71,32 @@ pub enum BackfillError {
         #[source]
         source: GuardError,
     },
-    /// The target table or cursor column does not exist or cannot be resolved.
+    /// The target table or one of the cursor components cannot be resolved.
     #[error("backfill target not found: {0}")]
     TargetNotFound(String),
-    /// The cursor column is not a unique, non-null paging key.
-    #[error("cursor_column {cursor_column:?} on {table:?} is not safe to page on ({reason}); page on the table's PRIMARY KEY")]
-    CursorNotUniqueNotNull {
+    /// The ordered cursor tuple is not a usable unique, non-null paging key.
+    #[error(
+        "cursorColumns {cursor_columns:?} on {table:?} cannot provide a stable resumable \
+         backfill cursor ({reason}); choose a one-shot update under a maintenance window, a \
+         target-specific rebuild or temporary surrogate, or creation of a stable unique cursor \
+         in an earlier migration"
+    )]
+    CursorTupleUnavailable {
         /// The target table.
         table: String,
-        /// The offending cursor column.
-        cursor_column: String,
+        /// The offending ordered cursor tuple.
+        cursor_columns: Vec<String>,
         /// Why it was rejected.
-        reason: &'static str,
+        reason: String,
     },
-    /// The authored set clause mutates the cursor column.
-    #[error("set_clause assigns the cursor_column {cursor_column:?}; a backfill must not mutate the column it pages on (author a separate migration / page on an immutable key)")]
-    CursorColumnMutated {
-        /// The cursor column the transform illegally assigns.
-        cursor_column: String,
+    /// The authored transform mutates a cursor component.
+    #[error(
+        "backfill transform assigns cursor component {cursor_component:?}; no cursorColumns \
+         component may change while the operation pages"
+    )]
+    CursorComponentMutated {
+        /// The cursor component the transform illegally assigns.
+        cursor_component: String,
     },
     /// SQLite analog of [`BackfillError::BatchFailed`].
     #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]

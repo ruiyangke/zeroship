@@ -70,7 +70,12 @@
     {
       "op": "backfill",
       "table": "status_codes",
-      "cursorColumn": "code",
+      "cursorColumns": [
+        "code"
+      ],
+      "cursorStability": {
+        "mode": "guardUpdates"
+      },
       "batchSize": 500,
       "set": {
         "label": {

@@ -529,6 +529,23 @@ pub enum PerRowGenerator {
     Ulid,
 }
 
+/// The invariant that keeps a resumable backfill's ordered cursor tuple
+/// immutable for the full operation, including time between an interrupted
+/// apply and its resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CursorStability {
+    /// Install a zero-migrate-owned database guard that rejects updates to any
+    /// cursor component until durable backfill completion.
+    GuardUpdates,
+    /// Rely on a named application or maintenance invariant, explicitly
+    /// acknowledged by the operator, that forbids cursor updates.
+    ExternalInvariant {
+        /// Human-readable name of the invariant being asserted.
+        name: String,
+    },
+}
+
 /// Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema
 /// enumerates exactly the supported types and the lowering is a total
 /// match. Camel-cased on the wire (`"int"`, `"bigInt"`, `"geoPoint"`, …).
@@ -3096,8 +3113,11 @@ pub enum Op {
     Backfill {
         /// Target table.
         table: String,
-        /// Cursor column to page over.
-        cursor_column: String,
+        /// Ordered cursor tuple to page over lexicographically.
+        #[schemars(length(min = 1))]
+        cursor_columns: Vec<String>,
+        /// The invariant that keeps every cursor component immutable.
+        cursor_stability: CursorStability,
         /// Rows per batch (JS-safe-integer bounded).
         batch_size: SafeU64,
         /// Column → ordinary DML value or apply-engine per-row generator.
@@ -4937,7 +4957,7 @@ mod tests {
         for wire in [
             r#"{"op":"insert","table":"t","columns":["id"],"rows":[[{"int64":"9007199254740993"}]]}"#,
             r#"{"op":"update","table":"t","set":{"id":{"int64":"9007199254740993"}}}"#,
-            r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":100,"set":{"id":{"int64":"9007199254740993"}},"name":"exact_ids"}"#,
+            r#"{"op":"backfill","table":"t","cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":100,"set":{"id":{"int64":"9007199254740993"}},"name":"exact_ids"}"#,
             r#"{"op":"setColumnDefault","table":"t","column":"id","value":{"literal":{"value":{"int64":"9007199254740993"}}}}"#,
         ] {
             let expected: serde_json::Value = serde_json::from_str(wire).unwrap();

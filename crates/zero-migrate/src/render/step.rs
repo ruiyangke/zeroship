@@ -194,7 +194,9 @@ mod touched_table_tests {
         let spec = BackfillSpec {
             schema: "app".into(),
             table: "members".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+            cursor_contract: None,
             batch_size: 100,
             set_clause: "x = 1".into(),
             per_row: Default::default(),

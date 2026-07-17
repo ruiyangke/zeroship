@@ -258,6 +258,33 @@ function requireString(v, what) {
     throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
   }
 }
+function requireNonEmptyString(v, what) {
+  requireString(v, what);
+  if (v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+}
+function requireOrderedColumns(v, what) {
+  if (!Array.isArray(v) || v.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be a non-empty ordered column-name array`
+    );
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (let position = 0; position < v.length; position += 1) {
+    const column = v[position];
+    requireNonEmptyString(column, `${what}[${position}]`);
+    if (seen.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)} more than once`,
+        { column, position }
+      );
+    }
+    seen.add(column);
+  }
+}
 function requireStrictness(v, what) {
   if (v === void 0) return void 0;
   if (v !== "strict" && v !== "lenient" && v !== "off") {
@@ -2455,7 +2482,7 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
       );
     }
     const seen = /* @__PURE__ */ new Set();
-    const knownColumns = new Set(columnNames);
+    const knownColumns2 = new Set(columnNames);
     for (const column of tablePrimaryKey) {
       if (typeof column !== "string") {
         throw structuredError(
@@ -2469,7 +2496,7 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
           `create table "${name}" primaryKey names column "${column}" more than once`
         );
       }
-      if (!knownColumns.has(column)) {
+      if (!knownColumns2.has(column)) {
         throw structuredError(
           "PRIMARY_KEY_INVALID",
           `create table "${name}" primaryKey names unknown column "${column}"`
@@ -2509,7 +2536,36 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
   for (const exclusion of args.exclusions ?? []) {
     constraints.push(exclusionConstraintFromSpec(exclusion));
   }
-  for (const fkSpec of args.foreignKeys ?? []) {
+  if (args.foreignKeys !== void 0 && !Array.isArray(args.foreignKeys)) {
+    throw structuredError("OP_INVALID", `create table "${name}" foreignKeys must be an array`);
+  }
+  const knownColumns = new Set(columnNames);
+  const foreignKeyNames = /* @__PURE__ */ new Set();
+  for (const [position, fkSpec] of (args.foreignKeys ?? []).entries()) {
+    requirePlainObject(fkSpec, `create table "${name}" foreignKeys[${position}]`);
+    requireNonEmptyString(
+      fkSpec.name,
+      `create table "${name}" foreignKeys[${position}].name`
+    );
+    if (foreignKeyNames.has(fkSpec.name)) {
+      throw structuredError(
+        "OP_INVALID",
+        `create table "${name}" foreignKeys names constraint ${JSON.stringify(fkSpec.name)} more than once`
+      );
+    }
+    foreignKeyNames.add(fkSpec.name);
+    requireOrderedColumns(
+      fkSpec.columns,
+      `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} columns`
+    );
+    for (const column of fkSpec.columns) {
+      if (!knownColumns.has(column)) {
+        throw structuredError(
+          "OP_INVALID",
+          `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} names unknown local column ${JSON.stringify(column)}`
+        );
+      }
+    }
     constraints.push(
       fkConstraintFromSpec({
         name: fkSpec.name,
@@ -2685,12 +2741,30 @@ function recordDropColumnDefault(table2, name, args) {
   emitDropColumnDefault({ table: table2, column: name, schema: args.schema });
 }
 function fkConstraintFromSpec(spec) {
-  if (!spec || typeof spec !== "object" || !spec.references) {
+  if (!spec || typeof spec !== "object") {
     throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
   }
+  requireNonEmptyString(spec.name, "foreign key name");
+  requireOrderedColumns(spec.columns, "foreign key columns");
+  requirePlainObject(spec.references, "foreign key references");
+  requireNonEmptyString(spec.references.table, "foreign key references.table");
+  requireOrderedColumns(spec.references.columns, "foreign key references.columns");
+  if (spec.columns.length !== spec.references.columns.length) {
+    throw structuredError(
+      "OP_INVALID",
+      `foreign key local and referenced columns must have equal arity; got ${spec.columns.length} and ${spec.references.columns.length}`,
+      { localArity: spec.columns.length, referencedArity: spec.references.columns.length }
+    );
+  }
   if (spec.references.schema !== void 0) {
-    requireString(spec.references.schema, "foreign key references.schema");
-    if (spec.schema !== void 0 && spec.references.schema !== spec.schema) {
+    requireNonEmptyString(spec.references.schema, "foreign key references.schema");
+    if (spec.schema === void 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "foreign key references.schema requires an explicit matching table schema; the frozen IR cannot prove an implicit schema or represent a cross-schema FK"
+      );
+    }
+    if (spec.references.schema !== spec.schema) {
       throw structuredError(
         "OP_INVALID",
         "foreign key references.schema must match the table schema; cross-schema FKs are not representable in the frozen IR"
@@ -2704,12 +2778,15 @@ function fkConstraintFromSpec(spec) {
       columns: spec.columns,
       referencesTable: spec.references.table,
       referencesColumns: spec.references.columns,
-      onDelete: spec.onDelete,
-      onUpdate: spec.onUpdate,
-      deferrable: spec.deferrable,
-      initiallyDeferred: spec.initiallyDeferred,
+      onDelete: requireReferenceAction(spec.onDelete, "foreign key onDelete"),
+      onUpdate: requireReferenceAction(spec.onUpdate, "foreign key onUpdate"),
+      deferrable: requireOptionalBoolean(spec.deferrable, "foreign key deferrable"),
+      initiallyDeferred: requireOptionalBoolean(
+        spec.initiallyDeferred,
+        "foreign key initiallyDeferred"
+      ),
       // PG-only online constraint adoption; refused off Postgres at validate.
-      notValid: spec.notValid
+      notValid: requireOptionalBoolean(spec.notValid, "foreign key notValid")
     })
   });
 }
@@ -2966,13 +3043,54 @@ function recordDel(table2, args) {
     schema: args.schema
   });
 }
-var DEFAULT_BACKFILL_CURSOR = "id";
 var DEFAULT_BACKFILL_BATCH = 1e3;
+function resolveCursorStability(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw structuredError(
+      "OP_INVALID",
+      'backfill({ cursorStability }) must be { mode: "guardUpdates" } or { mode: "externalInvariant", name: string }'
+    );
+  }
+  const stability = value;
+  if (stability.mode === "guardUpdates") {
+    const keys = Object.keys(stability);
+    if (keys.length !== 1 || keys[0] !== "mode") {
+      throw structuredError(
+        "OP_INVALID",
+        'backfill({ cursorStability: { mode: "guardUpdates" } }) accepts only the mode field'
+      );
+    }
+    return { mode: "guardUpdates" };
+  }
+  if (stability.mode === "externalInvariant") {
+    const keys = Object.keys(stability).sort();
+    if (keys.length !== 2 || keys[0] !== "mode" || keys[1] !== "name") {
+      throw structuredError(
+        "OP_INVALID",
+        'backfill({ cursorStability: { mode: "externalInvariant", name } }) accepts exactly mode and name'
+      );
+    }
+    requireNonEmptyString(stability.name, "backfill({ cursorStability.name })");
+    return { mode: "externalInvariant", name: stability.name };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    'backfill({ cursorStability.mode }) must be "guardUpdates" or "externalInvariant"'
+  );
+}
 function recordBackfill(table2, args) {
+  if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
+    throw structuredError(
+      "OP_INVALID",
+      'backfill({ cursorColumn }) was removed; use cursorColumns: ["column"]'
+    );
+  }
   if (args.set === void 0) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+  requireOrderedColumns(args.cursorColumns, "backfill({ cursorColumns })");
   emitBackfill({
     table: table2,
-    cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
+    cursorColumns: [...args.cursorColumns],
+    cursorStability: resolveCursorStability(args.cursorStability),
     batchSize: args.batchSize !== void 0 ? args.batchSize : DEFAULT_BACKFILL_BATCH,
     set: resolveBackfillSet(args.set),
     filter: resolveExpr(args.where),
@@ -3454,7 +3572,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
     // `foreignKey(name).add`/`check(name).add` are the SOLE public
     // writers of the `addConstraint` fk/check payload.
     foreignKey(fkName) {
-      requireString(fkName, ".foreignKey(name)");
+      requireNonEmptyString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
       return {
         add(args) {

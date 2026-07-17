@@ -412,8 +412,12 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
             let crate::render::expand_contract::OnlineIntent::RenameColumn {
                 table, from, to, ..
             } = intent;
-            let allowed_engine_trigger =
-                crate::render::expand_contract::dual_write_trg_name(table, from, to);
+            let allowed_engine_trigger = backfill_sql::AllowedOnlineRenameTrigger::new(
+                crate::render::expand_contract::dual_write_trg_name(table, from, to),
+                crate::render::expand_contract::dual_write_fn_name(table, from, to),
+                from.clone(),
+                to.clone(),
+            );
 
             let own_lock = lock_mode == LockMode::Acquire;
             if own_lock {
@@ -724,6 +728,14 @@ mod recording_session_genericity {
                 )]
             } else if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
                 self.canned_journal.borrow().clone()
+            } else if sql.contains("AS table_exists")
+                && sql.contains("pg_catalog.pg_class")
+                && sql.contains("schema_backfills")
+            {
+                vec![Row::new(
+                    vec!["table_exists".into()],
+                    vec![Value::Bool(self.progress_table_exists)],
+                )]
             } else if sql.contains("AS table_exists") && sql.contains("pg_catalog.pg_attribute") {
                 vec![Row::new(
                     vec!["table_exists".into(), "checksum_exists".into()],
@@ -732,7 +744,9 @@ mod recording_session_genericity {
                         Value::Bool(self.progress_checksum_exists),
                     ],
                 )]
-            } else if sql.contains("schema_backfills") && sql.contains("AS checksum, complete") {
+            } else if sql.contains("schema_backfills")
+                && sql.contains("backfill_id, checksum, complete")
+            {
                 self.canned_progress.borrow().clone()
             } else {
                 Vec::new()
@@ -854,7 +868,9 @@ mod recording_session_genericity {
                 spec: BackfillSpec {
                     schema: "proj_x".into(),
                     table: "users".into(),
-                    cursor_column: "id".into(),
+                    cursor_columns: vec!["id".into()],
+                    cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+                    cursor_contract: None,
                     batch_size: 100,
                     set_clause: "ready = TRUE".into(),
                     per_row: std::collections::BTreeMap::new(),

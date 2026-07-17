@@ -446,6 +446,10 @@ export interface PlanStatusStepDto {
   kind: string
   /** `pending | inflight | applied | drifted`. */
   state: string
+  /** `guardUpdates | externalInvariant` for resumable backfills. */
+  cursorStabilityMode?: string
+  /** The explicitly approved invariant name for `externalInvariant`. */
+  cursorStabilityInvariant?: string
 }
 
 /** Complete or abort one outstanding PostgreSQL online column rename. */

@@ -452,7 +452,8 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "base",
         Op::Backfill {
             table: "t".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: zero_migrate::CursorStability::GuardUpdates,
             batch_size: SafeU64::new(100).expect("safe u64"),
             set: std::iter::once((
                 "a".to_string(),

@@ -181,11 +181,12 @@ migrations. Rust apply coordinates zero-migrate processes that use the same
 application database, and it refuses to open for migration when crash-safe
 application and journal settings cannot be established.
 
-SQLite backfills require the table's non-null, single-column primary key with
-declared `INTEGER` or `TEXT` affinity. Every live cursor value must use the
-matching SQLite storage class. Unique-only or composite cursors and other or
-mixed storage classes are rejected before that backfill changes rows. `WITHOUT
-ROWID` tables are supported when their primary key meets these rules.
+SQLite backfills require an exact ordered, non-null primary or unique
+candidate-key tuple whose components have supported declared `INTEGER` or
+`TEXT` affinity. Every live cursor value must use the matching SQLite storage
+class. Partial tuples and unsupported or mixed storage classes are rejected
+before that backfill changes rows. `WITHOUT ROWID` tables are supported when
+their candidate key meets these rules.
 
 ## Backend capabilities
 
@@ -196,7 +197,7 @@ ROWID` tables are supported when their primary key meets these rules.
 | Schema snapshots | Yes | Limited: tables, columns, and ordered indexes | Yes |
 | Preconditions | Yes | No | Empty only |
 | Insert/update/delete | Yes | Yes, on trigger-free InnoDB | Yes |
-| Batched backfill | Yes, with a complete single-column primary key and no enabled user trigger | Yes, on trigger-free InnoDB with a complete single-column primary key | Yes, with an `INTEGER` or `TEXT` single-column primary key and no user trigger |
+| Batched backfill | Yes, with an exact ordered primary/unique cursor tuple and explicit stability | Yes, on InnoDB with an exact ordered primary/unique cursor tuple and explicit stability | Yes, with a supported exact ordered primary/unique cursor tuple and explicit stability |
 | Baseline | Yes | No | Yes |
 | Pending expand/contract state | Yes | No | No |
 
@@ -239,12 +240,13 @@ Apply checks the plan again before executing it.
 
 Schema and data steps execute in authored order. Every executable step receives
 a stable journal identity tied to the complete migration checksum. Backfills
-require approval and the table's complete, non-null, single-column primary key
-as their cursor. Approval is preflighted across the complete plan before any
+require approval, an exact ordered non-null primary/unique candidate-key cursor
+tuple, and an explicit stability mode. Approval is preflighted across the complete plan before any
 authored step runs. A backfill captures a fixed terminal cursor before its first
 batch, commits bounded batches, resumes after the last committed cursor, and
-stops at its original boundary. Rows inserted after capture are not guaranteed
-to be included and need a later migration.
+stops at its original boundary. The bounded cohort does not cover concurrent
+inserts by itself: make new rows fail the filter before capture or arrange a
+final catch-up while writes are stopped.
 
 MySQL structured insert, update, delete, and backfill additionally require an
 InnoDB target without user triggers. Apply refuses the operation when it cannot

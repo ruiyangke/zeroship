@@ -373,6 +373,10 @@ pub struct PlanStatusStepDto {
     pub kind: String,
     /// `pending | inflight | applied | drifted`.
     pub state: String,
+    /// `guardUpdates | externalInvariant` for resumable backfills.
+    pub cursor_stability_mode: Option<String>,
+    /// The explicitly approved invariant name for `externalInvariant`.
+    pub cursor_stability_invariant: Option<String>,
 }
 
 /// One event in the typed `history` audit trail.

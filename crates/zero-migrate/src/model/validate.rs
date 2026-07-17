@@ -570,10 +570,95 @@ fn per_row_validation_error(
     }
 }
 
+const MAX_EXTERNAL_CURSOR_INVARIANT_NAME_CHARS: usize = 255;
+
+fn validate_backfill_cursor_fields(
+    cursor_columns: &[String],
+    cursor_stability: &crate::model::ir::CursorStability,
+    set: &BTreeMap<String, crate::model::ir::BackfillSetValue>,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let error = |reason: String, suggested_fix: String| AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(suggested_fix),
+    };
+
+    if cursor_columns.is_empty() {
+        return Err(error(
+            "backfill cursorColumns must be a non-empty ordered tuple".to_string(),
+            "provide the full ordered primary/unique candidate key, for example cursorColumns: [\"id\"]"
+                .to_string(),
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for column in cursor_columns {
+        if !is_safe_schema_ident(column) {
+            return Err(error(
+                format!(
+                    "backfill cursorColumns contains {column:?}, which is not a safe non-empty bare column identifier"
+                ),
+                "use plain column identifiers containing only ASCII letters, digits, and underscores"
+                    .to_string(),
+            ));
+        }
+        let comparison_name = if target_dialect == Dialect::Postgres {
+            column.clone()
+        } else {
+            column.to_ascii_lowercase()
+        };
+        if !seen.insert(comparison_name) {
+            return Err(error(
+                format!(
+                    "backfill cursorColumns repeats component {column:?}; a cursor tuple cannot contain the same column twice"
+                ),
+                "list each cursor component exactly once in candidate-key order".to_string(),
+            ));
+        }
+        if set.keys().any(|destination| {
+            if target_dialect == Dialect::Postgres {
+                destination == column
+            } else {
+                destination.eq_ignore_ascii_case(column)
+            }
+        }) {
+            return Err(error(
+                format!(
+                    "backfill assignment targets cursor component {column:?}; changing any cursor component while paging would make row selection unstable"
+                ),
+                "remove every cursorColumns component from the backfill set assignment"
+                    .to_string(),
+            ));
+        }
+    }
+
+    if let crate::model::ir::CursorStability::ExternalInvariant { name } = cursor_stability {
+        let chars = name.chars().count();
+        if name.trim().is_empty() || chars > MAX_EXTERNAL_CURSOR_INVARIANT_NAME_CHARS {
+            return Err(error(
+                format!(
+                    "backfill cursorStability externalInvariant name must contain non-whitespace text and be at most {MAX_EXTERNAL_CURSOR_INVARIANT_NAME_CHARS} characters; found {chars} characters"
+                ),
+                "provide a short, explicit application or maintenance invariant name that operators can recognize in preview and status"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_per_row_destination(
     table: &str,
     schema: Option<&str>,
-    cursor_column: &str,
+    cursor_columns: &[String],
     column: &str,
     generator: &crate::model::ir::PerRowGenerator,
     declared: &LogicalColumnContracts,
@@ -604,7 +689,13 @@ fn validate_per_row_destination(
         }
     }
 
-    if column == cursor_column {
+    if cursor_columns.iter().any(|cursor| {
+        if target_dialect == Dialect::Postgres {
+            cursor == column
+        } else {
+            cursor.eq_ignore_ascii_case(column)
+        }
+    }) {
         return Err(per_row_validation_error(
             target_dialect,
             op_index,
@@ -612,7 +703,7 @@ fn validate_per_row_destination(
             format!(
                 "backfill per-row generation targets cursor column {column:?}; changing the cursor while paging would make row selection unstable"
             ),
-            "choose a destination column other than cursorColumn".to_string(),
+            "choose a destination column that is not a component of cursorColumns".to_string(),
         ));
     }
 
@@ -975,7 +1066,7 @@ fn validate_per_row_op(
         }
         Op::Backfill {
             table,
-            cursor_column,
+            cursor_columns,
             set,
             schema,
             ..
@@ -986,7 +1077,7 @@ fn validate_per_row_op(
                     validate_per_row_destination(
                         table,
                         schema.as_deref(),
-                        cursor_column,
+                        cursor_columns,
                         column,
                         per_row,
                         declared,
@@ -3412,7 +3503,22 @@ pub fn validate_op_scoped(
             let scope = TargetScope::structural_only(table);
             validate_expr(r#where, target_dialect, &scope, op_index, ts_location)
         }
-        Op::Backfill { table, set, filter, .. } => {
+        Op::Backfill {
+            table,
+            cursor_columns,
+            cursor_stability,
+            set,
+            filter,
+            ..
+        } => {
+            validate_backfill_cursor_fields(
+                cursor_columns,
+                cursor_stability,
+                set,
+                target_dialect,
+                op_index,
+                ts_location,
+            )?;
             let scope = TargetScope::structural_only(table);
             for value in set.values() {
                 if let crate::model::ir::BackfillSetValue::Value(
@@ -5773,8 +5879,21 @@ pub fn validate_op_resolved(
             }
         }
         Op::Backfill {
-            table, set, filter, ..
+            table,
+            cursor_columns,
+            cursor_stability,
+            set,
+            filter,
+            ..
         } => {
+            validate_backfill_cursor_fields(
+                cursor_columns,
+                cursor_stability,
+                set,
+                target_dialect,
+                op_index,
+                ts,
+            )?;
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
                 for value in set.values() {
@@ -8694,7 +8813,8 @@ mod tests {
         ); // fine structurally
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
             batch_size: serde_json::from_str("100").unwrap(),
             set,
             filter: Some(split(", ", 1)), // out-of-envelope → reject
@@ -8709,7 +8829,8 @@ mod tests {
     fn validate_ir_rejects_volatile_backfill_filter() {
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
             batch_size: serde_json::from_str("100").unwrap(),
             set: [(
                 "name".to_string(),
@@ -8735,7 +8856,8 @@ mod tests {
     fn validate_ir_rejects_aggregate_backfill_filter() {
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
-            cursor_column: "id".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
             batch_size: serde_json::from_str("100").unwrap(),
             set: [(
                 "name".to_string(),
@@ -8757,6 +8879,102 @@ mod tests {
         assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
         assert!(err.reason.contains("backfill filter"), "{err}");
         assert!(err.reason.contains("count()"), "{err}");
+    }
+
+    #[test]
+    fn backfill_rejects_assignment_to_any_composite_cursor_component() {
+        for assigned in ["tenant_id", "sequence"] {
+            let ir = ir_with(vec![Op::Backfill {
+                table: "events".into(),
+                cursor_columns: vec!["tenant_id".into(), "sequence".into()],
+                cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+                batch_size: serde_json::from_str("100").unwrap(),
+                set: [(
+                    assigned.to_string(),
+                    BackfillSetValue::from(IrValue::Scalar(IrScalar::Int(1))),
+                )]
+                .into_iter()
+                .collect(),
+                filter: None,
+                name: "bf".into(),
+                schema: None,
+            }]);
+            let error = validate_ir(&ir, Dialect::Postgres, &[])
+                .expect_err("cursor components are immutable destinations");
+            assert_eq!(error.code, CODE_OP_INVALID);
+            assert!(error.reason.contains(assigned), "{error}");
+            assert!(error.reason.contains("cursor component"), "{error}");
+        }
+    }
+
+    #[test]
+    fn case_insensitive_dialects_reject_case_variant_cursor_mutation() {
+        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+            let ir = ir_with(vec![Op::Backfill {
+                table: "events".into(),
+                cursor_columns: vec!["event_id".into()],
+                cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+                batch_size: serde_json::from_str("100").unwrap(),
+                set: [(
+                    "EVENT_ID".to_string(),
+                    BackfillSetValue::from(IrValue::Scalar(IrScalar::Int(1))),
+                )]
+                .into_iter()
+                .collect(),
+                filter: None,
+                name: "bf".into(),
+                schema: None,
+            }]);
+            let error = validate_ir(&ir, dialect, &[])
+                .expect_err("case-only spelling still targets the cursor component");
+            assert_eq!(error.code, CODE_OP_INVALID);
+            assert!(error.reason.contains("cursor component"), "{error}");
+        }
+    }
+
+    #[test]
+    fn external_cursor_invariant_requires_a_bounded_visible_name() {
+        for name in ["   ".to_string(), "x".repeat(256)] {
+            let ir = ir_with(vec![Op::Backfill {
+                table: "events".into(),
+                cursor_columns: vec!["id".into()],
+                cursor_stability: crate::model::ir::CursorStability::ExternalInvariant { name },
+                batch_size: serde_json::from_str("100").unwrap(),
+                set: [(
+                    "payload".to_string(),
+                    BackfillSetValue::from(IrValue::Scalar(IrScalar::Str("ready".into()))),
+                )]
+                .into_iter()
+                .collect(),
+                filter: None,
+                name: "bf".into(),
+                schema: None,
+            }]);
+            let error = validate_ir(&ir, Dialect::Postgres, &[])
+                .expect_err("external invariant name is operator-visible metadata");
+            assert_eq!(error.code, CODE_OP_INVALID);
+            assert!(error.reason.contains("externalInvariant"), "{error}");
+        }
+
+        let accepted = ir_with(vec![Op::Backfill {
+            table: "events".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: crate::model::ir::CursorStability::ExternalInvariant {
+                name: "events_id_updates_disabled_during_migration".into(),
+            },
+            batch_size: serde_json::from_str("100").unwrap(),
+            set: [(
+                "payload".to_string(),
+                BackfillSetValue::from(IrValue::Scalar(IrScalar::Str("ready".into()))),
+            )]
+            .into_iter()
+            .collect(),
+            filter: None,
+            name: "bf".into(),
+            schema: None,
+        }]);
+        validate_ir(&accepted, Dialect::Postgres, &[])
+            .expect("a named external invariant is explicitly authorable");
     }
 
     // ── the names-stay-strings BINDING corollary ───────────────────────────
@@ -9417,7 +9635,8 @@ mod tests {
     fn per_row_backfill_op(generator: PerRowGenerator) -> Op {
         Op::Backfill {
             table: "per_row_values".into(),
-            cursor_column: "cursor".into(),
+            cursor_columns: vec!["cursor".into()],
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
             batch_size: serde_json::from_str("10").unwrap(),
             set: [("generated".to_string(), BackfillSetValue::from(generator))]
                 .into_iter()

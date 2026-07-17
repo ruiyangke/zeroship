@@ -211,7 +211,8 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
         token: genRandomUuid(),
       },
       where: (col) => col("code").gt(0),
-      cursorColumn: "code",
+      cursorColumns: ["code"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 500,
       name: "fluent_backfill",
     });

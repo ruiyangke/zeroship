@@ -60,7 +60,8 @@ export default {
       limit: 100,
     });
 
-    // backfill({ set, where }) — `cursorColumn`/`batchSize` overridable; fnSynth
+    // backfill({ set, where }) — ordered `cursorColumns`, explicit stability,
+    // and overridable `batchSize`; fnSynth
     // concatWs/splitPart/now/genRandomUuid.
     sc.backfill({
       set: {
@@ -70,7 +71,8 @@ export default {
         token: genRandomUuid(),
       },
       where: (col) => col("code").gt(0),
-      cursorColumn: "code",
+      cursorColumns: ["code"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 500,
       name: "fluent_backfill",
     });

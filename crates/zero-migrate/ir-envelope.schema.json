@@ -1387,9 +1387,17 @@
               "description": "Target table.",
               "type": "string"
             },
-            "cursorColumn": {
-              "description": "Cursor column to page over.",
-              "type": "string"
+            "cursorColumns": {
+              "description": "Ordered cursor tuple to page over lexicographically.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "cursorStability": {
+              "description": "The invariant that keeps every cursor component immutable.",
+              "$ref": "#/$defs/CursorStability"
             },
             "batchSize": {
               "description": "Rows per batch (JS-safe-integer bounded).",
@@ -1433,7 +1441,8 @@
           "required": [
             "op",
             "table",
-            "cursorColumn",
+            "cursorColumns",
+            "cursorStability",
             "batchSize",
             "set",
             "name"
@@ -5822,6 +5831,44 @@
       "format": "uint64",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "CursorStability": {
+      "description": "The invariant that keeps a resumable backfill's ordered cursor tuple\nimmutable for the full operation, including time between an interrupted\napply and its resume.",
+      "oneOf": [
+        {
+          "description": "Install a zero-migrate-owned database guard that rejects updates to any\ncursor component until durable backfill completion.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "guardUpdates"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Rely on a named application or maintenance invariant, explicitly\nacknowledged by the operator, that forbids cursor updates.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Human-readable name of the invariant being asserted.",
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "externalInvariant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "name"
+          ]
+        }
+      ]
     },
     "BackfillSetValue": {
       "description": "A value accepted specifically by `backfill.set`.\n\nOrdinary DML values preserve their existing scalar/expression wire image.\nThe apply-engine generator arm is an explicit `{ \"perRow\": ... }` wrapper,\nwhich prevents it from being confused with either a literal or a database\nUUID expression.",

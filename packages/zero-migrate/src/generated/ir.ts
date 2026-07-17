@@ -428,9 +428,15 @@ export interface IrOnConflict {
   doUpdate?: { [column: string]: IrValue } | null;
 }
 
+/** The invariant that keeps a resumable backfill's cursor tuple immutable. */
+export type CursorStability =
+  | { mode: "guardUpdates" }
+  | { mode: "externalInvariant"; name: string };
+
 /** A batched-backfill knob. */
 export interface IrBatch {
-  cursorColumn: string;
+  cursorColumns: [string, ...string[]];
+  cursorStability: CursorStability;
   batchSize: number;
 }
 
@@ -553,7 +559,7 @@ export type Op =
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: BackfillSetValue }; filter?: Expr | null; name: string; schema?: string | null }
+  | { op: "backfill"; table: string; cursorColumns: [string, ...string[]]; cursorStability: CursorStability; batchSize: number; set: { [column: string]: BackfillSetValue }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "dialectal"; default?: Op[] | null; pg?: Op[] | null; sqlite?: Op[] | null; mysql?: Op[] | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }

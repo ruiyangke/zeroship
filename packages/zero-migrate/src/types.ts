@@ -869,11 +869,20 @@ export interface DelArgs {
   schema?: string;
 }
 
+/** The invariant that keeps every resumable-backfill cursor component
+ * immutable for the full operation, including time between interruption and
+ * resume. */
+export type CursorStability =
+  | { mode: "guardUpdates" }
+  | { mode: "externalInvariant"; name: string };
+
 export interface BackfillArgs {
   set: Record<string, BackfillSetValue>;
   where?: ExprFn | ExprChain | Expr;
-  /** Defaults to the single-column PK (`"id"`). */
-  cursorColumn?: string;
+  /** Non-empty ordered cursor tuple; a single-column cursor is `["id"]`. */
+  cursorColumns: OrderedColumns;
+  /** How cursor-component updates are forbidden for the whole operation. */
+  cursorStability: CursorStability;
   /** Defaults to the engine's chosen batch size. */
   batchSize?: number;
   name?: string;

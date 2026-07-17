@@ -29,7 +29,8 @@ export function up() {
   sc.backfill({
     set: { label: (col) => concatWs(" ", col("code"), col("label")), marker: "backfilled" },
     where: (col) => col("code").gt(0),
-    cursorColumn: "code",
+    cursorColumns: ["code"],
+    cursorStability: { mode: "guardUpdates" },
     batchSize: 500,
     name: "backfill_labels",
   });

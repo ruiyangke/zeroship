@@ -52,7 +52,8 @@ export default {
     table("dml_flow_items").backfill({
       set: { score: (column) => column("score").add(100) },
       where: (column) => column("id").gt(0),
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 1,
       name: "raise_remaining_scores",
     });

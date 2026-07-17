@@ -1,69 +1,19 @@
-//! The SQLite **batched / resumable backfill executor** — the
-//! SQLite analog of the Postgres `backfill.rs` (`run_backfill`), completing the
-//! "one script, both backends, DDL+DML" headline.
-//!
-//! The PG executor is structurally Postgres-only: it emits a data-modifying CTE
-//! (`WITH _bf_window AS (…), _bf_upd AS (UPDATE … RETURNING …)`) — SQLite has no
-//! writable CTEs — and derives the cursor type from `pg_catalog`. This module is
-//! the SQLite peer: a loop of **plain statements**, each its own
-//! `BEGIN IMMEDIATE … COMMIT` transaction on the single hardened migration
-//! connection ([`MigrationActor`]).
-//!
-//! # Per-batch statement (the engine-owned window)
-//!
-//! ```text
-//! BEGIN IMMEDIATE; -- engine mode owns the txn boundary
-//! (CreatorUp) UPDATE "<table>" SET <authored set>
-//! WHERE <cursor> IN (SELECT <cursor> FROM "<table>"
-//! WHERE <cursor_col> > ?1 [AND (<filter>)] -- ?1 omitted on batch 1
-//! ORDER BY <cursor_col> ASC LIMIT ?n
-//!)
-//! RETURNING <cursor_col>; -- touched cursors
-//! (EngineJournal) UPDATE "_mig".schema_backfills SET last_cursor=…, rows_done+=…, …;
-//! COMMIT; -- batch mutation + progress advance commit together
-//! ```
-//!
-//! The batch `UPDATE` runs under the confined **CreatorUp** authorizer mode (denied
-//! from `_mig` / PRAGMA / txn boundaries / vtables — exactly the confinement a
-//! creator `up` runs under); the progress write runs under **EngineJournal** (the
-//! engine owns `_mig`). They commit in the SAME `BEGIN IMMEDIATE` transaction, so a
-//! crash leaves **both or neither**: either the rows are updated AND the cursor
-//! advanced, or nothing. On the next run the loop reads the last committed cursor
-//! and re-runs strictly after it — never restarting from zero, never skipping,
-//! never double-applying (a crash before COMMIT rolled the mutation back too, so
-//! re-running the same window is correct even for a non-idempotent transform).
-//!
-//! # Reuse of the shared SQLite-DML seam (no re-implementation)
-//!
-//! - The per-batch `UPDATE … RETURNING` is run via
-//! [`MigrationActor::query_params`], binding the cursor + limit through the SAME
-//! native `?n` protocol (`crate::render::dml::sqlite_placeholder` /
-//! [`SqliteBind`](super::actor::SqliteBind)) the one-shot DML assembler uses — the
-//! two never fork a divergent `?n`-binding copy.
-//! - The authored `set` / `filter` SQL strings come from
-//! [`crate::render::dml::assemble_backfill_clauses`] (the SAME assembler the PG path
-//! uses), which renders the closed-AST transform — including the
-//! `c.fn.splitPart` lowering — to inline SQL, `''`-escaping every string literal.
-//! The whole assembled statement runs under the hardened authorizer (the SQLite
-//! analog of the PG guard), so a hostile literal cannot alter statement shape.
-//!
-//! # Crash-safe progress
-//!
-//! Progress lives in the attached `_mig` database (the SQLite journal sibling),
-//! the `schema_backfills` table — the SQLite mirror of the PG meta-schema progress
-//! table. It is written under EngineJournal mode (the creator `UPDATE` in CreatorUp
-//! can never forge or skip it — `_mig` is denied to CreatorUp). The progress-row
-//! identity is the spec's stable [`BackfillSpec::backfill_id`] (table + cursor +
-//! transform + name), so a re-authored backfill gets a fresh id and does not resume
-//! against an incompatible cursor.
+//! Crash-safe SQLite backfills over planner-proven ordered cursor tuples.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use sha2::{Digest, Sha256};
 
 use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry};
-use crate::model::backfill::{generate_per_row_value, BackfillSpec};
-use crate::model::ir::PerRowGenerator;
+use crate::model::backfill::{
+    generate_per_row_value, BackfillSpec, CursorColumnContract, CursorComparison, CursorContract,
+    CursorScalarType, CursorTuple,
+};
+use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
 use crate::model::migration::{Checksum, MigrationId};
 use crate::render::dml::sqlite_placeholder;
 
-use super::actor::{MigrationActor, SqliteActorError};
+use super::actor::{MigrationActor, SqliteActorError, SqliteBind};
 use super::authorizer::Mode;
 use super::journal_sql::sql_lit;
 
@@ -73,49 +23,175 @@ pub(crate) struct PlanBackfillIdentity<'a> {
     pub(crate) checksum: &'a Checksum,
 }
 
-/// Validate a bare SQL identifier (non-empty, `[A-Za-z_][A-Za-z0-9_]*`). Rejects
-/// schema-qualified / quoted-injection / whitespace, so the value is safe to
-/// double-quote into an identifier position. Mirrors the PG executor's
-/// `validate_ident`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqliteCursorKind {
+    Integer,
+    Text,
+}
+
+impl SqliteCursorKind {
+    const fn storage_class(self) -> &'static str {
+        match self {
+            Self::Integer => "integer",
+            Self::Text => "text",
+        }
+    }
+
+    const fn scalar_type(self) -> CursorScalarType {
+        match self {
+            Self::Integer => CursorScalarType::Int64,
+            Self::Text => CursorScalarType::String,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiveCursorContract {
+    contract: CursorContract,
+    kinds: Vec<SqliteCursorKind>,
+}
+
+#[derive(Debug)]
+struct TableColumn {
+    name: String,
+    database_type: String,
+    not_null: bool,
+    pk_ordinal: usize,
+    kind: Option<SqliteCursorKind>,
+}
+
+#[derive(Debug)]
+struct IndexCandidate {
+    primary: bool,
+    columns: Vec<String>,
+    collations: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Progress {
+    checksum: String,
+    target_table: String,
+    cursor_columns_json: String,
+    cursor_contract_json: String,
+    stability_mode: String,
+    stability_name: Option<String>,
+    guard_name: Option<String>,
+    guard_installed: bool,
+    guard_cleaned: bool,
+    last_cursor_json: Option<String>,
+    end_cursor_json: Option<String>,
+    cohort_checksum: String,
+    cohort_initialized: bool,
+    complete: bool,
+    exists: bool,
+}
+
+const PROGRESS_COLUMNS: &[&str] = &[
+    "backfill_id",
+    "checksum",
+    "name",
+    "target_table",
+    "cursor_columns",
+    "cursor_contract",
+    "stability_mode",
+    "stability_name",
+    "guard_name",
+    "guard_installed",
+    "guard_cleaned",
+    "last_cursor",
+    "end_cursor",
+    "cohort_checksum",
+    "cohort_initialized",
+    "rows_done",
+    "batches_done",
+    "complete",
+    "applied_by",
+    "started_at",
+    "updated_at",
+];
+
 fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> {
-    let ok = !value.is_empty()
-        && value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !ok {
-        return Err(BackfillError::InvalidIdentifier {
+    let valid = !value.is_empty()
+        && value.starts_with(|character: char| character.is_ascii_alphabetic() || character == '_')
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(BackfillError::InvalidIdentifier {
             what,
             value: value.to_string(),
-        });
+        })
     }
-    Ok(())
 }
 
-/// Double-quote a validated identifier (`"` → `""` — belt-and-suspenders; the value
-/// already passed [`validate_ident`] so it has no `"`).
-fn quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident(ident)
+fn quote_ident(identifier: &str) -> String {
+    crate::render::dml::escape_quote_ident(identifier)
 }
 
-fn validate_per_row_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), BackfillError> {
+fn cursor_unavailable(spec: &BackfillSpec, reason: impl Into<String>) -> BackfillError {
+    BackfillError::CursorTupleUnavailable {
+        table: spec.table.clone(),
+        cursor_columns: spec.cursor_columns.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), BackfillError> {
+    validate_ident("table", &spec.table)?;
+    if spec.cursor_columns.is_empty() {
+        return Err(cursor_unavailable(
+            spec,
+            "the ordered cursor tuple is empty",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for column in &spec.cursor_columns {
+        validate_ident("cursor component", column)?;
+        let folded = column.to_ascii_lowercase();
+        if !seen.insert(folded) {
+            return Err(cursor_unavailable(
+                spec,
+                format!("cursor component {column:?} appears more than once"),
+            ));
+        }
+    }
+    if spec.batch_size == 0 {
+        return Err(BackfillError::InvalidBatchSize);
+    }
     if set_clause.trim().is_empty() && spec.per_row.is_empty() {
         return Err(BackfillError::InvalidSpec(
             "backfill set must not be empty".to_string(),
         ));
     }
+    if let CursorStability::ExternalInvariant { name } = &spec.cursor_stability {
+        if name.trim().is_empty() {
+            return Err(BackfillError::InvalidSpec(
+                "external cursor invariant name must be non-empty".to_string(),
+            ));
+        }
+    }
+    for column in &spec.cursor_columns {
+        assert_component_not_mutated(set_clause, column)?;
+    }
     for (column, assignment) in &spec.per_row {
-        let generator = assignment.generator();
         validate_ident("per-row destination column", column)?;
-        if column.eq_ignore_ascii_case(&spec.cursor_column) {
-            return Err(BackfillError::CursorColumnMutated {
-                cursor_column: spec.cursor_column.clone(),
+        if spec
+            .cursor_columns
+            .iter()
+            .any(|cursor| cursor.eq_ignore_ascii_case(column))
+        {
+            return Err(BackfillError::CursorComponentMutated {
+                cursor_component: column.clone(),
             });
         }
         if !assignment.matches_target(&spec.schema, &spec.table, column) {
             return Err(BackfillError::InvalidSpec(format!(
-                "per-row assignment for destination {column:?} was validated for a different target; regenerate the plan from the declared schema"
+                "per-row assignment for destination {column:?} was validated for a different target"
             )));
         }
-        if let PerRowGenerator::TypeId { prefix } = generator {
+        if let PerRowGenerator::TypeId { prefix } = assignment.generator() {
             crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 BackfillError::InvalidSpec(format!(
                     "invalid TypeID prefix for per-row destination {column:?}: {error}"
@@ -123,336 +199,757 @@ fn validate_per_row_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), Ba
             })?;
         }
     }
+    if let Some(contract) = &spec.cursor_contract {
+        contract
+            .validate_columns(&spec.cursor_columns)
+            .map_err(|error| BackfillError::InvalidSpec(error.to_string()))?;
+    }
     Ok(())
 }
 
-/// The two SQLite cursor domains whose values can be checkpointed and rebound
-/// without changing their ordering or representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CursorKind {
-    Integer,
-    Text,
-}
-
-impl CursorKind {
-    const fn storage_class(self) -> &'static str {
-        match self {
-            Self::Integer => "integer",
-            Self::Text => "text",
-        }
-    }
-}
-
-/// Resolved facts about the cursor column from `PRAGMA table_info` (an engine-only
-/// pragma): whether it is the table's single-column PRIMARY KEY, whether it is
-/// `NOT NULL`, and its safe declared-type affinity.
-struct CursorInfo {
-    /// `true` iff the cursor column is the sole `PRIMARY KEY` column.
-    is_single_pk: bool,
-    /// `true` iff the column is declared `NOT NULL` (a PK column is implicitly so).
-    not_null: bool,
-    /// The safe cursor domain. `None` rejects BLOB/no-affinity, REAL, and NUMERIC
-    /// declarations because their values cannot be round-tripped through the text
-    /// progress checkpoint without type or ordering ambiguity.
-    kind: Option<CursorKind>,
-    /// `true` iff the column exists at all.
-    exists: bool,
-}
-
-/// Resolve only the SQLite affinities that have an exact, stable checkpoint
-/// representation. The remaining affinity classes are deliberately unsupported:
-/// BLOB/no-affinity is not text-safe, and REAL/NUMERIC can mix integer, real, and
-/// text storage classes while still satisfying a declaration.
-fn safe_cursor_kind(decl_type: &str) -> Option<CursorKind> {
-    let t = decl_type.to_ascii_uppercase();
-    if t.contains("INT") {
-        return Some(CursorKind::Integer);
-    }
-    if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
-        return Some(CursorKind::Text);
-    }
-    None
-}
-
-/// Resolve the cursor column via `PRAGMA table_info("<table>")` (engine mode). The
-/// rowid alias columns (`rowid`/`oid`/`_rowid_`) do not appear in `table_info`.
-async fn resolve_cursor_info(
-    actor: &MigrationActor,
-    spec: &BackfillSpec,
-) -> Result<CursorInfo, SqliteActorError> {
-    actor.set_mode(Mode::EngineJournal).await?;
-    // table_info columns: cid, name, type, notnull, dflt_value, pk.
-    let rows = actor
-        .query(&format!("PRAGMA table_info({})", quote_ident(&spec.table)))
-        .await?;
-    let mut info = CursorInfo {
-        is_single_pk: false,
-        not_null: false,
-        kind: None,
-        exists: false,
-    };
-    let mut pk_cols = 0usize;
-    let mut this_pk = false;
-    for r in &rows {
-        let pk: i64 = r
-            .get(5)
-            .and_then(|c| c.clone())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        if pk > 0 {
-            pk_cols += 1;
-        }
-        let name = r.get(1).and_then(|c| c.clone()).unwrap_or_default();
-        if name == spec.cursor_column {
-            info.exists = true;
-            let decl = r.get(2).and_then(|c| c.clone()).unwrap_or_default();
-            info.kind = safe_cursor_kind(&decl);
-            let nn: i64 = r
-                .get(3)
-                .and_then(|c| c.clone())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            // Ordinary SQLite rowid tables allow NULL in a non-INTEGER PRIMARY
-            // KEY unless it is explicitly NOT NULL. INTEGER PRIMARY KEY is the
-            // rowid alias and is inherently non-null. WITHOUT ROWID table_info
-            // reports PK columns as not-null, so it follows the first arm.
-            info.not_null = nn != 0 || (pk > 0 && info.kind == Some(CursorKind::Integer));
-            this_pk = pk > 0;
-        }
-    }
-    info.is_single_pk = this_pk && pk_cols == 1;
-    Ok(info)
-}
-
-/// Verify the live cursor values use exactly the storage class implied by the
-/// safe declaration. SQLite's dynamic typing permits a BLOB or REAL value in many
-/// declared columns; stringifying such a value into `last_cursor` would change the
-/// next batch's comparison semantics. A mixed or unsupported runtime domain is a
-/// hard preflight failure before any data mutation.
-async fn validate_cursor_storage_classes(
-    actor: &MigrationActor,
-    spec: &BackfillSpec,
-    kind: CursorKind,
+fn assert_component_not_mutated(
+    set_clause: &str,
+    cursor_component: &str,
 ) -> Result<(), BackfillError> {
+    let needle = format!("{} =", quote_ident(cursor_component));
+    let bytes = set_clause.as_bytes();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut at_assignment = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\'' {
+                if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
+                    index += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => {
+                in_string = true;
+                at_assignment = false;
+                index += 1;
+            }
+            b',' => {
+                at_assignment = true;
+                index += 1;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => index += 1,
+            _ => {
+                if at_assignment && set_clause[index..].starts_with(&needle) {
+                    return Err(BackfillError::CursorComponentMutated {
+                        cursor_component: cursor_component.to_string(),
+                    });
+                }
+                at_assignment = false;
+                index += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_cursor_kind(database_type: &str) -> Option<SqliteCursorKind> {
+    let upper = database_type.to_ascii_uppercase();
+    if upper.contains("INT") {
+        Some(SqliteCursorKind::Integer)
+    } else if upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT") {
+        Some(SqliteCursorKind::Text)
+    } else {
+        None
+    }
+}
+
+fn normalized_database_type(database_type: &str) -> String {
+    database_type
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn sqlite_comparison(collation: &str) -> Result<CursorComparison, String> {
+    if collation.eq_ignore_ascii_case("BINARY") {
+        Ok(CursorComparison::Default)
+    } else if collation.eq_ignore_ascii_case("NOCASE") {
+        Ok(CursorComparison::CaseInsensitive)
+    } else if collation.eq_ignore_ascii_case("RTRIM") {
+        Ok(CursorComparison::NamedCollation {
+            schema: None,
+            name: "RTRIM".to_string(),
+        })
+    } else {
+        Err(format!(
+            "SQLite collation {collation:?} is not one of the built-in comparison semantics the executor can prove"
+        ))
+    }
+}
+
+async fn table_columns(
+    actor: &MigrationActor,
+    spec: &BackfillSpec,
+) -> Result<Vec<TableColumn>, BackfillError> {
     actor
         .set_mode(Mode::EngineJournal)
         .await
         .map_err(sqlite_journal_err)?;
-    let table_q = quote_ident(&spec.table);
-    let cursor_q = quote_ident(&spec.cursor_column);
-    let classes = actor
-        .query(&format!(
-            "SELECT DISTINCT typeof({cursor_q}) FROM {table_q}"
-        ))
+    let rows = actor
+        .query(&format!("PRAGMA table_info({})", quote_ident(&spec.table)))
         .await
         .map_err(sqlite_journal_err)?;
-    let expected = kind.storage_class();
-    if classes.iter().any(|row| {
-        row.first()
-            .and_then(|cell| cell.as_deref())
-            .is_none_or(|actual| actual != expected)
-    }) {
-        return Err(BackfillError::CursorNotUniqueNotNull {
-            table: spec.table.clone(),
-            cursor_column: spec.cursor_column.clone(),
-            reason: "stored values are not a uniform INTEGER or TEXT domain matching the declared cursor type",
-        });
-    }
-    if matches!(kind, CursorKind::Text) {
-        actor
-            .validate_text_utf8(&format!("SELECT {cursor_q} FROM {table_q}"))
-            .await
-            .map_err(sqlite_journal_err)?;
-    }
-    Ok(())
-}
-
-/// SQLite triggers can suppress an UPDATE with `RAISE(IGNORE)` or mutate other
-/// tables. Either behavior breaks the claim that the selected batch, the data
-/// change, and the durable cursor describe the same rows. Reject every trigger
-/// on the target table. The check is repeated inside each batch transaction so a
-/// trigger created after the initial preflight cannot race the mutation.
-async fn ensure_no_target_triggers(
-    actor: &MigrationActor,
-    table: &str,
-) -> Result<(), SqliteActorError> {
-    use super::actor::SqliteBind;
-
-    actor.set_mode(Mode::EngineJournal).await?;
-    let rows = actor
-        .query_params(
-            "SELECT name FROM main.sqlite_master \
-              WHERE type = 'trigger' AND tbl_name = ?1 \
-              ORDER BY name LIMIT 1",
-            &[SqliteBind::Text(table.to_string())],
-        )
-        .await?;
-    if let Some(name) = rows
-        .first()
-        .and_then(|row| row.first())
-        .and_then(Clone::clone)
-    {
-        return Err(SqliteActorError::Exec(format!(
-            "sqlite backfill target table {table:?} has trigger {name:?}; trigger side effects and suppressed rows cannot be checkpointed safely"
+    if rows.is_empty() {
+        return Err(BackfillError::TargetNotFound(format!(
+            "table {:?} was not found",
+            spec.table
         )));
     }
-    Ok(())
-}
-
-/// Bootstrap (idempotently) the `_mig` **backfill progress** table — the SQLite
-/// mirror of the PG meta-schema `schema_backfills`. Engine-mode (the migrator /
-/// CreatorUp has no `_mig` grant — the journal's deny-by-absence model). Lives in
-/// the same attached journal database as the immutable journal.
-pub(crate) async fn ensure_backfill_progress(
-    actor: &MigrationActor,
-) -> Result<(), SqliteActorError> {
-    actor.set_mode(Mode::EngineJournal).await?;
-    actor
-        .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_backfills (\
-                backfill_id    TEXT PRIMARY KEY, \
-                checksum       TEXT, \
-                name           TEXT NOT NULL, \
-                target_table   TEXT NOT NULL, \
-                cursor_column  TEXT NOT NULL, \
-                last_cursor    TEXT, \
-                end_cursor     TEXT, \
-                cohort_initialized INTEGER NOT NULL DEFAULT 0, \
-                rows_done      INTEGER NOT NULL DEFAULT 0, \
-                batches_done   INTEGER NOT NULL DEFAULT 0, \
-                complete       INTEGER NOT NULL DEFAULT 0, \
-                applied_by     TEXT NOT NULL, \
-                started_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                updated_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-        )
-        .await?;
-    let columns = actor
-        .query("PRAGMA \"_mig\".table_info(schema_backfills)")
-        .await?;
-    for (column, definition) in [
-        ("checksum", "checksum TEXT"),
-        ("end_cursor", "end_cursor TEXT"),
-        (
-            "cohort_initialized",
-            "cohort_initialized INTEGER NOT NULL DEFAULT 0",
-        ),
-    ] {
-        let exists = columns.iter().any(|row| {
-            row.get(1)
-                .and_then(|cell| cell.as_deref())
-                .is_some_and(|name| name == column)
-        });
-        if !exists {
-            actor
-                .exec(&format!(
-                    "ALTER TABLE \"_mig\".schema_backfills ADD COLUMN {definition}"
-                ))
-                .await?;
-        }
-    }
-    Ok(())
-}
-
-/// Read existing progress evidence without creating or altering the table.
-/// Status uses this before any backfill may have run, so absence is normal. A
-/// legacy table without `checksum` returns missing checksums for fail-closed
-/// reconciliation.
-pub(crate) async fn read_progress_entries(
-    actor: &MigrationActor,
-) -> Result<Vec<BackfillProgressEntry>, SqliteActorError> {
-    actor.set_mode(Mode::EngineJournal).await?;
-    let exists = actor
-        .query(
-            "SELECT 1 FROM \"_mig\".sqlite_schema \
-              WHERE type = 'table' AND name = 'schema_backfills' LIMIT 1",
-        )
-        .await?;
-    if exists.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let columns = actor
-        .query("PRAGMA \"_mig\".table_info(schema_backfills)")
-        .await?;
-    let has_checksum = columns.iter().any(|row| {
-        row.get(1)
-            .and_then(|cell| cell.as_deref())
-            .is_some_and(|name| name == "checksum")
-    });
-    let checksum_expr = if has_checksum { "checksum" } else { "NULL" };
-    let rows = actor
-        .query(&format!(
-            "SELECT backfill_id, {checksum_expr}, complete \
-               FROM \"_mig\".schema_backfills"
-        ))
-        .await?;
-
     rows.into_iter()
         .map(|row| {
-            let version = row.first().and_then(|cell| cell.clone()).ok_or_else(|| {
-                SqliteActorError::Exec("backfill progress row has a null backfill_id".to_string())
-            })?;
-            let checksum = row.get(1).and_then(|cell| cell.clone());
-            let complete = match row.get(2).and_then(|cell| cell.as_deref()) {
-                Some("0") => false,
-                Some("1") => true,
-                value => {
-                    return Err(SqliteActorError::Exec(format!(
-                        "backfill progress row {version:?} has invalid complete value {value:?}"
-                    )));
-                }
-            };
-            Ok(BackfillProgressEntry {
-                version,
-                checksum,
-                complete,
+            let name = required_cell(&row, 1, "table_info.name")?;
+            let database_type = required_cell(&row, 2, "table_info.type")?;
+            let declared_not_null = required_cell(&row, 3, "table_info.notnull")? == "1";
+            let pk_ordinal = required_cell(&row, 5, "table_info.pk")?
+                .parse::<usize>()
+                .map_err(|_| {
+                    sqlite_journal_err(SqliteActorError::Exec(
+                        "PRAGMA table_info returned an invalid primary-key ordinal".to_string(),
+                    ))
+                })?;
+            let kind = sqlite_cursor_kind(&database_type);
+            Ok(TableColumn {
+                name,
+                database_type: normalized_database_type(&database_type),
+                not_null: declared_not_null,
+                pk_ordinal,
+                kind,
             })
         })
         .collect()
 }
 
-/// The committed progress of a backfill (the resume anchor). `None` until the
-/// progress row is inserted.
-struct Progress {
-    last_cursor: Option<String>,
-    end_cursor: Option<String>,
-    cohort_initialized: bool,
-    complete: bool,
-    checksum: Option<String>,
-    exists: bool,
+async fn index_candidates(
+    actor: &MigrationActor,
+    spec: &BackfillSpec,
+) -> Result<Vec<IndexCandidate>, BackfillError> {
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(sqlite_journal_err)?;
+    let rows = actor
+        .query(&format!("PRAGMA index_list({})", quote_ident(&spec.table)))
+        .await
+        .map_err(sqlite_journal_err)?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let name = required_cell(&row, 1, "index_list.name")?;
+        let unique = required_cell(&row, 2, "index_list.unique")? == "1";
+        let origin = required_cell(&row, 3, "index_list.origin")?;
+        let partial = required_cell(&row, 4, "index_list.partial")? == "1";
+        if !unique || partial {
+            continue;
+        }
+        let parts = actor
+            .query(&format!("PRAGMA index_xinfo({})", quote_ident(&name)))
+            .await
+            .map_err(sqlite_journal_err)?;
+        let mut keyed = Vec::new();
+        let mut usable = true;
+        for part in parts {
+            if required_cell(&part, 5, "index_xinfo.key")? != "1" {
+                continue;
+            }
+            let sequence = required_cell(&part, 0, "index_xinfo.seqno")?
+                .parse::<usize>()
+                .map_err(|_| {
+                    sqlite_journal_err(SqliteActorError::Exec(
+                        "PRAGMA index_xinfo returned an invalid key ordinal".to_string(),
+                    ))
+                })?;
+            let cid = required_cell(&part, 1, "index_xinfo.cid")?
+                .parse::<i64>()
+                .unwrap_or(-2);
+            let Some(column) = part.get(2).and_then(Clone::clone) else {
+                usable = false;
+                break;
+            };
+            if cid < 0 {
+                usable = false;
+                break;
+            }
+            let collation = part
+                .get(4)
+                .and_then(Clone::clone)
+                .unwrap_or_else(|| "BINARY".to_string());
+            keyed.push((sequence, column, collation));
+        }
+        if usable && !keyed.is_empty() {
+            keyed.sort_by_key(|(sequence, _, _)| *sequence);
+            let (columns, collations): (Vec<_>, Vec<_>) = keyed
+                .into_iter()
+                .map(|(_, column, collation)| (column, collation))
+                .unzip();
+            candidates.push(IndexCandidate {
+                primary: origin.eq_ignore_ascii_case("pk"),
+                columns,
+                collations,
+            });
+        }
+    }
+    candidates.sort_by_key(|candidate| !candidate.primary);
+    Ok(candidates)
 }
 
-/// Read the committed progress row for `backfill_id` (engine mode, read-only).
-async fn read_progress(
+fn tuple_names_match(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+async fn resolve_live_cursor_contract(
     actor: &MigrationActor,
-    backfill_id: &str,
-) -> Result<Progress, SqliteActorError> {
+    spec: &BackfillSpec,
+) -> Result<LiveCursorContract, BackfillError> {
+    let columns = table_columns(actor, spec).await?;
+    let by_name = columns
+        .iter()
+        .map(|column| (column.name.to_ascii_lowercase(), column))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = Vec::with_capacity(spec.cursor_columns.len());
+    for name in &spec.cursor_columns {
+        let Some(column) = by_name.get(&name.to_ascii_lowercase()).copied() else {
+            return Err(BackfillError::TargetNotFound(format!(
+                "table {:?} has no cursor component {name:?}",
+                spec.table
+            )));
+        };
+        if column.kind.is_none() {
+            return Err(cursor_unavailable(
+                spec,
+                format!(
+                    "cursor component {name:?} has unsupported SQLite type {:?}; only exact INTEGER and TEXT domains are resumable",
+                    column.database_type
+                ),
+            ));
+        }
+        selected.push(column);
+    }
+
+    let mut primary_columns = columns
+        .iter()
+        .filter(|column| column.pk_ordinal > 0)
+        .collect::<Vec<_>>();
+    primary_columns.sort_by_key(|column| column.pk_ordinal);
+    let primary_names = primary_columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let candidates = index_candidates(actor, spec).await?;
+    let has_primary_index = candidates.iter().any(|candidate| {
+        candidate.primary && tuple_names_match(&candidate.columns, &spec.cursor_columns)
+    });
+    // SQLite's rowid alias is the one narrow PRIMARY KEY exception where
+    // `table_info.notnull` remains zero despite nulls being impossible. Prove it
+    // from the sole exact `INTEGER` declaration and the absence of a physical PK
+    // index. BIGINT aliases, composite PK first components, and the historical
+    // `INTEGER PRIMARY KEY DESC` form all fail this test.
+    let integer_rowid_alias = tuple_names_match(&primary_names, &spec.cursor_columns)
+        && selected.len() == 1
+        && selected[0].database_type == "integer"
+        && !has_primary_index;
+    for (name, column) in spec.cursor_columns.iter().zip(&selected) {
+        if !column.not_null && !integer_rowid_alias {
+            return Err(cursor_unavailable(
+                spec,
+                format!("cursor component {name:?} is nullable"),
+            ));
+        }
+    }
+    let index_match = candidates
+        .iter()
+        .find(|candidate| tuple_names_match(&candidate.columns, &spec.cursor_columns));
+    let collations = if integer_rowid_alias {
+        vec!["BINARY".to_string()]
+    } else if let Some(candidate) = index_match {
+        candidate.collations.clone()
+    } else {
+        return Err(cursor_unavailable(
+            spec,
+            "the declared tuple is not the complete ordered key of a PRIMARY KEY or non-partial UNIQUE index",
+        ));
+    };
+
+    let mut contract_columns = Vec::with_capacity(selected.len());
+    let mut kinds = Vec::with_capacity(selected.len());
+    for ((authored_name, column), collation) in
+        spec.cursor_columns.iter().zip(selected).zip(collations)
+    {
+        let kind = column.kind.expect("validated cursor kind");
+        let comparison =
+            sqlite_comparison(&collation).map_err(|reason| cursor_unavailable(spec, reason))?;
+        contract_columns.push(CursorColumnContract {
+            name: authored_name.clone(),
+            scalar_type: kind.scalar_type(),
+            // Persist the semantic cursor family, not SQLite's arbitrary
+            // declared-type alias. BIGINT, UNSIGNED BIG INT, and INTEGER share
+            // one exact integer codec; VARCHAR/CLOB/TEXT share one text codec.
+            database_type: kind.storage_class().to_string(),
+            comparison,
+        });
+        kinds.push(kind);
+    }
+    let live = LiveCursorContract {
+        contract: CursorContract {
+            columns: contract_columns,
+        },
+        kinds,
+    };
+    if let Some(planned) = &spec.cursor_contract {
+        if planned != &live.contract {
+            return Err(cursor_unavailable(
+                spec,
+                format!(
+                    "cursor type/collation contract drifted: planned {planned:?}, live {:?}",
+                    live.contract
+                ),
+            ));
+        }
+    }
+    Ok(live)
+}
+
+async fn validate_storage_classes(
+    actor: &MigrationActor,
+    spec: &BackfillSpec,
+    live: &LiveCursorContract,
+) -> Result<(), BackfillError> {
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(sqlite_journal_err)?;
+    let table = quote_ident(&spec.table);
+    for (column, kind) in spec.cursor_columns.iter().zip(&live.kinds) {
+        let quoted = quote_ident(column);
+        let classes = actor
+            .query(&format!(
+                "SELECT DISTINCT typeof({quoted}) FROM {table} ORDER BY 1"
+            ))
+            .await
+            .map_err(sqlite_journal_err)?;
+        if classes
+            .iter()
+            .any(|row| row.first().and_then(|cell| cell.as_deref()) != Some(kind.storage_class()))
+        {
+            return Err(cursor_unavailable(
+                spec,
+                format!(
+                    "cursor component {column:?} contains a runtime storage class other than {:?}",
+                    kind.storage_class()
+                ),
+            ));
+        }
+        if *kind == SqliteCursorKind::Text {
+            actor
+                .validate_text_utf8(&format!("SELECT {quoted} FROM {table}"))
+                .await
+                .map_err(sqlite_journal_err)?;
+        }
+    }
+    Ok(())
+}
+
+fn required_cell(
+    row: &[Option<String>],
+    index: usize,
+    what: &str,
+) -> Result<String, BackfillError> {
+    row.get(index).and_then(Clone::clone).ok_or_else(|| {
+        sqlite_journal_err(SqliteActorError::Exec(format!(
+            "SQLite catalog returned null {what}"
+        )))
+    })
+}
+
+fn cursor_projection(columns: &[String]) -> String {
+    columns
+        .iter()
+        .flat_map(|column| {
+            let quoted = quote_ident(column);
+            [quoted.clone(), format!("typeof({quoted})")]
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn key_projection(columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn comparison_expression(column: &CursorColumnContract) -> String {
+    let collation = match &column.comparison {
+        CursorComparison::Default => "BINARY",
+        CursorComparison::CaseInsensitive => "NOCASE",
+        CursorComparison::NamedCollation { schema: None, name } => name,
+        CursorComparison::NamedCollation {
+            schema: Some(_), ..
+        }
+        | CursorComparison::MysqlText { .. } => {
+            unreachable!("non-SQLite comparison escaped live-contract validation")
+        }
+    };
+    format!(
+        "{} COLLATE {}",
+        quote_ident(&column.name),
+        quote_ident(collation)
+    )
+}
+
+fn order_by(columns: &[CursorColumnContract], descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    columns
+        .iter()
+        .map(|column| format!("{} {direction}", comparison_expression(column)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn lexicographic_after(columns: &[CursorColumnContract], first_placeholder: usize) -> String {
+    lexicographic_comparison(columns, first_placeholder, false)
+}
+
+fn lexicographic_at_or_before(
+    columns: &[CursorColumnContract],
+    first_placeholder: usize,
+) -> String {
+    lexicographic_comparison(columns, first_placeholder, true)
+}
+
+fn lexicographic_comparison(
+    columns: &[CursorColumnContract],
+    first_placeholder: usize,
+    upper_bound: bool,
+) -> String {
+    let mut terms = Vec::with_capacity(columns.len());
+    for index in 0..columns.len() {
+        let mut parts = Vec::with_capacity(index + 1);
+        for (prefix, column) in columns.iter().take(index).enumerate() {
+            parts.push(format!(
+                "{} = {}",
+                comparison_expression(column),
+                sqlite_placeholder(first_placeholder + prefix)
+            ));
+        }
+        let operator = if upper_bound {
+            if index + 1 == columns.len() {
+                "<="
+            } else {
+                "<"
+            }
+        } else {
+            ">"
+        };
+        parts.push(format!(
+            "{} {operator} {}",
+            comparison_expression(&columns[index]),
+            sqlite_placeholder(first_placeholder + index)
+        ));
+        terms.push(format!("({})", parts.join(" AND ")));
+    }
+    format!("({})", terms.join(" OR "))
+}
+
+fn window_predicate(
+    columns: &[CursorColumnContract],
+    filter: Option<&str>,
+    have_last: bool,
+) -> (String, usize) {
+    let arity = columns.len();
+    let mut predicates = Vec::new();
+    let end_first = if have_last {
+        predicates.push(lexicographic_after(columns, 1));
+        arity + 1
+    } else {
+        1
+    };
+    predicates.push(lexicographic_at_or_before(columns, end_first));
+    if let Some(filter) = filter {
+        predicates.push(format!("({filter})"));
+    }
+    (predicates.join(" AND "), end_first + arity)
+}
+
+fn build_window_sql(
+    table: &str,
+    contract: &CursorContract,
+    filter: Option<&str>,
+    have_last: bool,
+) -> String {
+    let columns = contract
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let (predicate, limit_placeholder) = window_predicate(&contract.columns, filter, have_last);
+    format!(
+        "SELECT {} FROM {} WHERE {predicate} ORDER BY {} LIMIT {}",
+        cursor_projection(&columns),
+        quote_ident(table),
+        order_by(&contract.columns, false),
+        sqlite_placeholder(limit_placeholder)
+    )
+}
+
+fn build_batch_update_sql(
+    table: &str,
+    contract: &CursorContract,
+    set_clause: &str,
+    filter: Option<&str>,
+    have_last: bool,
+) -> String {
+    let columns = contract
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let (predicate, limit_placeholder) = window_predicate(&contract.columns, filter, have_last);
+    let keys = key_projection(&columns);
+    // Match the selected window through the exact candidate-key comparison
+    // contract. A UNIQUE index may deliberately override the column's declared
+    // collation (for example, a BINARY unique key on a NOCASE column), so bare
+    // row-value membership could otherwise match more rows than paging selected.
+    let comparison_keys = contract
+        .columns
+        .iter()
+        .map(comparison_expression)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lhs = if contract.columns.len() == 1 {
+        comparison_keys.clone()
+    } else {
+        format!("({comparison_keys})")
+    };
+    format!(
+        "UPDATE {} SET {set_clause} WHERE {lhs} IN (SELECT {comparison_keys} FROM {} WHERE {predicate} ORDER BY {} LIMIT {}) RETURNING {keys}",
+        quote_ident(table),
+        quote_ident(table),
+        order_by(&contract.columns, false),
+        sqlite_placeholder(limit_placeholder)
+    )
+}
+
+fn build_end_cursor_sql(table: &str, contract: &CursorContract, filter: Option<&str>) -> String {
+    let predicate = filter
+        .map(|filter| format!(" WHERE ({filter})"))
+        .unwrap_or_default();
+    let columns = contract
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    format!(
+        "SELECT {} FROM {}{predicate} ORDER BY {} LIMIT 1",
+        cursor_projection(&columns),
+        quote_ident(table),
+        order_by(&contract.columns, true)
+    )
+}
+
+fn row_to_tuple(
+    row: &[Option<String>],
+    live: &LiveCursorContract,
+) -> Result<CursorTuple, SqliteActorError> {
+    if row.len() != live.kinds.len() * 2 {
+        return Err(SqliteActorError::Exec(format!(
+            "cursor query returned {} cells; expected {}",
+            row.len(),
+            live.kinds.len() * 2
+        )));
+    }
+    let mut values = Vec::with_capacity(live.kinds.len());
+    for (index, kind) in live.kinds.iter().enumerate() {
+        let value = row[index * 2].clone().ok_or_else(|| {
+            SqliteActorError::Exec(format!("cursor tuple component {index} is null"))
+        })?;
+        let storage_class = row[index * 2 + 1].as_deref();
+        if storage_class != Some(kind.storage_class()) {
+            return Err(SqliteActorError::Exec(format!(
+                "cursor tuple component {index} has storage class {storage_class:?}; expected {:?}",
+                kind.storage_class()
+            )));
+        }
+        values.push(match kind {
+            SqliteCursorKind::Integer => IrScalar::Int64(value.parse::<i64>().map_err(|_| {
+                SqliteActorError::Exec(format!(
+                    "cursor tuple component {index} is not an exact signed 64-bit integer"
+                ))
+            })?),
+            SqliteCursorKind::Text => IrScalar::Str(value),
+        });
+    }
+    CursorTuple::new(values, &live.contract)
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))
+}
+
+fn tuple_binds(tuple: &CursorTuple) -> Result<Vec<SqliteBind>, SqliteActorError> {
+    tuple
+        .values()
+        .iter()
+        .map(|value| match value {
+            IrScalar::Int(value) | IrScalar::Int64(value) => Ok(SqliteBind::Int(*value)),
+            IrScalar::Decimal(value) | IrScalar::Str(value) => Ok(SqliteBind::Text(value.clone())),
+            other => Err(SqliteActorError::Exec(format!(
+                "unsupported cursor scalar at executor boundary: {other:?}"
+            ))),
+        })
+        .collect()
+}
+
+fn window_binds(
+    last: Option<&CursorTuple>,
+    end: &CursorTuple,
+    batch_size: u32,
+) -> Result<Vec<SqliteBind>, SqliteActorError> {
+    let mut binds = Vec::new();
+    if let Some(last) = last {
+        binds.extend(tuple_binds(last)?);
+    }
+    binds.extend(tuple_binds(end)?);
+    binds.push(SqliteBind::Int(i64::from(batch_size)));
+    Ok(binds)
+}
+
+fn guard_name(backfill_id: &str) -> String {
+    let digest = Sha256::digest(backfill_id.as_bytes());
+    format!("zero_migrate_cursor_guard_{}", hex::encode(&digest[..10]))
+}
+
+fn guard_sql(spec: &BackfillSpec, name: &str) -> String {
+    let update_columns = spec
+        .cursor_columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let changed = spec
+        .cursor_columns
+        .iter()
+        .map(|column| {
+            let quoted = quote_ident(column);
+            // Compare the stored representation, not the cursor's paging
+            // collation. `NOCASE`/`RTRIM` may consider two distinct text values
+            // equal for ordering and uniqueness, but the stability contract
+            // forbids changing a component at all while checkpoints are live.
+            format!("OLD.{quoted} COLLATE BINARY IS NOT NEW.{quoted} COLLATE BINARY")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "CREATE TRIGGER {} BEFORE UPDATE OF {update_columns} ON {} FOR EACH ROW WHEN {changed} BEGIN SELECT RAISE(ABORT, 'zero-migrate cursor stability guard'); END",
+        quote_ident(name),
+        quote_ident(&spec.table)
+    )
+}
+
+fn normalize_trigger_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+async fn target_triggers(
+    actor: &MigrationActor,
+    table: &str,
+) -> Result<Vec<(String, String)>, SqliteActorError> {
     actor.set_mode(Mode::EngineJournal).await?;
     let rows = actor
-        .query(&format!(
-            "SELECT last_cursor, end_cursor, cohort_initialized, complete, checksum \
-               FROM \"_mig\".schema_backfills WHERE backfill_id = {}",
-            sql_lit(backfill_id)
-        ))
+        .query_params(
+            "SELECT name, sql FROM main.sqlite_schema WHERE type = 'trigger' AND tbl_name = ?1 ORDER BY name",
+            &[SqliteBind::Text(table.to_string())],
+        )
         .await?;
-    match rows.into_iter().next() {
-        None => Ok(Progress {
-            last_cursor: None,
-            end_cursor: None,
-            cohort_initialized: false,
-            complete: false,
-            checksum: None,
-            exists: false,
-        }),
-        Some(r) => Ok(Progress {
-            last_cursor: r.first().and_then(|c| c.clone()),
-            end_cursor: r.get(1).and_then(|cell| cell.clone()),
-            cohort_initialized: decode_progress_bool(&r, 2, "cohort_initialized")?,
-            complete: decode_progress_bool(&r, 3, "complete")?,
-            checksum: r.get(4).and_then(|cell| cell.clone()),
-            exists: true,
-        }),
+    rows.into_iter()
+        .map(|row| {
+            let name = row.first().and_then(Clone::clone).ok_or_else(|| {
+                SqliteActorError::Exec("target trigger has a null name".to_string())
+            })?;
+            let sql = row.get(1).and_then(Clone::clone).ok_or_else(|| {
+                SqliteActorError::Exec(format!("target trigger {name:?} has null SQL"))
+            })?;
+            Ok((name, sql))
+        })
+        .collect()
+}
+
+async fn ensure_trigger_state(
+    actor: &MigrationActor,
+    spec: &BackfillSpec,
+    expected_guard: Option<&str>,
+) -> Result<(), SqliteActorError> {
+    let triggers = target_triggers(actor, &spec.table).await?;
+    match expected_guard {
+        None if triggers.is_empty() => Ok(()),
+        None => Err(SqliteActorError::Exec(format!(
+            "sqlite backfill target {:?} has existing trigger {:?}; its interaction cannot be proven safe",
+            spec.table, triggers[0].0
+        ))),
+        Some(name) if triggers.len() == 1 && triggers[0].0 == name => {
+            let expected = normalize_trigger_sql(&guard_sql(spec, name));
+            let actual = normalize_trigger_sql(&triggers[0].1);
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(SqliteActorError::Exec(format!(
+                    "zero-migrate cursor guard {name:?} was replaced or changed"
+                )))
+            }
+        }
+        Some(name) => Err(SqliteActorError::Exec(format!(
+            "expected the sole target trigger to be zero-migrate guard {name:?}; found {triggers:?}"
+        ))),
     }
+}
+
+fn stability_parts(stability: &CursorStability) -> (&'static str, Option<&str>) {
+    match stability {
+        CursorStability::GuardUpdates => ("guardUpdates", None),
+        CursorStability::ExternalInvariant { name } => ("externalInvariant", Some(name)),
+    }
+}
+
+fn cohort_checksum(
+    checksum: &str,
+    target_table: &str,
+    cursor_columns_json: &str,
+    cursor_contract_json: &str,
+    stability_mode: &str,
+    stability_name: Option<&str>,
+    end_cursor_json: Option<&str>,
+) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        checksum,
+        target_table,
+        cursor_columns_json,
+        cursor_contract_json,
+        stability_mode,
+        stability_name.unwrap_or("\0<none>"),
+        end_cursor_json.unwrap_or("\0<empty>"),
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    hex::encode(digest.finalize())
 }
 
 fn decode_progress_bool(
@@ -469,84 +966,388 @@ fn decode_progress_bool(
     }
 }
 
-/// The shared window predicate the per-batch `UPDATE` and the high-water-mark
-/// `SELECT max(…)` BOTH page over — the SINGLE source of truth so the mutation and
-/// the resume cursor never page over divergent windows. With a prior cursor the
-/// window is `cursor_col > ?1 AND cursor_col <= ?2 [AND (filter)]`; on the first
-/// batch it is `cursor_col <= ?1 [AND (filter)]`. The upper bound is the terminal
-/// key captured once at cohort initialization, so a resume never expands to rows
-/// appended after the backfill started. `''`-escaped filter SQL comes from the
-/// shared assembler.
-fn window_predicate(cursor_q: &str, filter_sql: &str, have_cursor: bool) -> String {
-    if have_cursor {
-        let cursor_ph = sqlite_placeholder(1);
-        let end_ph = sqlite_placeholder(2);
-        format!("{cursor_q} > {cursor_ph} AND {cursor_q} <= {end_ph}{filter_sql}")
-    } else {
-        let end_ph = sqlite_placeholder(1);
-        format!("{cursor_q} <= {end_ph}{filter_sql}")
+fn sqlite_journal_err(error: SqliteActorError) -> BackfillError {
+    BackfillError::Journal(crate::apply::journal::JournalError::Backend(
+        error.to_string(),
+    ))
+}
+
+fn batch_error(last: Option<&CursorTuple>, error: SqliteActorError) -> BackfillError {
+    match error {
+        SqliteActorError::Poisoned(message) => BackfillError::SqlitePoisoned(message),
+        error => BackfillError::SqliteBatchFailed {
+            at_cursor: last.and_then(|cursor| cursor.to_json().ok()),
+            source_msg: error.to_string(),
+        },
     }
 }
 
-/// Build the per-batch `UPDATE … RETURNING` statement. `have_cursor` selects the
-/// shape: with a prior cursor the lower/upper bounds bind at `?1`/`?2` and the
-/// limit at `?3`; on the first batch the upper bound/limit bind at `?1`/`?2`.
-/// The authored `set` / `filter` are inline SQL strings from the
-/// shared assembler (`assemble_backfill_clauses`), `''`-escaped; the cursor + limit
-/// are NATIVE `?n` binds (`sqlite_placeholder`). RETURNING the cursor column yields
-/// the touched cursors so the loop derives a count (and a non-empty signal); the
-/// next window's lower bound is computed by [`build_window_max_sql`] in SQL under the
-/// column collation (see its docs for why the Rust-side max is collation-unsafe).
-fn build_batch_sql(
-    table_q: &str,
-    cursor_q: &str,
-    set_clause: &str,
-    filter: Option<&str>,
-    have_cursor: bool,
-) -> String {
-    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    let limit_ph = if have_cursor {
-        sqlite_placeholder(3)
-    } else {
-        sqlite_placeholder(2)
-    };
-    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
-    format!(
-        "UPDATE {table_q} SET {set_clause} \
-         WHERE {cursor_q} IN ( \
-            SELECT {cursor_q} FROM {table_q} \
-             WHERE {pred} \
-             ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
-         ) RETURNING {cursor_q}"
-    )
+/// Create the current pre-release progress schema directly. Old development
+/// schemas are rejected rather than normalized through a compatibility spelling.
+pub(crate) async fn ensure_backfill_progress(
+    actor: &MigrationActor,
+) -> Result<(), SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor
+        .exec(
+            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_backfills (\
+                backfill_id TEXT PRIMARY KEY, \
+                checksum TEXT NOT NULL, \
+                name TEXT NOT NULL, \
+                target_table TEXT NOT NULL, \
+                cursor_columns TEXT NOT NULL, \
+                cursor_contract TEXT NOT NULL, \
+                stability_mode TEXT NOT NULL, \
+                stability_name TEXT, \
+                guard_name TEXT, \
+                guard_installed INTEGER NOT NULL, \
+                guard_cleaned INTEGER NOT NULL, \
+                last_cursor TEXT, \
+                end_cursor TEXT, \
+                cohort_checksum TEXT NOT NULL, \
+                cohort_initialized INTEGER NOT NULL, \
+                rows_done INTEGER NOT NULL DEFAULT 0, \
+                batches_done INTEGER NOT NULL DEFAULT 0, \
+                complete INTEGER NOT NULL DEFAULT 0, \
+                applied_by TEXT NOT NULL, \
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .await?;
+    let columns = actor
+        .query("PRAGMA \"_mig\".table_info(schema_backfills)")
+        .await?;
+    let actual = columns
+        .iter()
+        .filter_map(|row| row.get(1).and_then(Clone::clone))
+        .collect::<Vec<_>>();
+    if actual.iter().map(String::as_str).collect::<Vec<_>>() != PROGRESS_COLUMNS {
+        return Err(SqliteActorError::Exec(format!(
+            "schema_backfills uses a stale pre-release schema {actual:?}; recreate the development migration database (expected {PROGRESS_COLUMNS:?})"
+        )));
+    }
+    Ok(())
 }
 
-fn build_per_row_window_sql(
-    table_q: &str,
-    cursor_q: &str,
-    filter: Option<&str>,
-    have_cursor: bool,
-) -> String {
-    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    let limit_ph = if have_cursor {
-        sqlite_placeholder(3)
-    } else {
-        sqlite_placeholder(2)
+pub(crate) async fn read_progress_entries(
+    actor: &MigrationActor,
+) -> Result<Vec<BackfillProgressEntry>, SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    let exists = actor
+        .query(
+            "SELECT 1 FROM \"_mig\".sqlite_schema WHERE type = 'table' AND name = 'schema_backfills' LIMIT 1",
+        )
+        .await?;
+    if exists.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_backfill_progress(actor).await?;
+    let rows = actor
+        .query(
+            "SELECT backfill_id, checksum, complete FROM \"_mig\".schema_backfills ORDER BY backfill_id",
+        )
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            let version = row.first().and_then(Clone::clone).ok_or_else(|| {
+                SqliteActorError::Exec("backfill progress row has null identity".to_string())
+            })?;
+            let checksum = row.get(1).and_then(Clone::clone).ok_or_else(|| {
+                SqliteActorError::Exec(format!(
+                    "backfill progress row {version:?} has null checksum"
+                ))
+            })?;
+            Ok(BackfillProgressEntry {
+                version,
+                checksum: Some(checksum),
+                complete: decode_progress_bool(&row, 2, "complete")?,
+            })
+        })
+        .collect()
+}
+
+fn absent_progress() -> Progress {
+    Progress {
+        checksum: String::new(),
+        target_table: String::new(),
+        cursor_columns_json: String::new(),
+        cursor_contract_json: String::new(),
+        stability_mode: String::new(),
+        stability_name: None,
+        guard_name: None,
+        guard_installed: false,
+        guard_cleaned: false,
+        last_cursor_json: None,
+        end_cursor_json: None,
+        cohort_checksum: String::new(),
+        cohort_initialized: false,
+        complete: false,
+        exists: false,
+    }
+}
+
+async fn read_progress(
+    actor: &MigrationActor,
+    backfill_id: &str,
+) -> Result<Progress, SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    let rows = actor
+        .query_params(
+            "SELECT checksum, target_table, cursor_columns, cursor_contract, \
+                    stability_mode, stability_name, guard_name, guard_installed, \
+                    guard_cleaned, last_cursor, end_cursor, cohort_checksum, \
+                    cohort_initialized, complete \
+               FROM \"_mig\".schema_backfills WHERE backfill_id = ?1",
+            &[SqliteBind::Text(backfill_id.to_string())],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(absent_progress());
     };
-    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
-    format!(
-        "SELECT {cursor_q}, typeof({cursor_q}) FROM {table_q} \
-         WHERE {pred} ORDER BY {cursor_q} ASC LIMIT {limit_ph}"
-    )
+    if rows.len() != 1 {
+        return Err(SqliteActorError::Exec(format!(
+            "backfill progress lookup returned {} rows for {backfill_id:?}",
+            rows.len()
+        )));
+    }
+    Ok(Progress {
+        checksum: required_progress_cell(row, 0, "checksum")?,
+        target_table: required_progress_cell(row, 1, "target_table")?,
+        cursor_columns_json: required_progress_cell(row, 2, "cursor_columns")?,
+        cursor_contract_json: required_progress_cell(row, 3, "cursor_contract")?,
+        stability_mode: required_progress_cell(row, 4, "stability_mode")?,
+        stability_name: row.get(5).and_then(Clone::clone),
+        guard_name: row.get(6).and_then(Clone::clone),
+        guard_installed: decode_progress_bool(row, 7, "guard_installed")?,
+        guard_cleaned: decode_progress_bool(row, 8, "guard_cleaned")?,
+        last_cursor_json: row.get(9).and_then(Clone::clone),
+        end_cursor_json: row.get(10).and_then(Clone::clone),
+        cohort_checksum: required_progress_cell(row, 11, "cohort_checksum")?,
+        cohort_initialized: decode_progress_bool(row, 12, "cohort_initialized")?,
+        complete: decode_progress_bool(row, 13, "complete")?,
+        exists: true,
+    })
+}
+
+fn required_progress_cell(
+    row: &[Option<String>],
+    index: usize,
+    column: &str,
+) -> Result<String, SqliteActorError> {
+    row.get(index).and_then(Clone::clone).ok_or_else(|| {
+        SqliteActorError::Exec(format!(
+            "backfill progress row has null required column {column}"
+        ))
+    })
+}
+
+fn validate_progress(
+    progress: &Progress,
+    checksum: &str,
+    spec: &BackfillSpec,
+    live: &LiveCursorContract,
+) -> Result<(Option<CursorTuple>, Option<CursorTuple>), SqliteActorError> {
+    if !progress.exists {
+        return Err(SqliteActorError::Exec(
+            "backfill progress row is absent".to_string(),
+        ));
+    }
+    let columns_json = serde_json::to_string(&spec.cursor_columns)
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    let contract_json = serde_json::to_string(&live.contract)
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    let (stability_mode, stability_name) = stability_parts(&spec.cursor_stability);
+    if progress.checksum != checksum
+        || progress.target_table != spec.table
+        || progress.cursor_columns_json != columns_json
+        || progress.cursor_contract_json != contract_json
+        || progress.stability_mode != stability_mode
+        || progress.stability_name.as_deref() != stability_name
+    {
+        return Err(SqliteActorError::Exec(
+            "backfill progress drift: checksum/target/cursor columns/scalar types/collation semantics no longer match the plan"
+                .to_string(),
+        ));
+    }
+    let expected_cohort_checksum = cohort_checksum(
+        checksum,
+        &spec.table,
+        &columns_json,
+        &contract_json,
+        stability_mode,
+        stability_name,
+        progress.end_cursor_json.as_deref(),
+    );
+    if progress.cohort_checksum != expected_cohort_checksum {
+        return Err(SqliteActorError::Exec(
+            "backfill cohort bound changed after initialization".to_string(),
+        ));
+    }
+    if !progress.cohort_initialized {
+        return Err(SqliteActorError::Exec(
+            "backfill cohort was not durably initialized".to_string(),
+        ));
+    }
+    let last = progress
+        .last_cursor_json
+        .as_deref()
+        .map(|json| CursorTuple::from_json(json, &live.contract))
+        .transpose()
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    let end = progress
+        .end_cursor_json
+        .as_deref()
+        .map(|json| CursorTuple::from_json(json, &live.contract))
+        .transpose()
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    if last.is_some() && end.is_none() {
+        return Err(SqliteActorError::Exec(
+            "backfill progress has a checkpoint for an empty cohort".to_string(),
+        ));
+    }
+    match &spec.cursor_stability {
+        CursorStability::GuardUpdates => {
+            let expected = guard_name_for_progress(progress)?;
+            if !progress.guard_installed {
+                return Err(SqliteActorError::Exec(format!(
+                    "cursor guard {expected:?} was never durably installed"
+                )));
+            }
+            if progress.complete != progress.guard_cleaned {
+                return Err(SqliteActorError::Exec(
+                    "cursor guard cleanup obligation disagrees with completion".to_string(),
+                ));
+            }
+        }
+        CursorStability::ExternalInvariant { .. } => {
+            if progress.guard_name.is_some() || progress.guard_installed || progress.guard_cleaned {
+                return Err(SqliteActorError::Exec(
+                    "external-invariant progress unexpectedly records a database guard".to_string(),
+                ));
+            }
+        }
+    }
+    Ok((last, end))
+}
+
+fn guard_name_for_progress(progress: &Progress) -> Result<&str, SqliteActorError> {
+    progress.guard_name.as_deref().ok_or_else(|| {
+        SqliteActorError::Exec("guardUpdates progress has no guard name".to_string())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn initialize_progress(
+    actor: &MigrationActor,
+    backfill_id: &str,
+    checksum: &str,
+    spec: &BackfillSpec,
+    applied_by: &str,
+) -> Result<(LiveCursorContract, Option<CursorTuple>), SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+    let result = async {
+        let live = resolve_live_cursor_contract(actor, spec)
+            .await
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        validate_storage_classes(actor, spec, &live)
+            .await
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        ensure_trigger_state(actor, spec, None).await?;
+
+        let installed_guard = match &spec.cursor_stability {
+            CursorStability::GuardUpdates => {
+                let name = guard_name(backfill_id);
+                actor.set_mode(Mode::EngineJournal).await?;
+                actor.exec(&guard_sql(spec, &name)).await?;
+                ensure_trigger_state(actor, spec, Some(&name)).await?;
+                Some(name)
+            }
+            CursorStability::ExternalInvariant { .. } => None,
+        };
+
+        actor.set_mode(Mode::CreatorUp).await?;
+        let rows = actor
+            .query(&build_end_cursor_sql(
+                &spec.table,
+                &live.contract,
+                spec.filter.as_deref(),
+            ))
+            .await?;
+        let end = rows
+            .first()
+            .map(|row| row_to_tuple(row, &live))
+            .transpose()?;
+        let end_json = end
+            .as_ref()
+            .map(CursorTuple::to_json)
+            .transpose()
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let columns_json = serde_json::to_string(&spec.cursor_columns)
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let contract_json = serde_json::to_string(&live.contract)
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let (stability_mode, stability_name) = stability_parts(&spec.cursor_stability);
+        let cohort = cohort_checksum(
+            checksum,
+            &spec.table,
+            &columns_json,
+            &contract_json,
+            stability_mode,
+            stability_name,
+            end_json.as_deref(),
+        );
+        actor.set_mode(Mode::EngineJournal).await?;
+        actor
+            .exec_params(
+                "INSERT INTO \"_mig\".schema_backfills \
+                    (backfill_id, checksum, name, target_table, cursor_columns, \
+                     cursor_contract, stability_mode, stability_name, guard_name, \
+                     guard_installed, guard_cleaned, end_cursor, cohort_checksum, \
+                     cohort_initialized, applied_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, 1, ?13)",
+                &[
+                    SqliteBind::Text(backfill_id.to_string()),
+                    SqliteBind::Text(checksum.to_string()),
+                    SqliteBind::Text(spec.name.clone()),
+                    SqliteBind::Text(spec.table.clone()),
+                    SqliteBind::Text(columns_json),
+                    SqliteBind::Text(contract_json),
+                    SqliteBind::Text(stability_mode.to_string()),
+                    stability_name
+                        .map_or(SqliteBind::Null, |name| SqliteBind::Text(name.to_string())),
+                    installed_guard
+                        .as_ref()
+                        .map_or(SqliteBind::Null, |name| SqliteBind::Text(name.clone())),
+                    SqliteBind::Int(i64::from(installed_guard.is_some())),
+                    end_json.map_or(SqliteBind::Null, SqliteBind::Text),
+                    SqliteBind::Text(cohort),
+                    SqliteBind::Text(applied_by.to_string()),
+                ],
+            )
+            .await?;
+        Ok::<_, SqliteActorError>((live, end))
+    }
+    .await;
+    match result {
+        Ok(value) => {
+            actor
+                .commit_or_cleanup("backfill cohort initialization")
+                .await?;
+            Ok(value)
+        }
+        Err(error) => Err(actor
+            .cleanup_after_error("backfill cohort initialization", error)
+            .await),
+    }
 }
 
 fn build_per_row_update_sql(
-    table_q: &str,
-    cursor_q: &str,
-    set_clause: &str,
     spec: &BackfillSpec,
+    set_clause: &str,
+    contract: &CursorContract,
 ) -> String {
-    let mut assignments = Vec::with_capacity(spec.per_row.len() + 1);
+    let mut assignments = Vec::new();
     if !set_clause.trim().is_empty() {
         assignments.push(set_clause.to_string());
     }
@@ -557,74 +1358,286 @@ fn build_per_row_update_sql(
             sqlite_placeholder(index + 1)
         ));
     }
-    let cursor_placeholder = sqlite_placeholder(spec.per_row.len() + 1);
+    let cursor_first = spec.per_row.len() + 1;
+    let predicate = contract
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            format!(
+                "{} = {}",
+                comparison_expression(column),
+                sqlite_placeholder(cursor_first + index)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
     format!(
-        "UPDATE {table_q} SET {} WHERE {cursor_q} = {cursor_placeholder} \
-         RETURNING {cursor_q}",
-        assignments.join(", ")
+        "UPDATE {} SET {} WHERE {predicate} RETURNING {}",
+        quote_ident(&spec.table),
+        assignments.join(", "),
+        key_projection(&spec.cursor_columns)
     )
 }
 
-/// Build the high-water-mark statement: `SELECT max(<cursor>), min(typeof(...)),
-/// max(typeof(...)), count(*) FROM (<the SAME window the UPDATE pages>)`. This is the
-/// SQLite analog of the PG executor's
-/// `(SELECT max(_bf_key)::text FROM _bf_window)` (backfill.rs) — the resume cursor
-/// is computed in SQL under the cursor COLUMN's declared collation, exactly as the
-/// `ORDER BY <cursor> ASC` / `<cursor> > ?1` paging does. A Rust-side `cells.max`
-/// would use BINARY (byte) ordering, which for a non-BINARY-collated TEXT cursor
-/// (e.g. `COLLATE NOCASE`) can differ from the column's collation-max of the touched
-/// window — so the next `cursor > last_cursor` (collation-compared) would re-include
-/// or skip rows, breaking the headline exactly-once guarantee. Because the cursor
-/// column is never mutated (Gate 3: `assert_cursor_not_mutated`) and runs on the
-/// single exclusive migration connection inside the batch's `BEGIN IMMEDIATE`, this
-/// SELECT and the UPDATE page the identical pre-mutation window. The cursor + limit
-/// bind through the SAME native `?n` slots as the UPDATE (`have_cursor` selects the
-/// `?1`/`?2`/`?3` shape), so the two never fork a divergent bind protocol.
-fn build_window_max_sql(
-    table_q: &str,
-    cursor_q: &str,
-    filter: Option<&str>,
-    have_cursor: bool,
-) -> String {
-    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    let limit_ph = if have_cursor {
-        sqlite_placeholder(3)
-    } else {
-        sqlite_placeholder(2)
-    };
-    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
-    format!(
-        "SELECT max({cursor_q}), min(typeof({cursor_q})), max(typeof({cursor_q})), count(*) FROM ( \
-            SELECT {cursor_q} FROM {table_q} \
-             WHERE {pred} \
-             ORDER BY {cursor_q} ASC LIMIT {limit_ph} \
-         )"
-    )
+#[allow(clippy::too_many_arguments)]
+async fn run_batch(
+    actor: &MigrationActor,
+    backfill_id: &str,
+    checksum: &str,
+    spec: &BackfillSpec,
+    set_clause: &str,
+    expected_last: Option<&CursorTuple>,
+    expected_end: &CursorTuple,
+) -> Result<(u64, Option<CursorTuple>), BackfillError> {
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(|error| batch_error(expected_last, error))?;
+    actor
+        .exec("BEGIN IMMEDIATE")
+        .await
+        .map_err(|error| batch_error(expected_last, error))?;
+    let result = async {
+        let live = resolve_live_cursor_contract(actor, spec)
+            .await
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        validate_storage_classes(actor, spec, &live)
+            .await
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let progress = read_progress(actor, backfill_id).await?;
+        let (actual_last, actual_end) = validate_progress(&progress, checksum, spec, &live)?;
+        if actual_last.as_ref() != expected_last || actual_end.as_ref() != Some(expected_end) {
+            return Err(SqliteActorError::Exec(
+                "backfill checkpoint or cohort bound changed before the batch".to_string(),
+            ));
+        }
+        let expected_guard = match &spec.cursor_stability {
+            CursorStability::GuardUpdates => Some(guard_name_for_progress(&progress)?),
+            CursorStability::ExternalInvariant { .. } => None,
+        };
+        ensure_trigger_state(actor, spec, expected_guard).await?;
+
+        let binds = window_binds(expected_last, expected_end, spec.batch_size)?;
+        let window_sql = build_window_sql(
+            &spec.table,
+            &live.contract,
+            spec.filter.as_deref(),
+            expected_last.is_some(),
+        );
+        actor.set_mode(Mode::CreatorUp).await?;
+        let selected_rows = actor.query_params(&window_sql, &binds).await?;
+        let selected = selected_rows
+            .iter()
+            .map(|row| row_to_tuple(row, &live))
+            .collect::<Result<Vec<_>, _>>()?;
+        if selected.is_empty() {
+            return Ok((0, None));
+        }
+        let new_last = selected.last().cloned().ok_or_else(|| {
+            SqliteActorError::Exec("non-empty cursor window has no tail".to_string())
+        })?;
+
+        if spec.per_row.is_empty() {
+            let sql = build_batch_update_sql(
+                &spec.table,
+                &live.contract,
+                set_clause,
+                spec.filter.as_deref(),
+                expected_last.is_some(),
+            );
+            let returned = actor.query_params(&sql, &binds).await?;
+            if returned.len() != selected.len() {
+                return Err(SqliteActorError::Exec(format!(
+                    "backfill selected {} rows but updated {}; a trigger, policy, or conflict suppressed the window",
+                    selected.len(),
+                    returned.len()
+                )));
+            }
+        } else {
+            let sql = build_per_row_update_sql(spec, set_clause, &live.contract);
+            for cursor in &selected {
+                let mut row_binds = spec
+                    .per_row
+                    .values()
+                    .map(|assignment| {
+                        SqliteBind::Text(generate_per_row_value(assignment.generator()))
+                    })
+                    .collect::<Vec<_>>();
+                row_binds.extend(tuple_binds(cursor)?);
+                let returned = actor.query_params(&sql, &row_binds).await?;
+                if returned.len() != 1 {
+                    return Err(SqliteActorError::Exec(format!(
+                        "per-row backfill at cursor {:?} affected {} rows",
+                        cursor.values(),
+                        returned.len()
+                    )));
+                }
+            }
+        }
+
+        let old_last_json = expected_last
+            .map(CursorTuple::to_json)
+            .transpose()
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let new_last_json = new_last
+            .to_json()
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        actor.set_mode(Mode::EngineJournal).await?;
+        let advanced = actor
+            .query_params(
+                "UPDATE \"_mig\".schema_backfills \
+                    SET last_cursor = ?1, rows_done = rows_done + ?2, \
+                        batches_done = batches_done + 1 \
+                  WHERE backfill_id = ?3 AND checksum = ?4 AND last_cursor IS ?5 \
+                    AND end_cursor = ?6 AND cohort_checksum = ?7 \
+                    AND cohort_initialized = 1 AND complete = 0 \
+                RETURNING backfill_id",
+                &[
+                    SqliteBind::Text(new_last_json),
+                    SqliteBind::Int(i64::try_from(selected.len()).map_err(|_| {
+                        SqliteActorError::Exec("backfill batch row count exceeds i64".to_string())
+                    })?),
+                    SqliteBind::Text(backfill_id.to_string()),
+                    SqliteBind::Text(checksum.to_string()),
+                    old_last_json.map_or(SqliteBind::Null, SqliteBind::Text),
+                    SqliteBind::Text(expected_end.to_json().map_err(|error| {
+                        SqliteActorError::Exec(error.to_string())
+                    })?),
+                    SqliteBind::Text(progress.cohort_checksum),
+                ],
+            )
+            .await?;
+        if advanced.len() != 1 {
+            return Err(SqliteActorError::Exec(format!(
+                "backfill checkpoint advance affected {} rows; expected one",
+                advanced.len()
+            )));
+        }
+        Ok((selected.len() as u64, Some(new_last)))
+    }
+    .await;
+    match result {
+        Ok(value) => match actor.commit_or_cleanup("backfill batch").await {
+            Ok(()) => Ok(value),
+            Err(error) => Err(batch_error(expected_last, error)),
+        },
+        Err(error) => Err(batch_error(
+            expected_last,
+            actor.cleanup_after_error("backfill batch", error).await,
+        )),
+    }
 }
 
-/// Capture the terminal key of the initial filtered cohort. `ORDER BY ... DESC
-/// LIMIT 1` uses the cursor column's own collation and returns no row for an empty
-/// cohort, unlike an open-ended `max()` queried afresh on every resume.
-fn build_end_cursor_sql(table_q: &str, cursor_q: &str, filter: Option<&str>) -> String {
-    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    format!(
-        "SELECT {cursor_q}, typeof({cursor_q}) FROM {table_q} \
-          WHERE 1=1{filter_sql} \
-          ORDER BY {cursor_q} DESC LIMIT 1"
-    )
+async fn complete_progress(
+    actor: &MigrationActor,
+    backfill_id: &str,
+    checksum: &str,
+    spec: &BackfillSpec,
+    expected_last: Option<&CursorTuple>,
+    identity: Option<PlanBackfillIdentity<'_>>,
+    applied_by: &str,
+) -> Result<(), SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    actor.exec("BEGIN IMMEDIATE").await?;
+    let result = async {
+        let live = resolve_live_cursor_contract(actor, spec)
+            .await
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+        let progress = read_progress(actor, backfill_id).await?;
+        let (actual_last, _) = validate_progress(&progress, checksum, spec, &live)?;
+        if actual_last.as_ref() != expected_last {
+            return Err(SqliteActorError::Exec(
+                "backfill checkpoint changed before completion".to_string(),
+            ));
+        }
+        match &spec.cursor_stability {
+            CursorStability::GuardUpdates => {
+                let guard = guard_name_for_progress(&progress)?;
+                if !progress.complete {
+                    ensure_trigger_state(actor, spec, Some(guard)).await?;
+                    actor.set_mode(Mode::EngineJournal).await?;
+                    actor
+                        .exec(&format!("DROP TRIGGER {}", quote_ident(guard)))
+                        .await?;
+                }
+                ensure_trigger_state(actor, spec, None).await?;
+            }
+            CursorStability::ExternalInvariant { .. } => {
+                ensure_trigger_state(actor, spec, None).await?;
+            }
+        }
+        actor.set_mode(Mode::EngineJournal).await?;
+        let completed = actor
+            .query_params(
+                "UPDATE \"_mig\".schema_backfills \
+                    SET complete = 1, guard_cleaned = CASE WHEN guard_installed = 1 THEN 1 ELSE 0 END \
+                  WHERE backfill_id = ?1 AND checksum = ?2 AND cohort_checksum = ?3 \
+                    AND complete IN (0, 1) \
+                RETURNING backfill_id",
+                &[
+                    SqliteBind::Text(backfill_id.to_string()),
+                    SqliteBind::Text(checksum.to_string()),
+                    SqliteBind::Text(progress.cohort_checksum),
+                ],
+            )
+            .await?;
+        if completed.len() != 1 {
+            return Err(SqliteActorError::Exec(format!(
+                "backfill completion affected {} progress rows; expected one",
+                completed.len()
+            )));
+        }
+
+        if let Some(identity) = identity {
+            let latest = actor
+                .query(&format!(
+                    "SELECT event_kind, checksum FROM \"_mig\".schema_migrations \
+                      WHERE version = {} ORDER BY event_seq DESC LIMIT 1",
+                    sql_lit(identity.version.as_str())
+                ))
+                .await?;
+            let already_matching = latest.first().is_some_and(|row| {
+                row.first().and_then(|cell| cell.as_deref()) == Some("applied")
+                    && row.get(1).and_then(|cell| cell.as_deref())
+                        == Some(identity.checksum.as_str())
+            });
+            if latest.first().is_some_and(|row| {
+                row.first().and_then(|cell| cell.as_deref()) == Some("applied")
+                    && row.get(1).and_then(|cell| cell.as_deref())
+                        != Some(identity.checksum.as_str())
+            }) {
+                return Err(SqliteActorError::Exec(format!(
+                    "checksum drift while finalizing backfill {}",
+                    identity.version.as_str()
+                )));
+            }
+            if !already_matching {
+                actor
+                    .exec(&format!(
+                        "INSERT INTO \"_mig\".schema_migrations \
+                            (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+                         VALUES ('applied', {}, {}, {}, {}, 'completed', 'success', 'apply')",
+                        sql_lit(identity.version.as_str()),
+                        sql_lit(&spec.name),
+                        sql_lit(identity.checksum.as_str()),
+                        sql_lit(applied_by),
+                    ))
+                    .await?;
+            }
+        }
+        Ok::<(), SqliteActorError>(())
+    }
+    .await;
+    match result {
+        Ok(()) => actor.commit_or_cleanup("backfill finalization").await,
+        Err(error) => Err(actor
+            .cleanup_after_error("backfill finalization", error)
+            .await),
+    }
 }
 
-/// Run (or resume) a SQLite batched backfill, the SQLite analog of
-/// the PG backfill runner. Pages `spec.table` by `spec.cursor_column` in
-/// `spec.batch_size` chunks, each its own committed transaction, resumable from the
-/// committed progress cursor. `max_batches` bounds the run (`None` = run to
-/// completion) — the checkpoint/crash-fuzz seam.
-///
-/// # Errors
-/// [`BackfillError`] on a malformed spec, an unsafe cursor column (not a
-/// single-column PRIMARY KEY, nullable, or outside the exact INTEGER/TEXT domains),
-/// a cursor-column mutation, a batch failure
-/// (rolled back, resumable), or an infrastructure failure.
+/// Run or resume an ordered, bounded SQLite backfill.
 pub(crate) async fn run_backfill_bounded(
     actor: &MigrationActor,
     spec: &BackfillSpec,
@@ -634,103 +1647,75 @@ pub(crate) async fn run_backfill_bounded(
     max_batches: Option<u64>,
     identity: Option<PlanBackfillIdentity<'_>>,
 ) -> Result<BackfillOutcome, BackfillError> {
-    // Gate 1 — identifier + batch-size validation, BEFORE any SQL is assembled.
-    validate_ident("table", &spec.table)?;
-    validate_ident("cursor_column", &spec.cursor_column)?;
-    if spec.batch_size == 0 {
-        return Err(BackfillError::InvalidBatchSize);
+    validate_spec(spec, set_clause)?;
+    if filter != spec.filter.as_deref() {
+        return Err(BackfillError::InvalidSpec(
+            "executor filter differs from the planned backfill filter".to_string(),
+        ));
     }
-    validate_per_row_spec(spec, set_clause)?;
-
-    // Gate 2: resolve the cursor column. It MUST exist, be the table's
-    // single-column PRIMARY KEY, and be NOT NULL. SQLite UNIQUE indexes are not a
-    // substitute: dynamic typing/collations and nullable legacy primary-key rules
-    // make the arbitrary-index route unsafe for durable cursor checkpoints.
-    let info = resolve_cursor_info(actor, spec)
+    ensure_backfill_progress(actor)
         .await
         .map_err(sqlite_journal_err)?;
-    if !info.exists {
-        return Err(BackfillError::TargetNotFound(format!(
-            "{} column {} not found",
-            spec.table, spec.cursor_column
-        )));
-    }
-    if !info.is_single_pk {
-        return Err(BackfillError::CursorNotUniqueNotNull {
-            table: spec.table.clone(),
-            cursor_column: spec.cursor_column.clone(),
-            reason: "it is not the table's single-column PRIMARY KEY",
-        });
-    }
-    if !info.not_null {
-        return Err(BackfillError::CursorNotUniqueNotNull {
-            table: spec.table.clone(),
-            cursor_column: spec.cursor_column.clone(),
-            reason: "it is nullable",
-        });
-    }
-
-    let table_q = quote_ident(&spec.table);
-    let cursor_q = quote_ident(&spec.cursor_column);
-    let Some(cursor_kind) = info.kind else {
-        return Err(BackfillError::CursorNotUniqueNotNull {
-            table: spec.table.clone(),
-            cursor_column: spec.cursor_column.clone(),
-            reason: "its declared type is not an exact INTEGER or TEXT cursor domain",
-        });
-    };
-
-    // Gate 3: SQLite declarations are affinities, not runtime type guarantees.
-    // Reject a BLOB/REAL/NULL/mixed live domain before creating progress or
-    // mutating application data.
-    validate_cursor_storage_classes(actor, spec, cursor_kind).await?;
-
-    // Gate 4: target triggers can suppress selected updates or create side effects
-    // that are not represented by the progress row. Reject them before progress
-    // is created; every batch repeats this check under BEGIN IMMEDIATE.
-    ensure_no_target_triggers(actor, &spec.table)
-        .await
-        .map_err(sqlite_journal_err)?;
-
-    // Gate 5: the authored transform MUST NOT assign the cursor column itself
-    // (mutating the paged key breaks the cursor → re-processing / loop /
-    // double-apply). A structural pre-flight scan of the assembled SET assignments:
-    // each assignment is rendered `"col" = …`, so a leading `"<cursor>" =` token at
-    // an assignment boundary is the mutation. We scan the comma-separated SET list.
-    assert_cursor_not_mutated(set_clause, &spec.cursor_column)?;
 
     let backfill_id = identity.map_or_else(
         || spec.backfill_id(),
         |identity| identity.version.as_str().to_string(),
     );
-    let expected_checksum = identity.map(|identity| identity.checksum.as_str());
-    ensure_backfill_progress(actor)
+    // Direct test/backend calls have no migration envelope. Their stable spec id
+    // serves as the checksum anchor; planned calls always use the plan checksum.
+    let expected_checksum = identity.map_or_else(
+        || spec.backfill_id(),
+        |identity| identity.checksum.as_str().to_string(),
+    );
+    let live = resolve_live_cursor_contract(actor, spec).await?;
+    validate_storage_classes(actor, spec, &live).await?;
+    let mut progress = read_progress(actor, &backfill_id)
         .await
         .map_err(sqlite_journal_err)?;
-
-    // Resume from the last committed cursor (if any).
-    let existing = read_progress(actor, &backfill_id)
-        .await
-        .map_err(sqlite_journal_err)?;
-    if let Some(identity) = identity {
-        if existing.exists {
-            let recorded = existing.checksum.as_deref().unwrap_or("<missing>");
-            if recorded != identity.checksum.as_str() {
-                return Err(BackfillError::ChecksumDrift {
-                    version: identity.version.as_str().to_string(),
-                    recorded: recorded.to_string(),
-                    expected: identity.checksum.as_str().to_string(),
-                });
+    let existed = progress.exists;
+    let (mut last, end) = if progress.exists {
+        let tuple = validate_progress(&progress, &expected_checksum, spec, &live)
+            .map_err(sqlite_journal_err)?;
+        let expected_guard = match &spec.cursor_stability {
+            CursorStability::GuardUpdates if !progress.complete => {
+                Some(guard_name_for_progress(&progress).map_err(sqlite_journal_err)?)
             }
-        }
-    }
-    let resumed = existing.exists && existing.last_cursor.is_some();
-    if existing.complete {
-        // Already complete — idempotent no-op re-run.
-        if let Some(identity) = identity {
-            finish_plan_backfill(actor, &backfill_id, identity, spec, applied_by)
+            _ => None,
+        };
+        ensure_trigger_state(actor, spec, expected_guard)
+            .await
+            .map_err(sqlite_journal_err)?;
+        tuple
+    } else {
+        let (initialized_live, initialized_end) =
+            initialize_progress(actor, &backfill_id, &expected_checksum, spec, applied_by)
                 .await
                 .map_err(sqlite_journal_err)?;
+        if initialized_live.contract != live.contract {
+            return Err(cursor_unavailable(
+                spec,
+                "cursor contract changed while cohort initialization acquired its lock",
+            ));
+        }
+        progress = read_progress(actor, &backfill_id)
+            .await
+            .map_err(sqlite_journal_err)?;
+        (None, initialized_end)
+    };
+    let resumed = existed;
+    if progress.complete {
+        if let Some(identity) = identity {
+            complete_progress(
+                actor,
+                &backfill_id,
+                &expected_checksum,
+                spec,
+                last.as_ref(),
+                Some(identity),
+                applied_by,
+            )
+            .await
+            .map_err(sqlite_journal_err)?;
         }
         return Ok(BackfillOutcome {
             backfill_id,
@@ -740,1655 +1725,828 @@ pub(crate) async fn run_backfill_bounded(
             complete: true,
         });
     }
-    if existing.exists && !existing.cohort_initialized {
-        return Err(sqlite_journal_err(SqliteActorError::Exec(format!(
-            "incomplete legacy backfill progress for {backfill_id:?} has no terminal cohort boundary; refusing an unsafe resume"
-        ))));
-    }
-    if existing.cohort_initialized
-        && existing.end_cursor.is_none()
-        && existing.last_cursor.is_some()
-    {
-        return Err(sqlite_journal_err(SqliteActorError::Exec(format!(
-            "backfill progress for {backfill_id:?} records a cursor for an empty cohort"
-        ))));
-    }
-    let mut last_cursor: Option<String> = existing.last_cursor.clone();
-    let end_cursor = if existing.exists {
-        existing.end_cursor.clone()
-    } else {
-        initialize_progress_row(
-            actor,
-            &backfill_id,
-            identity.map(|value| value.checksum),
-            spec,
-            &table_q,
-            &cursor_q,
-            cursor_kind,
-            filter,
-            applied_by,
-        )
-        .await
-        .map_err(sqlite_journal_err)?
-    };
 
-    let mut batches: u64 = 0;
-    let mut rows_updated: u64 = 0;
-    let mut tail_reached = false;
-
-    if let Some(end_cursor) = end_cursor.as_deref() {
+    let mut batches = 0_u64;
+    let mut rows_updated = 0_u64;
+    let mut tail = end.is_none();
+    if let Some(end) = end.as_ref() {
         loop {
-            if max_batches.is_some_and(|m| batches >= m) {
-                break; // bound hit before the tail; leave NOT complete and resumable.
+            if max_batches.is_some_and(|limit| batches >= limit) {
+                break;
             }
-            let (n, max_cursor) = run_one_batch(
+            let (count, next) = run_batch(
                 actor,
                 &backfill_id,
-                expected_checksum,
+                &expected_checksum,
                 spec,
-                &table_q,
-                &cursor_q,
                 set_clause,
-                filter,
-                cursor_kind,
-                last_cursor.as_deref(),
-                end_cursor,
+                last.as_ref(),
+                end,
             )
             .await?;
-            if n == 0 {
-                tail_reached = true;
+            if count == 0 {
+                tail = true;
                 break;
             }
             batches += 1;
-            rows_updated += n;
-            last_cursor = max_cursor;
-            // Fault seam (test-only): a simulated crash BETWEEN batches. The last
-            // batch's UPDATE + cursor advance already COMMITted, but the backfill is NOT
-            // marked complete, so a resume reads the committed cursor and finishes the
-            // tail (the resumability invariant). Identical seam to the PG executor.
-            if let Err(e) = crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES) {
-                return Err(BackfillError::Fault(e.to_string()));
+            rows_updated += count;
+            last = next;
+            if let Err(error) = crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES) {
+                return Err(BackfillError::Fault(error.to_string()));
             }
-            if n < u64::from(spec.batch_size) {
-                tail_reached = true;
+            if count < u64::from(spec.batch_size) {
+                tail = true;
                 break;
             }
         }
-    } else {
-        tail_reached = true;
     }
-    if tail_reached {
-        if let Some(identity) = identity {
-            finish_plan_backfill(actor, &backfill_id, identity, spec, applied_by)
-                .await
-                .map_err(sqlite_journal_err)?;
-        } else {
-            mark_complete(actor, &backfill_id, spec)
-                .await
-                .map_err(sqlite_journal_err)?;
-        }
+    if tail {
+        complete_progress(
+            actor,
+            &backfill_id,
+            &expected_checksum,
+            spec,
+            last.as_ref(),
+            identity,
+            applied_by,
+        )
+        .await
+        .map_err(sqlite_journal_err)?;
     }
-
     Ok(BackfillOutcome {
         backfill_id,
         batches,
         rows_updated,
         resumed,
-        complete: tail_reached,
+        complete: tail,
     })
-}
-
-/// Reject an authored `set_clause` that assigns the cursor column. The assembler
-/// renders each assignment as `"<col>" = <expr>`, comma-joined; a `"<cursor>" =`
-/// token at an ASSIGNMENT BOUNDARY is the illegal mutation. Splitting on top-level
-/// commas is unsafe (a CASE/function arg may contain commas), so instead we scan
-/// the clause for the cursor-assignment LHS at a boundary — the very start of the
-/// clause, or right after a top-level comma — while SKIPPING single-quoted string
-/// literals (with `''` escaping). Skipping literals is what makes the check
-/// correct AND precise: a string literal that embeds the `, "<cursor>" =` byte
-/// sequence is RHS data, not an assignment, so it is NOT a false-positive reject
-/// (the over-rejection the prior `contains`-based heuristic produced). Fail-closed:
-/// any boundary occurrence of the cursor LHS rejects; a genuine later-position
-/// cursor mutation is still caught.
-fn assert_cursor_not_mutated(set_clause: &str, cursor_column: &str) -> Result<(), BackfillError> {
-    let needle = format!("{} =", quote_ident(cursor_column));
-    // The assembler emits `"<col>" = <expr>` for every assignment, comma-joined, so
-    // the cursor is mutated iff the cursor-assignment LHS appears at an assignment
-    // BOUNDARY: the very start of the clause, or right after a top-level (outside any
-    // string literal) comma. We scan the clause OUTSIDE single-quoted string
-    // literals only, so a literal that happens to embed `, "id" =` is RHS data, not a
-    // mutation (the over-rejection the prior `contains` heuristic produced). SQLite
-    // single-quote escaping is `''`; the scanner treats a doubled quote inside a
-    // literal as an escaped quote, not a close, so it never desyncs. Fail-closed: any
-    // boundary occurrence of the cursor-assignment LHS rejects.
-    let bytes = set_clause.as_bytes();
-    let mut i = 0usize;
-    let mut in_str = false;
-    // `at_boundary` is true at the start and immediately after a top-level comma
-    // (skipping leading whitespace), i.e. exactly where an assignment LHS begins.
-    let mut at_boundary = true;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_str {
-            if b == b'\'' {
-                // `''` is an escaped quote (stay in the literal); a lone `'` closes it.
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'\'' => {
-                in_str = true;
-                at_boundary = false;
-                i += 1;
-            }
-            b' ' | b'\t' | b'\n' | b'\r' => {
-                // whitespace does not end an assignment boundary (allows `, "id" =`).
-                i += 1;
-            }
-            b',' => {
-                at_boundary = true;
-                i += 1;
-            }
-            _ => {
-                if at_boundary && set_clause[i..].starts_with(&needle) {
-                    return Err(BackfillError::CursorColumnMutated {
-                        cursor_column: cursor_column.to_string(),
-                    });
-                }
-                at_boundary = false;
-                i += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Map a [`SqliteActorError`] into a [`BackfillError`] for a journal/meta-side
-/// failure (progress bootstrap/read/write), mirroring the PG path's
-/// `BackfillError::Journal`.
-fn sqlite_journal_err(e: SqliteActorError) -> BackfillError {
-    BackfillError::Journal(crate::apply::journal::JournalError::Backend(e.to_string()))
-}
-
-/// Capture the terminal key and insert the fresh progress row in one transaction.
-/// A crash commits both facts or neither, so no retry can mistake a partially
-/// initialized legacy row for a bounded cohort.
-#[allow(clippy::too_many_arguments)]
-async fn initialize_progress_row(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    checksum: Option<&Checksum>,
-    spec: &BackfillSpec,
-    table_q: &str,
-    cursor_q: &str,
-    cursor_kind: CursorKind,
-    filter: Option<&str>,
-    applied_by: &str,
-) -> Result<Option<String>, SqliteActorError> {
-    use super::actor::SqliteBind;
-
-    actor.set_mode(Mode::EngineJournal).await?;
-    actor.exec("BEGIN IMMEDIATE").await?;
-    let result = async {
-        actor.set_mode(Mode::CreatorUp).await?;
-        let rows = actor
-            .query(&build_end_cursor_sql(table_q, cursor_q, filter))
-            .await?;
-        let end_cursor = rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(Clone::clone);
-        let end_class = rows
-            .first()
-            .and_then(|row| row.get(1))
-            .and_then(|cell| cell.as_deref());
-        if end_cursor.is_some() && end_class != Some(cursor_kind.storage_class()) {
-            return Err(SqliteActorError::Exec(format!(
-                "backfill terminal cursor has unsafe storage class {end_class:?}; expected {:?}",
-                cursor_kind.storage_class()
-            )));
-        }
-
-        actor.set_mode(Mode::EngineJournal).await?;
-        let checksum_bind = checksum.map_or(SqliteBind::Null, |value| {
-            SqliteBind::Text(value.as_str().to_string())
-        });
-        let end_cursor_bind = end_cursor
-            .as_ref()
-            .map_or(SqliteBind::Null, |value| SqliteBind::Text(value.clone()));
-        actor
-            .exec_params(
-                "INSERT INTO \"_mig\".schema_backfills \
-                     (backfill_id, checksum, name, target_table, cursor_column, \
-                      end_cursor, cohort_initialized, applied_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-                &[
-                    SqliteBind::Text(backfill_id.to_string()),
-                    checksum_bind,
-                    SqliteBind::Text(spec.name.clone()),
-                    SqliteBind::Text(spec.table.clone()),
-                    SqliteBind::Text(spec.cursor_column.clone()),
-                    end_cursor_bind,
-                    SqliteBind::Text(applied_by.to_string()),
-                ],
-            )
-            .await?;
-        Ok::<Option<String>, SqliteActorError>(end_cursor)
-    }
-    .await;
-
-    match result {
-        Ok(end_cursor) => {
-            actor
-                .commit_or_cleanup("backfill cohort initialization")
-                .await?;
-            Ok(end_cursor)
-        }
-        Err(error) => Err(actor
-            .cleanup_after_error("backfill cohort initialization", error)
-            .await),
-    }
-}
-
-/// Mark exactly one identity-matching progress row complete. SQLite reports the
-/// updated row through `RETURNING`, which keeps a missing, replaced, or corrupted
-/// progress row from being mistaken for successful finalization.
-async fn complete_progress_row(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    expected_checksum: Option<&str>,
-    spec: &BackfillSpec,
-) -> Result<(), SqliteActorError> {
-    use super::actor::SqliteBind;
-
-    actor.set_mode(Mode::EngineJournal).await?;
-    let completed = actor
-        .query_params(
-            "UPDATE \"_mig\".schema_backfills \
-                SET complete = 1 \
-              WHERE backfill_id = ?1 \
-                AND checksum IS ?2 \
-                AND target_table = ?3 \
-                AND cursor_column = ?4 \
-                AND cohort_initialized = 1 \
-                AND complete IN (0, 1) \
-            RETURNING backfill_id",
-            &[
-                SqliteBind::Text(backfill_id.to_string()),
-                expected_checksum.map_or(SqliteBind::Null, |value| {
-                    SqliteBind::Text(value.to_string())
-                }),
-                SqliteBind::Text(spec.table.clone()),
-                SqliteBind::Text(spec.cursor_column.clone()),
-            ],
-        )
-        .await?;
-    if completed.len() != 1 {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill completion update affected {} rows for {backfill_id:?}; expected exactly one matching progress row",
-            completed.len()
-        )));
-    }
-    Ok(())
-}
-
-/// Atomically mark a plan backfill complete and append its ordinary migration
-/// journal event. A crash leaves both changes committed or neither; on retry the
-/// caller can safely finish again after observing progress without a journal row.
-async fn finish_plan_backfill(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    identity: PlanBackfillIdentity<'_>,
-    spec: &BackfillSpec,
-    applied_by: &str,
-) -> Result<(), SqliteActorError> {
-    actor.set_mode(Mode::EngineJournal).await?;
-    actor.exec("BEGIN IMMEDIATE").await?;
-    let result = async {
-        complete_progress_row(actor, backfill_id, Some(identity.checksum.as_str()), spec).await?;
-        let latest = actor
-            .query(&format!(
-                "SELECT event_kind, checksum FROM \"_mig\".schema_migrations \
-                  WHERE version = {} ORDER BY event_seq DESC LIMIT 1",
-                sql_lit(identity.version.as_str())
-            ))
-            .await?;
-        let already_matching = latest.first().is_some_and(|row| {
-            row.first().and_then(|cell| cell.as_deref()) == Some("applied")
-                && row.get(1).and_then(|cell| cell.as_deref()) == Some(identity.checksum.as_str())
-        });
-        if latest.first().is_some_and(|row| {
-            row.first().and_then(|cell| cell.as_deref()) == Some("applied")
-                && row.get(1).and_then(|cell| cell.as_deref()) != Some(identity.checksum.as_str())
-        }) {
-            let recorded = latest[0]
-                .get(1)
-                .and_then(|cell| cell.as_deref())
-                .unwrap_or("<missing>");
-            return Err(SqliteActorError::Exec(format!(
-                "checksum drift while finalizing backfill {}: journal has {recorded}, plan has {}",
-                identity.version.as_str(),
-                identity.checksum.as_str()
-            )));
-        }
-        if !already_matching {
-            actor
-                .exec(&format!(
-                    "INSERT INTO \"_mig\".schema_migrations \
-                        (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
-                     VALUES ('applied', {}, {}, {}, {}, 'completed', 'success', 'apply')",
-                    sql_lit(identity.version.as_str()),
-                    sql_lit(&spec.name),
-                    sql_lit(identity.checksum.as_str()),
-                    sql_lit(applied_by),
-                ))
-                .await?;
-        }
-        Ok::<(), SqliteActorError>(())
-    }
-    .await;
-
-    match result {
-        Ok(()) => actor.commit_or_cleanup("backfill finalization").await,
-        Err(error) => Err(actor
-            .cleanup_after_error("backfill finalization", error)
-            .await),
-    }
-}
-
-/// Mark a backfill complete (engine mode, its own statement).
-async fn mark_complete(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    spec: &BackfillSpec,
-) -> Result<(), SqliteActorError> {
-    actor.set_mode(Mode::EngineJournal).await?;
-    actor.exec("BEGIN IMMEDIATE").await?;
-    match complete_progress_row(actor, backfill_id, None, spec).await {
-        Ok(()) => actor.commit_or_cleanup("backfill completion").await,
-        Err(error) => Err(actor
-            .cleanup_after_error("backfill completion", error)
-            .await),
-    }
-}
-
-/// Re-read the resume-critical progress fields after `BEGIN IMMEDIATE` has
-/// acquired SQLite's writer reservation. The values read before entering the
-/// batch are only hints: another connection may have deleted or corrupted the
-/// journal row in the meantime. No application mutation may run unless this
-/// transaction observes exactly the row and cursor anchor the caller planned.
-async fn revalidate_batch_progress(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    expected_checksum: Option<&str>,
-    spec: &BackfillSpec,
-    expected_last_cursor: Option<&str>,
-    expected_end_cursor: &str,
-) -> Result<(), SqliteActorError> {
-    use super::actor::SqliteBind;
-
-    actor.set_mode(Mode::EngineJournal).await?;
-    let rows = actor
-        .query_params(
-            "SELECT checksum, target_table, cursor_column, last_cursor, end_cursor, \
-                    cohort_initialized, complete \
-               FROM \"_mig\".schema_backfills \
-              WHERE backfill_id = ?1",
-            &[SqliteBind::Text(backfill_id.to_string())],
-        )
-        .await?;
-    if rows.is_empty() {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress row disappeared for {backfill_id:?}"
-        )));
-    }
-    if rows.len() != 1 {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress lookup returned {} rows for {backfill_id:?}; expected exactly one",
-            rows.len()
-        )));
-    }
-
-    let row = &rows[0];
-    let checksum = row.first().and_then(Clone::clone);
-    if checksum.as_deref() != expected_checksum {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress checksum changed for {backfill_id:?}: recorded {checksum:?}, expected {expected_checksum:?}"
-        )));
-    }
-
-    let target_table = row.get(1).and_then(Clone::clone);
-    let cursor_column = row.get(2).and_then(Clone::clone);
-    if target_table.as_deref() != Some(spec.table.as_str())
-        || cursor_column.as_deref() != Some(spec.cursor_column.as_str())
-    {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress target changed for {backfill_id:?}: recorded table {target_table:?} cursor {cursor_column:?}, expected table {:?} cursor {:?}",
-            spec.table, spec.cursor_column
-        )));
-    }
-
-    let cohort_initialized = decode_progress_bool(row, 5, "cohort_initialized")?;
-    let complete = decode_progress_bool(row, 6, "complete")?;
-    if !cohort_initialized || complete {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress state changed for {backfill_id:?}: cohort_initialized={cohort_initialized}, complete={complete}"
-        )));
-    }
-
-    let last_cursor = row.get(3).and_then(Clone::clone);
-    let end_cursor = row.get(4).and_then(Clone::clone);
-    if last_cursor.as_deref() != expected_last_cursor
-        || end_cursor.as_deref() != Some(expected_end_cursor)
-    {
-        return Err(SqliteActorError::Exec(format!(
-            "backfill progress cursor changed for {backfill_id:?}: recorded last={last_cursor:?}, end={end_cursor:?}; expected last={expected_last_cursor:?}, end={expected_end_cursor:?}"
-        )));
-    }
-    Ok(())
-}
-
-/// Run ONE batch in its own `BEGIN IMMEDIATE … COMMIT` transaction (the
-/// non-blocking, crash-safe unit). Returns `(rows_updated, new_max_cursor)`.
-///
-/// The batch `UPDATE … RETURNING <cursor>` runs under CreatorUp (the confined
-/// mode); the progress advance runs under EngineJournal; both commit together. On
-/// any failure the transaction is rolled back (progress NOT advanced) and the
-/// connection's autocommit state is re-asserted (a wedged connection is a
-/// hard error, not a silent reuse).
-#[allow(clippy::too_many_arguments)]
-async fn run_one_batch(
-    actor: &MigrationActor,
-    backfill_id: &str,
-    expected_checksum: Option<&str>,
-    spec: &BackfillSpec,
-    table_q: &str,
-    cursor_q: &str,
-    set_clause: &str,
-    filter: Option<&str>,
-    cursor_kind: CursorKind,
-    last_cursor: Option<&str>,
-    end_cursor: &str,
-) -> Result<(u64, Option<String>), BackfillError> {
-    use super::actor::SqliteBind;
-
-    let have_cursor = last_cursor.is_some();
-    let batch_sql = build_batch_sql(table_q, cursor_q, set_clause, filter, have_cursor);
-    let window_max_sql = build_window_max_sql(table_q, cursor_q, filter, have_cursor);
-    let per_row_window_sql = build_per_row_window_sql(table_q, cursor_q, filter, have_cursor);
-    let per_row_update_sql = build_per_row_update_sql(table_q, cursor_q, set_clause, spec);
-
-    // Rebind the committed cursor in the exact validated storage domain so
-    // `cursor > ?` keeps the same comparison semantics across a resume.
-    let cursor_bind = |value: &str| match cursor_kind {
-        CursorKind::Integer => value.parse::<i64>().map(SqliteBind::Int).map_err(|_| {
-            BackfillError::SqliteBatchFailed {
-                at_cursor: last_cursor.map(str::to_string),
-                source_msg: format!("committed INTEGER cursor {value:?} is not an exact i64"),
-            }
-        }),
-        CursorKind::Text => Ok(SqliteBind::Text(value.to_string())),
-    };
-    let mut binds: Vec<SqliteBind> = Vec::with_capacity(3);
-    if let Some(lc) = last_cursor {
-        binds.push(cursor_bind(lc)?);
-    }
-    binds.push(cursor_bind(end_cursor)?);
-    binds.push(SqliteBind::Int(i64::from(spec.batch_size)));
-
-    // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows SQLITE_TRANSACTION
-    // only in EngineJournal — the engine owns txn boundaries).
-    actor
-        .set_mode(Mode::EngineJournal)
-        .await
-        .map_err(batch_infra_err)?;
-    actor
-        .exec("BEGIN IMMEDIATE")
-        .await
-        .map_err(batch_infra_err)?;
-
-    let result = async {
-        revalidate_batch_progress(
-            actor,
-            backfill_id,
-            expected_checksum,
-            spec,
-            last_cursor,
-            end_cursor,
-        )
-        .await?;
-
-        // Revalidate the target while this BEGIN IMMEDIATE holds SQLite's writer
-        // reservation. A concurrent schema writer cannot add a trigger between
-        // this catalog read and the UPDATE.
-        ensure_no_target_triggers(actor, &spec.table).await?;
-
-        // 2. Compute the high-water mark and exact selected-row count IN SQL, under
-        // the cursor column's collation, over the SAME pre-mutation window the
-        // UPDATE pages, the SQLite analog
-        // of the PG `max(_bf_key)::text`. This MUST run BEFORE the UPDATE: the
-        // authored transform can mutate a filter column (e.g. `done = 1` against a
-        // `done = 0` filter), so post-UPDATE the window predicate would no longer
-        // match the just-touched rows. The cursor column itself is never mutated
-        // (Gate 3), and the single exclusive connection inside this BEGIN IMMEDIATE
-        // sees a stable snapshot, so the SELECT's window == the UPDATE's window.
-        // Computing the max in SQL (not Rust `cells.max`) makes the resume cursor
-        // collation-consistent with the `ORDER BY <cursor>` / `<cursor> > ?1` paging
-        // (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
-        actor.set_mode(Mode::CreatorUp).await?;
-        let (n, max_cursor) = if spec.per_row.is_empty() {
-            let max_rows = actor.query_params(&window_max_sql, &binds).await?;
-            let max_row = max_rows.first().ok_or_else(|| {
-                SqliteActorError::Exec("backfill window aggregate returned no row".to_string())
-            })?;
-            let max_cursor = max_row.first().and_then(Clone::clone);
-            let min_class = max_row.get(1).and_then(|cell| cell.as_deref());
-            let max_class = max_row.get(2).and_then(|cell| cell.as_deref());
-            let selected_count = max_row
-                .get(3)
-                .and_then(|cell| cell.as_deref())
-                .ok_or_else(|| {
-                    SqliteActorError::Exec(
-                        "backfill window aggregate returned no selected row count".to_string(),
-                    )
-                })?
-                .parse::<u64>()
-                .map_err(|_| {
-                    SqliteActorError::Exec(
-                        "backfill window aggregate returned an invalid selected row count"
-                            .to_string(),
-                    )
-                })?;
-            let expected_class = cursor_kind.storage_class();
-            if (min_class.is_some() || max_class.is_some())
-                && (min_class != Some(expected_class) || max_class != Some(expected_class))
-            {
-                return Err(SqliteActorError::Exec(format!(
-                    "backfill window contains cursor storage classes outside {expected_class:?}: min={min_class:?}, max={max_class:?}"
-                )));
-            }
-
-            // Keep the existing set-based statement as the fast path when no
-            // apply-engine generator is present.
-            let returned = actor.query_params(&batch_sql, &binds).await?;
-            let n = returned.len() as u64;
-            if n != selected_count {
-                return Err(SqliteActorError::Exec(format!(
-                    "backfill window selected {selected_count} rows but updated {n}; a constraint conflict may have suppressed rows"
-                )));
-            }
-            (n, max_cursor)
-        } else {
-            // Freeze the ordered key window before evaluating any generator. Each
-            // key is then updated independently, and every generator call happens
-            // inside this batch transaction immediately before its bound UPDATE.
-            let selected_rows = actor.query_params(&per_row_window_sql, &binds).await?;
-            let expected_class = cursor_kind.storage_class();
-            let mut selected = Vec::with_capacity(selected_rows.len());
-            for row in &selected_rows {
-                let cursor = row.first().and_then(Clone::clone).ok_or_else(|| {
-                    SqliteActorError::Exec(
-                        "per-row backfill window returned a null cursor".to_string(),
-                    )
-                })?;
-                let storage_class = row.get(1).and_then(|cell| cell.as_deref());
-                if storage_class != Some(expected_class) {
-                    return Err(SqliteActorError::Exec(format!(
-                        "per-row backfill window contains cursor storage class {storage_class:?}; expected {expected_class:?}"
-                    )));
-                }
-                selected.push(cursor);
-            }
-            let max_cursor = selected.last().cloned();
-            for selected_cursor in &selected {
-                let mut row_binds = spec
-                    .per_row
-                    .values()
-                    .map(|assignment| generate_per_row_value(assignment.generator()))
-                    .map(SqliteBind::Text)
-                    .collect::<Vec<_>>();
-                let selected_cursor_bind = match cursor_kind {
-                    CursorKind::Integer => selected_cursor
-                        .parse::<i64>()
-                        .map(SqliteBind::Int)
-                        .map_err(|_| {
-                            SqliteActorError::Exec(format!(
-                                "selected INTEGER cursor {selected_cursor:?} is not an exact i64"
-                            ))
-                        })?,
-                    CursorKind::Text => SqliteBind::Text(selected_cursor.clone()),
-                };
-                row_binds.push(selected_cursor_bind);
-                let returned = actor
-                    .query_params(&per_row_update_sql, &row_binds)
-                    .await?;
-                if returned.len() != 1 {
-                    return Err(SqliteActorError::Exec(format!(
-                        "per-row update at cursor {selected_cursor:?} affected {} rows; expected exactly one",
-                        returned.len()
-                    )));
-                }
-            }
-            (selected.len() as u64, max_cursor)
-        };
-
-        if n > 0 {
-            // 4. Advance progress IN THE SAME TRANSACTION (both-or-neither),
-            // under EngineJournal.
-            actor.set_mode(Mode::EngineJournal).await?;
-            let max_cursor_bind = max_cursor.clone().ok_or_else(|| {
-                SqliteActorError::Exec(
-                    "non-empty backfill window produced no maximum cursor".to_string(),
-                )
-            })?;
-            // `updated_at` is NOT refreshed here: `CURRENT_TIMESTAMP` in an UPDATE
-            // SET position fires `SQLITE_FUNCTION("CURRENT_TIMESTAMP")`, which the
-            // hardened authorizer denies (it is allow-listed only as a column DEFAULT
-            // keyword, never as a callable function — and we do NOT widen the
-            // function allow-list for an observability-only timestamp). The
-            // INSERT-time default stamps `updated_at`; per-batch progress carries
-            // `last_cursor`/`rows_done`/`batches_done`, the resume-critical columns.
-            let advanced = actor
-                .query_params(
-                    "UPDATE \"_mig\".schema_backfills \
-                        SET last_cursor = ?1, \
-                            rows_done = rows_done + ?2, \
-                            batches_done = batches_done + 1 \
-                      WHERE backfill_id = ?3 \
-                        AND checksum IS ?4 \
-                        AND target_table = ?5 \
-                        AND cursor_column = ?6 \
-                        AND last_cursor IS ?7 \
-                        AND end_cursor IS ?8 \
-                        AND cohort_initialized = 1 \
-                        AND complete = 0 \
-                    RETURNING backfill_id",
-                    &[
-                        SqliteBind::Text(max_cursor_bind),
-                        SqliteBind::Int(i64::try_from(n).map_err(|_| {
-                            SqliteActorError::Exec("backfill row count exceeds i64".to_string())
-                        })?),
-                        SqliteBind::Text(backfill_id.to_string()),
-                        expected_checksum.map_or(SqliteBind::Null, |value| {
-                            SqliteBind::Text(value.to_string())
-                        }),
-                        SqliteBind::Text(spec.table.clone()),
-                        SqliteBind::Text(spec.cursor_column.clone()),
-                        last_cursor.map_or(SqliteBind::Null, |value| {
-                            SqliteBind::Text(value.to_string())
-                        }),
-                        SqliteBind::Text(end_cursor.to_string()),
-                    ],
-                )
-                .await?;
-            if advanced.len() != 1 {
-                return Err(SqliteActorError::Exec(format!(
-                    "backfill progress update affected {} rows for {backfill_id:?}; expected exactly one",
-                    advanced.len()
-                )));
-            }
-        }
-        Ok::<(u64, Option<String>), SqliteActorError>((n, max_cursor))
-    }
-    .await;
-
-    match result {
-        Ok((n, max_cursor)) => match actor.commit_or_cleanup("backfill batch").await {
-            Ok(()) => Ok((n, max_cursor)),
-            Err(SqliteActorError::Poisoned(message)) => Err(BackfillError::SqlitePoisoned(message)),
-            Err(error) => Err(BackfillError::SqliteBatchFailed {
-                at_cursor: last_cursor.map(str::to_string),
-                source_msg: error.to_string(),
-            }),
-        },
-        Err(e) => match actor.cleanup_after_error("backfill batch", e).await {
-            SqliteActorError::Poisoned(message) => Err(BackfillError::SqlitePoisoned(message)),
-            error => Err(BackfillError::SqliteBatchFailed {
-                at_cursor: last_cursor.map(str::to_string),
-                source_msg: error.to_string(),
-            }),
-        },
-    }
-}
-
-/// A BEGIN/COMMIT/mode-flip infrastructure failure around a batch (not the batch
-/// UPDATE itself). Surfaced as a poisoned-connection error.
-fn batch_infra_err(e: SqliteActorError) -> BackfillError {
-    BackfillError::SqlitePoisoned(e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[compio::test]
-    async fn progress_reader_handles_absence_and_decodes_existing_rows() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-
-        assert!(read_progress_entries(&actor)
-            .await
-            .expect("absent progress table")
-            .is_empty());
-
-        ensure_backfill_progress(&actor)
-            .await
-            .expect("create progress table");
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        actor
-            .exec(
-                "INSERT INTO \"_mig\".schema_backfills \
-                    (backfill_id, checksum, name, target_table, cursor_column, applied_by) \
-                 VALUES ('mig_progress', 'checksum_a', 'fill users', 'users', 'id', 'tester')",
-            )
-            .await
-            .expect("insert progress row");
-
-        assert_eq!(
-            read_progress_entries(&actor)
-                .await
-                .expect("read progress row"),
-            vec![BackfillProgressEntry {
-                version: "mig_progress".into(),
-                checksum: Some("checksum_a".into()),
-                complete: false,
-            }]
-        );
+    fn contract_column(
+        name: &str,
+        scalar_type: CursorScalarType,
+        database_type: &str,
+        comparison: CursorComparison,
+    ) -> CursorColumnContract {
+        CursorColumnContract {
+            name: name.to_string(),
+            scalar_type,
+            database_type: database_type.to_string(),
+            comparison,
+        }
     }
 
-    #[test]
-    fn cursor_affinity_rules_fail_closed() {
-        assert_eq!(safe_cursor_kind("INTEGER"), Some(CursorKind::Integer));
-        assert_eq!(safe_cursor_kind("BIGINT"), Some(CursorKind::Integer));
-        assert_eq!(safe_cursor_kind("TEXT"), Some(CursorKind::Text));
-        assert_eq!(safe_cursor_kind("VARCHAR(20)"), Some(CursorKind::Text));
-        assert_eq!(safe_cursor_kind("REAL"), None);
-        assert_eq!(safe_cursor_kind("NUMERIC"), None);
-        assert_eq!(safe_cursor_kind("BLOB"), None);
-        assert_eq!(safe_cursor_kind(""), None);
-    }
-
-    #[test]
-    fn batch_sql_first_vs_resume_shape() {
-        let first = build_batch_sql("\"t\"", "\"id\"", "\"a\" = 1", None, false);
-        assert!(
-            first.contains("WHERE \"id\" <= ?1 ORDER BY \"id\" ASC LIMIT ?2"),
-            "{first}"
-        );
-        assert!(first.ends_with("RETURNING \"id\""));
-        assert!(first.contains("WHERE \"id\" IN"), "{first}");
-        assert!(!first.contains("rowid"), "{first}");
-        let resume = build_batch_sql("\"t\"", "\"id\"", "\"a\" = 1", Some("\"a\" IS NULL"), true);
-        assert!(
-            resume.contains("WHERE \"id\" > ?1 AND \"id\" <= ?2 AND (\"a\" IS NULL)"),
-            "{resume}"
-        );
-        assert!(resume.contains("LIMIT ?3"), "{resume}");
-    }
-
-    #[test]
-    fn per_row_sql_has_only_bound_generator_and_cursor_values() {
-        let mut spec = test_spec("items", "id");
-        spec.set_clause.clear();
-        spec.per_row.insert(
-            "generated".into(),
-            crate::model::backfill::PerRowAssignment::validated(
-                "main",
-                "items",
-                "generated",
-                PerRowGenerator::Ulid,
-            ),
-        );
-
-        let sql = build_per_row_update_sql("\"items\"", "\"id\"", "", &spec);
-        assert_eq!(
-            sql,
-            "UPDATE \"items\" SET \"generated\" = ?1 WHERE \"id\" = ?2 RETURNING \"id\""
-        );
-        assert!(!sql.contains("01J"), "no sampled literal belongs in SQL");
-    }
-
-    #[test]
-    fn per_row_assignment_cannot_be_retargeted() {
-        let mut spec = test_spec("items", "id");
-        spec.set_clause.clear();
-        spec.per_row.insert(
-            "generated".into(),
-            crate::model::backfill::PerRowAssignment::validated(
-                "main",
-                "other_items",
-                "generated",
-                PerRowGenerator::Ulid,
-            ),
-        );
-        let error = validate_per_row_spec(&spec, "").expect_err("retargeted token must fail");
-        assert!(
-            matches!(error, BackfillError::InvalidSpec(message) if message.contains("validated for a different target"))
-        );
-    }
-
-    fn test_spec(table: &str, cursor: &str) -> BackfillSpec {
+    fn external_spec(table: &str, columns: &[&str], batch_size: u32) -> BackfillSpec {
         BackfillSpec {
             schema: "main".to_string(),
             table: table.to_string(),
-            cursor_column: cursor.to_string(),
-            batch_size: 2,
-            set_clause: "\"value\" = (\"value\" + 1)".to_string(),
-            per_row: std::collections::BTreeMap::new(),
-            filter: None,
+            cursor_columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            cursor_stability: CursorStability::ExternalInvariant {
+                name: format!("{table}_cursor_is_immutable"),
+            },
+            cursor_contract: None,
+            batch_size,
+            set_clause: "\"done\" = 1".to_string(),
+            per_row: BTreeMap::new(),
+            filter: Some("\"done\" = 0".to_string()),
             name: format!("fill_{table}"),
         }
     }
 
-    async fn seed_batch_progress(
-        actor: &MigrationActor,
-        spec: &BackfillSpec,
-        backfill_id: &str,
-        last_cursor: Option<&str>,
-        end_cursor: &str,
-    ) {
-        use super::super::actor::SqliteBind;
-
-        ensure_backfill_progress(actor)
-            .await
-            .expect("create progress table");
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        actor
-            .exec_params(
-                "INSERT INTO \"_mig\".schema_backfills \
-                     (backfill_id, name, target_table, cursor_column, last_cursor, \
-                      end_cursor, cohort_initialized, applied_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'tester')",
-                &[
-                    SqliteBind::Text(backfill_id.to_string()),
-                    SqliteBind::Text(spec.name.clone()),
-                    SqliteBind::Text(spec.table.clone()),
-                    SqliteBind::Text(spec.cursor_column.clone()),
-                    last_cursor.map_or(SqliteBind::Null, |value| {
-                        SqliteBind::Text(value.to_string())
-                    }),
-                    SqliteBind::Text(end_cursor.to_string()),
-                ],
-            )
-            .await
-            .expect("seed progress row");
-    }
-
-    async fn assert_test_values_unchanged(actor: &MigrationActor, table: &str) {
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        let rows = actor
-            .query(&format!(
-                "SELECT count(*) FROM {} WHERE value != 0",
-                quote_ident(table)
-            ))
-            .await
-            .expect("read target rows");
-        assert_eq!(rows[0][0].as_deref(), Some("0"));
-        assert!(actor.is_autocommit().await.expect("autocommit probe"));
-    }
-
-    #[compio::test]
-    async fn deleted_progress_row_cannot_commit_application_changes() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn open_actor(tag: &str) -> (tempfile::TempDir, MigrationActor) {
+        let directory = tempfile::tempdir().expect("tempdir");
         let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
+            &directory.path().join(format!("{tag}.sqlite")),
+            &directory.path().join(format!("{tag}.journal.sqlite")),
         )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE deleted_progress (id INTEGER PRIMARY KEY, value INTEGER NOT NULL); \
-                 INSERT INTO deleted_progress (id, value) VALUES (1, 0), (2, 0)",
-            )
-            .await
-            .expect("seed target rows");
+        .expect("open sqlite migration actor");
+        (directory, actor)
+    }
 
-        let spec = test_spec("deleted_progress", "id");
-        let backfill_id = spec.backfill_id();
-        seed_batch_progress(&actor, &spec, &backfill_id, None, "2").await;
-        actor
-            .exec_params(
-                "DELETE FROM \"_mig\".schema_backfills WHERE backfill_id = ?1",
-                &[super::super::actor::SqliteBind::Text(backfill_id.clone())],
-            )
-            .await
-            .expect("delete progress row");
-
-        let error = run_one_batch(
-            &actor,
-            &backfill_id,
-            None,
-            &spec,
-            "\"deleted_progress\"",
-            "\"id\"",
-            &spec.set_clause,
-            None,
-            CursorKind::Integer,
-            None,
-            "2",
-        )
-        .await
-        .expect_err("a missing checkpoint must abort the data batch");
-        assert!(
-            error.to_string().contains("progress row disappeared"),
-            "{error}"
+    #[test]
+    fn lexicographic_disjunction_preserves_declared_order_and_boundaries() {
+        let columns = vec![
+            contract_column(
+                "tenant",
+                CursorScalarType::String,
+                "text",
+                CursorComparison::CaseInsensitive,
+            ),
+            contract_column(
+                "sequence",
+                CursorScalarType::Int64,
+                "integer",
+                CursorComparison::Default,
+            ),
+        ];
+        assert_eq!(
+            lexicographic_after(&columns, 1),
+            "((\"tenant\" COLLATE \"NOCASE\" > ?1) OR (\"tenant\" COLLATE \"NOCASE\" = ?1 AND \"sequence\" COLLATE \"BINARY\" > ?2))"
         );
-        assert_test_values_unchanged(&actor, &spec.table).await;
-    }
-
-    #[compio::test]
-    async fn corrupted_progress_cursor_cannot_commit_application_changes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE corrupt_progress (id INTEGER PRIMARY KEY, value INTEGER NOT NULL); \
-                 INSERT INTO corrupt_progress (id, value) VALUES (1, 0), (2, 0)",
-            )
-            .await
-            .expect("seed target rows");
-
-        let spec = test_spec("corrupt_progress", "id");
-        let backfill_id = spec.backfill_id();
-        seed_batch_progress(&actor, &spec, &backfill_id, Some("1"), "2").await;
-
-        let error = run_one_batch(
-            &actor,
-            &backfill_id,
-            None,
-            &spec,
-            "\"corrupt_progress\"",
-            "\"id\"",
-            &spec.set_clause,
-            None,
-            CursorKind::Integer,
-            None,
-            "2",
-        )
-        .await
-        .expect_err("a changed resume anchor must abort the data batch");
-        assert!(
-            error.to_string().contains("progress cursor changed"),
-            "{error}"
+        assert_eq!(
+            lexicographic_at_or_before(&columns, 3),
+            "((\"tenant\" COLLATE \"NOCASE\" < ?3) OR (\"tenant\" COLLATE \"NOCASE\" = ?3 AND \"sequence\" COLLATE \"BINARY\" <= ?4))"
         );
-        assert_test_values_unchanged(&actor, &spec.table).await;
+        let (predicate, limit) = window_predicate(&columns, Some("\"done\" = 0"), true);
+        assert!(predicate.contains("\"tenant\" COLLATE \"NOCASE\" > ?1"));
+        assert!(predicate.contains("\"tenant\" COLLATE \"NOCASE\" < ?3"));
+        assert!(predicate.ends_with("AND (\"done\" = 0)"));
+        assert_eq!(limit, 5);
     }
 
-    #[compio::test]
-    async fn suppressed_checkpoint_update_rolls_back_application_changes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let app_path = dir.path().join("app.sqlite");
-        let journal_path = dir.path().join("journal.sqlite");
-        let actor = MigrationActor::open(&app_path, &journal_path).expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE suppressed_checkpoint (id INTEGER PRIMARY KEY, value INTEGER NOT NULL); \
-                 INSERT INTO suppressed_checkpoint (id, value) VALUES (1, 0), (2, 0)",
-            )
-            .await
-            .expect("seed target rows");
-
-        let spec = test_spec("suppressed_checkpoint", "id");
-        let backfill_id = spec.backfill_id();
-        seed_batch_progress(&actor, &spec, &backfill_id, None, "2").await;
-
-        // Simulate out-of-band journal corruption that suppresses the checkpoint
-        // after the progress row has been successfully revalidated. Requiring one
-        // UPDATE ... RETURNING row is what turns this into a batch rollback.
-        let journal = rusqlite::Connection::open(&journal_path).expect("open journal directly");
-        journal
-            .execute_batch(
-                "CREATE TRIGGER suppress_backfill_checkpoint \
-                   BEFORE UPDATE OF last_cursor ON schema_backfills \
-                   BEGIN \
-                     DELETE FROM schema_backfills \
-                      WHERE backfill_id = old.backfill_id; \
-                   END",
-            )
-            .expect("install checkpoint suppression trigger");
-        drop(journal);
-
-        let error = run_one_batch(
-            &actor,
-            &backfill_id,
-            None,
-            &spec,
-            "\"suppressed_checkpoint\"",
-            "\"id\"",
-            &spec.set_clause,
-            None,
-            CursorKind::Integer,
-            None,
-            "2",
-        )
-        .await
-        .expect_err("a suppressed checkpoint must abort the data batch");
-        assert!(
-            error
-                .to_string()
-                .contains("progress update affected 0 rows"),
-            "{error}"
+    #[test]
+    fn update_matching_uses_the_proven_candidate_key_collation() {
+        let contract = CursorContract {
+            columns: vec![contract_column(
+                "cursor_value",
+                CursorScalarType::String,
+                "text",
+                CursorComparison::Default,
+            )],
+        };
+        let batch = build_batch_update_sql(
+            "items",
+            &contract,
+            "\"done\" = 1",
+            Some("\"done\" = 0"),
+            false,
         );
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        let progress = actor
-            .query("SELECT count(*) FROM \"_mig\".schema_backfills")
-            .await
-            .expect("verify progress rollback");
-        assert_eq!(progress[0][0].as_deref(), Some("1"));
-        assert_test_values_unchanged(&actor, &spec.table).await;
-    }
+        assert!(batch.contains(
+            "WHERE \"cursor_value\" COLLATE \"BINARY\" IN (SELECT \"cursor_value\" COLLATE \"BINARY\""
+        ));
 
-    #[compio::test]
-    async fn without_rowid_table_pages_by_its_validated_primary_key() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE wr (id INTEGER PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID; \
-                 INSERT INTO wr (id, value) VALUES (1, 0), (2, 0), (3, 0)",
-            )
-            .await
-            .expect("seed WITHOUT ROWID table");
-
-        let spec = test_spec("wr", "id");
-        let outcome =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect("backfill WITHOUT ROWID table");
-        assert!(outcome.complete);
-        assert_eq!(outcome.rows_updated, 3);
-
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        let rows = actor
-            .query("SELECT count(*) FROM wr WHERE value = 1")
-            .await
-            .expect("verify rows");
-        assert_eq!(rows[0][0].as_deref(), Some("3"));
-    }
-
-    #[compio::test]
-    async fn per_row_generator_is_evaluated_for_every_selected_row() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE generated_items (\
-                    id INTEGER PRIMARY KEY, generated TEXT\
-                 ); \
-                 INSERT INTO generated_items (id) VALUES (1), (2), (3), (4), (5)",
-            )
-            .await
-            .expect("seed target rows");
-
-        let mut spec = test_spec("generated_items", "id");
-        spec.batch_size = 2;
-        spec.set_clause.clear();
+        let mut spec = external_spec("items", &["cursor_value"], 1);
         spec.per_row.insert(
-            "generated".into(),
+            "generated".to_string(),
             crate::model::backfill::PerRowAssignment::validated(
                 "main",
-                "generated_items",
+                "items",
                 "generated",
-                PerRowGenerator::Ulid,
+                PerRowGenerator::UuidV4,
             ),
         );
-        let outcome = run_backfill_bounded(&actor, &spec, "", None, "tester", None, None)
-            .await
-            .expect("per-row backfill");
-        assert_eq!(outcome.rows_updated, 5);
-        assert_eq!(outcome.batches, 3);
+        let per_row = build_per_row_update_sql(&spec, &spec.set_clause, &contract);
+        assert!(per_row.contains("WHERE \"cursor_value\" COLLATE \"BINARY\" = ?2"));
+    }
 
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        let rows = actor
-            .query("SELECT generated FROM generated_items ORDER BY id")
-            .await
-            .expect("read generated values");
-        let values = rows
-            .iter()
-            .map(|row| row[0].clone().expect("generated value"))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(values.len(), 5, "one literal must never be reused");
-        assert!(values.iter().all(|value| {
-            value.len() == 26
-                && value
-                    .bytes()
-                    .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
-        }));
+    #[test]
+    fn mutation_scan_rejects_every_cursor_component_without_literal_false_positives() {
+        assert!(matches!(
+            assert_component_not_mutated("\"a\" = 1, \"b\" = 2", "b"),
+            Err(BackfillError::CursorComponentMutated { cursor_component }) if cursor_component == "b"
+        ));
+        assert_component_not_mutated("\"value\" = ', \"b\" = 2'", "b")
+            .expect("assignment-shaped string content is data");
+    }
+
+    #[test]
+    fn tuple_checkpoint_is_a_tagged_scalar_array_not_a_joined_string() {
+        let contract = CursorContract {
+            columns: vec![
+                CursorColumnContract {
+                    name: "tenant".to_string(),
+                    scalar_type: CursorScalarType::String,
+                    database_type: "TEXT".to_string(),
+                    comparison: CursorComparison::Default,
+                },
+                CursorColumnContract {
+                    name: "sequence".to_string(),
+                    scalar_type: CursorScalarType::Int64,
+                    database_type: "INTEGER".to_string(),
+                    comparison: CursorComparison::Default,
+                },
+            ],
+        };
+        let tuple = CursorTuple::new(
+            vec![
+                IrScalar::Str("contains|delimiter\0safely".to_string()),
+                IrScalar::Int64(i64::MAX),
+            ],
+            &contract,
+        )
+        .expect("tuple");
+        let json = tuple.to_json().expect("json");
+        assert_eq!(
+            json,
+            r#"["contains|delimiter\u0000safely",{"int64":"9223372036854775807"}]"#
+        );
+        assert_eq!(CursorTuple::from_json(&json, &contract).unwrap(), tuple);
     }
 
     #[compio::test]
-    async fn resumed_backfill_stops_at_its_initial_terminal_cursor() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+    async fn live_contract_canonicalizes_supported_unmanaged_sqlite_aliases() {
+        let (_directory, actor) = open_actor("cursor_aliases");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
         actor
             .exec(
-                "CREATE TABLE bounded (id INTEGER PRIMARY KEY, value INTEGER NOT NULL); \
-                 INSERT INTO bounded (id, value) VALUES (1, 0), (2, 0), (3, 0)",
+                "CREATE TABLE alias_items (
+                    id BIGINT NOT NULL,
+                    sequence UNSIGNED BIG INT NOT NULL,
+                    code VARCHAR(191) NOT NULL,
+                    done INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE (id, sequence, code)
+                )",
             )
             .await
-            .expect("seed initial cohort");
+            .unwrap();
+        let mut spec = external_spec("alias_items", &["id", "sequence", "code"], 10);
+        let expected = CursorContract {
+            columns: vec![
+                contract_column(
+                    "id",
+                    CursorScalarType::Int64,
+                    "integer",
+                    CursorComparison::Default,
+                ),
+                contract_column(
+                    "sequence",
+                    CursorScalarType::Int64,
+                    "integer",
+                    CursorComparison::Default,
+                ),
+                contract_column(
+                    "code",
+                    CursorScalarType::String,
+                    "text",
+                    CursorComparison::Default,
+                ),
+            ],
+        };
+        spec.cursor_contract = Some(expected.clone());
 
-        let spec = test_spec("bounded", "id");
+        let live = resolve_live_cursor_contract(&actor, &spec)
+            .await
+            .expect("supported aliases share semantic cursor types");
+        assert_eq!(live.contract, expected);
+    }
+
+    #[compio::test]
+    async fn single_cursor_progress_is_typed_bounded_and_atomic() {
+        let (_directory, actor) = open_actor("single");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0); \
+                 INSERT INTO items (id) VALUES (1), (2), (3), (4), (5)",
+            )
+            .await
+            .unwrap();
+        let mut spec = external_spec("items", &["id"], 2);
+        spec.cursor_contract = Some(CursorContract {
+            columns: vec![contract_column(
+                "id",
+                CursorScalarType::Int64,
+                "integer",
+                CursorComparison::Default,
+            )],
+        });
+
         let first = run_backfill_bounded(
             &actor,
             &spec,
             &spec.set_clause,
-            None,
+            spec.filter.as_deref(),
             "tester",
             Some(1),
             None,
         )
         .await
-        .expect("first bounded batch");
+        .unwrap();
         assert_eq!(first.rows_updated, 2);
         assert!(!first.complete);
 
-        // These rows arrive after cohort initialization. Their keys are above the
-        // fixed terminal cursor and must be left for a later migration.
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec("INSERT INTO bounded (id, value) VALUES (4, 0), (5, 0)")
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let progress = actor
+            .query(
+                "SELECT cursor_columns, last_cursor, end_cursor, rows_done, \
+                        batches_done, complete, stability_mode, stability_name, guard_name \
+                   FROM \"_mig\".schema_backfills",
+            )
             .await
-            .expect("append rows after first batch");
+            .unwrap();
+        assert_eq!(progress[0][0].as_deref(), Some(r#"["id"]"#));
+        assert_eq!(progress[0][1].as_deref(), Some(r#"[{"int64":"2"}]"#));
+        assert_eq!(progress[0][2].as_deref(), Some(r#"[{"int64":"5"}]"#));
+        assert_eq!(progress[0][3].as_deref(), Some("2"));
+        assert_eq!(progress[0][4].as_deref(), Some("1"));
+        assert_eq!(progress[0][5].as_deref(), Some("0"));
+        assert_eq!(progress[0][6].as_deref(), Some("externalInvariant"));
+        assert_eq!(progress[0][7].as_deref(), Some("items_cursor_is_immutable"));
+        assert_eq!(progress[0][8], None);
+        let columns = actor
+            .query("PRAGMA \"_mig\".table_info(schema_backfills)")
+            .await
+            .unwrap();
+        let names = columns
+            .iter()
+            .filter_map(|row| row.get(1).and_then(Clone::clone))
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "cursor_columns"));
+        assert!(!names.iter().any(|name| name == "cursor_column"));
+        assert!(names.iter().any(|name| name == "stability_mode"));
 
-        let resumed =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect("resume fixed cohort");
+        let resumed = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(resumed.resumed);
         assert!(resumed.complete);
-        assert_eq!(resumed.rows_updated, 1, "only original id=3 remains");
+        assert_eq!(resumed.rows_updated, 3);
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        let rows = actor
+            .query("SELECT count(*) FROM items WHERE done = 1")
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("5"));
+    }
 
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+    #[compio::test]
+    async fn composite_primary_key_pages_lexicographically_with_tagged_arrays() {
+        let (_directory, actor) = open_actor("composite");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE pairs (\
+                    tenant TEXT COLLATE NOCASE NOT NULL, \
+                    sequence INTEGER NOT NULL, \
+                    done INTEGER NOT NULL DEFAULT 0, \
+                    PRIMARY KEY (tenant, sequence)); \
+                 INSERT INTO pairs (tenant, sequence) VALUES \
+                    ('a', 1), ('a', 3), ('B', 1), ('b', 2), ('C', 1)",
+            )
+            .await
+            .unwrap();
+        let spec = external_spec("pairs", &["tenant", "sequence"], 2);
+        let first = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(1),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.rows_updated, 2);
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let progress = actor
+            .query("SELECT last_cursor, end_cursor FROM \"_mig\".schema_backfills")
+            .await
+            .unwrap();
+        assert_eq!(progress[0][0].as_deref(), Some(r#"["a",{"int64":"3"}]"#));
+        assert_eq!(progress[0][1].as_deref(), Some(r#"["C",{"int64":"1"}]"#));
+
+        let resumed = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.complete);
+        assert_eq!(resumed.rows_updated, 3);
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        let rows = actor
+            .query("SELECT count(*) FROM pairs WHERE done = 1")
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("5"));
+    }
+
+    #[compio::test]
+    async fn unique_index_collation_controls_one_row_batch_update_matching() {
+        let (_directory, actor) = open_actor("candidate_collation");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE collation_keys (\
+                    cursor_value TEXT COLLATE NOCASE NOT NULL, \
+                    done INTEGER NOT NULL DEFAULT 0); \
+                 CREATE UNIQUE INDEX collation_keys_binary \
+                    ON collation_keys (cursor_value COLLATE BINARY); \
+                 INSERT INTO collation_keys (cursor_value) VALUES ('A'), ('a')",
+            )
+            .await
+            .unwrap();
+        let spec = external_spec("collation_keys", &["cursor_value"], 1);
+
+        let first = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the BINARY candidate key must update only its selected row");
+        assert_eq!(first.rows_updated, 1);
+        assert!(!first.complete);
+
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        let first_batch = actor
+            .query(
+                "SELECT cursor_value, done FROM collation_keys \
+                 ORDER BY cursor_value COLLATE BINARY",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first_batch,
+            vec![
+                vec![Some("A".to_string()), Some("1".to_string())],
+                vec![Some("a".to_string()), Some("0".to_string())],
+            ]
+        );
+
+        let resumed = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.resumed);
+        assert!(resumed.complete);
+        assert_eq!(resumed.rows_updated, 1);
+
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        let completed = actor
+            .query("SELECT count(*) FROM collation_keys WHERE done = 1")
+            .await
+            .unwrap();
+        assert_eq!(completed[0][0].as_deref(), Some("2"));
+    }
+
+    #[compio::test]
+    async fn exact_unique_candidate_is_accepted_but_reordered_or_nullable_tuples_are_not() {
+        let (_directory, actor) = open_actor("candidate");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE candidates (\
+                    id INTEGER PRIMARY KEY, tenant TEXT NOT NULL, sequence INTEGER NOT NULL, \
+                    done INTEGER NOT NULL DEFAULT 0, UNIQUE (tenant, sequence)); \
+                 INSERT INTO candidates (id, tenant, sequence) VALUES \
+                    (1, 'a', 1), (2, 'a', 2), (3, 'b', 1); \
+                 CREATE TABLE nullable_composite (\
+                    id INTEGER, tenant TEXT, done INTEGER NOT NULL DEFAULT 0, \
+                    PRIMARY KEY (id, tenant)); \
+                 INSERT INTO nullable_composite (id, tenant) VALUES (1, 'a')",
+            )
+            .await
+            .unwrap();
+        let exact = external_spec("candidates", &["tenant", "sequence"], 2);
+        let outcome = run_backfill_bounded(
+            &actor,
+            &exact,
+            &exact.set_clause,
+            exact.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.complete);
+        assert_eq!(outcome.rows_updated, 3);
+
+        let reordered = external_spec("candidates", &["sequence", "tenant"], 2);
+        assert!(matches!(
+            run_backfill_bounded(
+                &actor,
+                &reordered,
+                &reordered.set_clause,
+                reordered.filter.as_deref(),
+                "tester",
+                None,
+                None,
+            )
+            .await,
+            Err(BackfillError::CursorTupleUnavailable { .. })
+        ));
+        let nullable = external_spec("nullable_composite", &["id", "tenant"], 2);
+        assert!(matches!(
+            run_backfill_bounded(
+                &actor,
+                &nullable,
+                &nullable.set_clause,
+                nullable.filter.as_deref(),
+                "tester",
+                None,
+                None,
+            )
+            .await,
+            Err(BackfillError::CursorTupleUnavailable { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn bounded_cohort_excludes_later_tuples() {
+        let (_directory, actor) = open_actor("bounded");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE bounded (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0); \
+                 INSERT INTO bounded (id) VALUES (1), (2), (3)",
+            )
+            .await
+            .unwrap();
+        let spec = external_spec("bounded", &["id"], 2);
+        run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(1),
+            None,
+        )
+        .await
+        .unwrap();
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec("INSERT INTO bounded (id) VALUES (4), (5)")
+            .await
+            .unwrap();
+        let resumed = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.complete);
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
         let rows = actor
             .query(
                 "SELECT \
-                    (SELECT count(*) FROM bounded WHERE id <= 3 AND value = 1), \
-                    (SELECT count(*) FROM bounded WHERE id > 3 AND value = 0)",
+                    (SELECT count(*) FROM bounded WHERE id <= 3 AND done = 1), \
+                    (SELECT count(*) FROM bounded WHERE id > 3 AND done = 0)",
             )
             .await
-            .expect("verify fixed cohort");
+            .unwrap();
         assert_eq!(rows[0][0].as_deref(), Some("3"));
         assert_eq!(rows[0][1].as_deref(), Some("2"));
     }
 
     #[compio::test]
-    async fn empty_cohort_is_initialized_and_completed_without_a_cursor() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+    async fn failed_checkpoint_advance_rolls_back_data_writes() {
+        let (directory, actor) = open_actor("atomic");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
         actor
-            .exec("CREATE TABLE empty_items (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)")
-            .await
-            .expect("create empty table");
-
-        let spec = test_spec("empty_items", "id");
-        let outcome =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect("complete empty cohort");
-        assert!(outcome.complete);
-        assert_eq!(outcome.rows_updated, 0);
-
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        let rows = actor
-            .query(
-                "SELECT end_cursor, cohort_initialized, complete \
-                   FROM \"_mig\".schema_backfills",
+            .exec(
+                "CREATE TABLE atomic_items (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0); \
+                 INSERT INTO atomic_items (id) VALUES (1), (2)",
             )
             .await
-            .expect("read initialized progress");
-        assert_eq!(rows[0][0], None);
-        assert_eq!(rows[0][1].as_deref(), Some("1"));
-        assert_eq!(rows[0][2].as_deref(), Some("1"));
+            .unwrap();
+        let spec = external_spec("atomic_items", &["id"], 2);
+        let initialized = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(0),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!initialized.complete);
+
+        let journal = rusqlite::Connection::open(directory.path().join("atomic.journal.sqlite"))
+            .expect("open journal directly");
+        journal
+            .execute_batch(
+                "CREATE TRIGGER abort_checkpoint BEFORE UPDATE OF last_cursor ON schema_backfills \
+                 BEGIN SELECT RAISE(ABORT, 'checkpoint blocked'); END",
+            )
+            .unwrap();
+        drop(journal);
+
+        let error = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .expect_err("checkpoint failure must abort the data transaction");
+        assert!(error.to_string().contains("checkpoint blocked"), "{error}");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        let rows = actor
+            .query("SELECT count(*) FROM atomic_items WHERE done <> 0")
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("0"));
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let progress = actor
+            .query("SELECT last_cursor, rows_done, batches_done FROM \"_mig\".schema_backfills")
+            .await
+            .unwrap();
+        assert_eq!(progress[0], vec![None, Some("0".into()), Some("0".into())]);
     }
 
     #[compio::test]
-    async fn plan_finalization_keeps_one_matching_applied_event() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
+    async fn resume_refuses_cursor_columns_and_cohort_bound_drift() {
+        let (directory, actor) = open_actor("drift");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE drift_items (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0); \
+                 INSERT INTO drift_items (id) VALUES (1), (2)",
+            )
+            .await
+            .unwrap();
+        let spec = external_spec("drift_items", &["id"], 1);
+        run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(0),
+            None,
         )
-        .expect("open actor");
-        super::super::journal_sql::ensure_journal(&actor)
-            .await
-            .expect("create journal");
-        ensure_backfill_progress(&actor)
-            .await
-            .expect("create progress");
-
-        let version = MigrationId::derive("backfill-finalization", b"stable");
-        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
-            up: "complete authored plan",
-            down: None,
-            flags: &crate::model::migration::MigrationFlags::default(),
-            owner_app: "app",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        actor
-            .exec(&format!(
-                "INSERT INTO \"_mig\".schema_backfills \
-                    (backfill_id, checksum, name, target_table, cursor_column, \
-                     cohort_initialized, applied_by) \
-                 VALUES ({}, {}, 'fill items', 'items', 'id', 1, 'tester')",
-                sql_lit(version.as_str()),
-                sql_lit(checksum.as_str())
-            ))
-            .await
-            .expect("seed progress");
-
-        let identity = PlanBackfillIdentity {
-            version: &version,
-            checksum: &checksum,
-        };
-        let spec = test_spec("items", "id");
-        finish_plan_backfill(&actor, version.as_str(), identity, &spec, "tester")
-            .await
-            .expect("first finalization");
-        finish_plan_backfill(&actor, version.as_str(), identity, &spec, "tester")
-            .await
-            .expect("idempotent finalization");
-
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        let rows = actor
-            .query(&format!(
-                "SELECT count(*) FROM \"_mig\".schema_migrations \
-                  WHERE version = {} AND event_kind = 'applied'",
-                sql_lit(version.as_str())
-            ))
-            .await
-            .expect("count applied events");
-        assert_eq!(rows[0][0].as_deref(), Some("1"));
-    }
-
-    #[compio::test]
-    async fn missing_progress_row_cannot_create_plan_journal_event() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
+        .await
+        .unwrap();
+        let journal = rusqlite::Connection::open(directory.path().join("drift.journal.sqlite"))
+            .expect("open journal directly");
+        journal
+            .execute(
+                "UPDATE schema_backfills SET cursor_columns = '[\"other\"]'",
+                [],
+            )
+            .unwrap();
+        drop(journal);
+        let error = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
         )
-        .expect("open actor");
-        super::super::journal_sql::ensure_journal(&actor)
-            .await
-            .expect("create journal");
-        ensure_backfill_progress(&actor)
-            .await
-            .expect("create progress table");
-
-        let version = MigrationId::derive("missing-backfill-finalization", b"stable");
-        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
-            up: "missing progress must not finalize",
-            down: None,
-            flags: &crate::model::migration::MigrationFlags::default(),
-            owner_app: "app",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        let identity = PlanBackfillIdentity {
-            version: &version,
-            checksum: &checksum,
-        };
-        let spec = test_spec("missing_items", "id");
-
-        let error = finish_plan_backfill(&actor, version.as_str(), identity, &spec, "tester")
-            .await
-            .expect_err("missing progress must abort finalization");
-        assert!(
-            error
-                .to_string()
-                .contains("completion update affected 0 rows"),
-            "{error}"
-        );
-        assert!(actor.is_autocommit().await.expect("autocommit probe"));
-
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
+        .await
+        .expect_err("stored tuple drift must refuse resume");
+        assert!(error.to_string().contains("progress drift"), "{error}");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
         let rows = actor
-            .query(&format!(
-                "SELECT count(*) FROM \"_mig\".schema_migrations WHERE version = {}",
-                sql_lit(version.as_str())
-            ))
+            .query("SELECT count(*) FROM drift_items WHERE done <> 0")
             .await
-            .expect("verify journal remains empty");
+            .unwrap();
         assert_eq!(rows[0][0].as_deref(), Some("0"));
     }
 
     #[compio::test]
-    async fn incomplete_legacy_progress_is_upgraded_then_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
+    async fn guard_is_durable_rejects_each_component_and_is_cleaned_at_completion() {
+        let (_directory, actor) = open_actor("guard");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE guarded (\
+                    tenant TEXT COLLATE NOCASE NOT NULL, sequence INTEGER NOT NULL, \
+                    done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant, sequence)); \
+                 INSERT INTO guarded (tenant, sequence) VALUES ('a', 1), ('a', 2), ('b', 1)",
+            )
+            .await
+            .unwrap();
+        let mut spec = external_spec("guarded", &["tenant", "sequence"], 1);
+        spec.cursor_stability = CursorStability::GuardUpdates;
+        let interrupted = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            Some(1),
+            None,
         )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE legacy_items (id INTEGER PRIMARY KEY, value INTEGER NOT NULL); \
-                 INSERT INTO legacy_items (id, value) VALUES (1, 0), (2, 0)",
-            )
+        .await
+        .unwrap();
+        assert!(!interrupted.complete);
+
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let progress = actor
+            .query("SELECT guard_installed, guard_cleaned, complete FROM \"_mig\".schema_backfills")
             .await
-            .expect("seed target");
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        actor
-            .exec(
-                "CREATE TABLE \"_mig\".schema_backfills (\
-                    backfill_id TEXT PRIMARY KEY, checksum TEXT, name TEXT NOT NULL, \
-                    target_table TEXT NOT NULL, cursor_column TEXT NOT NULL, \
-                    last_cursor TEXT, rows_done INTEGER NOT NULL DEFAULT 0, \
-                    batches_done INTEGER NOT NULL DEFAULT 0, \
-                    complete INTEGER NOT NULL DEFAULT 0, applied_by TEXT NOT NULL\
-                 ); \
-                 INSERT INTO \"_mig\".schema_backfills \
-                    (backfill_id, name, target_table, cursor_column, last_cursor, applied_by) \
-                 VALUES ('legacy', 'fill_legacy_items', 'legacy_items', 'id', '1', 'tester')",
-            )
-            .await
-            .expect("seed legacy progress");
-
-        let spec = test_spec("legacy_items", "id");
-        // Direct backfills use the spec-derived id, so make the seeded key match.
-        let legacy_id = spec.backfill_id();
-        actor
-            .exec(&format!(
-                "UPDATE \"_mig\".schema_backfills SET backfill_id = {} WHERE backfill_id = 'legacy'",
-                sql_lit(&legacy_id)
-            ))
-            .await
-            .expect("match progress key");
-        let error =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect_err("legacy progress has no safe terminal boundary");
-        assert!(
-            error.to_string().contains("legacy backfill progress"),
-            "{error}"
-        );
-
-        actor
-            .set_mode(Mode::EngineJournal)
-            .await
-            .expect("engine mode");
-        let columns = actor
-            .query("PRAGMA \"_mig\".table_info(schema_backfills)")
-            .await
-            .expect("inspect upgraded progress schema");
-        assert!(columns
-            .iter()
-            .any(|row| row[1].as_deref() == Some("end_cursor")));
-        assert!(columns
-            .iter()
-            .any(|row| row[1].as_deref() == Some("cohort_initialized")));
-
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        let rows = actor
-            .query("SELECT count(*) FROM legacy_items WHERE value <> 0")
-            .await
-            .expect("verify no mutation");
-        assert_eq!(rows[0][0].as_deref(), Some("0"));
-    }
-
-    #[compio::test]
-    async fn unique_non_primary_cursor_is_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE items (\
-                    id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, value INTEGER NOT NULL\
-                 ); \
-                 INSERT INTO items (id, code, value) VALUES (1, 'a', 0)",
-            )
-            .await
-            .expect("seed table");
-
-        let spec = test_spec("items", "code");
-        let error =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect_err("a UNIQUE index is not a durable cursor contract");
-        assert!(matches!(
-            error,
-            BackfillError::CursorNotUniqueNotNull { .. }
-        ));
-    }
-
-    #[compio::test]
-    async fn blob_or_mixed_storage_cursor_is_rejected_before_mutation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE mixed (\
-                    key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL\
-                 ); \
-                 INSERT INTO mixed (key, value) VALUES ('safe', 0), (X'80FF', 0)",
-            )
-            .await
-            .expect("seed mixed storage classes");
-
-        let spec = test_spec("mixed", "key");
-        let error =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect_err("mixed TEXT/BLOB storage classes are unsafe");
-        assert!(matches!(
-            error,
-            BackfillError::CursorNotUniqueNotNull { .. }
-        ));
-
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        let rows = actor
-            .query("SELECT count(*) FROM mixed WHERE value <> 0")
-            .await
-            .expect("verify no mutation");
-        assert_eq!(rows[0][0].as_deref(), Some("0"));
-    }
-
-    #[compio::test]
-    async fn real_primary_key_cursor_is_rejected_before_mutation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &dir.path().join("app.sqlite"),
-            &dir.path().join("journal.sqlite"),
-        )
-        .expect("open actor");
-        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
-        actor
-            .exec(
-                "CREATE TABLE real_keys (\
-                    key REAL PRIMARY KEY NOT NULL, value INTEGER NOT NULL\
-                 ); \
-                 INSERT INTO real_keys (key, value) VALUES (1.5, 0)",
-            )
-            .await
-            .expect("seed REAL key");
-
-        let spec = test_spec("real_keys", "key");
-        let error =
-            run_backfill_bounded(&actor, &spec, &spec.set_clause, None, "tester", None, None)
-                .await
-                .expect_err("REAL checkpoints are unsupported");
-        assert!(matches!(
-            error,
-            BackfillError::CursorNotUniqueNotNull { .. }
-        ));
-    }
-
-    #[test]
-    fn cursor_mutation_detected() {
-        // mutating the cursor at the head of the SET clause
-        assert!(assert_cursor_not_mutated("\"id\" = 5", "id").is_err());
-        // mutating it in a later assignment
-        assert!(assert_cursor_not_mutated("\"a\" = 1, \"id\" = 5", "id").is_err());
-        // a column ref to the cursor on the RHS is NOT a mutation
-        assert!(assert_cursor_not_mutated("\"a\" = (\"id\" + 1)", "id").is_ok());
-    }
-
-    /// A SAFE backfill whose STRING LITERAL happens to embed
-    /// the `, "<cursor>" =` byte sequence must NOT be a false-positive mutation
-    /// reject — the literal is RHS data, not an assignment LHS. The scan now skips
-    /// over single-quoted string literals, so the needle inside a literal is ignored.
-    #[test]
-    fn cursor_mutation_ignores_string_literal_needle() {
-        // a non-mutating assignment whose literal contains `, "id" =`
-        assert!(
-            assert_cursor_not_mutated("\"a\" = ', \"id\" = x'", "id").is_ok(),
-            "a string literal containing the needle is not a cursor mutation"
-        );
-        // leading-position literal that LOOKS like a cursor assignment but is RHS data
-        assert!(
-            assert_cursor_not_mutated("\"note\" = '\"id\" = 9'", "id").is_ok(),
-            "a quoted-ident-looking string literal on the RHS is not a mutation"
-        );
-        // a `''`-escaped quote inside the literal does not desync the scanner
-        assert!(
-            assert_cursor_not_mutated("\"a\" = 'it''s, \"id\" = 1', \"b\" = 2", "id").is_ok(),
-            "an escaped quote inside the literal is handled"
-        );
-        // …but a REAL cursor mutation AFTER a literal is still caught.
-        assert!(
-            assert_cursor_not_mutated("\"a\" = 'x', \"id\" = 5", "id").is_err(),
-            "a genuine later-position cursor mutation is still detected"
-        );
-    }
-
-    /// The high-water mark is computed IN SQL —
-    /// `SELECT max(<cursor>), ..., count(*) FROM (<same window>)`, so it honors the cursor column's
-    /// declared collation (mirroring the PG `max(_bf_key)::text`), NOT a Rust BINARY
-    /// `cells.max`. This pins the statement shape (collation-correctness over real
-    /// data is proven by the e2e `sqlite_backfill_nocase_cursor_exactly_once` +
-    /// `sqlite_backfill_real_cursor_*` against temp-file SQLite). The window
-    /// predicate/ordering/limit MUST match `build_batch_sql` byte-for-byte so the two
-    /// page the identical window.
-    #[test]
-    fn window_max_first_vs_resume_shape() {
-        let first = build_window_max_sql("\"t\"", "\"id\"", None, false);
+            .unwrap();
         assert_eq!(
-            first,
-            "SELECT max(\"id\"), min(typeof(\"id\")), max(typeof(\"id\")), count(*) FROM ( \
-                SELECT \"id\" FROM \"t\" \
-                 WHERE \"id\" <= ?1 \
-                 ORDER BY \"id\" ASC LIMIT ?2 \
-             )",
-            "{first}"
+            progress[0],
+            vec![Some("1".into()), Some("0".into()), Some("0".into())]
         );
-        let resume = build_window_max_sql("\"t\"", "\"id\"", Some("\"a\" IS NULL"), true);
-        assert_eq!(
-            resume,
-            "SELECT max(\"id\"), min(typeof(\"id\")), max(typeof(\"id\")), count(*) FROM ( \
-                SELECT \"id\" FROM \"t\" \
-                 WHERE \"id\" > ?1 AND \"id\" <= ?2 AND (\"a\" IS NULL) \
-                 ORDER BY \"id\" ASC LIMIT ?3 \
-             )",
-            "{resume}"
-        );
-    }
+        let triggers = actor
+            .query("SELECT count(*) FROM main.sqlite_schema WHERE type = 'trigger'")
+            .await
+            .unwrap();
+        assert_eq!(triggers[0][0].as_deref(), Some("1"));
 
-    /// The window-max SELECT and the batch UPDATE MUST page the IDENTICAL window
-    /// (same predicate, same ORDER BY, same `?n` limit slot) — otherwise the resume
-    /// cursor and the mutation diverge. Assert the shared predicate/order/limit
-    /// substring appears verbatim in both renderings.
-    #[test]
-    fn window_max_and_batch_share_the_window() {
-        for (filter, have_cursor) in [(None, false), (Some("\"a\" IS NULL"), true), (None, true)] {
-            let batch = build_batch_sql("\"t\"", "\"id\"", "\"v\" = 1", filter, have_cursor);
-            let wmax = build_window_max_sql("\"t\"", "\"id\"", filter, have_cursor);
-            let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-            let limit_ph = if have_cursor { "?3" } else { "?2" };
-            let pred = window_predicate("\"id\"", &filter_sql, have_cursor);
-            let shared = format!("WHERE {pred} ORDER BY \"id\" ASC LIMIT {limit_ph}");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        for sql in [
+            "UPDATE guarded SET tenant = 'z' WHERE tenant = 'a' AND sequence = 2",
+            "UPDATE guarded SET tenant = 'A' WHERE tenant = 'a' AND sequence = 2",
+            "UPDATE guarded SET sequence = 9 WHERE tenant = 'a' AND sequence = 2",
+        ] {
+            let error = actor
+                .exec(sql)
+                .await
+                .expect_err("guard must reject mutation");
             assert!(
-                batch.contains(&shared),
-                "batch missing shared window: {batch}"
-            );
-            assert!(
-                wmax.contains(&shared),
-                "window-max missing shared window: {wmax}"
+                error.to_string().contains("cursor stability guard"),
+                "{error}"
             );
         }
+
+        let resumed = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.complete);
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let progress = actor
+            .query("SELECT guard_installed, guard_cleaned, complete FROM \"_mig\".schema_backfills")
+            .await
+            .unwrap();
+        assert_eq!(
+            progress[0],
+            vec![Some("1".into()), Some("1".into()), Some("1".into())]
+        );
+        let triggers = actor
+            .query("SELECT count(*) FROM main.sqlite_schema WHERE type = 'trigger'")
+            .await
+            .unwrap();
+        assert_eq!(triggers[0][0].as_deref(), Some("0"));
     }
 
-    #[test]
-    fn terminal_cursor_query_uses_filter_and_cursor_collation_order() {
-        assert_eq!(
-            build_end_cursor_sql("\"t\"", "\"id\"", Some("\"ready\" = 1")),
-            "SELECT \"id\", typeof(\"id\") FROM \"t\" WHERE 1=1 AND (\"ready\" = 1) ORDER BY \"id\" DESC LIMIT 1"
-        );
+    #[compio::test]
+    async fn existing_target_trigger_is_rejected_before_guard_or_cohort_capture() {
+        let (_directory, actor) = open_actor("trigger_interaction");
+        actor.set_mode(Mode::CreatorUp).await.unwrap();
+        actor
+            .exec(
+                "CREATE TABLE trigger_items (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0); \
+                 INSERT INTO trigger_items (id) VALUES (1); \
+                 CREATE TRIGGER application_trigger AFTER UPDATE ON trigger_items \
+                 BEGIN SELECT 1; END",
+            )
+            .await
+            .unwrap();
+        let mut spec = external_spec("trigger_items", &["id"], 1);
+        spec.cursor_stability = CursorStability::GuardUpdates;
+        let error = run_backfill_bounded(
+            &actor,
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+            None,
+        )
+        .await
+        .expect_err("an unproven trigger interaction must fail closed");
+        assert!(error.to_string().contains("trigger"), "{error}");
+        actor.set_mode(Mode::EngineJournal).await.unwrap();
+        let rows = actor
+            .query("SELECT count(*) FROM \"_mig\".schema_backfills")
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("0"));
     }
 }

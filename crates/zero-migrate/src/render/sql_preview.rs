@@ -44,7 +44,7 @@
 
 use std::fmt::Write as _;
 
-use crate::model::ir::{CommentTarget, ExistenceGuard, MigrationIr, Op};
+use crate::model::ir::{CommentTarget, CursorStability, ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
@@ -470,8 +470,14 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
         PlanStep::Backfill { spec, .. } => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} backfill {:?}.{:?}: windowed runtime loop over batches \
-                 (cursor {:?}, batch {}); exact statement stream depends on live row count",
-                spec.schema, spec.table, spec.cursor_column, spec.batch_size
+                 (cursorColumns {:?}, batch {}, {}); bounded cohort; concurrent inserts require \
+                 a write invariant or a final catch-up with writes stopped; exact statement \
+                 stream depends on live row count",
+                spec.schema,
+                spec.table,
+                spec.cursor_columns,
+                spec.batch_size,
+                cursor_stability_label(&spec.cursor_stability)
             )));
         }
         PlanStep::OnlineRename(rename) => render_online_rename(op, rename, out),
@@ -502,12 +508,29 @@ fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
         }
         PlanStep::Backfill { spec, .. } => {
             out.push(Rendered::label(format!(
-                "{RUNTIME_RESOLVED} backfill {:?}.{:?}: windowed runtime loop (cursor {:?}, \
-                 batch {}); exact statement stream depends on live row count",
-                spec.schema, spec.table, spec.cursor_column, spec.batch_size
+                "{RUNTIME_RESOLVED} backfill {:?}.{:?}: windowed runtime loop (cursorColumns \
+                 {:?}, batch {}, {}); bounded cohort; concurrent inserts require a write \
+                 invariant or a final catch-up with writes stopped; exact statement stream \
+                 depends on live row count",
+                spec.schema,
+                spec.table,
+                spec.cursor_columns,
+                spec.batch_size,
+                cursor_stability_label(&spec.cursor_stability)
             )));
         }
         PlanStep::OnlineRename(rename) => render_online_rename_no_op(rename, out),
+    }
+}
+
+fn cursor_stability_label(stability: &CursorStability) -> String {
+    match stability {
+        CursorStability::GuardUpdates => {
+            "cursor stability guardUpdates (managed database update guard)".to_string()
+        }
+        CursorStability::ExternalInvariant { name } => format!(
+            "CURSOR STABILITY EXTERNAL INVARIANT {name:?} (explicit destructive approval required)"
+        ),
     }
 }
 

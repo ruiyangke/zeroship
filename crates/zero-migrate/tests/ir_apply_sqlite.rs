@@ -215,7 +215,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
           {"op":"insert","table":"samples","columns":["id"],
            "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
           {"op":"backfill","table":"samples","name":"fill_per_row_ids",
-           "cursorColumn":"id","batchSize":2,"set":{
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
              "uuid4":{"perRow":"uuidV4"},
              "uuid7":{"perRow":"uuidV7"},
              "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
@@ -354,7 +354,8 @@ async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
                     "op": "backfill",
                     "table": "guarded_items",
                     "name": "invalid_per_row_destination",
-                    "cursorColumn": "id",
+                    "cursorColumns": ["id"],
+                    "cursorStability": { "mode": "guardUpdates" },
                     "batchSize": 1,
                     "set": { "generated": generator }
                 }
@@ -654,7 +655,7 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
     let ir = resolved_envelope_json(
         r#"{"ir_version":1,"name":"sqlite_byte_backfill","ops":[
           {"op":"backfill","table":"files","name":"fill_payload",
-           "cursorColumn":"id","batchSize":1,
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":1,
            "set":{"payload":{"node":"literal","value":{"bytes":"AAF/gP8="}}}}
         ]}"#,
     );
@@ -781,7 +782,7 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
           {"op":"delete","table":"users","where":{"node":"binOp","op":"eq",
             "lhs":{"node":"colRef","name":"id"},"rhs":{"node":"literal","value":999}}},
           {"op":"backfill","table":"users","name":"mark_users_ready",
-            "cursorColumn":"id","batchSize":100,
+            "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":100,
             "set":{"ready":{"node":"literal","value":true}}}
         ]}"#,
     );

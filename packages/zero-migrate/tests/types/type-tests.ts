@@ -143,6 +143,8 @@ export function antiRotMigration(): void {
   table("nonexistent_table").backfill({
     set: { legacy_col: (col) => col("phantom_col").splitPart(" ", 1) },
     where: (col) => col("phantom_col").isNotNull(),
+    cursorColumns: ["id"],
+    cursorStability: { mode: "guardUpdates" },
   });
   table("nonexistent_table").insert({ rows: { phantom_col: "ok", another_phantom: 42 } });
   view("phantom_totals").create({
@@ -199,8 +201,8 @@ export function badOpShapes(): void {
   table("users").update({
     set: { name: "x" },
     where: (col) => col("id").isNotNull(),
-    // @ts-expect-error — batched writes are spelled backfill({ cursorColumn, batchSize }), not update({ batch }).
-    batch: { cursorColumn: "id", batchSize: 500 },
+    // @ts-expect-error — batched writes are spelled backfill({ cursorColumns, cursorStability, batchSize }), not update({ batch }).
+    batch: { cursorColumns: ["id"], batchSize: 500 },
   });
 
   // @ts-expect-error — the table-level `.rename({ to })` REQUIRES a `to` string.
@@ -767,6 +769,8 @@ export function perRowGeneratorShapes(): void {
       ulid: generators.ulid(),
       database_uuid: uuidV4(),
     },
+    cursorColumns: ["id"],
+    cursorStability: { mode: "guardUpdates" },
   });
   void setValue;
   void wireGenerator;
@@ -803,7 +807,11 @@ export function int64ValueShapes(): void {
 
   table("ledger").insert({ rows: { amount: exact } });
   table("ledger").update({ set: { amount: max } });
-  table("ledger").backfill({ set: { amount: int64("-9223372036854775808") } });
+  table("ledger").backfill({
+    set: { amount: int64("-9223372036854775808") },
+    cursorColumns: ["id"],
+    cursorStability: { mode: "guardUpdates" },
+  });
   table("ledger").create({
     columns: { amount: t.bigInt().default(int64("-9223372036854775808")) },
   });
