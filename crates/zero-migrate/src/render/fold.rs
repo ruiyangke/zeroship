@@ -74,7 +74,8 @@ use crate::render::lower::{
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::value_format::{
-    column_metadata as value_format_column_metadata, uuid_column_metadata,
+    authored_id_default, authored_text_id_default, authored_uuid_id_default, catalog_id_default,
+    catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
 use crate::schema::query::SqlDialect;
 
@@ -595,7 +596,7 @@ fn sqlite_integer_storage_for_rowid(snap: &TableSnapshot, data_type: &str) -> bo
     } else {
         matches!(
             data_type.trim().to_ascii_lowercase().as_str(),
-            "integer" | "int" | "bigint" | "smallint"
+            "integer" | "int" | "bigint" | "smallint" | "boolean"
         )
     }
 }
@@ -803,6 +804,15 @@ fn apply_fold_alter_primary_key(
             .find(|candidate| candidate.name == *column)
         {
             folded.identity = None;
+            if folded.value_format.is_none()
+                && !folded.data_type.eq_ignore_ascii_case("uuid")
+                && !matches!(
+                    folded.id_default,
+                    Some(crate::model::snapshot::IdDefaultSnapshot::Nextval(_))
+                )
+            {
+                folded.id_default = None;
+            }
         }
     }
     if let Some(candidate) = reusable_candidate {
@@ -1000,8 +1010,9 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
-                apply_fold_uuid_metadata(columns, &mut snap, dialect)?;
-                apply_fold_value_format_metadata(columns, &mut snap, dialect)?;
+                apply_fold_uuid_metadata(columns, &mut snap, dialect, project_schema)?;
+                apply_fold_value_format_metadata(columns, &mut snap, dialect, project_schema)?;
+                apply_fold_id_default_metadata(columns, &mut snap, dialect, project_schema)?;
                 fold_create_table_specs(
                     name,
                     project_schema,
@@ -1213,8 +1224,19 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
-                apply_fold_uuid_column_metadata(&source_col, &mut col, dialect)?;
-                apply_fold_value_format_column_metadata(&source_col, &mut col, dialect)?;
+                apply_fold_uuid_column_metadata(&source_col, &mut col, dialect, project_schema)?;
+                apply_fold_value_format_column_metadata(
+                    &source_col,
+                    &mut col,
+                    dialect,
+                    project_schema,
+                )?;
+                apply_fold_id_default_column_metadata(
+                    &source_col,
+                    &mut col,
+                    dialect,
+                    project_schema,
+                );
                 snap.columns.push(col);
                 if let Some(sibling) = masked_sibling {
                     snap.columns.push(sibling);
@@ -1428,8 +1450,24 @@ pub fn fold_ops_onto(
                          fail-closed rather than fold a stale encryption contract)",
                     ));
                 }
+                let source_was_native_uuid =
+                    dialect == SqlDialect::Postgres && col.data_type.eq_ignore_ascii_case("uuid");
                 col.data_type = new_col.data_type;
                 col.ddl_type_override = new_col.ddl_type_override;
+                if matches!(to_type, ColType::Uuid) {
+                    // `setColumnType` preserves the live DEFAULT. Entering the UUID
+                    // surface must therefore classify that existing default instead
+                    // of copying `new_col`'s synthetic absent default.
+                    col.id_default = Some(catalog_uuid_id_default(
+                        col.default.as_deref(),
+                        dialect,
+                        None,
+                    ));
+                } else if source_was_native_uuid {
+                    // PostgreSQL's native UUID type is itself an ID-default drift
+                    // surface. Leaving it must not retain stale UUID-only metadata.
+                    col.id_default = None;
+                }
             }
             Op::SetColumnNotNull { table, column, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1489,7 +1527,40 @@ pub fn fold_ops_onto(
                         render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
                 };
+                let tracks_id_default =
+                    col.id_default.is_some() || matches!(value, IrDefault::Nextval { .. });
                 col.default = Some(rendered);
+                if tracks_id_default {
+                    let data_type = col.data_type.trim().to_ascii_lowercase();
+                    let default = if data_type == "uuid" {
+                        authored_uuid_id_default(
+                            Some(value),
+                            col.default.as_deref(),
+                            dialect,
+                            Some(project_schema),
+                        )
+                    } else if data_type == "text"
+                        || data_type == "character varying"
+                        || data_type == "character"
+                        || data_type.starts_with("varchar")
+                        || data_type.starts_with("char(")
+                    {
+                        authored_text_id_default(
+                            Some(value),
+                            col.default.as_deref(),
+                            dialect,
+                            Some(project_schema),
+                        )
+                    } else {
+                        authored_id_default(
+                            Some(value),
+                            col.default.as_deref(),
+                            dialect,
+                            Some(project_schema),
+                        )
+                    };
+                    col.id_default = Some(default);
+                }
             }
             Op::DropColumnDefault { table, column, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1502,6 +1573,9 @@ pub fn fold_ops_onto(
                         column: column.clone(),
                     })?;
                 col.default = None;
+                if col.id_default.is_some() {
+                    col.id_default = Some(crate::model::snapshot::IdDefaultSnapshot::Absent);
+                }
             }
             Op::AlterPrimaryKey { table, action, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1794,6 +1868,12 @@ pub fn fold_ops_onto(
         }
     }
 
+    if dialect == SqlDialect::Sqlite {
+        for snap in tables.values_mut() {
+            apply_fold_sqlite_rowid_metadata(snap)?;
+        }
+    }
+
     Ok(SchemaSnapshot {
         tables,
         partitions,
@@ -1804,6 +1884,46 @@ pub fn fold_ops_onto(
         schemas,
         extensions,
     })
+}
+
+fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), FoldError> {
+    for column in &mut snap.columns {
+        column.sqlite_rowid = false;
+    }
+    let Some((_, columns)) = folded_primary_key(snap)? else {
+        return Ok(());
+    };
+    let [column_name] = columns.as_slice() else {
+        return Ok(());
+    };
+    let Some(column_index) = snap
+        .columns
+        .iter()
+        .position(|candidate| candidate.name == *column_name)
+    else {
+        return Err(FoldError::MissingColumn {
+            table: "<snapshot>".to_string(),
+            column: column_name.clone(),
+        });
+    };
+    let storage_generates =
+        sqlite_integer_storage_for_rowid(snap, &snap.columns[column_index].data_type)
+            || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
+    let stored_shape_allows_rowid = snap.stored_create_sql.as_deref().is_none_or(|stored| {
+        !crate::render::declarative::sqlite_create_is_without_rowid(stored)
+            && !crate::render::declarative::sqlite_inline_primary_key_is_desc(stored, column_name)
+    });
+    let sqlite_rowid = storage_generates && stored_shape_allows_rowid;
+    let column = &mut snap.columns[column_index];
+    column.sqlite_rowid = sqlite_rowid;
+    if column.sqlite_rowid {
+        column.id_default = Some(catalog_id_default(
+            column.default.as_deref(),
+            SqlDialect::Sqlite,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// `&mut TableSnapshot` for `table`, or [`FoldError::MissingTable`] (fail-closed).
@@ -2136,6 +2256,7 @@ fn apply_fold_value_format_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: SqlDialect,
+    project_schema: &str,
 ) -> Result<(), FoldError> {
     for source in columns {
         if source.value_format.is_none() {
@@ -2146,15 +2267,47 @@ fn apply_fold_value_format_metadata(
             .iter_mut()
             .find(|col| col.name == source.name)
             .ok_or(FoldError::Unsupported("value-format column folded away"))?;
-        apply_fold_value_format_column_metadata(source, col, dialect)?;
+        apply_fold_value_format_column_metadata(source, col, dialect, project_schema)?;
     }
     Ok(())
+}
+
+fn apply_fold_id_default_metadata(
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Result<(), FoldError> {
+    for source in columns {
+        let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
+            return Err(FoldError::Unsupported("ID-default column folded away"));
+        };
+        apply_fold_id_default_column_metadata(source, col, dialect, project_schema);
+    }
+    Ok(())
+}
+
+fn apply_fold_id_default_column_metadata(
+    source: &IrColumn,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+    project_schema: &str,
+) {
+    if source.identity.is_some() || matches!(source.default, Some(IrDefault::Nextval { .. })) {
+        col.id_default = Some(authored_id_default(
+            source.default.as_ref(),
+            col.default.as_deref(),
+            dialect,
+            Some(project_schema),
+        ));
+    }
 }
 
 fn apply_fold_uuid_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: SqlDialect,
+    project_schema: &str,
 ) -> Result<(), FoldError> {
     for source in columns {
         if !matches!(source.ty, ColType::Uuid) {
@@ -2165,7 +2318,7 @@ fn apply_fold_uuid_metadata(
             .iter_mut()
             .find(|col| col.name == source.name)
             .ok_or(FoldError::Unsupported("UUID column folded away"))?;
-        apply_fold_uuid_column_metadata(source, col, dialect)?;
+        apply_fold_uuid_column_metadata(source, col, dialect, project_schema)?;
     }
     Ok(())
 }
@@ -2174,10 +2327,17 @@ fn apply_fold_uuid_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
+    project_schema: &str,
 ) -> Result<(), FoldError> {
     if !matches!(source.ty, ColType::Uuid) {
         return Ok(());
     }
+    col.id_default = Some(authored_uuid_id_default(
+        source.default.as_ref(),
+        col.default.as_deref(),
+        dialect,
+        Some(project_schema),
+    ));
     let Some(metadata) = uuid_column_metadata(&source.name, dialect)
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?
     else {
@@ -2195,6 +2355,7 @@ fn apply_fold_value_format_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
+    project_schema: &str,
 ) -> Result<(), FoldError> {
     let Some(value_format) = &source.value_format else {
         return Ok(());
@@ -2203,7 +2364,14 @@ fn apply_fold_value_format_column_metadata(
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
     col.collation = metadata.collation;
     col.ddl_type_override = Some(metadata.ddl_type);
+    col.id_default = Some(authored_text_id_default(
+        source.default.as_ref(),
+        col.default.as_deref(),
+        dialect,
+        Some(project_schema),
+    ));
     if source.references.is_none() {
+        col.value_format = Some(value_format.clone());
         col.inline_checks.push(metadata.inline_check);
     }
     Ok(())
@@ -3903,9 +4071,10 @@ mod tests {
     use crate::model::expr::Expr;
     use crate::model::ir::{
         IndexElement, IrScalar, MigrationIr, TableRuntimeOptions, TableRuntimeOptionsPatch,
-        TableStrictness, CURRENT_IR_VERSION,
+        TableStrictness, ValueFormat, CURRENT_IR_VERSION,
     };
     use crate::model::policy::SchemaScope;
+    use crate::model::snapshot::IdDefaultSnapshot;
 
     use crate::model::table_shape::{resolve_create_table_policy, zeroship_confined_ceiling};
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
@@ -4056,6 +4225,69 @@ mod tests {
             .find(|column| column.name == "body")
             .expect("renamed column is projected");
         assert_eq!(body.default.as_deref(), Some("'{}'::jsonb"));
+    }
+
+    #[test]
+    fn set_column_default_preserves_id_surface_literal_semantics() {
+        let upper_uuid = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+            let ops = vec![
+                create("members", vec![col("member_key", ColType::Uuid, false)]),
+                Op::SetColumnDefault {
+                    table: "members".to_string(),
+                    column: "member_key".to_string(),
+                    value: IrDefault::Literal {
+                        value: IrScalar::Str(upper_uuid.to_string()),
+                    },
+                    schema: None,
+                    existence_guard: None,
+                },
+            ];
+            let snapshot = fold_ops(&ops, dialect, SCHEMA).expect("UUID history folds");
+            let member_key = snapshot.tables["members"]
+                .columns
+                .iter()
+                .find(|column| column.name == "member_key")
+                .expect("UUID column survives");
+            let expected = if dialect == SqlDialect::Postgres {
+                IdDefaultSnapshot::UuidLiteral(format!("\"{}\"", upper_uuid.to_ascii_lowercase()))
+            } else {
+                IdDefaultSnapshot::Literal(format!("\"{upper_uuid}\""))
+            };
+            assert_eq!(member_key.id_default.as_ref(), Some(&expected));
+        }
+
+        let mut type_id = col("type_key", ColType::Text, false);
+        type_id.value_format = Some(ValueFormat::TypeId {
+            prefix: String::new(),
+        });
+        let decimal = "12345678901234567890123456";
+        let mysql = fold_ops(
+            &[
+                create("type_keys", vec![type_id]),
+                Op::SetColumnDefault {
+                    table: "type_keys".to_string(),
+                    column: "type_key".to_string(),
+                    value: IrDefault::Literal {
+                        value: IrScalar::Decimal(decimal.to_string()),
+                    },
+                    schema: None,
+                    existence_guard: None,
+                },
+            ],
+            SqlDialect::Mysql,
+            SCHEMA,
+        )
+        .expect("MySQL TypeID history folds");
+        let type_key = mysql.tables["type_keys"]
+            .columns
+            .iter()
+            .find(|column| column.name == "type_key")
+            .expect("TypeID column survives");
+        assert_eq!(
+            type_key.id_default.as_ref(),
+            Some(&IdDefaultSnapshot::Literal(format!("\"{decimal}\"")))
+        );
     }
 
     #[test]
@@ -4880,6 +5112,50 @@ mod tests {
             "setColumnType re-derives the new data_type"
         );
         assert!(!n.nullable, "setColumnType keeps existing nullability");
+    }
+
+    #[test]
+    fn alter_column_type_enters_and_leaves_uuid_default_drift_surface() {
+        let to_uuid = fold(&[
+            create("users", vec![col("external_id", ColType::Text, false)]),
+            Op::SetColumnType {
+                table: "users".to_string(),
+                column: "external_id".to_string(),
+                to_type: ColType::Uuid,
+                using: None,
+                schema: None,
+                existence_guard: None,
+            },
+        ])
+        .unwrap();
+        let external_id = to_uuid.tables["users"]
+            .columns
+            .iter()
+            .find(|column| column.name == "external_id")
+            .unwrap();
+        assert_eq!(
+            external_id.id_default,
+            Some(crate::model::snapshot::IdDefaultSnapshot::Absent)
+        );
+
+        let from_uuid = fold(&[
+            create("users", vec![col("external_id", ColType::Uuid, false)]),
+            Op::SetColumnType {
+                table: "users".to_string(),
+                column: "external_id".to_string(),
+                to_type: ColType::Text,
+                using: None,
+                schema: None,
+                existence_guard: None,
+            },
+        ])
+        .unwrap();
+        let external_id = from_uuid.tables["users"]
+            .columns
+            .iter()
+            .find(|column| column.name == "external_id")
+            .unwrap();
+        assert_eq!(external_id.id_default, None);
     }
 
     #[test]

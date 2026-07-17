@@ -2618,6 +2618,7 @@ fn column_snapshot_for_field(
     synth_json_defaults: bool,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let data_type = field_data_type(f)?;
+    let default = field_default_expr(f, dialect, synth_json_defaults)?;
     let sdk_def = field_to_sdk_def(f);
     crate::schema::query::validate_encryption_sentinel_for_field(&sdk_def)
         .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
@@ -2640,7 +2641,7 @@ fn column_snapshot_for_field(
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
-        default: field_default_expr(f, dialect, synth_json_defaults)?,
+        default: default.clone(),
         ddl_type_override,
         generated: f
             .generated
@@ -2648,6 +2649,9 @@ fn column_snapshot_for_field(
             .map(|g| generated_column_snapshot(g, dialect))
             .transpose()?,
         identity: f.identity,
+        id_default: f.identity.map(|_| {
+            crate::render::value_format::catalog_id_default(default.as_deref(), dialect, None)
+        }),
         case_sensitive,
         encryption_sentinel,
         comment_sentinel,
@@ -3737,6 +3741,10 @@ fn fts_objects_pg(
         inline_checks: Vec::new(),
         generated: None,
         identity: None,
+        sqlite_rowid: false,
+        value_format: None,
+        id_default: None,
+        mysql_default_generated: None,
         case_sensitive: None,
         collation: None,
         mysql_text_storage: None,

@@ -40,17 +40,22 @@ use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::ir::{
-    IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
-    SafeI64, SafeU64, SequenceOwnedBy, SequenceRef,
+    IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds,
+    PartitionSpec, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef,
 };
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
-    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
-    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IdDefaultSnapshot, IndexElementSnapshot,
+    IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot,
+    SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
+use crate::render::value_format::{
+    catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
+    catalog_text_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
+};
+use crate::schema::query::SqlDialect;
 
 // ---------------------------------------------------------------------------
 // B1 — checksum / tamper / orphan drift
@@ -255,8 +260,9 @@ pub fn compare_applied_to_set(
 ///
 /// A column / index / constraint present on BOTH sides but with a changed
 /// attribute — an out-of-band `ALTER` that name-only diffing would miss (e.g.
-/// `ALTER COLUMN … TYPE`, `DROP NOT NULL`, an index losing UNIQUE, a rewritten
-/// CHECK predicate). This is the tamper blind spot #1 closes.
+/// `ALTER COLUMN … TYPE`, `DROP NOT NULL`, an identity/default generator flip,
+/// an index losing UNIQUE, a rewritten format CHECK, or an FK repoint/action
+/// change). This is the tamper blind spot #1 closes.
 ///
 /// Names only — never DDL. The caller decides what (if anything) to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,8 +272,9 @@ pub struct AlteredObject {
     /// The object, qualified within the table: a column as `column id`, an index
     /// as `index users_email_idx`, a constraint as `constraint users_age_chk`.
     pub object: String,
-    /// The attribute that diverged: `data_type`, `nullable`, `unique`, `columns`,
-    /// `access_method`, `expression`, `kind`, or `definition`.
+    /// The attribute that diverged: `data_type`, `nullable`, `identity`,
+    /// `default`, `format`, `unique`, `columns`, `access_method`, `expression`,
+    /// `kind`, or `definition`.
     pub field: String,
     /// The expected snapshot's value for `field`.
     pub expected: String,
@@ -289,9 +296,10 @@ pub struct StructuralDrift {
     /// outside the migration journal.
     pub unexpected_objects: Vec<String>,
     /// Same-name objects (present on BOTH sides) whose ATTRIBUTES diverge — an
-    /// out-of-band `ALTER` (type/nullability/uniqueness/CHECK-body change). The
-    /// missing/unexpected name buckets cannot see these because the name still
-    /// matches; this bucket is the attribute-aware tamper surface (#1).
+    /// out-of-band `ALTER` (type/nullability/identity/default/format/reference/
+    /// uniqueness change). The missing/unexpected name buckets cannot see these
+    /// because the name still matches; this bucket is the attribute-aware tamper
+    /// surface (#1).
     pub altered_objects: Vec<AlteredObject>,
 }
 
@@ -314,6 +322,13 @@ impl StructuralDrift {
 /// every catalog query — never interpolated into SQL text — so a schema name
 /// containing a quote, a semicolon, or any SQL metacharacter selects zero rows
 /// rather than altering the query.
+///
+/// Identity and ID-default semantics are recovered from structured catalog
+/// metadata (including a `pg_depend` lookup for search-path-stable nextval
+/// identity). Engine-owned TypeID/ULID CHECKs project onto their columns, and
+/// foreign keys are rebuilt from ordered catalog tuples, target identity,
+/// actions, match mode, deferrability, and validation state. This avoids relying
+/// on PostgreSQL's search-path-sensitive FK/nextval deparser spelling.
 ///
 /// Determinism: the result map is a `BTreeMap` and every column/index/constraint
 /// vector is sorted by name, so the snapshot is stable across catalog scan order.
@@ -612,6 +627,11 @@ pub async fn snapshot_schema<D: SqlSession>(
     let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
     let mut named_types: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
+    // Retain non-pg_catalog function/operator/collation provenance, including
+    // same-spelling objects selected through search_path, until CHECK recovery
+    // below may promote a text column onto the ID-default comparison surface.
+    let mut default_has_user_semantic_dependency: BTreeMap<(String, String), bool> =
+        BTreeMap::new();
 
     let partition_rows = conn
         .query(
@@ -784,9 +804,41 @@ pub async fn snapshot_schema<D: SqlSession>(
             "SELECT c.table_name, c.column_name, c.data_type, \
                     c.udt_schema, c.udt_name, c.domain_schema, c.domain_name, \
                     column_type.typtype::text AS type_kind, c.is_nullable, \
+                    c.identity_generation, a.attgenerated::text AS generated_kind, \
                     c.character_maximum_length, c.collation_schema, c.collation_name, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
                     pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
+                    default_sequence.schema_name AS default_sequence_schema, \
+                    default_sequence.sequence_name AS default_sequence_name, \
+                    EXISTS ( \
+                      SELECT 1 \
+                      FROM pg_depend dep \
+                      WHERE dep.classid = 'pg_attrdef'::regclass \
+                        AND dep.objid = ad.oid \
+                        AND ( \
+                          (dep.refclassid = 'pg_proc'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_proc semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.pronamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) OR \
+                          (dep.refclassid = 'pg_operator'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_operator semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.oprnamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) OR \
+                          (dep.refclassid = 'pg_collation'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_collation semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.collnamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) \
+                        ) \
+                    ) AS default_has_user_semantic_dependency, \
                     col_description(rel.oid, a.attnum) AS comment \
              FROM information_schema.columns c \
              JOIN pg_namespace n ON n.nspname = c.table_schema \
@@ -794,6 +846,17 @@ pub async fn snapshot_schema<D: SqlSession>(
              JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name \
              JOIN pg_type column_type ON column_type.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+             LEFT JOIN LATERAL ( \
+               SELECT sn.nspname AS schema_name, seq.relname AS sequence_name \
+               FROM pg_depend dep \
+               JOIN pg_class seq ON seq.oid = dep.refobjid AND seq.relkind = 'S' \
+               JOIN pg_namespace sn ON sn.oid = seq.relnamespace \
+               WHERE dep.classid = 'pg_attrdef'::regclass \
+                 AND dep.objid = ad.oid \
+                 AND dep.refclassid = 'pg_class'::regclass \
+               ORDER BY sn.nspname, seq.relname \
+               LIMIT 1 \
+             ) default_sequence ON true \
              WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.table_name, c.column_name",
             &[project_schema.into()],
@@ -802,6 +865,7 @@ pub async fn snapshot_schema<D: SqlSession>(
     for r in &col_rows {
         let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
+            let column_name: String = r.try_get("column_name")?;
             let nullable: String = r.try_get("is_nullable")?;
             let data_type: String = r.try_get("data_type")?;
             let udt_schema: String = r.try_get("udt_schema")?;
@@ -810,6 +874,20 @@ pub async fn snapshot_schema<D: SqlSession>(
             let domain_name: Option<String> = r.try_get("domain_name")?;
             let type_kind: String = r.try_get("type_kind")?;
             let format_type: String = r.try_get("format_type")?;
+            let identity = match r
+                .try_get::<_, Option<String>>("identity_generation")
+                .ok()
+                .flatten()
+                .as_deref()
+            {
+                Some(generation) if generation.eq_ignore_ascii_case("ALWAYS") => {
+                    Some(IdentityCol { always: true })
+                }
+                Some(generation) if generation.eq_ignore_ascii_case("BY DEFAULT") => {
+                    Some(IdentityCol { always: false })
+                }
+                _ => None,
+            };
             let is_citext = data_type.eq_ignore_ascii_case("USER-DEFINED")
                 && (is_citext_extension_type(&format_type)
                     || udt_name.eq_ignore_ascii_case("citext"));
@@ -852,18 +930,57 @@ pub async fn snapshot_schema<D: SqlSession>(
             };
             let (comment, comment_sentinel) =
                 split_column_catalog_comment(r.try_get("comment").ok().flatten());
+            // Generated expressions also live in pg_attrdef, but they are not
+            // column defaults. Reading adbin without this gate would project a
+            // clean generated UUID/TypeID expression onto the ID-default drift
+            // surface even though information_schema.column_default is NULL.
+            let is_generated = !r.try_get::<_, String>("generated_kind")?.is_empty();
+            let raw_default: Option<String> = if is_generated {
+                None
+            } else {
+                r.try_get("column_default").ok().flatten()
+            };
+            let has_user_semantic_dependency: bool =
+                !is_generated && r.try_get::<_, bool>("default_has_user_semantic_dependency")?;
+            default_has_user_semantic_dependency.insert(
+                (table.clone(), column_name.clone()),
+                has_user_semantic_dependency,
+            );
+            // `pg_get_expr`'s regclass spelling is search_path-sensitive: the
+            // same nextval may deparse as either `'seq'::regclass` or
+            // `'schema.seq'::regclass`. Confirm that the whole expression is the
+            // narrow nextval form, then take its sequence identity from pg_depend
+            // so drift comparison is stable and schema-exact.
+            let parsed_nextval = recover_nextval_default(raw_default.clone());
+            let structured_nextval = parsed_nextval.as_ref().and_then(|_| {
+                let schema: Option<String> = r.try_get("default_sequence_schema").ok().flatten();
+                let name: Option<String> = r.try_get("default_sequence_name").ok().flatten();
+                name.map(|name| {
+                    crate::render::declarative::nextval_default_expr(&SequenceRef { name, schema })
+                })
+            });
+            let default = structured_nextval.or(parsed_nextval).or(raw_default);
+            let id_default = recover_pg_id_default(
+                &data_type,
+                identity,
+                default.as_deref(),
+                false,
+                has_user_semantic_dependency,
+            );
             t.columns.push(ColumnSnapshot {
-                name: r.try_get("column_name")?,
+                name: column_name,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 // Preserve PostgreSQL's canonical, modifier-aware DDL spelling
                 // for operations such as online rename that must reproduce the
                 // exact live type rather than information_schema's base family.
                 ddl_type_override: Some(format_type),
-                // Defaults and inline encryption sentinels are emission-only.
+                // Raw defaults and inline encryption sentinels are emission-only.
+                // `id_default` below carries the narrow semantic comparison key.
                 // COMMENT-based runtime sentinels are classified into
                 // `comment_sentinel` so they do not drift against user-authored
                 // catalog comments.
+                identity,
                 case_sensitive: if is_citext { Some(false) } else { None },
                 collation: r
                     .try_get::<_, Option<String>>("collation_name")
@@ -876,7 +993,8 @@ pub async fn snapshot_schema<D: SqlSession>(
                             .flatten(),
                         name,
                     }),
-                default: recover_nextval_default(r.try_get("column_default").ok().flatten()),
+                default,
+                id_default,
                 comment,
                 comment_sentinel,
                 ..Default::default()
@@ -1000,21 +1118,93 @@ pub async fn snapshot_schema<D: SqlSession>(
         }
     }
 
-    // Constraints via pg_catalog (schema BOUND $1 on the namespace name). We read
-    // byte-comparable constraint bodies from `pg_get_constraintdef(oid)` so a
-    // same-name CHECK whose predicate was rewritten out-of-band is surfaced by the
-    // attribute diff (#1). EXCLUDE bodies are not byte-comparable with the authored
-    // IR render, so they are presence/kind-only. `contype` is mapped to the same
-    // human label information_schema reports (`PRIMARY KEY` / `FOREIGN KEY` /
-    // `UNIQUE` / `CHECK` / `EXCLUDE`) so `kind` is unchanged.
+    // Constraints via pg_catalog (schema BOUND $1 on the child table's namespace).
+    // FK definitions are rebuilt from the structured catalog fields rather than
+    // `pg_get_constraintdef`: the latter omits the referenced schema whenever the
+    // target happens to be visible on `search_path`, which would make the same FK
+    // snapshot differently from one session to the next. `conkey`/`confkey` are
+    // expanded with ordinality so composite column order and arity remain exact.
+    //
+    // CHECK definitions still come from `pg_get_constraintdef`. Engine-owned
+    // TypeID/ULID checks are recognized and projected onto their column's semantic
+    // `value_format` facet instead of also appearing as a generic constraint. An
+    // altered check intentionally fails recognition and remains a constraint, so
+    // the column loses its expected format and the altered body is never accepted
+    // as equivalent. EXCLUDE bodies remain presence/kind-only because PostgreSQL
+    // canonicalizes them differently from the authored IR render.
     let constraint_rows = conn
         .query(
             "SELECT c.relname AS table_name, con.conname AS constraint_name, \
-                    con.contype AS contype, pg_get_constraintdef(con.oid) AS definition, \
-                    obj_description(con.oid, 'pg_constraint') AS comment \
+                    con.contype::text AS contype, \
+                    pg_get_constraintdef(con.oid) AS definition, \
+                    obj_description(con.oid, 'pg_constraint') AS comment, \
+                    ARRAY( \
+                      SELECT a.attname \
+                      FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                      JOIN pg_attribute a \
+                        ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+                      ORDER BY k.ord \
+                    ) AS local_columns, \
+                    rn.nspname AS referenced_schema, rc.relname AS referenced_table, \
+                    CASE WHEN con.contype = 'f' THEN ARRAY( \
+                      SELECT a.attname \
+                      FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord) \
+                      JOIN pg_attribute a \
+                        ON a.attrelid = con.confrelid AND a.attnum = k.attnum \
+                      ORDER BY k.ord \
+                    ) END AS referenced_columns, \
+                    ARRAY( \
+                      SELECT a.attname \
+                      FROM jsonb_array_elements_text( \
+                        CASE \
+                          WHEN jsonb_typeof(to_jsonb(con)->'confdelsetcols') = 'array' \
+                          THEN to_jsonb(con)->'confdelsetcols' \
+                          ELSE '[]'::jsonb \
+                        END \
+                      ) WITH ORDINALITY AS k(attnum, ord) \
+                      JOIN pg_attribute a \
+                        ON a.attrelid = con.conrelid \
+                       AND a.attnum = k.attnum::smallint \
+                      ORDER BY k.ord \
+                    ) AS delete_set_columns, \
+                    con.confupdtype::text AS on_update, \
+                    con.confdeltype::text AS on_delete, \
+                    con.confmatchtype::text AS match_type, \
+                    con.condeferrable, con.condeferred, con.convalidated, \
+                    EXISTS ( \
+                      SELECT 1 \
+                      FROM pg_depend dep \
+                      WHERE dep.classid = 'pg_constraint'::regclass \
+                        AND dep.objid = con.oid \
+                        AND ( \
+                          (dep.refclassid = 'pg_proc'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_proc semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.pronamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) OR \
+                          (dep.refclassid = 'pg_operator'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_operator semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.oprnamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) OR \
+                          (dep.refclassid = 'pg_collation'::regclass AND EXISTS ( \
+                            SELECT 1 FROM pg_collation semantic_object \
+                            JOIN pg_namespace semantic_ns \
+                              ON semantic_ns.oid = semantic_object.collnamespace \
+                            WHERE semantic_object.oid = dep.refobjid \
+                              AND semantic_ns.nspname <> 'pg_catalog' \
+                          )) \
+                        ) \
+                    ) AS has_user_semantic_dependency \
              FROM pg_constraint con \
              JOIN pg_class c ON c.oid = con.conrelid \
-             JOIN pg_namespace n ON n.oid = con.connamespace \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_class rc ON rc.oid = con.confrelid \
+             LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
              WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c', 'x') \
              ORDER BY c.relname, con.conname",
             &[project_schema.into()],
@@ -1023,17 +1213,100 @@ pub async fn snapshot_schema<D: SqlSession>(
     for r in &constraint_rows {
         let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
-            let contype: i8 = r.try_get("contype")?;
-            let kind = match u8::try_from(contype).ok().map(char::from) {
-                Some('p') => "PRIMARY KEY",
-                Some('f') => "FOREIGN KEY",
-                Some('u') => "UNIQUE",
-                Some('c') => "CHECK",
-                Some('x') => "EXCLUDE",
+            let contype: String = r.try_get("contype")?;
+            let kind = match contype.as_str() {
+                "p" => "PRIMARY KEY",
+                "f" => "FOREIGN KEY",
+                "u" => "UNIQUE",
+                "c" => "CHECK",
+                "x" => "EXCLUDE",
                 _ => "UNKNOWN",
             };
-            let definition = if constraint_definition_is_comparable(kind) {
-                r.try_get("definition")?
+            let catalog_definition: String = r.try_get("definition")?;
+            let local_columns: Vec<String> = r.try_get("local_columns").unwrap_or_default();
+            let convalidated: bool = r.try_get("convalidated")?;
+            let has_user_semantic_dependency: bool = r.try_get("has_user_semantic_dependency")?;
+
+            if kind == "CHECK"
+                && convalidated
+                && !has_user_semantic_dependency
+                && local_columns.len() == 1
+            {
+                let column_name = &local_columns[0];
+                if let Some(RecoveredFormatCheck::Value(value_format)) =
+                    recover_format_check(column_name, &catalog_definition, SqlDialect::Postgres)
+                {
+                    if let Some(column) = t
+                        .columns
+                        .iter_mut()
+                        .find(|column| column.name == *column_name)
+                    {
+                        // A second engine-shaped check on the same column is not
+                        // silently consumed: it remains a generic unexpected
+                        // constraint below. That makes an out-of-band duplicate or
+                        // conflicting format contract visible.
+                        if column.value_format.is_none() {
+                            column.value_format = Some(value_format);
+                            column.id_default = recover_pg_id_default(
+                                &column.data_type,
+                                column.identity,
+                                column.default.as_deref(),
+                                true,
+                                default_has_user_semantic_dependency
+                                    .get(&(table.clone(), column.name.clone()))
+                                    .copied()
+                                    .unwrap_or(false),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if kind == "FOREIGN KEY" {
+                // Typed references intentionally omit a child format CHECK and
+                // inherit format safety through this FK. Promote its
+                // default-bearing local columns onto the live ID-default surface
+                // while retaining pg_depend provenance; ordinary FK columns remain
+                // ignored when the authored snapshot has no ID-default contract.
+                for column_name in &local_columns {
+                    if let Some(column) = t
+                        .columns
+                        .iter_mut()
+                        .find(|column| column.name == *column_name)
+                    {
+                        if column.id_default.is_none() && column.default.is_some() {
+                            column.id_default = recover_pg_id_default(
+                                &column.data_type,
+                                column.identity,
+                                column.default.as_deref(),
+                                true,
+                                default_has_user_semantic_dependency
+                                    .get(&(table.clone(), column.name.clone()))
+                                    .copied()
+                                    .unwrap_or(false),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let definition = if kind == "FOREIGN KEY" {
+                pg_foreign_key_definition(
+                    &local_columns,
+                    &r.try_get::<_, String>("referenced_schema")?,
+                    &r.try_get::<_, String>("referenced_table")?,
+                    &r.try_get::<_, Vec<String>>("referenced_columns")?,
+                    &r.try_get::<_, String>("on_update")?,
+                    &r.try_get::<_, String>("on_delete")?,
+                    &r.try_get::<_, Vec<String>>("delete_set_columns")?,
+                    &r.try_get::<_, String>("match_type")?,
+                    r.try_get("condeferrable")?,
+                    r.try_get("condeferred")?,
+                    convalidated,
+                )?
+            } else if constraint_definition_is_comparable(kind) {
+                catalog_definition
             } else {
                 String::new()
             };
@@ -1217,10 +1490,15 @@ pub async fn snapshot_schema<D: SqlSession>(
 /// as `"users constraint users_pkey"`. Output vectors are sorted + deterministic.
 ///
 /// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE
-/// (#1): columns by `data_type` + `nullable`, indexes by `unique` + `columns`,
-/// constraints by `kind` plus byte-comparable `definition` bodies. Any divergence
-/// becomes an [`AlteredObject`] — closing the out-of-band-`ALTER` blind spot that
-/// pure name diffing left open.
+/// (#1): columns include physical type/nullability, identity/auto-increment,
+/// semantic ID defaults, and enforced TypeID/ULID format; indexes include unique,
+/// ordered keys, method, predicate, INCLUDE columns, and storage parameters;
+/// constraints include kind plus a comparable definition. Foreign-key definitions
+/// are canonical structured identities (target schema/table, ordered local and
+/// referenced tuples, actions, match behavior, and deferrability), while ordinary
+/// CHECK/PK/UNIQUE bodies use the catalog-author comparison spelling. Any
+/// divergence becomes an [`AlteredObject`] — closing the out-of-band-`ALTER`
+/// blind spot that pure name diffing left open.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
     let mut missing = Vec::new();
@@ -1492,11 +1770,15 @@ fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
 }
 
 fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
-    let inner = expr
-        .trim()
-        .strip_prefix("nextval(")?
-        .strip_suffix(')')?
-        .trim();
+    let expression = expr.trim();
+    // pg_get_expr qualifies the built-in when a same-signature function earlier
+    // on search_path would otherwise capture the deparsed spelling. The OID is
+    // still proven through pg_depend below, so pg_catalog qualification is
+    // catalog decoration rather than generator identity.
+    let call = expression
+        .strip_prefix("nextval(")
+        .or_else(|| expression.strip_prefix("pg_catalog.nextval("))?;
+    let inner = call.strip_suffix(')')?.trim();
     let literal = inner.strip_suffix("::regclass")?.trim();
     let regclass = parse_single_quoted_sql_string(literal)?;
     let (schema, name) = match regclass.split_once('.') {
@@ -1512,6 +1794,153 @@ fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
 fn recover_nextval_default(expr: Option<String>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr.as_deref()?)?;
     Some(crate::render::declarative::nextval_default_expr(&sequence))
+}
+
+fn recover_pg_id_default(
+    data_type: &str,
+    identity: Option<IdentityCol>,
+    expression: Option<&str>,
+    force_id_surface: bool,
+    has_user_semantic_dependency: bool,
+) -> Option<IdDefaultSnapshot> {
+    let nextval = expression.and_then(|expr| recover_nextval_default(Some(expr.to_string())));
+    if !force_id_surface
+        && identity.is_none()
+        && !data_type.eq_ignore_ascii_case("uuid")
+        && nextval.is_none()
+        && !has_user_semantic_dependency
+    {
+        return None;
+    }
+
+    let Some(expression) = expression else {
+        return Some(IdDefaultSnapshot::Absent);
+    };
+    if let Some(nextval) = nextval {
+        // The sequence dependency proves the regclass target, but not which
+        // same-spelling nextval(regclass) function the parser resolved. Only a
+        // definition without a user semantic dependency may be the built-in
+        // generator contract.
+        if !has_user_semantic_dependency {
+            return Some(IdDefaultSnapshot::Nextval(nextval));
+        }
+        return Some(IdDefaultSnapshot::Expression(format!(
+            "user-defined:{}",
+            catalog_expression_fingerprint_in_dialect(expression, SqlDialect::Postgres)
+        )));
+    }
+
+    // Every function/operator admitted by the authored closed default AST
+    // resolves to a pg_catalog primitive on PostgreSQL. A dependency owned by
+    // another schema therefore proves that an out-of-band user object (including
+    // a search_path shadow with identical deparsed spelling) participates in
+    // this ID default. Keep that provenance in the semantic key for UUID
+    // generators and arbitrary closed expressions alike.
+    if has_user_semantic_dependency {
+        return Some(IdDefaultSnapshot::Expression(format!(
+            "user-defined:{}",
+            catalog_expression_fingerprint_in_dialect(expression, SqlDialect::Postgres)
+        )));
+    }
+    Some(if data_type.eq_ignore_ascii_case("uuid") {
+        catalog_uuid_id_default(Some(expression), SqlDialect::Postgres, None)
+    } else {
+        catalog_id_default(Some(expression), SqlDialect::Postgres, None)
+    })
+}
+
+fn pg_foreign_key_action(code: &str, field: &str) -> Result<Option<&'static str>, DriftError> {
+    match code {
+        // NO ACTION is PostgreSQL's catalog default and pg_get_constraintdef
+        // omits it. Keep the same canonical spelling as authored snapshots.
+        "a" => Ok(None),
+        "r" => Ok(Some("RESTRICT")),
+        "c" => Ok(Some("CASCADE")),
+        "n" => Ok(Some("SET NULL")),
+        "d" => Ok(Some("SET DEFAULT")),
+        other => Err(DriftError::Snapshot(format!(
+            "unknown PostgreSQL foreign-key {field} action code `{other}`"
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pg_foreign_key_definition(
+    local_columns: &[String],
+    referenced_schema: &str,
+    referenced_table: &str,
+    referenced_columns: &[String],
+    on_update: &str,
+    on_delete: &str,
+    delete_set_columns: &[String],
+    match_type: &str,
+    deferrable: bool,
+    initially_deferred: bool,
+    validated: bool,
+) -> Result<String, DriftError> {
+    use std::fmt::Write as _;
+
+    let mut definition = format!(
+        "FOREIGN KEY ({}) REFERENCES {}.{}({})",
+        crate::render::declarative::constraintdef_cols(local_columns),
+        crate::render::declarative::quote_ident_if_needed(referenced_schema),
+        crate::render::declarative::quote_ident_if_needed(referenced_table),
+        crate::render::declarative::constraintdef_cols(referenced_columns),
+    );
+
+    match match_type {
+        "s" => {}
+        "f" => definition.push_str(" MATCH FULL"),
+        "p" => definition.push_str(" MATCH PARTIAL"),
+        other => {
+            return Err(DriftError::Snapshot(format!(
+                "unknown PostgreSQL foreign-key match type code `{other}`"
+            )));
+        }
+    }
+
+    // PostgreSQL canonicalizes policy clauses in this order, independently of
+    // their order in the authored DDL.
+    if let Some(action) = pg_foreign_key_action(on_update, "ON UPDATE")? {
+        let _ = write!(definition, " ON UPDATE {action}");
+    }
+    if let Some(action) = pg_foreign_key_action(on_delete, "ON DELETE")? {
+        let _ = write!(definition, " ON DELETE {action}");
+        if !delete_set_columns.is_empty() {
+            if !matches!(action, "SET NULL" | "SET DEFAULT") {
+                return Err(DriftError::Snapshot(format!(
+                    "PostgreSQL foreign key reports ON DELETE column subset for action {action}"
+                )));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if delete_set_columns.iter().any(|column| {
+                !local_columns.iter().any(|local| local == column) || !seen.insert(column)
+            }) {
+                return Err(DriftError::Snapshot(
+                    "PostgreSQL foreign key reports invalid ON DELETE column subset".to_string(),
+                ));
+            }
+            let _ = write!(
+                definition,
+                " ({})",
+                crate::render::declarative::constraintdef_cols(delete_set_columns)
+            );
+        }
+    } else if !delete_set_columns.is_empty() {
+        return Err(DriftError::Snapshot(
+            "PostgreSQL foreign key reports ON DELETE column subset without an action".to_string(),
+        ));
+    }
+    if deferrable {
+        definition.push_str(" DEFERRABLE");
+        if initially_deferred {
+            definition.push_str(" INITIALLY DEFERRED");
+        }
+    }
+    if !validated {
+        definition.push_str(" NOT VALID");
+    }
+    Ok(definition)
 }
 
 fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
@@ -1723,6 +2152,82 @@ fn format_collation(collation: Option<&ColumnCollationSnapshot>) -> String {
     collation.map_or_else(String::new, ColumnCollationSnapshot::display_name)
 }
 
+fn format_identity(column: &ColumnSnapshot) -> &'static str {
+    match (column.sqlite_rowid, column.identity) {
+        (true, Some(identity)) if !identity.always => "sqlite autoincrement",
+        (true, None) => "sqlite rowid",
+        (_, Some(identity)) if identity.always => "always",
+        (_, Some(_)) => "by default / auto increment",
+        _ => "",
+    }
+}
+
+fn format_value_format(value_format: Option<&crate::model::ir::ValueFormat>) -> String {
+    match value_format {
+        None => String::new(),
+        Some(crate::model::ir::ValueFormat::TypeId { prefix }) => {
+            format!("typeId({prefix})")
+        }
+        Some(crate::model::ir::ValueFormat::Ulid) => "ulid".to_string(),
+    }
+}
+
+fn format_id_default(default: Option<&crate::model::snapshot::IdDefaultSnapshot>) -> String {
+    use crate::model::snapshot::IdDefaultSnapshot;
+    match default {
+        None => String::new(),
+        Some(IdDefaultSnapshot::Absent) => "absent".to_string(),
+        Some(IdDefaultSnapshot::UuidV4) => "uuidV4".to_string(),
+        Some(IdDefaultSnapshot::UuidV7) => "uuidV7".to_string(),
+        Some(IdDefaultSnapshot::Nextval(sequence)) => sequence.clone(),
+        Some(IdDefaultSnapshot::Literal(value)) => value.clone(),
+        Some(IdDefaultSnapshot::UuidLiteral(value)) => value.clone(),
+        Some(IdDefaultSnapshot::Expression(expression)) => expression.clone(),
+    }
+}
+
+fn introspected_table_dialect(table: &TableSnapshot) -> Option<SqlDialect> {
+    if table.stored_create_sql.is_some() {
+        return Some(SqlDialect::Sqlite);
+    }
+    if table
+        .columns
+        .iter()
+        .any(|column| column.mysql_text_storage.is_some())
+    {
+        return Some(SqlDialect::Mysql);
+    }
+    if table
+        .columns
+        .iter()
+        .any(|column| column.ddl_type_override.is_some())
+    {
+        return Some(SqlDialect::Postgres);
+    }
+    None
+}
+
+fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> bool {
+    if expected.data_type == actual.data_type {
+        return true;
+    }
+    if !(expected.sqlite_rowid && actual.sqlite_rowid) {
+        return false;
+    }
+
+    // SQLite's rowid alias requires the physical declaration `INTEGER PRIMARY
+    // KEY`, even when the portable authored integer width was bigint/smallint.
+    // Preserve exact type drift everywhere else; this equivalence is confined to
+    // two columns already proven to be the same rowid-alias contract.
+    let integer_family = |data_type: &str| {
+        matches!(
+            data_type.trim().to_ascii_lowercase().as_str(),
+            "smallint" | "integer" | "bigint" | "int" | "int2" | "int4" | "int8" | "boolean"
+        )
+    };
+    integer_family(&expected.data_type) && integer_family(&actual.data_type)
+}
+
 /// Compare the attributes of same-name children (columns/indexes/constraints
 /// present on BOTH sides of one table), pushing an [`AlteredObject`] per diverging
 /// field. Added/removed children are NOT this function's concern (they go to the
@@ -1780,18 +2285,29 @@ fn diff_attrs(
         act_t.comment.as_deref().unwrap_or(""),
     );
 
-    // Columns: data_type + nullable + recoverable text collation + catalog comment.
+    // Columns: physical type/nullability, identity/default generation, enforced
+    // value format, recoverable text collation, and catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+    let actual_dialect = introspected_table_dialect(act_t);
     for ec in &exp_t.columns {
         if let Some(ac) = act_cols.get(ec.name.as_str()) {
             let obj = format!("column {}", ec.name);
-            push(&obj, "data_type", &ec.data_type, &ac.data_type);
+            if !column_data_types_eq(ec, ac) {
+                push(&obj, "data_type", &ec.data_type, &ac.data_type);
+            }
             push(
                 &obj,
                 "nullable",
                 &ec.nullable.to_string(),
                 &ac.nullable.to_string(),
+            );
+            push(&obj, "identity", format_identity(ec), format_identity(ac));
+            push(
+                &obj,
+                "format",
+                &format_value_format(ec.value_format.as_ref()),
+                &format_value_format(ac.value_format.as_ref()),
             );
             push(
                 &obj,
@@ -1811,15 +2327,54 @@ fn diff_attrs(
                 ec.comment.as_deref().unwrap_or(""),
                 ac.comment.as_deref().unwrap_or(""),
             );
-            let expected_nextval = comparable_nextval_default(ec.default.as_deref());
-            let actual_nextval = comparable_nextval_default(ac.default.as_deref());
-            if expected_nextval.is_some() || actual_nextval.is_some() {
+            if let Some(expected_default) = ec.id_default.as_ref() {
+                let recover_against_expected = || {
+                    if actual_dialect == Some(SqlDialect::Mysql) && ac.mysql_text_storage.is_some()
+                    {
+                        return catalog_text_id_default(
+                            ac.default.as_deref(),
+                            SqlDialect::Mysql,
+                            ac.mysql_default_generated,
+                        );
+                    }
+                    catalog_id_default_for_expected(
+                        expected_default,
+                        ac.default.as_deref(),
+                        actual_dialect,
+                        ac.mysql_default_generated,
+                    )
+                };
+                let actual_default =
+                    if matches!(expected_default, IdDefaultSnapshot::UuidLiteral(_)) {
+                        // A typed UUID reference may intentionally omit its child
+                        // format CHECK, so the live side cannot always infer UUID
+                        // literal semantics independently. The expected UUID arm is
+                        // authoritative for canonicalizing its retained raw default.
+                        recover_against_expected()
+                    } else {
+                        ac.id_default
+                            .clone()
+                            .unwrap_or_else(recover_against_expected)
+                    };
                 push(
                     &obj,
                     "default",
-                    expected_nextval.as_deref().unwrap_or(""),
-                    actual_nextval.as_deref().unwrap_or(""),
+                    &format_id_default(Some(expected_default)),
+                    &format_id_default(Some(&actual_default)),
                 );
+            } else {
+                // Backward-compatible parsed-nextval seam for callers that
+                // construct snapshots directly without the newer semantic key.
+                let expected_nextval = comparable_nextval_default(ec.default.as_deref());
+                let actual_nextval = comparable_nextval_default(ac.default.as_deref());
+                if expected_nextval.is_some() || actual_nextval.is_some() {
+                    push(
+                        &obj,
+                        "default",
+                        expected_nextval.as_deref().unwrap_or(""),
+                        actual_nextval.as_deref().unwrap_or(""),
+                    );
+                }
             }
         }
     }
@@ -1893,12 +2448,14 @@ fn diff_attrs(
         }
     }
 
-    // Constraints: kind + byte-comparable definition bodies. EXCLUDE definitions
-    // are intentionally presence/kind-only: PG canonicalizes them differently from
-    // the authored IR render, and this engine cannot normalize them to a proven
-    // comparable form. The existence guard still fails closed for same-name
-    // unprovable constraints; structural drift must not false-positive after a
-    // clean apply + re-introspection.
+    // Constraints: kind + comparable canonical definitions. PostgreSQL FKs are
+    // structured catalog reconstructions; the other comparable kinds retain the
+    // authored/catalog body spelling. EXCLUDE definitions are intentionally
+    // presence/kind-only: PG canonicalizes them differently from the authored IR
+    // render, and this engine cannot normalize them to a proven comparable form.
+    // The existence guard still fails closed for same-name unprovable constraints;
+    // structural drift must not false-positive after a clean apply +
+    // re-introspection.
     let act_con: BTreeMap<&str, &ConstraintSnapshot> = act_t
         .constraints
         .iter()

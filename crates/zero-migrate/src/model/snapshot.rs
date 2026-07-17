@@ -4,12 +4,13 @@ use std::collections::BTreeMap;
 
 use crate::model::ir::{
     ColType, IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec,
-    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions, ValueFormat,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
 ///
-/// `default` is **DDL-emission metadata, not a drift-comparable attribute**: it
+/// `default` is **DDL-emission metadata, not a blanket drift-comparable
+/// attribute**: it
 /// carries the column `DEFAULT` clause the declarative author wants emitted at
 /// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
 /// `Eq` / `Hash` (see the manual impls below) because Postgres normalises a
@@ -19,10 +20,9 @@ use crate::model::ir::{
 /// is set once at create time). Tracking it in equality would make the differ
 /// emit a phantom op and break the lossless round-trip oracle.
 ///
-/// Introspection (`snapshot_schema`) leaves it `None` except for recovered
-/// PostgreSQL `nextval('<sequence>'::regclass)` defaults, which are compared by
-/// parsed sequence identity. All other drift comparison is on `data_type` +
-/// `nullable` only (see `diff_attrs`).
+/// ID-bearing defaults are projected into [`Self::id_default`] and compared
+/// semantically. Ordinary defaults remain excluded so harmless catalog
+/// normalization cannot create phantom drift.
 #[derive(Clone, Default)]
 pub struct ColumnSnapshot {
     /// Column name.
@@ -33,10 +33,10 @@ pub struct ColumnSnapshot {
     /// `true` if the column is nullable.
     pub nullable: bool,
     /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN (#4), e.g.
-    /// `'active'` or `'{}'::jsonb`. Emission-only; NOT drift-compared (see the
-    /// type-level note). `None` ⇒ no default emitted; live introspection only
-    /// populates recovered PostgreSQL `nextval('<sequence>'::regclass)`
-    /// defaults.
+    /// `'active'` or `'{}'::jsonb`. The raw SQL is emission/diagnostic metadata
+    /// and is NOT drift-compared (see the type-level note). `None` means no
+    /// default. Live introspection may retain a catalog-rendered expression;
+    /// only its narrow [`Self::id_default`] projection participates in drift.
     pub default: Option<String>,
     /// Dialect-rendered type spelling to use in DDL instead of deriving from
     /// `data_type`. This is emission-only for named type references: a Postgres
@@ -46,16 +46,50 @@ pub struct ColumnSnapshot {
     /// Column-level CHECK clauses to append at the use-site, e.g. the SQLite
     /// enum/domain inline forms. Each entry includes the `CHECK (...)` wrapper and
     /// is rendered only by the DDL emitter. Emission-only: live introspection tracks
-    /// table constraints, not this authoring metadata.
+    /// table constraints separately; only recognized ID format CHECKs project
+    /// into [`Self::value_format`].
     pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
     /// introspection does not carry this expression into the structural snapshot,
     /// so it is excluded from drift equality.
     pub generated: Option<GeneratedColumnSnapshot>,
-    /// A SQL identity column facet. Emission-only: drift tracks the physical
-    /// column and primary-key constraint, not the sequence metadata.
+    /// SQL identity / portable auto-increment facet. Desired snapshots use it
+    /// for emission and live introspection recovers it from PostgreSQL
+    /// `attidentity`, MySQL `AUTO_INCREMENT`, or SQLite's explicit
+    /// `AUTOINCREMENT` clause. It is drift-comparable.
     pub identity: Option<IdentityCol>,
+    /// Whether this SQLite column is the exact rowid alias shape
+    /// (`INTEGER PRIMARY KEY`, excluding `DESC` and `WITHOUT ROWID`).
+    ///
+    /// SQLite's ordinary rowid allocator and its stronger `AUTOINCREMENT`
+    /// contract are physically distinct even though only the latter corresponds
+    /// to [`Self::identity`]. Desired and live SQLite snapshots populate this
+    /// drift-comparable bit so a normal rowid primary key stays clean while an
+    /// out-of-band rowid/AUTOINCREMENT flip is visible.
+    pub sqlite_rowid: bool,
+    /// A locally enforced TypeID/ULID format CHECK recovered from the catalog.
+    ///
+    /// This is deliberately separate from [`Self::inline_checks`], which may
+    /// contain unrelated emission-only CHECKs. Typed reference columns that
+    /// inherit format safety through their foreign key leave this field `None`;
+    /// their reference constraint is the drift contract.
+    pub value_format: Option<ValueFormat>,
+    /// Semantic drift key for a default on an ID-bearing column.
+    ///
+    /// `None` means this is not an ID-default comparison surface. `Some(Absent)`
+    /// means it is ID-bearing and deliberately has no database default, which is
+    /// distinct from an untracked ordinary column.
+    pub id_default: Option<IdDefaultSnapshot>,
+    /// MySQL's authoritative distinction between an expression default
+    /// (`EXTRA` contains `DEFAULT_GENERATED`) and a scalar literal. MySQL strips
+    /// SQL quotes from `COLUMN_DEFAULT`, so the raw text alone cannot distinguish
+    /// a literal such as `"uuid()"` from the function call `uuid()`.
+    ///
+    /// Live MySQL snapshots retain this only for expected-driven ID-default
+    /// classification. It is introspection metadata, not an independently
+    /// drift-comparable portable facet, and is excluded from equality/hashing.
+    pub mysql_default_generated: Option<bool>,
     /// `Some(false)` means this logical text column is case-insensitive. It is a
     /// drift-comparable catalog attribute on engines where the intent is
     /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
@@ -136,16 +170,153 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         s.field("generated", &self.generated)
             .field("identity", &self.identity)
+            .field("sqlite_rowid", &self.sqlite_rowid)
+            .field("value_format", &self.value_format)
+            .field("id_default", &self.id_default)
             .field("case_sensitive", &self.case_sensitive)
             .field("collation", &self.collation);
         if self.mysql_text_storage.is_some() {
             s.field("mysql_text_storage", &self.mysql_text_storage);
+        }
+        if self.mysql_default_generated.is_some() {
+            s.field("mysql_default_generated", &self.mysql_default_generated);
         }
         s.field("encryption_sentinel", &self.encryption_sentinel)
             .field("comment_sentinel", &self.comment_sentinel)
             .field("comment", &self.comment)
             .finish()
     }
+}
+
+/// Drift-comparable default semantics for an ID-bearing column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IdDefaultSnapshot {
+    /// The column is ID-bearing and intentionally has no SQL default.
+    Absent,
+    /// The engine's exact database-side UUIDv4 generator.
+    UuidV4,
+    /// The engine's exact database-side UUIDv7 generator.
+    UuidV7,
+    /// A PostgreSQL `nextval` generator, stored in canonical rendered form so
+    /// schema and sequence identity remain part of the key.
+    Nextval(String),
+    /// A typed scalar literal, stored as a canonical semantic spelling (JSON
+    /// strings, bare booleans/numbers, and exact decimal text). Catalog-specific
+    /// SQL quoting, tagged int64 transport, and type casts are not part of the
+    /// comparison key.
+    Literal(String),
+    /// A scalar literal on PostgreSQL's native UUID surface. PostgreSQL
+    /// canonicalizes accepted UUID text to lowercase hyphenated spelling, so
+    /// this distinct semantic arm normalizes that representation without
+    /// weakening literal comparison on portable UUID/TypeID/ULID text columns.
+    UuidLiteral(String),
+    /// Another catalog expression on an ID-bearing column. The string is a
+    /// dialect-normalized expression fingerprint, not emission SQL.
+    Expression(String),
+}
+
+/// Normalize catalog SQL before narrow ID-literal parsing by ignoring casing,
+/// whitespace, outer grouping, and MySQL character-set introducers. Structured
+/// expression defaults use the semantics-preserving fingerprint in the render
+/// layer instead.
+#[must_use]
+pub(crate) fn canonical_id_default_expression(expression: &str) -> String {
+    fn balanced_outer_parens(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return false;
+        }
+        let mut depth = 0_i32;
+        let mut cursor = 0_usize;
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    if bytes.get(cursor + 1) == Some(&delimiter) {
+                        cursor += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                cursor += 1;
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' | b'`' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && cursor + 1 != bytes.len() {
+                        return false;
+                    }
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        depth == 0 && quote.is_none()
+    }
+
+    let mut value = expression.trim();
+    while balanced_outer_parens(value) {
+        value = value[1..value.len() - 1].trim();
+    }
+
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if byte == b'_' {
+            let start = cursor;
+            cursor += 1;
+            while bytes
+                .get(cursor)
+                .is_some_and(|candidate| candidate.is_ascii_alphanumeric() || *candidate == b'_')
+            {
+                cursor += 1;
+            }
+            if cursor > start + 1 && bytes.get(cursor) == Some(&b'\'') {
+                // MySQL deparsing may prefix string literals with `_latin1`,
+                // `_ascii`, `_utf8mb4`, or another connection charset. The
+                // literal bytes—not that catalog annotation—define the default.
+                continue;
+            }
+            out.push('_');
+            cursor = start + 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            let delimiter = byte;
+            out.push(char::from(byte));
+            cursor += 1;
+            while cursor < bytes.len() {
+                let current = bytes[cursor];
+                out.push(char::from(current));
+                cursor += 1;
+                if current == delimiter {
+                    if bytes.get(cursor) == Some(&delimiter) {
+                        out.push(char::from(delimiter));
+                        cursor += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(char::from(byte.to_ascii_lowercase()));
+        cursor += 1;
+    }
+    out
 }
 
 /// Exact PostgreSQL/SQLite catalog identity for a non-default column collation.
@@ -186,6 +357,10 @@ impl PartialEq for ColumnSnapshot {
         self.name == other.name
             && self.data_type == other.data_type
             && self.nullable == other.nullable
+            && self.identity == other.identity
+            && self.sqlite_rowid == other.sqlite_rowid
+            && self.value_format == other.value_format
+            && self.id_default == other.id_default
             && self.case_sensitive == other.case_sensitive
             && self.collation == other.collation
             && self.comment == other.comment
@@ -197,6 +372,17 @@ impl std::hash::Hash for ColumnSnapshot {
         self.name.hash(state);
         self.data_type.hash(state);
         self.nullable.hash(state);
+        self.identity.map(|identity| identity.always).hash(state);
+        self.sqlite_rowid.hash(state);
+        match &self.value_format {
+            None => 0_u8.hash(state),
+            Some(ValueFormat::TypeId { prefix }) => {
+                1_u8.hash(state);
+                prefix.hash(state);
+            }
+            Some(ValueFormat::Ulid) => 2_u8.hash(state),
+        }
+        self.id_default.hash(state);
         self.case_sensitive.hash(state);
         self.collation.hash(state);
         self.comment.hash(state);

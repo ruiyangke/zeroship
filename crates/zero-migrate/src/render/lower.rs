@@ -61,6 +61,7 @@ use crate::render::step::{
     AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep, SynchronizeIdentityStep,
 };
 use crate::render::value_format::{
+    authored_id_default, authored_text_id_default, authored_uuid_id_default,
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
 use crate::schema::query::SqlDialect;
@@ -4018,6 +4019,7 @@ impl IrAuthor {
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 self.apply_uuid_metadata(columns, &mut snap)?;
                 self.apply_value_format_metadata(columns, &mut snap)?;
+                self.apply_id_default_metadata(columns, &mut snap)?;
                 // keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
                 // injects `<col>_masked` from the descriptor's `mask` facet (including
@@ -4162,6 +4164,7 @@ impl IrAuthor {
                 )?;
                 self.apply_uuid_column_metadata(&source_col, &mut col)?;
                 self.apply_value_format_column_metadata(&source_col, &mut col)?;
+                self.apply_id_default_column_metadata(&source_col, &mut col);
                 // addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
                 // **F1** — the decider compares the canonical SQLite affinity (consistent
@@ -6499,6 +6502,12 @@ impl IrAuthor {
         if !matches!(source.ty, ColType::Uuid) {
             return Ok(());
         }
+        col.id_default = Some(authored_uuid_id_default(
+            source.default.as_ref(),
+            col.default.as_deref(),
+            self.dialect,
+            Some(&self.project_schema),
+        ));
         let Some(metadata) =
             uuid_column_metadata(&source.name, self.dialect).map_err(DeclarativeError::Invalid)?
         else {
@@ -6510,6 +6519,31 @@ impl IrAuthor {
             col.inline_checks.push(metadata.inline_check);
         }
         Ok(())
+    }
+
+    fn apply_id_default_metadata(
+        &self,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        for source in columns {
+            let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
+                return Err(IrLowerError::UnsupportedOp("ID-default column folded away"));
+            };
+            self.apply_id_default_column_metadata(source, col);
+        }
+        Ok(())
+    }
+
+    fn apply_id_default_column_metadata(&self, source: &IrColumn, col: &mut ColumnSnapshot) {
+        if source.identity.is_some() || matches!(source.default, Some(IrDefault::Nextval { .. })) {
+            col.id_default = Some(authored_id_default(
+                source.default.as_ref(),
+                col.default.as_deref(),
+                self.dialect,
+                Some(&self.project_schema),
+            ));
+        }
     }
 
     fn apply_value_format_column_metadata(
@@ -6524,7 +6558,14 @@ impl IrAuthor {
             .map_err(DeclarativeError::Invalid)?;
         col.collation = metadata.collation;
         col.ddl_type_override = Some(metadata.ddl_type);
+        col.id_default = Some(authored_text_id_default(
+            source.default.as_ref(),
+            col.default.as_deref(),
+            self.dialect,
+            Some(&self.project_schema),
+        ));
         if source.references.is_none() {
+            col.value_format = Some(value_format.clone());
             col.inline_checks.push(metadata.inline_check);
         }
         Ok(())

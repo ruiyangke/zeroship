@@ -5,11 +5,16 @@ use std::collections::BTreeMap;
 use crate::apply::drift::DriftError;
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
-use crate::model::ir::IndexSortOrder;
+use crate::model::ir::{IdentityCol, IndexSortOrder};
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
     MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::render::value_format::{
+    catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
+    RecoveredFormatCheck,
+};
+use crate::schema::query::SqlDialect;
 
 #[derive(Debug)]
 struct IndexParts {
@@ -39,6 +44,30 @@ fn mysql_fk_action(rule: &str) -> Result<&'static str, DriftError> {
         other => Err(DriftError::Snapshot(format!(
             "MySQL catalog returned an unrecognized foreign-key action {other:?}"
         ))),
+    }
+}
+
+fn has_auto_increment(extra: &str) -> bool {
+    extra
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("auto_increment"))
+}
+
+fn has_default_generated(extra: &str) -> bool {
+    extra
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("default_generated"))
+}
+
+fn recover_mysql_id_default(
+    default: Option<&str>,
+    expression_default: bool,
+    uuid_surface: bool,
+) -> IdDefaultSnapshot {
+    if uuid_surface {
+        catalog_uuid_id_default(default, SqlDialect::Mysql, Some(expression_default))
+    } else {
+        catalog_id_default(default, SqlDialect::Mysql, Some(expression_default))
     }
 }
 
@@ -99,6 +128,19 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
     cfg: &ExecutorConfig,
 ) -> Result<SchemaSnapshot, DriftError> {
     let schema = cfg.project_schema.as_str();
+    let version_rows = conn
+        .query("SELECT VERSION() AS server_version", &[])
+        .await?;
+    let server_version: String = version_rows
+        .first()
+        .ok_or_else(|| {
+            DriftError::Snapshot("MySQL VERSION() returned no rows during drift snapshot".into())
+        })?
+        .try_get("server_version")?;
+    let server_version = super::parse_mysql_version(&server_version)
+        .map_err(|detail| DriftError::Snapshot(format!("MySQL drift snapshot: {detail}")))?;
+    let supports_check_constraints = server_version >= [8, 0, 16];
+
     let table_rows = conn
         .query(
             "SELECT TABLE_NAME AS table_name
@@ -133,6 +175,8 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
                     CHARACTER_SET_NAME AS character_set_name,
                     COLLATION_NAME AS collation_name,
                     IS_NULLABLE AS is_nullable,
+                    COLUMN_DEFAULT AS column_default,
+                    EXTRA AS extra,
                     ORDINAL_POSITION AS ordinal_position
                FROM information_schema.COLUMNS
               WHERE TABLE_SCHEMA = ?
@@ -140,6 +184,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             &[schema.into()],
         )
         .await?;
+    let mut default_generated = BTreeMap::<(String, String), bool>::new();
     for row in column_rows {
         let table_name: String = row.try_get("table_name")?;
         let Some(table) = tables.get_mut(&table_name) else {
@@ -151,15 +196,30 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
         let mysql_text_storage =
             mysql_text_storage(character_set.as_deref(), collation.as_deref())?;
         let nullable: String = row.try_get("is_nullable")?;
+        let default: Option<String> = row.try_get("column_default")?;
+        let extra: String = row.try_get("extra")?;
+        let column_name: String = row.try_get("column_name")?;
+        default_generated.insert(
+            (table_name.clone(), column_name.clone()),
+            has_default_generated(&extra),
+        );
+        let identity = has_auto_increment(&extra).then_some(IdentityCol { always: false });
+        let mysql_default_generated = default.as_ref().map(|_| has_default_generated(&extra));
         table.columns.push(ColumnSnapshot {
-            name: row.try_get("column_name")?,
+            name: column_name,
             data_type: crate::schema::query::mysql_canonical_type(&raw_type),
             nullable: nullable.eq_ignore_ascii_case("YES"),
-            default: None,
+            default: default.clone(),
             ddl_type_override: None,
             inline_checks: Vec::new(),
             generated: None,
-            identity: None,
+            identity,
+            sqlite_rowid: false,
+            value_format: None,
+            id_default: identity.map(|_| {
+                recover_mysql_id_default(default.as_deref(), has_default_generated(&extra), false)
+            }),
+            mysql_default_generated,
             case_sensitive: case_sensitive_from_collation(collation.as_deref())?,
             collation: None,
             mysql_text_storage,
@@ -167,6 +227,82 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             comment_sentinel: None,
             comment: None,
         });
+    }
+
+    if supports_check_constraints {
+        let check_rows = conn
+            .query(
+                "SELECT tc.TABLE_NAME AS table_name,
+                        tc.CONSTRAINT_NAME AS constraint_name,
+                        tc.ENFORCED AS enforced,
+                        cc.CHECK_CLAUSE AS check_clause
+                   FROM information_schema.TABLE_CONSTRAINTS tc
+                   JOIN information_schema.CHECK_CONSTRAINTS cc
+                     ON cc.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+                    AND cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+                    AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+                  WHERE tc.CONSTRAINT_SCHEMA = ?
+                    AND tc.CONSTRAINT_TYPE = 'CHECK'
+                  ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_NAME",
+                &[schema.into()],
+            )
+            .await?;
+        for row in check_rows {
+            let table_name: String = row.try_get("table_name")?;
+            let constraint_name: String = row.try_get("constraint_name")?;
+            let enforced: String = row.try_get("enforced")?;
+            if !enforced.eq_ignore_ascii_case("YES") {
+                continue;
+            }
+            let check_clause: String = row.try_get("check_clause")?;
+            let Some(table) = tables.get_mut(&table_name) else {
+                return Err(DriftError::Snapshot(format!(
+                    "MySQL catalog returned CHECK metadata for unknown table {table_name:?}"
+                )));
+            };
+
+            let recovered = table
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(index, column)| {
+                    recover_format_check(&column.name, &check_clause, SqlDialect::Mysql)
+                        .map(|format| (index, format))
+                })
+                .collect::<Vec<_>>();
+            if recovered.len() > 1 {
+                return Err(DriftError::Snapshot(format!(
+                    "MySQL catalog CHECK {table_name}.{constraint_name} ambiguously matches multiple ID-format columns"
+                )));
+            }
+            let Some((column_index, recovered)) = recovered.into_iter().next() else {
+                continue;
+            };
+            let column = &mut table.columns[column_index];
+            if column.value_format.is_some() || column.id_default.is_some() {
+                return Err(DriftError::Snapshot(format!(
+                    "MySQL catalog returned multiple ID-format CHECKs for {table_name}.{}",
+                    column.name
+                )));
+            }
+            let expression_default = default_generated
+                .get(&(table_name.clone(), column.name.clone()))
+                .copied()
+                .unwrap_or(false);
+            column.id_default = Some(match &recovered {
+                RecoveredFormatCheck::Uuid => {
+                    recover_mysql_id_default(column.default.as_deref(), expression_default, true)
+                }
+                RecoveredFormatCheck::Value(_) => catalog_text_id_default(
+                    column.default.as_deref(),
+                    SqlDialect::Mysql,
+                    Some(expression_default),
+                ),
+            });
+            if let RecoveredFormatCheck::Value(format) = recovered {
+                column.value_format = Some(format);
+            }
+        }
     }
 
     let index_rows = conn
@@ -424,11 +560,38 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             false,
             crate::schema::query::SqlDialect::Mysql,
         );
-        tables
+        let table = tables
             .get_mut(&table_name)
-            .expect("the immutable table lookup above proved this table exists")
-            .constraints
-            .push(constraint);
+            .expect("the immutable table lookup above proved this table exists");
+        // A typed reference deliberately has no child format CHECK, so the FK is
+        // the live evidence that its local column belongs to the ID-default
+        // comparison surface. Promote its default-bearing local columns while
+        // preserving MySQL's authoritative DEFAULT_GENERATED distinction: without
+        // it, a literal string equal to the generator SQL could masquerade as the
+        // expression.
+        for column_name in &parts.columns {
+            let column = table
+                .columns
+                .iter_mut()
+                .find(|column| column.name == *column_name)
+                .expect("the local-column validation above proved this column exists");
+            if column.id_default.is_none() && column.default.is_some() {
+                let expression_default = default_generated
+                    .get(&(table_name.clone(), column.name.clone()))
+                    .copied()
+                    .unwrap_or(false);
+                column.id_default = Some(if column.mysql_text_storage.is_some() {
+                    catalog_text_id_default(
+                        column.default.as_deref(),
+                        SqlDialect::Mysql,
+                        Some(expression_default),
+                    )
+                } else {
+                    recover_mysql_id_default(column.default.as_deref(), expression_default, false)
+                });
+            }
+        }
+        table.constraints.push(constraint);
     }
     for table in tables.values_mut() {
         table
@@ -450,7 +613,11 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
 
 #[cfg(test)]
 mod tests {
-    use super::{case_sensitive_from_collation, mysql_text_storage};
+    use super::{
+        case_sensitive_from_collation, has_auto_increment, mysql_text_storage,
+        recover_mysql_id_default,
+    };
+    use crate::model::snapshot::IdDefaultSnapshot;
 
     #[test]
     fn mysql_collations_normalize_to_portable_case_sensitive_intent() {
@@ -480,5 +647,33 @@ mod tests {
         assert!(mysql_text_storage(Some("ascii"), None).is_err());
         assert!(mysql_text_storage(None, Some("ascii_bin")).is_err());
         assert_eq!(mysql_text_storage(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn mysql_generation_metadata_recovers_auto_increment_and_deparsed_uuid_v4() {
+        assert!(has_auto_increment("DEFAULT_GENERATED auto_increment"));
+        assert!(!has_auto_increment("DEFAULT_GENERATED"));
+
+        // MySQL 8.4's information_schema spelling adds grouping parentheses
+        // and character-set introducers to the authored renderer expression.
+        let catalog = "lower(concat(hex(random_bytes(4)),_latin1'-',hex(random_bytes(2)),_latin1'-',hex(((ord(random_bytes(1)) & 15) | 64)),hex(random_bytes(1)),_latin1'-',hex(((ord(random_bytes(1)) & 63) | 128)),hex(random_bytes(1)),_latin1'-',hex(random_bytes(6))))";
+        assert_eq!(
+            recover_mysql_id_default(Some(catalog), true, true),
+            IdDefaultSnapshot::UuidV4
+        );
+        assert_eq!(
+            recover_mysql_id_default(Some("uuid()"), true, true),
+            IdDefaultSnapshot::Expression(
+                crate::render::value_format::catalog_expression_fingerprint("uuid()"),
+            )
+        );
+        assert_eq!(
+            recover_mysql_id_default(Some("uuid()"), false, true),
+            IdDefaultSnapshot::Literal("\"uuid()\"".to_string())
+        );
+        assert_eq!(
+            recover_mysql_id_default(None, false, true),
+            IdDefaultSnapshot::Absent
+        );
     }
 }

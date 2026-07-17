@@ -39,11 +39,15 @@
 use std::collections::BTreeMap;
 
 use crate::apply::drift::DriftError;
-use crate::model::ir::IndexSortOrder;
+use crate::model::ir::{IdentityCol, IndexSortOrder};
 use crate::model::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot,
     IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
+use crate::render::value_format::{
+    catalog_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
+};
+use crate::schema::query::SqlDialect;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -344,6 +348,29 @@ async fn introspect_columns(
         .query(&format!("PRAGMA main.table_info({})", lit(table)))
         .await
         .map_err(drift_err)?;
+    // A sole exact `INTEGER PRIMARY KEY` is a rowid alias unless SQLite also
+    // materialized a real primary-key index. The latter distinguishes both
+    // WITHOUT ROWID tables and the historical inline `PRIMARY KEY DESC` form.
+    let primary_key_has_separate_index = actor
+        .query(&format!("PRAGMA main.index_list({})", lit(table)))
+        .await
+        .map_err(drift_err)?
+        .iter()
+        .any(|row| {
+            row.get(3)
+                .and_then(Clone::clone)
+                .is_some_and(|origin| origin.eq_ignore_ascii_case("pk"))
+        });
+
+    let primary_members = rows
+        .iter()
+        .filter_map(|row| {
+            let ordinal = sqlite_integer_cell(row, 5);
+            (ordinal > 0).then_some(ordinal)
+        })
+        .count();
+    let without_rowid =
+        crate::render::declarative::sqlite_create_is_without_rowid(stored_create_sql);
     let Some(t) = tables.get_mut(table) else {
         return Ok(());
     };
@@ -357,11 +384,8 @@ async fn introspect_columns(
         let name = cell(r, 1)?;
         let raw_type = r.get(2).and_then(Clone::clone).unwrap_or_default();
         let notnull = r.get(3).and_then(Clone::clone).unwrap_or_default();
-        let pk_ord: i64 = r
-            .get(5)
-            .and_then(Clone::clone)
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
+        let raw_default = r.get(4).and_then(Clone::clone);
+        let pk_ord = sqlite_integer_cell(r, 5);
         if pk_ord > 0 {
             pk_members.push((pk_ord, name.clone()));
         }
@@ -380,6 +404,41 @@ async fn introspect_columns(
         // NULL so the introspected nullability agrees with the dialect-agnostic model
         // (and with the PG snapshot).
         let nullable = notnull.trim() != "1" && pk_ord == 0;
+        let sqlite_rowid = primary_members == 1
+            && pk_ord == 1
+            && raw_type.trim().eq_ignore_ascii_case("INTEGER")
+            && !without_rowid
+            && !primary_key_has_separate_index;
+        let identity = (sqlite_rowid && column_declares_autoincrement(stored_create_sql, &name))
+            .then_some(IdentityCol { always: false });
+        let recovered_checks = recover_column_format_checks(stored_create_sql, &name);
+        if recovered_checks.mixed_uuid_and_value_format {
+            return Err(DriftError::Snapshot(format!(
+                "SQLite stored CREATE returned mixed UUID and TypeID/ULID format CHECKs for {table}.{name}"
+            )));
+        }
+        let value_format = recovered_checks.value_format;
+        let has_uuid_format_check = recovered_checks.uuid;
+        let catalog_default = if has_uuid_format_check {
+            catalog_uuid_id_default(raw_default.as_deref(), SqlDialect::Sqlite, None)
+        } else {
+            catalog_id_default(raw_default.as_deref(), SqlDialect::Sqlite, None)
+        };
+        let is_uuid_v4_default = matches!(
+            catalog_default,
+            crate::model::snapshot::IdDefaultSnapshot::UuidV4
+        );
+        // Defaults remain emission-only in `default`, but ID-bearing defaults
+        // have a narrow semantic drift key. Recognize the exact engine UUIDv4
+        // expression even when its CHECK was dropped so an out-of-band generator
+        // addition/removal is still visible. An unknown default is compared only
+        // when another catalog facet proves that the column carries an ID contract.
+        let tracks_id_default = is_uuid_v4_default
+            || identity.is_some()
+            || sqlite_rowid
+            || has_uuid_format_check
+            || value_format.is_some();
+        let id_default = tracks_id_default.then_some(catalog_default);
         t.columns.push(ColumnSnapshot {
             name: name.clone(),
             // Normalise the declared type to a lowercase spelling so it is a stable
@@ -390,9 +449,19 @@ async fn introspect_columns(
             // Emission-only on the PG path; the same here. We DO recover the inline
             // mask/encryption sentinel into `comment_sentinel` so an encrypted
             // / masked column round-trips faithfully rather than dropping silently.
-            default: None,
+            // Retain the raw catalog spelling for expected-driven ID-default
+            // comparison. Typed references intentionally have no local format
+            // CHECK, so live introspection cannot independently mark their
+            // default as ID-bearing; `diff_snapshots` classifies this raw value
+            // against the authored semantic key instead. Ordinary defaults are
+            // still excluded from column equality and remain emission-only.
+            default: raw_default,
             generated: None,
-            identity: None,
+            identity,
+            sqlite_rowid,
+            value_format,
+            id_default,
+            mysql_default_generated: None,
             encryption_sentinel: None,
             ddl_type_override: None,
             inline_checks: Vec::new(),
@@ -1327,6 +1396,164 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
     None
 }
 
+#[derive(Default)]
+struct RecoveredColumnFormatChecks {
+    uuid: bool,
+    value_format: Option<crate::model::ir::ValueFormat>,
+    mixed_uuid_and_value_format: bool,
+}
+
+/// Recover only engine-owned, column-local format checks. SQLite stores both
+/// inline and table-level CHECKs in the CREATE statement, so scan every
+/// unquoted CHECK and let the exact shared contract matcher attribute it to the
+/// requested column. The shared recovery
+/// routine validates the complete CHECK against the authoritative dialect
+/// contract, so unrelated user checks and partially edited format checks stay
+/// out of the semantic snapshot.
+fn recover_column_format_checks(create_sql: &str, column: &str) -> RecoveredColumnFormatChecks {
+    let mut uuid_count = 0_usize;
+    let mut value_formats = Vec::new();
+    for (start, end) in keyword_spans(create_sql, "CHECK", false) {
+        let Some(open) = find_char_outside_quotes(create_sql, '(', end) else {
+            continue;
+        };
+        let Some(close) = find_matching_paren(create_sql, open) else {
+            continue;
+        };
+        match recover_format_check(column, &create_sql[start..=close], SqlDialect::Sqlite) {
+            Some(RecoveredFormatCheck::Uuid) => uuid_count += 1,
+            Some(RecoveredFormatCheck::Value(format)) => value_formats.push(format),
+            None => {}
+        }
+    }
+
+    // Duplicate engine contracts are themselves a structural alteration. Keep
+    // recovery fail-closed so a duplicate cannot masquerade as the one expected
+    // format check merely because both clauses happen to be identical.
+    let mixed_uuid_and_value_format = uuid_count > 0 && !value_formats.is_empty();
+    RecoveredColumnFormatChecks {
+        uuid: uuid_count == 1,
+        value_format: (value_formats.len() == 1).then(|| value_formats.remove(0)),
+        mixed_uuid_and_value_format,
+    }
+}
+
+fn column_declares_autoincrement(create_sql: &str, column: &str) -> bool {
+    sqlite_column_clause(create_sql, column)
+        .is_some_and(|clause| !keyword_spans(clause, "AUTOINCREMENT", true).is_empty())
+}
+
+fn sqlite_integer_cell(row: &[Option<String>], index: usize) -> i64 {
+    row.get(index)
+        .and_then(Clone::clone)
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_default()
+}
+
+/// Locate unquoted SQL keywords while preserving byte spans into the original
+/// clause. `top_level_only` is used for column facets such as AUTOINCREMENT;
+/// full CREATE-statement CHECK recovery accepts either inline or table-level
+/// placement. This deliberately does not use the general DDL tokenizer: quoted
+/// identifiers and string literals are valid tokenizer words, but neither may
+/// declare structural metadata.
+fn keyword_spans(sql: &str, keyword: &str, top_level_only: bool) -> Vec<(usize, usize)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Plain,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    fn word_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Plain;
+    let mut depth = 0_usize;
+    let mut spans = Vec::new();
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor + 1).copied();
+        match state {
+            State::Plain => match (byte, next) {
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'\'', _) => state = State::Single,
+                (b'"', _) => state = State::Double,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (b'(', _) => depth += 1,
+                (b')', _) => depth = depth.saturating_sub(1),
+                _ if byte.is_ascii_alphabetic() || byte == b'_' => {
+                    let start = cursor;
+                    cursor += 1;
+                    while bytes.get(cursor).is_some_and(|byte| word_byte(*byte)) {
+                        cursor += 1;
+                    }
+                    if (!top_level_only || depth == 0)
+                        && sql[start..cursor].eq_ignore_ascii_case(keyword)
+                    {
+                        spans.push((start, cursor));
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+            State::Single if byte == b'\'' => {
+                if next == Some(b'\'') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Plain;
+            }
+            State::Double if byte == b'"' => {
+                if next == Some(b'"') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Plain;
+            }
+            State::Backtick if byte == b'`' => {
+                if next == Some(b'`') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Plain;
+            }
+            State::Bracket if byte == b']' => {
+                if next == Some(b']') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Plain;
+            }
+            State::LineComment if matches!(byte, b'\n' | b'\r') => state = State::Plain,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Plain;
+                cursor += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    spans
+}
+
 /// Extract a required text cell, erroring on NULL / missing.
 fn cell(row: &[Option<String>], i: usize) -> Result<String, DriftError> {
     row.get(i)
@@ -1556,6 +1783,27 @@ mod tests {
             actual,
             "FOREIGN KEY (tenant, \"order\") REFERENCES \"Parent\"(tenant, parent_id) \
              ON UPDATE SET NULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+        );
+    }
+
+    #[test]
+    fn recovers_an_exact_table_level_value_format_check() {
+        let check = crate::render::value_format::column_metadata(
+            "id",
+            &crate::model::ir::ValueFormat::TypeId {
+                prefix: "account".to_string(),
+            },
+            SqlDialect::Sqlite,
+        )
+        .expect("TypeID metadata")
+        .inline_check;
+        let create_sql = format!("CREATE TABLE ids (id TEXT PRIMARY KEY, {check})");
+        let recovered = recover_column_format_checks(&create_sql, "id");
+        assert_eq!(
+            recovered.value_format,
+            Some(crate::model::ir::ValueFormat::TypeId {
+                prefix: "account".to_string()
+            })
         );
     }
 }
