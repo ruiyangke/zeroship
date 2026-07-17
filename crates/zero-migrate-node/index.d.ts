@@ -442,7 +442,7 @@ export interface PlanStatusStepDto {
   version: string
   /** Human-readable operation label. */
   name: string
-  /** `ddl | dml | backfill | onlineExpand | onlineContract | sqliteRebuild`. */
+  /** `ddl | dml | backfill | synchronizeIdentity | onlineExpand | onlineContract | sqliteRebuild`. */
   kind: string
   /** `pending | inflight | applied | drifted`. */
   state: string
@@ -450,6 +450,8 @@ export interface PlanStatusStepDto {
   cursorStabilityMode?: string
   /** The explicitly approved invariant name for `externalInvariant`. */
   cursorStabilityInvariant?: string
+  /** The named assertion that concurrent identity allocation is quiesced. */
+  writesQuiesced?: string
 }
 
 /** Complete or abort one outstanding PostgreSQL online column rename. */

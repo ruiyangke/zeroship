@@ -1186,6 +1186,14 @@ export interface ColumnRef {
   setDefault(value: DefaultValue | DefaultExprFn | ExprChain | Expr, args?: { schema?: string }): TableHandle;
   dropDefault(args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+  /** Reconcile this imported integer identity's associated generator without
+   *  moving an already-ahead generator backward. `writesQuiesced` names the
+   *  operator-asserted window or invariant that prevents concurrent allocation;
+   *  the engine records and surfaces this assertion but cannot prove it. */
+  synchronizeIdentity(args: {
+    schema?: string;
+    writesQuiesced: string;
+  }): TableHandle;
 }
 
 /** The `.foreignKey(name)` selector sub-handle. */

@@ -54,14 +54,16 @@ use crate::schema::query::SqlDialect;
 /// no-fabrication tests assert on. If you change this, change the tests.
 pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 
-/// MySQL string literals are authored for standard quote-doubling. A copied
-/// preview must therefore execute under `NO_BACKSLASH_ESCAPES`, just like apply.
-/// Save and restore the exact inherited mode so preview execution does not leak a
-/// session-policy change into the caller's connection.
+/// MySQL string literals are authored for standard quote-doubling, and an
+/// explicit legacy zero identity must never become an implicit allocation. A
+/// copied preview therefore executes under `NO_BACKSLASH_ESCAPES` and
+/// `NO_AUTO_VALUE_ON_ZERO`, just like apply. Save and restore the exact inherited
+/// mode so preview execution does not leak a session-policy change into the
+/// caller's connection.
 const MYSQL_PREVIEW_SAVE_SQL_MODE: &str =
     "SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;";
 const MYSQL_PREVIEW_PIN_SQL_MODE: &str =
-    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES');";
+    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');";
 const MYSQL_PREVIEW_RESTORE_SQL_MODE: &str =
     "SET SESSION sql_mode = @__zero_migrate_preview_saved_sql_mode;";
 
@@ -481,6 +483,7 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
             )));
         }
         PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
+        PlanStep::SynchronizeIdentity(step) => render_synchronize_identity(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename(op, rename, out),
     }
 }
@@ -521,6 +524,7 @@ fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
             )));
         }
         PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
+        PlanStep::SynchronizeIdentity(step) => render_synchronize_identity(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename_no_op(rename, out),
     }
 }
@@ -567,6 +571,16 @@ fn render_alter_primary_key(
     out.push(Rendered::label(format!(
         "{RUNTIME_RESOLVED} primary-key {action} {:?}.{:?} ({authored}): exact current-key, candidate-unique, identity, and inbound-foreign-key prerequisites are catalog-validated under the apply lock; target-specific SQL is generated only after validation",
         step.schema, step.table,
+    )));
+}
+
+fn render_synchronize_identity(
+    step: &crate::render::step::SynchronizeIdentityStep,
+    out: &mut Vec<Rendered>,
+) {
+    out.push(Rendered::label(format!(
+        "{RUNTIME_RESOLVED} SYNCHRONIZE IDENTITY {:?}.{:?}.{:?}; WRITES QUIESCED ASSERTION {:?}: the engine cannot prove writer quiescence; apply validates the live identity generator and advances it only when behind, never backward",
+        step.schema, step.table, step.column, step.writes_quiesced,
     )));
 }
 
@@ -705,6 +719,7 @@ fn op_subject(op: &Op) -> String {
             )
         }
         Op::AlterPrimaryKey { table, .. } => quote_dotted(&[table]),
+        Op::SynchronizeIdentity { table, column, .. } => quote_dotted(&[table, column]),
         Op::RenameTable { table, to, .. } => {
             format!("{} → {}", quote_dotted(&[table]), quote_dotted(&[to]))
         }

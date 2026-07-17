@@ -325,6 +325,7 @@ pub use render::plan::{
 };
 pub use render::step::{
     tables_touched_by, AlterPrimaryKeyStep, BindValue, DialectScope, PlanStep, RenameStep,
+    SynchronizeIdentityStep,
 };
 // The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already

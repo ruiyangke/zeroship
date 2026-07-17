@@ -112,11 +112,13 @@ fn render_mode(
     use crate::model::support::{Dialect, RenderMode};
     let sqlite_live = matches!(dialect, Dialect::Sqlite);
     match op {
-        // Backfill, column-rename, and primary-key lifecycle are live-rendered
+        // Backfill, column-rename, primary-key lifecycle, and identity
+        // synchronization are live-rendered
         // on every supported dialect (they need the resolved live schema).
-        Op::Backfill { .. } | Op::RenameColumn { .. } | Op::AlterPrimaryKey { .. } => {
-            RenderMode::LiveResolved
-        }
+        Op::Backfill { .. }
+        | Op::RenameColumn { .. }
+        | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. } => RenderMode::LiveResolved,
         // The wrapper itself is expanded before per-op lower; the selected
         // inner ops report their own render modes.
         Op::Dialectal { .. } => RenderMode::Offline,
@@ -212,6 +214,7 @@ fn unsupported_reason(
                 _ => "renameColumn is render-only for MySQL, not live-rendered",
             },
             Op::AlterPrimaryKey { .. } => NEVER_REFUSED,
+            Op::SynchronizeIdentity { .. } => NEVER_REFUSED,
             Op::AddConstraint { .. } => match variant {
                 "check" => {
                     "addConstraint(check) expression rendering is PostgreSQL-only in the current engine"
@@ -509,6 +512,7 @@ fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
             },
         ),
         Op::AlterPrimaryKey { .. } => ("alterPrimaryKey", "base"),
+        Op::SynchronizeIdentity { .. } => ("synchronizeIdentity", "base"),
         Op::SetTableOptions { .. } => ("setTableOptions", "base"),
         Op::AddConstraint { constraint, .. } => {
             ("addConstraint", add_constraint_variant(&constraint.kind))
@@ -805,6 +809,7 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
         | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. }
         | Op::AddConstraint { .. }
         | Op::DropConstraint { .. }
         | Op::ValidateConstraint { .. }

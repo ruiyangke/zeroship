@@ -1507,6 +1507,22 @@ pub fn fold_ops_onto(
                 let snap = table_mut(&mut tables, table)?;
                 apply_fold_alter_primary_key(table, snap, action, dialect)?;
             }
+            Op::SynchronizeIdentity { table, column, .. } => {
+                let snap = table_mut(&mut tables, table)?;
+                if !snap
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                {
+                    return Err(FoldError::MissingColumn {
+                        table: table.clone(),
+                        column: column.clone(),
+                    });
+                }
+                // Generator state is runtime data, not structural schema state.
+                // The fold validates the target and otherwise leaves the snapshot
+                // byte-for-byte unchanged.
+            }
             Op::AddConstraint {
                 table, constraint, ..
             } => {
@@ -4040,6 +4056,39 @@ mod tests {
             .find(|column| column.name == "body")
             .expect("renamed column is projected");
         assert_eq!(body.default.as_deref(), Some("'{}'::jsonb"));
+    }
+
+    #[test]
+    fn synchronize_identity_fold_validates_target_without_changing_schema() {
+        let create_op = create("orders", vec![col("description", ColType::Text, true)]);
+        let base = fold(std::slice::from_ref(&create_op)).expect("base schema folds");
+        let synchronize = Op::SynchronizeIdentity {
+            table: "orders".to_string(),
+            column: "id".to_string(),
+            writes_quiesced: "orders_import_window".to_string(),
+            schema: None,
+        };
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let projected =
+                fold_ops_onto(&base, std::slice::from_ref(&synchronize), dialect, SCHEMA)
+                    .expect("synchronization target validates");
+            assert_eq!(
+                projected, base,
+                "generator state must not become structural drift state"
+            );
+        }
+
+        let missing = Op::SynchronizeIdentity {
+            table: "orders".to_string(),
+            column: "missing_id".to_string(),
+            writes_quiesced: "orders_import_window".to_string(),
+            schema: None,
+        };
+        assert!(matches!(
+            fold_ops_onto(&base, &[missing], SqlDialect::Postgres, SCHEMA),
+            Err(FoldError::MissingColumn { .. })
+        ));
     }
 
     #[test]

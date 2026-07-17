@@ -74,7 +74,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::{AlterPrimaryKeyStep, BindValue};
+use crate::render::step::{AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep};
 use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
@@ -532,6 +532,20 @@ pub trait MigrationBackend {
     ) -> Result<bool, ApplyError> {
         Err(ApplyError::Backend(
             "this backend does not implement explicit primary-key lifecycle operations".to_string(),
+        ))
+    }
+
+    /// Reconcile one imported integer identity column's live generator while
+    /// the project migration lock is held. Implementations validate the exact
+    /// target-specific generator association and journal the monotonic action.
+    async fn synchronize_identity(
+        &self,
+        _cfg: &ExecutorConfig,
+        _step: &SynchronizeIdentityStep,
+        _applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        Err(ApplyError::Backend(
+            "this backend does not implement identity synchronization".to_string(),
         ))
     }
 

@@ -193,6 +193,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropColumnDefault { table, .. }
         | Op::RenameColumn { table, .. }
         | Op::AlterPrimaryKey { table, .. }
+        | Op::SynchronizeIdentity { table, .. }
         | Op::AddConstraint { table, .. }
         | Op::DropConstraint { table, .. }
         | Op::ValidateConstraint { table, .. }
@@ -472,6 +473,25 @@ mod tests {
         }
     }
 
+    fn synchronize_identity_ir() -> MigrationIr {
+        MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "synchronize imported orders".to_string(),
+            owner_app: "untrusted-wire-hint".to_string(),
+            ops: vec![Op::SynchronizeIdentity {
+                table: "orders".to_string(),
+                column: "id".to_string(),
+                writes_quiesced: "orders_import_window".to_string(),
+                schema: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
     #[test]
     fn alter_primary_key_participates_in_table_ownership_gate() {
         let ir = alter_primary_key_ir();
@@ -489,5 +509,17 @@ mod tests {
                 deploying_app: "other-app".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn synchronize_identity_participates_in_table_ownership_gate() {
+        let ir = synchronize_identity_ir();
+        let owned = BTreeMap::from([("orders".to_string(), "orders-app".to_string())]);
+        enforce_ir_ownership(&ir, "orders-app", &owned)
+            .expect("the owning app may synchronize its identity generator");
+
+        let error = enforce_ir_ownership(&ir, "other-app", &owned)
+            .expect_err("a different app must not synchronize the generator");
+        assert!(error.to_string().contains("orders"), "{error}");
     }
 }

@@ -569,6 +569,7 @@ export type Op =
   | { op: "dropColumnDefault"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "alterPrimaryKey"; table: string; action: AlterPrimaryKeyAction; schema?: string | null }
+  | { op: "synchronizeIdentity"; table: string; column: string; writesQuiesced: string; schema?: string | null }
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }

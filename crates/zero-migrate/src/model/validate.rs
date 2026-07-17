@@ -3879,6 +3879,27 @@ pub fn validate_op_scoped(
                 ),
             })
         }
+        Op::SynchronizeIdentity {
+            writes_quiesced, ..
+        } => {
+            if writes_quiesced.trim().is_empty() {
+                Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_location.map(str::to_string),
+                    dialect: target_dialect,
+                    reason: "synchronizeIdentity writesQuiesced must contain non-whitespace text naming the no-concurrent-writer window or invariant"
+                        .to_string(),
+                    suggested_fix: Some(
+                        "pass writesQuiesced: \"<maintenance-window-or-write-invariant>\"; the engine records this assertion but cannot prove writer quiescence"
+                            .to_string(),
+                    ),
+                })
+            } else {
+                Ok(())
+            }
+        }
         Op::SetColumnDefault { value, .. } => {
             if let crate::model::ir::IrDefault::Expr { expr } = value {
                 validate_default_expr(
@@ -9207,6 +9228,34 @@ mod tests {
         }]);
         validate_ir(&accepted, Dialect::Postgres, &[])
             .expect("a named external invariant is explicitly authorable");
+    }
+
+    #[test]
+    fn synchronize_identity_requires_a_non_whitespace_quiescence_assertion() {
+        let rejected = ir_with(vec![Op::SynchronizeIdentity {
+            table: "orders".into(),
+            column: "id".into(),
+            writes_quiesced: "   ".into(),
+            schema: None,
+        }]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let error = validate_ir(&rejected, dialect, &[])
+                .expect_err("writer quiescence acknowledgment is required metadata");
+            assert_eq!(error.code, CODE_OP_INVALID);
+            assert!(error.reason.contains("writesQuiesced"), "{error}");
+            assert!(error.reason.contains("non-whitespace"), "{error}");
+        }
+
+        let accepted = ir_with(vec![Op::SynchronizeIdentity {
+            table: "orders".into(),
+            column: "id".into(),
+            writes_quiesced: "orders_import_window".into(),
+            schema: None,
+        }]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_ir(&accepted, dialect, &[])
+                .expect("a named writer-quiescence invariant is explicitly authorable");
+        }
     }
 
     // ── the names-stay-strings BINDING corollary ───────────────────────────

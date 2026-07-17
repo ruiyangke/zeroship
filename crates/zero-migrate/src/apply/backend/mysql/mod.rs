@@ -35,6 +35,7 @@
 
 pub(crate) mod backfill_sql;
 pub(crate) mod drift_sql;
+pub(crate) mod identity_sql;
 pub(crate) mod journal_sql;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
@@ -50,7 +51,7 @@ use crate::driver::{Row, SqlSession};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseFeature, DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::{AlterPrimaryKeyStep, BindValue};
+use crate::render::step::{AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep};
 use crate::schema::query::SqlDialect;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
@@ -79,6 +80,7 @@ pub struct MysqlSessionSnapshot {
     time_zone: String,
     max_execution_time: i64,
     innodb_lock_wait_timeout: i64,
+    information_schema_stats_expiry: i64,
     autocommit: i64,
     foreign_key_checks: i64,
     unique_checks: i64,
@@ -859,6 +861,15 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         primary_key_sql::alter_primary_key(self.conn, cfg, step, approval, scope, applied_by).await
     }
 
+    async fn synchronize_identity(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &SynchronizeIdentityStep,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        identity_sql::synchronize_identity(self.conn, cfg, step, applied_by).await
+    }
+
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,
@@ -1228,6 +1239,7 @@ mod render_tests {
                         "time_zone".into(),
                         "max_execution_time".into(),
                         "innodb_lock_wait_timeout".into(),
+                        "information_schema_stats_expiry".into(),
                         "autocommit".into(),
                         "foreign_key_checks".into(),
                         "unique_checks".into(),
@@ -1239,6 +1251,7 @@ mod render_tests {
                         Value::Text("SYSTEM".into()),
                         Value::Int(0),
                         Value::Int(50),
+                        Value::Int(86_400),
                         Value::Int(0),
                         Value::Int(0),
                         Value::Int(0),
@@ -2754,11 +2767,12 @@ mod render_tests {
         assert!(
             all.contains("SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode")
                 && all.contains(
-                    "'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO'"
+                    "'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO', 'NO_AUTO_VALUE_ON_ZERO'"
                 )
                 && all.contains("SESSION time_zone = '+00:00'")
                 && all.contains("SESSION max_execution_time")
                 && all.contains("innodb_lock_wait_timeout")
+                && all.contains("SESSION information_schema_stats_expiry = 0")
                 && all.contains("SESSION autocommit = 1")
                 && all.contains("SESSION foreign_key_checks = 1")
                 && all.contains("SESSION unique_checks = 1"),
@@ -3187,6 +3201,7 @@ mod render_tests {
             .await
             .expect("session snapshot decodes");
         assert_eq!(snapshot.autocommit, 0);
+        assert_eq!(snapshot.information_schema_stats_expiry, 86_400);
         assert_eq!(snapshot.foreign_key_checks, 0);
         assert_eq!(snapshot.unique_checks, 0);
 
@@ -3198,8 +3213,12 @@ mod render_tests {
         let all = rec.log.borrow().join("\n");
         assert!(
             all.contains("@@SESSION.autocommit AS autocommit")
+                && all.contains(
+                    "@@SESSION.information_schema_stats_expiry AS information_schema_stats_expiry"
+                )
                 && all.contains("@@SESSION.foreign_key_checks AS foreign_key_checks")
                 && all.contains("@@SESSION.unique_checks AS unique_checks")
+                && all.contains("SESSION information_schema_stats_expiry = 86400")
                 && all.contains("SESSION autocommit = 0")
                 && all.contains("SESSION foreign_key_checks = 0")
                 && all.contains("SESSION unique_checks = 0"),
@@ -3384,6 +3403,99 @@ mod render_tests {
             }),
             "the supplied artifact checksum is journaled verbatim: {:?}",
             rec.binds.borrow()
+        );
+    }
+
+    /// MySQL normally interprets an explicit zero for an AUTO_INCREMENT column
+    /// as "allocate a value". Import DML must pin NO_AUTO_VALUE_ON_ZERO before
+    /// sending the native zero bind, and a failure to establish that invariant
+    /// must stop before the row can be written.
+    #[compio::test]
+    async fn legacy_zero_import_is_preserved_or_rejected_before_dml() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let version = MigrationId::generate();
+        let checksum = step_checksum("legacy zero import");
+        let template = "INSERT INTO `proj_x`.`users` (`id`) VALUES (?)";
+
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        backend
+            .run_dml_step(
+                &cfg,
+                &version,
+                &checksum,
+                "import legacy zero user",
+                template,
+                &[BindValue::Int(0)],
+                "proj_x",
+                "users",
+                None,
+                true,
+                false,
+                "app_test",
+                crate::approval::Approval::None,
+                &crate::approval::ApprovalScope::All,
+                "tester",
+                crate::apply::executor::LockMode::AlreadyHeld,
+            )
+            .await
+            .expect("legacy zero import runs under the pinned SQL mode");
+
+        {
+            let log = rec.log.borrow();
+            let mode = log
+                .iter()
+                .position(|entry| entry.contains("NO_AUTO_VALUE_ON_ZERO"))
+                .expect("legacy-zero semantics are pinned");
+            let insert = log
+                .iter()
+                .position(|entry| entry == &format!("exec: {template}"))
+                .expect("import insert executes");
+            assert!(
+                mode < insert,
+                "SQL mode must be pinned before import DML: {log:?}"
+            );
+            assert!(
+                rec.binds
+                    .borrow()
+                    .iter()
+                    .any(|params| params.as_slice() == [Bind::Int(0)]),
+                "the explicit legacy zero must remain a zero bind: {:?}",
+                rec.binds.borrow()
+            );
+        }
+
+        let rejected = RecordingSession::with_failure("NO_AUTO_VALUE_ON_ZERO");
+        let rejected_backend = MysqlBackend::new_generic(&rejected);
+        let result = rejected_backend
+            .run_dml_step(
+                &cfg,
+                &MigrationId::generate(),
+                &step_checksum("rejected legacy zero import"),
+                "import legacy zero user",
+                template,
+                &[BindValue::Int(0)],
+                "proj_x",
+                "users",
+                None,
+                true,
+                false,
+                "app_test",
+                crate::approval::Approval::None,
+                &crate::approval::ApprovalScope::All,
+                "tester",
+                crate::apply::executor::LockMode::AlreadyHeld,
+            )
+            .await;
+        assert!(result.is_err(), "mode-pin failure must reject the import");
+        assert!(
+            !rejected
+                .log
+                .borrow()
+                .iter()
+                .any(|entry| entry == &format!("exec: {template}")),
+            "the zero row must not reach MySQL when its preserving mode was not established: {:?}",
+            rejected.log.borrow()
         );
     }
 

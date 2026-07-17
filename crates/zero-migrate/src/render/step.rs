@@ -65,6 +65,26 @@ pub struct AlterPrimaryKeyStep {
     pub action: AlterPrimaryKeyAction,
 }
 
+/// One explicit import-time identity-generator reconciliation.
+///
+/// This remains structured until apply so the backend validates the live
+/// identity/sequence association and performs a monotonic comparison while the
+/// project migration lock is held. `writes_quiesced` is the operator's named
+/// assertion; it is audit/status metadata, not something the engine can prove.
+#[derive(Debug, Clone)]
+pub struct SynchronizeIdentityStep {
+    /// Journal marker and execution metadata for this operation.
+    pub migration: Migration,
+    /// Effective target schema selected during lowering.
+    pub schema: String,
+    /// Bare target table name.
+    pub table: String,
+    /// Bare identity column name.
+    pub column: String,
+    /// Named maintenance window or invariant asserted by the operator.
+    pub writes_quiesced: String,
+}
+
 /// One ordered step of an [`AppliedPlan`](crate::render::plan::AppliedPlan).
 #[derive(Debug, Clone)]
 pub enum PlanStep {
@@ -124,6 +144,8 @@ pub enum PlanStep {
     },
     /// A live-catalog-validated primary-key lifecycle mutation.
     AlterPrimaryKey(AlterPrimaryKeyStep),
+    /// A live-catalog-validated, monotonic identity-generator reconciliation.
+    SynchronizeIdentity(SynchronizeIdentityStep),
     /// A rename, lowered to ONE of two dialect-distinct executable shapes.
     OnlineRename(RenameStep),
 }
@@ -137,6 +159,7 @@ impl PlanStep {
             PlanStep::Dml { destructive, .. } => *destructive,
             PlanStep::Backfill { .. } => true,
             PlanStep::AlterPrimaryKey(step) => step.migration.flags.destructive,
+            PlanStep::SynchronizeIdentity(step) => step.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::PgExpandContract(_)) => false,
         }
@@ -163,6 +186,11 @@ impl PlanStep {
             {
                 Some(step.migration.version.as_str())
             }
+            PlanStep::SynchronizeIdentity(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb))
                 if rb.migration.flags.destructive || rb.migration.flags.requires_approval =>
             {
@@ -185,6 +213,7 @@ impl PlanStep {
             PlanStep::Dml { .. }
             | PlanStep::Backfill { .. }
             | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::SynchronizeIdentity(_)
             | PlanStep::OnlineRename(_) => false,
         }
     }
@@ -200,6 +229,7 @@ impl PlanStep {
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
             PlanStep::Backfill { spec, .. } => Some(spec.table.as_str()),
             PlanStep::AlterPrimaryKey(step) => Some(step.table.as_str()),
+            PlanStep::SynchronizeIdentity(step) => Some(step.table.as_str()),
             PlanStep::Dml { target_table, .. } => Some(target_table.as_str()),
             PlanStep::Ddl(_) => None,
         }

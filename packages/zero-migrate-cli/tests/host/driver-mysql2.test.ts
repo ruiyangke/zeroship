@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { cellsToParams } from "../../src/driver-mysql2.js";
+import {
+  cellsToParams,
+  MYSQL_SESSION_SQL_MODE_PIN,
+} from "../../src/driver-mysql2.js";
 import { history } from "../../src/index.js";
 
 test("MySQL exact integers remain numeric parameters", () => {
@@ -20,6 +23,11 @@ test("MySQL decimal text never crosses JavaScript's number domain", () => {
 
   assert.deepEqual(values, [decimal]);
   assert.equal(typeof values[0], "string");
+});
+
+test("MySQL host sessions pin explicit legacy zero preservation", () => {
+  assert.match(MYSQL_SESSION_SQL_MODE_PIN, /NO_AUTO_VALUE_ON_ZERO/);
+  assert.match(MYSQL_SESSION_SQL_MODE_PIN, /NO_BACKSLASH_ESCAPES/);
 });
 
 test("history rejects MySQL locally without opening a connection", async () => {

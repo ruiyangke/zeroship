@@ -2157,6 +2157,19 @@ impl MigrationEngine {
                     }
                     i += 1;
                 }
+                PlanStep::SynchronizeIdentity(step) => {
+                    let version = step.migration.version.as_str();
+                    let ran = backend
+                        .synchronize_identity(exec_cfg, step, applied_by)
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    if ran {
+                        applied.applied.push(version.to_string());
+                    } else {
+                        applied.skipped.push(version.to_string());
+                    }
+                    i += 1;
+                }
                 PlanStep::Backfill {
                     version,
                     checksum,
@@ -2345,6 +2358,12 @@ impl MigrationEngine {
                     checksum.as_str(),
                 )?,
                 PlanStep::AlterPrimaryKey(step) => journal_completed_for_approval(
+                    &journal,
+                    step.migration.version.as_str(),
+                    step.migration.checksum.as_str(),
+                    false,
+                )?,
+                PlanStep::SynchronizeIdentity(step) => journal_completed_for_approval(
                     &journal,
                     step.migration.version.as_str(),
                     step.migration.checksum.as_str(),

@@ -254,6 +254,7 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
         | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. }
         | Op::AddConstraint { .. }
         | Op::ValidateConstraint { .. }
         | Op::DropConstraint { .. }

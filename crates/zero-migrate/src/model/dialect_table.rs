@@ -151,6 +151,7 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "setColumnType", variant: "using", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setRls", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setTableOptions", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
+    DispositionRow { kind: "synchronizeIdentity", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "update", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "validateConstraint", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
 ];

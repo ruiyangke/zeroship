@@ -850,6 +850,9 @@ fn step_has_journal_phase(
         zero_migrate::PlanStep::AlterPrimaryKey(step) => {
             has_version(step.migration.version.as_str())
         }
+        zero_migrate::PlanStep::SynchronizeIdentity(step) => {
+            has_version(step.migration.version.as_str())
+        }
         zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(
             rename,
         )) => rename
@@ -1115,9 +1118,9 @@ fn advance_ownership_registry(
 
 /// Compatibility projection of [`lower_envelope_to_plan`] for callers that still
 /// consume a flat `Vec<Migration>`. This view intentionally cannot represent DML,
-/// backfill, or structured primary-key lifecycle steps; execution callers must use
-/// the complete plan instead. `AlterPrimaryKey` is refused rather than projected to
-/// its comment-only journal marker.
+/// backfill, or structured live-resolved steps; execution callers must use the
+/// complete plan instead. `AlterPrimaryKey` and `SynchronizeIdentity` are refused
+/// rather than projected to their comment-only journal markers.
 ///
 /// # Errors
 /// Same as [`lower_envelope_to_plan`].
@@ -1137,14 +1140,15 @@ pub fn lower_envelope_to_migrations(
         registry_json,
         policy_ceiling_toml,
     )?;
-    if artifact
-        .plan
-        .steps
-        .iter()
-        .any(|step| matches!(step, zero_migrate::PlanStep::AlterPrimaryKey(_)))
-    {
+    if artifact.plan.steps.iter().any(|step| {
+        matches!(
+            step,
+            zero_migrate::PlanStep::AlterPrimaryKey(_)
+                | zero_migrate::PlanStep::SynchronizeIdentity(_)
+        )
+    }) {
         return Err(
-            "alterPrimaryKey requires the complete ordered plan; the flat Migration projection would lose its structured apply operation"
+            "structured live-resolved operations require the complete ordered plan; the flat Migration projection would lose their apply operation"
                 .to_string(),
         );
     }
@@ -2107,10 +2111,7 @@ mod tests {
             Some(CEILING),
         )
         .expect_err("flat migration consumers must not receive a comment-only marker");
-        assert!(
-            error.contains("requires the complete ordered plan"),
-            "{error}"
-        );
+        assert!(error.contains("complete ordered plan"), "{error}");
 
         let plan = lower_envelope_to_plan(
             &envelope,
@@ -2124,6 +2125,45 @@ mod tests {
         assert!(matches!(
             plan.plan.steps.as_slice(),
             [zero_migrate::PlanStep::AlterPrimaryKey(_)]
+        ));
+    }
+
+    #[test]
+    fn flat_migration_projection_refuses_identity_synchronization() {
+        let envelope = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "synchronize_imported_items",
+            "ops": [{
+                "op": "synchronizeIdentity",
+                "table": "items",
+                "column": "id",
+                "writesQuiesced": "items_import_window"
+            }]
+        })
+        .to_string();
+        let error = lower_envelope_to_migrations(
+            &envelope,
+            "app_x",
+            "app_x",
+            "postgres",
+            r#"{"items":"app_x"}"#,
+            Some(CEILING),
+        )
+        .expect_err("flat migration consumers must not lose identity synchronization");
+        assert!(error.contains("complete ordered plan"), "{error}");
+
+        let plan = lower_envelope_to_plan(
+            &envelope,
+            "app_x",
+            "app_x",
+            "postgres",
+            r#"{"items":"app_x"}"#,
+            Some(CEILING),
+        )
+        .expect("the complete plan retains identity synchronization");
+        assert!(matches!(
+            plan.plan.steps.as_slice(),
+            [zero_migrate::PlanStep::SynchronizeIdentity(_)]
         ));
     }
 

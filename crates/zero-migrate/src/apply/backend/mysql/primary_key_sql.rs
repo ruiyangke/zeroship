@@ -176,7 +176,7 @@ pub(super) async fn alter_primary_key<D: SqlSession>(
             "MySQL primary-key ALTER completed but explicit table-lock cleanup failed: {unlock}; the inflight marker was retained for recovery"
         )));
     }
-        session::finalize_started_primary_key(conn, cfg, &step.migration, applied_by, exec_ms)
+        session::finalize_started_structured_ddl(conn, cfg, &step.migration, applied_by, exec_ms)
             .await?;
         Ok(true)
     }
@@ -1003,6 +1003,7 @@ mod tests {
                         "time_zone".into(),
                         "max_execution_time".into(),
                         "innodb_lock_wait_timeout".into(),
+                        "information_schema_stats_expiry".into(),
                         "autocommit".into(),
                         "foreign_key_checks".into(),
                         "unique_checks".into(),
@@ -1014,6 +1015,7 @@ mod tests {
                         Value::Text("SYSTEM".into()),
                         Value::Int(17),
                         Value::Int(23),
+                        Value::Int(47),
                         Value::Int(0),
                         Value::Int(1),
                         Value::Int(0),
@@ -1208,6 +1210,7 @@ mod tests {
         assert!(
             all[restored..].contains("SESSION max_execution_time = 17")
                 && all[restored..].contains("SESSION innodb_lock_wait_timeout = 23")
+                && all[restored..].contains("SESSION information_schema_stats_expiry = 47")
                 && all[restored..].contains("SESSION autocommit = 0")
                 && all[restored..].contains("SESSION foreign_key_checks = 1")
                 && all[restored..].contains("SESSION unique_checks = 0"),

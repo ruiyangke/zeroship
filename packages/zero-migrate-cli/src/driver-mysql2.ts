@@ -32,6 +32,10 @@ export interface MysqlSessionOptions {
   queryTimeoutMs?: number;
 }
 
+/** Session semantics required before any host-side authored statement runs. */
+export const MYSQL_SESSION_SQL_MODE_PIN =
+  "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO')";
+
 /**
  * Open a pinned host MySQL session and return the `hostDriver` callback + `close()`.
  * BIGINT crosses as a string (exact-integer domain).
@@ -65,10 +69,10 @@ export async function openMysqlSession(
 
   // The Rust backend repeats this before every author DDL/data step. Pin it at
   // connection creation as well so every host-side parameterized verb shares
-  // the same literal semantics from its first request onward.
-  await connection.query(
-    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES')",
-  );
+  // the same literal semantics from its first request onward. The explicit-zero
+  // mode is also the fail-safe for legacy identity imports: `0` must remain `0`,
+  // never become an implicit AUTO_INCREMENT allocation.
+  await connection.query(MYSQL_SESSION_SQL_MODE_PIN);
 
   const hostDriver: MysqlHostDriver = ([request, done]) => {
     runVerb(connection, request, opts.queryTimeoutMs).then(

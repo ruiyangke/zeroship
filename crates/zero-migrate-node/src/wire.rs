@@ -369,7 +369,8 @@ pub struct PlanStatusStepDto {
     pub version: String,
     /// Human-readable operation label.
     pub name: String,
-    /// `ddl | dml | backfill | onlineExpand | onlineContract | sqliteRebuild`.
+    /// `ddl | dml | backfill | synchronizeIdentity | onlineExpand |
+    /// onlineContract | sqliteRebuild`.
     pub kind: String,
     /// `pending | inflight | applied | drifted`.
     pub state: String,
@@ -377,6 +378,8 @@ pub struct PlanStatusStepDto {
     pub cursor_stability_mode: Option<String>,
     /// The explicitly approved invariant name for `externalInvariant`.
     pub cursor_stability_invariant: Option<String>,
+    /// Named assertion that identity-allocating writes are quiesced.
+    pub writes_quiesced: Option<String>,
 }
 
 /// One event in the typed `history` audit trail.

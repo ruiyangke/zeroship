@@ -3113,6 +3113,25 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
+    /// Reconcile one imported integer identity column's associated generator
+    /// without ever moving an already-ahead generator backward.
+    ///
+    /// The named `writesQuiesced` assertion is operator-authored coordination
+    /// metadata: the engine records and surfaces it, but cannot prove that
+    /// concurrent application writers are actually quiesced.
+    SynchronizeIdentity {
+        /// Target table.
+        table: String,
+        /// Integer identity/auto-increment/rowid column to synchronize.
+        column: String,
+        /// Named maintenance window or invariant under which no concurrent
+        /// writer can allocate a colliding identity value.
+        #[schemars(length(min = 1))]
+        writes_quiesced: String,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
     /// `ALTER TABLE … ADD CONSTRAINT …`.
     AddConstraint {
         /// Target table.
@@ -3754,6 +3773,7 @@ impl Op {
             | Self::DropColumnDefault { table, .. }
             | Self::RenameColumn { table, .. }
             | Self::AlterPrimaryKey { table, .. }
+            | Self::SynchronizeIdentity { table, .. }
             | Self::AddConstraint { table, .. }
             | Self::DropConstraint { table, .. }
             | Self::ValidateConstraint { table, .. }
@@ -3890,6 +3910,7 @@ impl Op {
                 action: AlterPrimaryKeyAction::Add { .. },
                 ..
             }
+            | Self::SynchronizeIdentity { .. }
             | Self::AddConstraint { .. }
             | Self::ValidateConstraint { .. }
             | Self::Insert { .. }
@@ -3972,6 +3993,7 @@ impl Op {
             | Self::DropColumnDefault { schema, .. }
             | Self::RenameColumn { schema, .. }
             | Self::AlterPrimaryKey { schema, .. }
+            | Self::SynchronizeIdentity { schema, .. }
             | Self::AddConstraint { schema, .. }
             | Self::DropConstraint { schema, .. }
             | Self::ValidateConstraint { schema, .. }
@@ -4095,6 +4117,7 @@ impl Op {
             | Self::DetachPartition { .. }
             | Self::SetTableOptions { .. }
             | Self::AlterPrimaryKey { .. }
+            | Self::SynchronizeIdentity { .. }
             | Self::Insert { .. }
             | Self::Update { .. }
             | Self::Delete { .. }
@@ -4164,6 +4187,7 @@ impl Op {
             | Self::DetachPartition { .. }
             | Self::SetTableOptions { .. }
             | Self::AlterPrimaryKey { .. }
+            | Self::SynchronizeIdentity { .. }
             | Self::Insert { .. }
             | Self::Update { .. }
             | Self::Delete { .. }

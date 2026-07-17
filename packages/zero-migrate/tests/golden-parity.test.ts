@@ -252,6 +252,16 @@ test("alter_primary_key fluent-recorded ops equal the committed golden", async (
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
 });
 
+test("synchronize_identity fluent-recorded ops equal the committed golden", async () => {
+  const ops = record(() => {
+    table("orders", { schema: "app" }).column("id").synchronizeIdentity({
+      writesQuiesced: "orders_import_window",
+    });
+  });
+  const g = await golden("synchronize_identity");
+  assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
+});
+
 test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
   const ops = record(() => {
     extension("citext").create({ ifNotExists: true });

@@ -498,6 +498,7 @@ const emitSetTableOptions = defineOp("setTableOptions");
 const emitDropTable = defineOp("dropTable");
 const emitRenameTable = defineOp("renameTable");
 const emitAlterPrimaryKey = defineOp("alterPrimaryKey");
+const emitSynchronizeIdentity = defineOp("synchronizeIdentity");
 const emitAddColumn = defineOp("addColumn");
 const emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
 const emitDropColumn = defineOp("dropColumn");
@@ -4427,6 +4428,15 @@ function recordAlterPrimaryKey(
   emitAlterPrimaryKey({ table, action: compact(action), schema });
 }
 
+function recordSynchronizeIdentity(
+  table: string,
+  column: string,
+  writesQuiesced: string,
+  schema: string | undefined,
+): void {
+  emitSynchronizeIdentity({ table, column, writesQuiesced, schema });
+}
+
 export function comment(target: CommentTargetArg, text: string | null): void {
   recordComment(target, text);
 }
@@ -4645,6 +4655,27 @@ export function __makeTableHandle(
         comment(text, args = {}) {
           terminateSelector(id);
           recordComment({ kind: "column", table: name, name: col, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+        synchronizeIdentity(args) {
+          requirePlainObject(args, ".column(name).synchronizeIdentity(args)");
+          requireNonEmptyString(
+            args.writesQuiesced,
+            ".column(name).synchronizeIdentity({ writesQuiesced })",
+          );
+          if (args.writesQuiesced.trim().length === 0) {
+            throw structuredError(
+              "OP_INVALID",
+              ".column(name).synchronizeIdentity({ writesQuiesced }) must contain non-whitespace text",
+            );
+          }
+          terminateSelector(id);
+          recordSynchronizeIdentity(
+            name,
+            col,
+            args.writesQuiesced,
+            pickSchema(args, dflt),
+          );
           return handle;
         },
       };

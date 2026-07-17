@@ -111,6 +111,7 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "setColumnType", variant: "using", postgres: "unsupported", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "setRls", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "setTableOptions", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
+  { kind: "synchronizeIdentity", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "update", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "validateConstraint", variant: "base", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },
 ] as const;

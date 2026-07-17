@@ -57,7 +57,9 @@ use crate::render::declarative::{
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::render::step::{AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep};
+use crate::render::step::{
+    AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep, SynchronizeIdentityStep,
+};
 use crate::render::value_format::{
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
@@ -99,6 +101,8 @@ enum LoweredOp {
     /// An explicit primary-key lifecycle mutation. It remains structured until
     /// apply so catalog preconditions are checked under the migration lock.
     PrimaryKey(Box<AlterPrimaryKeyStep>),
+    /// An import-time identity synchronization, kept structured through apply.
+    IdentitySynchronization(Box<SynchronizeIdentityStep>),
     /// a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
     /// creator-DML assembler ([`crate::render::dml`]) into a [`PlanStep::Dml`]
     /// (parameterized one-shot) or [`PlanStep::Backfill`] (batched backfill). NOT
@@ -2014,6 +2018,7 @@ impl LoweredArtifact {
                     out.push(rb.migration.clone());
                 }
                 PlanStep::AlterPrimaryKey(step) => out.push(step.migration.clone()),
+                PlanStep::SynchronizeIdentity(step) => out.push(step.migration.clone()),
                 PlanStep::Dml { .. } | PlanStep::Backfill { .. } => {}
             }
         }
@@ -2203,6 +2208,7 @@ fn collect_op_database_requirements(
         | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
         | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. }
         | Op::ValidateConstraint { .. }
         | Op::DropConstraint { .. }
         | Op::DropView { .. }
@@ -2890,6 +2896,11 @@ impl IrAuthor {
                 PlanStep::AlterPrimaryKey(_) => {
                     return Err(IrLowerError::UnsupportedOp(
                         "alterPrimaryKey requires lower_plan",
+                    ));
+                }
+                PlanStep::SynchronizeIdentity(_) => {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "synchronizeIdentity requires lower_plan",
                     ));
                 }
                 _ => {}
@@ -3762,6 +3773,9 @@ impl IrAuthor {
             }
             LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
             LoweredOp::PrimaryKey(step) => out.push(PlanStep::AlterPrimaryKey(*step)),
+            LoweredOp::IdentitySynchronization(step) => {
+                out.push(PlanStep::SynchronizeIdentity(*step));
+            }
             LoweredOp::Dml(step) => out.push(step),
         }
         Ok(())
@@ -4680,6 +4694,54 @@ impl IrAuthor {
                     table: table.clone(),
                     action: action.clone(),
                 })));
+            }
+            Op::SynchronizeIdentity {
+                table,
+                column,
+                writes_quiesced,
+                ..
+            } => {
+                if guard.is_some() {
+                    return Err(IrLowerError::GuardProbeUnbuildable("synchronizeIdentity"));
+                }
+                let up = format!(
+                    "-- zero-migrate: synchronize identity; schema={eff_schema:?}; table={table:?}; column={column:?}; writes quiesced={writes_quiesced:?}"
+                );
+                let owner_app = self.decl.owner_app().to_string();
+                let flags = MigrationFlags {
+                    transactional: self.dialect != SqlDialect::Mysql,
+                    ..MigrationFlags::default()
+                };
+                let migration = Migration {
+                    version: provisional_step_version(op_index, &owner_app, "synchronize_identity"),
+                    name: format!("synchronize_identity_{table}_{column}"),
+                    checksum: Checksum::of(&ChecksumInput {
+                        up: &up,
+                        down: None,
+                        flags: &flags,
+                        owner_app: &owner_app,
+                        depends_on: &[],
+                        supersedes: &[],
+                        preconditions: &[],
+                    }),
+                    up,
+                    down: None,
+                    flags,
+                    owner_app,
+                    depends_on: Vec::new(),
+                    supersedes: Vec::new(),
+                    preconditions: Vec::new(),
+                    existence_guard: None,
+                };
+                return Ok(LoweredOp::IdentitySynchronization(Box::new(
+                    SynchronizeIdentityStep {
+                        migration,
+                        schema: eff_schema,
+                        table: table.clone(),
+                        column: column.clone(),
+                        writes_quiesced: writes_quiesced.clone(),
+                    },
+                )));
             }
             Op::AddConstraint {
                 table, constraint, ..
@@ -5952,6 +6014,15 @@ impl IrAuthor {
             }
             LoweredOp::PrimaryKey(step) => {
                 steps.push(PlanStep::AlterPrimaryKey(*step));
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
+                });
+                return Ok(());
+            }
+            LoweredOp::IdentitySynchronization(step) => {
+                steps.push(PlanStep::SynchronizeIdentity(*step));
                 op_spans.push(LoweredOpSpan {
                     op: op.clone(),
                     step_range: step_start..steps.len(),
@@ -8026,6 +8097,7 @@ fn validate_repeatable_ir_steps(ir: &MigrationIr, steps: &[PlanStep]) -> Result<
             PlanStep::Dml { .. } => "a DML step",
             PlanStep::Backfill { .. } => "a backfill step",
             PlanStep::AlterPrimaryKey(_) => "an alter-primary-key step",
+            PlanStep::SynchronizeIdentity(_) => "a synchronize-identity step",
             PlanStep::OnlineRename(_) => "an online rename step",
         };
         return Err(IrLowerError::RepeatableStepUnsupported(kind));
@@ -8064,6 +8136,12 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 );
             }
             PlanStep::AlterPrimaryKey(step) => {
+                replacements.insert(
+                    step.migration.version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::SynchronizeIdentity(step) => {
                 replacements.insert(
                     step.migration.version.as_str().to_string(),
                     ir_step_version(&plan_version, ordinal),
@@ -8131,6 +8209,10 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
             }
+            PlanStep::SynchronizeIdentity(step) => {
+                let next = ir_step_version(&plan_version, ordinal);
+                restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
+            }
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut rb.migration, next, &anchor, &replacements, &ir.flags);
@@ -8179,6 +8261,7 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
             PlanStep::Dml { .. }
             | PlanStep::Backfill { .. }
             | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::SynchronizeIdentity(_)
             | PlanStep::OnlineRename(_) => {
                 preceding_ddl = None;
             }
@@ -8328,6 +8411,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::DropColumnDefault { .. } => "dropColumnDefault",
         Op::RenameColumn { .. } => "renameColumn",
         Op::AlterPrimaryKey { .. } => "alterPrimaryKey",
+        Op::SynchronizeIdentity { .. } => "synchronizeIdentity",
         Op::AddConstraint { .. } => "addConstraint",
         Op::DropConstraint { .. } => "dropConstraint",
         Op::ValidateConstraint { .. } => "validateConstraint",
@@ -14168,6 +14252,65 @@ mod tests {
             plan.steps.as_slice(),
             [PlanStep::AlterPrimaryKey(_)]
         ));
+    }
+
+    #[test]
+    fn synchronize_identity_marker_escapes_newlines_in_operator_assertion() {
+        let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "synchronize_accounts_identity",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "synchronizeIdentity",
+                "table": "accounts\nSELECT pg_sleep(2)",
+                "column": "id\nDELETE FROM accounts",
+                "writesQuiesced": "import window closed\nSELECT pg_sleep(1)"
+            }]
+        }))
+        .expect("identity synchronization IR parses");
+        let live = LiveSchema::from_catalog_snapshot(
+            crate::model::snapshot::SchemaSnapshot {
+                tables: BTreeMap::from([(
+                    "accounts\nSELECT pg_sleep(2)".to_string(),
+                    crate::model::snapshot::TableSnapshot {
+                        columns: vec![crate::model::snapshot::ColumnSnapshot {
+                            name: "id\nDELETE FROM accounts".to_string(),
+                            data_type: "bigint".to_string(),
+                            nullable: false,
+                            ..Default::default()
+                        }],
+                        indexes: Vec::new(),
+                        constraints: Vec::new(),
+                        runtime_options: Default::default(),
+                        partition_by: None,
+                        comment: None,
+                        stored_create_sql: None,
+                    },
+                )]),
+                ..Default::default()
+            },
+            "app_a",
+        );
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &live)
+            .expect("identity synchronization lowers");
+        let [PlanStep::SynchronizeIdentity(step)] = plan.steps.as_slice() else {
+            panic!("expected one identity synchronization step")
+        };
+
+        assert_eq!(step.migration.up.lines().count(), 1);
+        assert!(step
+            .migration
+            .up
+            .contains(r#"table="accounts\nSELECT pg_sleep(2)""#));
+        assert!(step
+            .migration
+            .up
+            .contains(r#"column="id\nDELETE FROM accounts""#));
+        assert!(step
+            .migration
+            .up
+            .contains(r#"writes quiesced="import window closed\nSELECT pg_sleep(1)""#));
     }
 
     #[test]

@@ -1142,6 +1142,43 @@
           ]
         },
         {
+          "description": "Reconcile one imported integer identity column's associated generator\nwithout ever moving an already-ahead generator backward.\n\nThe named `writesQuiesced` assertion is operator-authored coordination\nmetadata: the engine records and surfaces it, but cannot prove that\nconcurrent application writers are actually quiesced.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Integer identity/auto-increment/rowid column to synchronize.",
+              "type": "string"
+            },
+            "writesQuiesced": {
+              "description": "Named maintenance window or invariant under which no concurrent\nwriter can allocate a colliding identity value.",
+              "type": "string",
+              "minLength": 1
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "synchronizeIdentity"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "column",
+            "writesQuiesced"
+          ]
+        },
+        {
           "description": "`ALTER TABLE … ADD CONSTRAINT …`.",
           "type": "object",
           "properties": {

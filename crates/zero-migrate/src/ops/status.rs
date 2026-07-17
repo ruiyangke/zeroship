@@ -42,6 +42,8 @@ pub enum PlanStatusStepKind {
     Dml,
     /// A resumable data backfill.
     Backfill,
+    /// An import-time identity-generator reconciliation.
+    SynchronizeIdentity,
     /// One PostgreSQL expand migration of an online rename.
     OnlineExpand,
     /// One PostgreSQL deferred-contract migration of an online rename.
@@ -58,6 +60,7 @@ impl PlanStatusStepKind {
             Self::Ddl => "ddl",
             Self::Dml => "dml",
             Self::Backfill => "backfill",
+            Self::SynchronizeIdentity => "synchronizeIdentity",
             Self::OnlineExpand => "onlineExpand",
             Self::OnlineContract => "onlineContract",
             Self::SqliteRebuild => "sqliteRebuild",
@@ -84,6 +87,8 @@ pub struct PlanStatusManifestStep {
     /// The explicitly approved application/maintenance invariant name when the
     /// mode is `externalInvariant`.
     pub cursor_stability_invariant: Option<String>,
+    /// Named operator assertion that concurrent identity allocation is quiesced.
+    pub writes_quiesced: Option<String>,
 }
 
 /// A journal-reconcilable projection of one complete [`AppliedPlan`].
@@ -131,6 +136,7 @@ impl PlanStatusManifest {
                 repeatable: migration.flags.repeatable,
                 cursor_stability_mode: None,
                 cursor_stability_invariant: None,
+                writes_quiesced: None,
             }
         }
 
@@ -153,6 +159,7 @@ impl PlanStatusManifest {
                     repeatable: false,
                     cursor_stability_mode: None,
                     cursor_stability_invariant: None,
+                    writes_quiesced: None,
                 }),
                 PlanStep::Backfill {
                     version,
@@ -175,10 +182,17 @@ impl PlanStatusManifest {
                         repeatable: false,
                         cursor_stability_mode: Some(mode),
                         cursor_stability_invariant: invariant,
+                        writes_quiesced: None,
                     });
                 }
                 PlanStep::AlterPrimaryKey(step) => {
                     steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
+                }
+                PlanStep::SynchronizeIdentity(step) => {
+                    let mut status =
+                        migration_step(&step.migration, PlanStatusStepKind::SynchronizeIdentity);
+                    status.writes_quiesced = Some(step.writes_quiesced.clone());
+                    steps.push(status);
                 }
                 PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
                     steps.extend(
@@ -272,6 +286,8 @@ pub struct PlanStatusStep {
     pub cursor_stability_mode: Option<String>,
     /// Named external invariant prominently retained for operator status.
     pub cursor_stability_invariant: Option<String>,
+    /// Named no-concurrent-writer assertion retained prominently for operators.
+    pub writes_quiesced: Option<String>,
 }
 
 /// A net-applied or inflight journal identity absent from every supplied plan.
@@ -706,6 +722,7 @@ pub fn reconcile_applied_plans_with_resolutions(
                 journal_checksum,
                 cursor_stability_mode: expected.cursor_stability_mode.clone(),
                 cursor_stability_invariant: expected.cursor_stability_invariant.clone(),
+                writes_quiesced: expected.writes_quiesced.clone(),
             });
         }
 
@@ -1443,7 +1460,9 @@ mod plan_status_tests {
     use super::*;
     use crate::model::backfill::BackfillSpec;
     use crate::model::migration::{ChecksumInput, MigrationFlags};
+    use crate::render::lower::{IrAuthor, LiveSchema};
     use crate::render::step::DialectScope;
+    use crate::schema::query::SqlDialect;
 
     fn id(seed: &str) -> MigrationId {
         MigrationId::derive("status_test", seed.as_bytes())
@@ -1471,6 +1490,7 @@ mod plan_status_tests {
             repeatable: false,
             cursor_stability_mode: None,
             cursor_stability_invariant: None,
+            writes_quiesced: None,
         }
     }
 
@@ -2275,6 +2295,38 @@ mod plan_status_tests {
                 .cursor_stability_invariant
                 .as_deref(),
             Some("writers_hold_cursor_key")
+        );
+    }
+
+    #[test]
+    fn manifest_and_status_retain_synchronize_identity_quiescence_assertion() {
+        let ir: crate::model::ir::MigrationIr = serde_json::from_str(
+            r#"{"ir_version":1,"name":"sync_imported_orders","ops":[
+              {"op":"synchronizeIdentity","schema":"app","table":"orders",
+               "column":"id","writesQuiesced":"orders_import_window"}
+            ]}"#,
+        )
+        .expect("synchronizeIdentity IR");
+        let plan = IrAuthor::new("app", "app_status", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("synchronizeIdentity plan");
+
+        let projected =
+            PlanStatusManifest::from_applied_plan(&plan, &[]).expect("manifest projection");
+        assert_eq!(projected.steps.len(), 1);
+        assert_eq!(
+            projected.steps[0].kind,
+            PlanStatusStepKind::SynchronizeIdentity
+        );
+        assert_eq!(
+            projected.steps[0].writes_quiesced.as_deref(),
+            Some("orders_import_window")
+        );
+
+        let status = reconcile_applied_plans(&[projected], &[], &[]).expect("status");
+        assert_eq!(
+            status.plans[0].steps[0].writes_quiesced.as_deref(),
+            Some("orders_import_window")
         );
     }
 }

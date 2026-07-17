@@ -551,6 +551,7 @@ fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
                     state: step.state.as_str().to_string(),
                     cursor_stability_mode: step.cursor_stability_mode.clone(),
                     cursor_stability_invariant: step.cursor_stability_invariant.clone(),
+                    writes_quiesced: step.writes_quiesced.clone(),
                 })
                 .collect(),
             missing_dependencies: plan

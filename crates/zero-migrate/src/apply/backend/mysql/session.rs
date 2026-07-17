@@ -289,16 +289,21 @@ fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// Build the session invariant that every author-controlled MySQL statement
 /// executes under. `NO_BACKSLASH_ESCAPES` makes standard quote doubling stable
 /// for grammar-only string positions (`ENUM`, `SIGNAL SQLSTATE`, defaults).
+/// `NO_AUTO_VALUE_ON_ZERO` makes an explicitly imported legacy zero remain zero
+/// instead of silently allocating a different identity.
 /// Autocommit and relational integrity checks are pinned because MySQL otherwise
 /// inherits them from the caller or server defaults. Every inherited value is
-/// snapshotted and restored.
+/// snapshotted and restored. `information_schema_stats_expiry=0` keeps the live
+/// AUTO_INCREMENT metadata used by identity synchronization uncached.
 fn session_settings_sql(statement_timeout_ms: u64, lock_timeout_secs: u64) -> String {
     format!(
         "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, \
-             'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO'), \
+             'NO_BACKSLASH_ESCAPES', 'STRICT_ALL_TABLES', 'ERROR_FOR_DIVISION_BY_ZERO', \
+             'NO_AUTO_VALUE_ON_ZERO'), \
          SESSION time_zone = '+00:00', \
          SESSION max_execution_time = {statement_timeout_ms}, \
          SESSION innodb_lock_wait_timeout = {lock_timeout_secs}, \
+         SESSION information_schema_stats_expiry = 0, \
          SESSION autocommit = 1, \
          SESSION foreign_key_checks = 1, \
          SESSION unique_checks = 1"
@@ -314,6 +319,7 @@ async fn read_session_snapshot<D: SqlSession>(
                     @@SESSION.time_zone AS time_zone, \
                     @@SESSION.max_execution_time AS max_execution_time, \
                     @@SESSION.innodb_lock_wait_timeout AS innodb_lock_wait_timeout, \
+                    @@SESSION.information_schema_stats_expiry AS information_schema_stats_expiry, \
                     @@SESSION.autocommit AS autocommit, \
                     @@SESSION.foreign_key_checks AS foreign_key_checks, \
                     @@SESSION.unique_checks AS unique_checks, \
@@ -355,6 +361,7 @@ async fn read_session_snapshot<D: SqlSession>(
         time_zone: row.try_get("time_zone")?,
         max_execution_time: row.try_get("max_execution_time")?,
         innodb_lock_wait_timeout: row.try_get("innodb_lock_wait_timeout")?,
+        information_schema_stats_expiry: row.try_get("information_schema_stats_expiry")?,
         autocommit: row.try_get("autocommit")?,
         foreign_key_checks: row.try_get("foreign_key_checks")?,
         unique_checks: row.try_get("unique_checks")?,
@@ -373,11 +380,13 @@ async fn restore_session_snapshot<D: SqlSession>(
             "SET SESSION sql_mode = ?, SESSION time_zone = ?, \
              SESSION max_execution_time = {}, \
              SESSION innodb_lock_wait_timeout = {}, \
+             SESSION information_schema_stats_expiry = {}, \
              SESSION autocommit = {}, \
              SESSION foreign_key_checks = {}, \
              SESSION unique_checks = {}",
             snap.max_execution_time,
             snap.innodb_lock_wait_timeout,
+            snap.information_schema_stats_expiry,
             snap.autocommit,
             snap.foreign_key_checks,
             snap.unique_checks
@@ -663,11 +672,10 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     Ok(false)
 }
 
-/// Finalize a structured primary-key ALTER whose started marker was armed while
-/// an explicit target-table lock was still held. The ALTER itself releases the
-/// MySQL table lock; completion then uses the ordinary atomic journal-finalize
-/// transaction.
-pub(crate) async fn finalize_started_primary_key<D: SqlSession>(
+/// Finalize structured DDL whose started marker was armed while an explicit
+/// target-table lock was still held. The DDL itself releases the MySQL table
+/// lock; completion then uses the ordinary atomic journal-finalize transaction.
+pub(crate) async fn finalize_started_structured_ddl<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,

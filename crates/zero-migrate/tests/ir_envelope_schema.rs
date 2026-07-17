@@ -100,6 +100,7 @@ fn op_variant_names_from_schema() {
         "dropColumnDefault",
         "renameColumn",
         "alterPrimaryKey",
+        "synchronizeIdentity",
         "setTableOptions",
         "addConstraint",
         "dropConstraint",

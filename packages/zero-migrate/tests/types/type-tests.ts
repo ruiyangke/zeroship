@@ -138,6 +138,19 @@ table("accounts").primaryKey("accounts_pkey");
 // @ts-expect-error — changing an ID family is an explicit expand/cutover workflow, not one call.
 table("accounts").changeIdType({ from: t.bigInt(), to: t.uuid() });
 
+const identityImportTable = table("orders");
+const synchronizedIdentityTable: typeof identityImportTable = identityImportTable
+  .column("id")
+  .synchronizeIdentity({
+    schema: "app",
+    writesQuiesced: "orders_import_window",
+  });
+void synchronizedIdentityTable;
+// @ts-expect-error — synchronizeIdentity requires the named writer-quiescence acknowledgment.
+identityImportTable.column("id").synchronizeIdentity({});
+// @ts-expect-error — writesQuiesced is a name, not a boolean toggle.
+identityImportTable.column("id").synchronizeIdentity({ writesQuiesced: true });
+
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee.
 // ───────────────────────────────────────────────────────────────────────────

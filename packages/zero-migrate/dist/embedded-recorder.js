@@ -192,6 +192,7 @@ var emitSetTableOptions = defineOp("setTableOptions");
 var emitDropTable = defineOp("dropTable");
 var emitRenameTable = defineOp("renameTable");
 var emitAlterPrimaryKey = defineOp("alterPrimaryKey");
+var emitSynchronizeIdentity = defineOp("synchronizeIdentity");
 var emitAddColumn = defineOp("addColumn");
 var emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
 var emitDropColumn = defineOp("dropColumn");
@@ -3449,6 +3450,9 @@ function requireColumnDef(x, where) {
 function recordAlterPrimaryKey(table2, action, schema2) {
   emitAlterPrimaryKey({ table: table2, action: compact(action), schema: schema2 });
 }
+function recordSynchronizeIdentity(table2, column, writesQuiesced, schema2) {
+  emitSynchronizeIdentity({ table: table2, column, writesQuiesced, schema: schema2 });
+}
 function comment(target, text) {
   recordComment(target, text);
 }
@@ -3654,6 +3658,27 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
         comment(text, args = {}) {
           terminateSelector(id);
           recordComment({ kind: "column", table: name, name: col, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+        synchronizeIdentity(args) {
+          requirePlainObject(args, ".column(name).synchronizeIdentity(args)");
+          requireNonEmptyString(
+            args.writesQuiesced,
+            ".column(name).synchronizeIdentity({ writesQuiesced })"
+          );
+          if (args.writesQuiesced.trim().length === 0) {
+            throw structuredError(
+              "OP_INVALID",
+              ".column(name).synchronizeIdentity({ writesQuiesced }) must contain non-whitespace text"
+            );
+          }
+          terminateSelector(id);
+          recordSynchronizeIdentity(
+            name,
+            col,
+            args.writesQuiesced,
+            pickSchema(args, dflt)
+          );
           return handle;
         }
       };

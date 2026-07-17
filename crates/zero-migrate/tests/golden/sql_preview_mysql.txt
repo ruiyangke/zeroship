@@ -4,7 +4,7 @@
 
 SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;
 
-SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES');
+SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');
 
 CREATE TABLE `public`.`codes` (`code` INT NOT NULL, `created_at` DATETIME(6) NOT NULL, `created_by` VARCHAR(191), `deleted_at` DATETIME(6), `id` VARCHAR(191) PRIMARY KEY NOT NULL, `label` VARCHAR(191), `updated_at` DATETIME(6) NOT NULL, `updated_by` VARCHAR(191), `version` INT NOT NULL);
 

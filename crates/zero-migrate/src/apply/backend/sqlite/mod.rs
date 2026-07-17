@@ -22,6 +22,7 @@ pub mod authorizer;
 mod backfill_sql;
 mod drift_sql;
 mod dump_sql;
+mod identity_sql;
 mod journal_sql;
 mod primary_key_sql;
 pub mod rebuild_sql;
@@ -804,6 +805,59 @@ impl MigrationBackend for SqliteBackend {
         )
         .await
         .map_err(|error| ApplyError::Backend(error.to_string()))?;
+        Ok(true)
+    }
+
+    async fn synchronize_identity(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &crate::render::step::SynchronizeIdentityStep,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        if step.writes_quiesced.trim().is_empty() {
+            return Err(ApplyError::Backend(
+                "sqlite synchronizeIdentity writesQuiesced must name the maintenance window or no-concurrent-writer invariant"
+                    .to_string(),
+            ));
+        }
+        journal_sql::ensure_journal(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?;
+        if let Some(entry) = journal_sql::applied(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .find(|entry| entry.version == step.migration.version.as_str())
+        {
+            if entry.checksum != step.migration.checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: step.migration.version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: step.migration.checksum.as_str().to_string(),
+                });
+            }
+            return Ok(false);
+        }
+        if !step.schema.eq_ignore_ascii_case(&cfg.project_schema)
+            && !step.schema.eq_ignore_ascii_case("main")
+        {
+            return Err(ApplyError::Backend(format!(
+                "sqlite synchronizeIdentity schema {:?} is outside configured project schema {:?}",
+                step.schema, cfg.project_schema
+            )));
+        }
+        identity_sql::synchronize_identity(
+            &self.actor,
+            &step.table,
+            &step.column,
+            &step.migration,
+            applied_by,
+        )
+        .await
+        .map_err(apply_err)?;
         Ok(true)
     }
 

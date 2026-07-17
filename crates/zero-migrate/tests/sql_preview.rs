@@ -364,6 +364,27 @@ fn external_cursor_invariant_is_prominent_in_preview() {
     );
 }
 
+#[test]
+fn synchronize_identity_quiescence_assertion_is_prominent_in_preview() {
+    let ir = r#"{"ir_version":1,"name":"sync_imported_orders","ops":[
+      {"op":"synchronizeIdentity","schema":"public","table":"orders","column":"id",
+       "writesQuiesced":"orders_import_window"}
+    ]}"#;
+
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        let out = render_ir_envelope_sql(ir, dialect, &opts()).expect("preview");
+        assert!(
+            out.contains(RUNTIME_RESOLVED)
+                && out.contains("SYNCHRONIZE IDENTITY")
+                && out.contains("WRITES QUIESCED ASSERTION")
+                && out.contains("orders_import_window")
+                && out.contains("engine cannot prove writer quiescence")
+                && out.contains("never backward"),
+            "identity synchronization coordination must be operator-prominent for {dialect:?}:\n{out}"
+        );
+    }
+}
+
 /// NO FABRICATION — a guarded (`ifNotExists`) addColumn carries the runtime catalog-
 /// probe label AND its bare DDL has NO invented `IF NOT EXISTS` clause (the guard is
 /// a runtime probe, not a native clause).
