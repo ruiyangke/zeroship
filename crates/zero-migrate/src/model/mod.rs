@@ -8,6 +8,8 @@ pub mod load;
 pub mod op_support;
 pub mod snapshot;
 pub mod support;
+#[cfg(test)]
+pub(crate) mod support_matrix;
 pub mod table_shape;
 // The POLICY validator (`validate_ir`/`validate_op`, the vendor-capability gate,
 // the raw-view-body `pg_query` scan). It re-exports the STRUCTURAL validator from

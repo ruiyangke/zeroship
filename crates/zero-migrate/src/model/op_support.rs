@@ -392,39 +392,143 @@ fn support_tier(op: &Op) -> crate::model::support::SupportTier {
     }
 }
 
-/// The static per-op feature-support declarations validation walks after the
-/// op-level dialect decision. Feature gates are a finer, orthogonal refusal
-/// dimension (not the op-level dialect gate the generated table drives), so
-/// they remain hand-declared here.
-fn support_features(op: &Op) -> &'static [crate::model::support::FeatureSupport] {
-    use crate::model::support::{
-        ADD_COLUMN_FEATURES, ADD_CONSTRAINT_FEATURES, ALTER_COLUMN_TYPE_FEATURES, COMMENT_FEATURES,
-        CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES, CREATE_TRIGGER_FEATURES,
-        CREATE_VIEW_FEATURES, INSERT_FEATURES, PARTITION_FEATURES, PG_RAW_FEATURES,
-        RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES, SET_COLUMN_DEFAULT_FEATURES,
-    };
-    match op {
-        Op::CreateTable { .. } => CREATE_TABLE_FEATURES,
-        Op::CreatePartition { .. }
-        | Op::AttachPartition { .. }
-        | Op::DetachPartition { .. }
-        | Op::DropPartition { .. } => PARTITION_FEATURES,
-        Op::AddColumn { .. } => ADD_COLUMN_FEATURES,
-        Op::CreateIndex { .. } => CREATE_INDEX_FEATURES,
-        Op::Comment { .. } => COMMENT_FEATURES,
-        Op::SetColumnType { .. } => ALTER_COLUMN_TYPE_FEATURES,
-        Op::SetColumnDefault { .. } => SET_COLUMN_DEFAULT_FEATURES,
-        Op::RenameColumn { .. } => RENAME_COLUMN_FEATURES,
-        Op::AddConstraint { .. } => ADD_CONSTRAINT_FEATURES,
-        Op::Insert { .. } => INSERT_FEATURES,
-        Op::CreateView { .. } => CREATE_VIEW_FEATURES,
-        Op::DropView { materialized, .. } if materialized.unwrap_or(false) => CREATE_VIEW_FEATURES,
-        Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
-            SEQUENCE_FEATURES
+/// Declare the op-to-feature-table registry once, then derive both the live
+/// lookup match and the test-only iterable registry used to generate the
+/// support-matrix documentation. The declaration order is therefore the
+/// canonical documentation order as well as the lookup order.
+macro_rules! feature_support_registry {
+    (
+        $(
+            $group:ident {
+                label: $label:literal,
+                features: $features:path,
+                ops: [$($pattern:pat $(if $guard:expr)?),+ $(,)?],
+            }
+        )+
+    ) => {
+        #[cfg(test)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum FeatureSupportGroup {
+            $($group,)+
         }
-        Op::CreateTrigger { .. } => CREATE_TRIGGER_FEATURES,
-        Op::PgRaw { .. } => PG_RAW_FEATURES,
-        _ => &[],
+
+        #[cfg(test)]
+        impl FeatureSupportGroup {
+            pub(crate) const fn label(self) -> &'static str {
+                match self {
+                    $(Self::$group => $label,)+
+                }
+            }
+
+            pub(crate) const fn features(
+                self,
+            ) -> &'static [crate::model::support::FeatureSupport] {
+                match self {
+                    $(Self::$group => $features,)+
+                }
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) const FEATURE_SUPPORT_REGISTRY: &[FeatureSupportGroup] = &[
+            $(FeatureSupportGroup::$group,)+
+        ];
+
+        /// The static per-op feature-support declarations validation walks after
+        /// the op-level dialect decision. Feature gates are a finer, orthogonal
+        /// refusal dimension (not the op-level dialect gate the generated table
+        /// drives), so they remain hand-declared here.
+        fn support_features(op: &Op) -> &'static [crate::model::support::FeatureSupport] {
+            match op {
+                $($($pattern $(if $guard)? => $features,)+)+
+                _ => &[],
+            }
+        }
+    };
+}
+
+feature_support_registry! {
+    CreateTable {
+        label: "Create table",
+        features: crate::model::support::CREATE_TABLE_FEATURES,
+        ops: [Op::CreateTable { .. }],
+    }
+    PartitionLifecycle {
+        label: "Partition lifecycle",
+        features: crate::model::support::PARTITION_FEATURES,
+        ops: [
+            Op::CreatePartition { .. },
+            Op::AttachPartition { .. },
+            Op::DetachPartition { .. },
+            Op::DropPartition { .. },
+        ],
+    }
+    AddColumn {
+        label: "Add column",
+        features: crate::model::support::ADD_COLUMN_FEATURES,
+        ops: [Op::AddColumn { .. }],
+    }
+    CreateIndex {
+        label: "Create index",
+        features: crate::model::support::CREATE_INDEX_FEATURES,
+        ops: [Op::CreateIndex { .. }],
+    }
+    Comment {
+        label: "Comment",
+        features: crate::model::support::COMMENT_FEATURES,
+        ops: [Op::Comment { .. }],
+    }
+    SetColumnType {
+        label: "Set column type",
+        features: crate::model::support::ALTER_COLUMN_TYPE_FEATURES,
+        ops: [Op::SetColumnType { .. }],
+    }
+    SetColumnDefault {
+        label: "Set column default",
+        features: crate::model::support::SET_COLUMN_DEFAULT_FEATURES,
+        ops: [Op::SetColumnDefault { .. }],
+    }
+    RenameColumn {
+        label: "Rename column",
+        features: crate::model::support::RENAME_COLUMN_FEATURES,
+        ops: [Op::RenameColumn { .. }],
+    }
+    AddConstraint {
+        label: "Add constraint",
+        features: crate::model::support::ADD_CONSTRAINT_FEATURES,
+        ops: [Op::AddConstraint { .. }],
+    }
+    Insert {
+        label: "Insert / DML",
+        features: crate::model::support::INSERT_FEATURES,
+        ops: [Op::Insert { .. }],
+    }
+    CreateView {
+        label: "Create view / drop materialized view",
+        features: crate::model::support::CREATE_VIEW_FEATURES,
+        ops: [
+            Op::CreateView { .. },
+            Op::DropView { materialized, .. } if materialized.unwrap_or(false),
+        ],
+    }
+    SequenceLifecycle {
+        label: "Sequence lifecycle",
+        features: crate::model::support::SEQUENCE_FEATURES,
+        ops: [
+            Op::CreateSequence { .. },
+            Op::AlterSequence { .. },
+            Op::DropSequence { .. },
+        ],
+    }
+    CreateTrigger {
+        label: "Create trigger",
+        features: crate::model::support::CREATE_TRIGGER_FEATURES,
+        ops: [Op::CreateTrigger { .. }],
+    }
+    PgRaw {
+        label: "PostgreSQL raw SQL",
+        features: crate::model::support::PG_RAW_FEATURES,
+        ops: [Op::PgRaw { .. }],
     }
 }
 
