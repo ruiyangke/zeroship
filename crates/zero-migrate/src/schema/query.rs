@@ -796,14 +796,14 @@ pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError>
     Ok(())
 }
 
-/// Typed-id prefixes reserved for the platform. A creator-declared
-/// `id: t.id("usr")` would mint ids that collide with platform user
-/// ids (`crates/core/src/typed_id.rs`), so the prefix is rejected.
+/// Legacy base62-UUIDv7 ID prefixes reserved for the platform. An internal
+/// descriptor using `usr` would mint IDs that collide with platform user IDs,
+/// so the prefix is rejected.
 /// Only `usr` is reserved for now (matches the SDK-side fence in
 /// `sdks/db/src/types.ts`).
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
-/// Validate a creator-declared typed-id prefix (`t.id("blog")`).
+/// Validate a legacy internal platform-ID prefix.
 ///
 /// Defense-in-depth mirror of the SDK-side check in
 /// the db SDK types: the SDK throws at `pnpm dev` build time, but
@@ -826,12 +826,12 @@ pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if !valid {
         return Err(QueryError::InvalidIdent(format!(
-            "t.id(prefix): prefix must match ^[a-z][a-z0-9_]*$ (got '{prefix}')"
+            "internal platform ID prefix must match ^[a-z][a-z0-9_]*$ (got '{prefix}')"
         )));
     }
     if RESERVED_ID_PREFIXES.contains(&prefix) {
         return Err(QueryError::ReservedSystemFieldName(format!(
-            "t.id(prefix): '{prefix}' is reserved for platform ids; choose a different prefix"
+            "internal platform ID prefix '{prefix}' is reserved; choose a different prefix"
         )));
     }
     Ok(())
@@ -1128,7 +1128,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             if is_schema_metadata_key(field) {
                 continue;
             }
-            // `id: t.id("prefix")` is a PREFIX DECLARATION for
+            // A legacy internal `type: "id"` field is a PREFIX DECLARATION for
             // the system `id` PK column already emitted by
             // `build_system_field_columns`, NOT a second column. Skip it
             // so we neither duplicate the `id` column nor trip the
@@ -3266,7 +3266,7 @@ mod tests {
 
     #[test]
     fn p7_id_prefix_decl_emits_single_id_column() {
-        // **P7** — `id: t.id("blog")` is a prefix declaration for the
+        // **P7** — a legacy internal ID descriptor is a prefix declaration for the
         // system `id` PK column, NOT a second column. The emitter must
         // skip it: exactly one `id` column (the system PK), no duplicate,
         // and no reserved-name rejection.
@@ -3298,7 +3298,8 @@ mod tests {
     #[test]
     fn p7_id_prefix_decl_with_reserved_usr_is_rejected() {
         // Defense in depth: a hand-built wire payload declaring
-        // `id: t.id("usr")` must be rejected at DDL build (mirrors the
+        // an internal descriptor using the reserved `usr` prefix must be rejected
+        // at DDL build (mirrors the
         // SDK fence). Reuses `ReservedSystemFieldName`.
         let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
         let err =

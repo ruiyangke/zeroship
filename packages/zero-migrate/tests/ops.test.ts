@@ -371,9 +371,9 @@ test("t.textArray() records the textArray column type", () => {
   assert.equal(col.nullable, false);
 });
 
-test("t.id() keeps its existing shape while recording the exact UUIDv4 default", () => {
+test("an explicit UUID primary key records the exact UUIDv4 default", () => {
   const ops = record(() => {
-    table("u").create({ columns: { id: t.id() } });
+    table("u").create({ columns: { id: t.uuid().primaryKey().default(uuidV4()) } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "uuid");
@@ -3182,7 +3182,7 @@ test("authoring outside a recorder throws OP_OUTSIDE_RECORDER", () => {
   __begin();
   __drain(); // close the recorder
   assert.throws(
-    () => table("u").create({ columns: { id: t.id() } }),
+    () => table("u").create({ columns: { id: t.uuid().primaryKey().default(uuidV4()) } }),
     (e: any) => e.code === "OP_OUTSIDE_RECORDER",
   );
 });
@@ -3197,7 +3197,7 @@ test("determinism lint flags Date.now()/Math.random()/new Date(); clean source i
 });
 
 test("determinism lint is a coarse whole-source scan (over-flags, never under-flags)", () => {
-  const inComment = lintDeterminism(`// audited at new Date()\ntable("t").create({ columns: { id: t.id() } });`);
+  const inComment = lintDeterminism(`// audited at new Date()\ntable("t").create({ columns: { id: t.uuid().primaryKey().default(uuidV4()) } });`);
   assert.ok(
     inComment.some((f) => f.accessor.includes("new Date")),
     "the coarse scan flags a clock accessor even in a comment (fail-safe over-flag)",

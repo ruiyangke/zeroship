@@ -467,7 +467,7 @@ pub struct FieldDescriptorDto {
     /// Enum membership (string or numeric members).
     #[napi(js_name = "enum")]
     pub enum_values: Option<Vec<JsonValue>>,
-    /// A `t.id(prefix)` typed-id prefix.
+    /// A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix.
     pub id_prefix: Option<String>,
     /// A `t.vector(dims, …)` dimensionality.
     pub vector_dims: Option<i64>,

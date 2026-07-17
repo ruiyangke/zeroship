@@ -2,10 +2,10 @@
 // fluent table() surface. Covers the IrDefault carrier (a typed-scalar literal
 // default + a synth `genRandomUuid()`). Records the byte-identical frozen wire ops.
 //
-// NOTE: `id` is a bare uuid (NOT t.id()) — t.id() would hoist a table-level pk
-// constraint, but this fixture's golden has an EMPTY constraints list (it is the
-// no-constraint createTable carrier). `note` is nullable-by-default (the fluent
-// chain OMITS the nullable key for a nullable column).
+// NOTE: `id` is deliberately a non-primary-key UUID, so this fixture's golden has
+// an EMPTY constraints list (it is the no-constraint createTable carrier). `note`
+// is nullable-by-default (the fluent chain OMITS the nullable key for a nullable
+// column).
 import { table, t, genRandomUuid } from "zero-migrate";
 
 export const name = "ddl_create";

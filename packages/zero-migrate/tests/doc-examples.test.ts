@@ -45,7 +45,7 @@ const VOCAB_PREAMBLE = `import {
   view,
   enumType,
   comment,
-  t, fromDb, lintDeterminism,
+  t, ids, fromDb, lintDeterminism,
   now, uuidV4, uuidV7, genRandomUuid, currentSetting, currentUser, interval, concatWs,
   dialect,
   dbType as dbT,

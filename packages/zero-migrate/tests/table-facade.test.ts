@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t, table } from "../src/index.js";
+import { t, table, uuidV4 } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 
 function record(up: () => void): any[] {
@@ -277,7 +277,7 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
     const u = table("users");
     u.column("a").add({ type: t.int(), ifNotExists: true });
     u.column("b").drop({ ifExists: true });
-    u.create({ columns: { id: t.id() }, ifNotExists: true });
+    u.create({ columns: { id: t.uuid().primaryKey().default(uuidV4()) }, ifNotExists: true });
     u.drop({ ifExists: true });
     u.index("ix_a").add({ on: ["a"], ifNotExists: true });
     u.index("ix_b").drop({ ifExists: true });

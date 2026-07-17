@@ -1,8 +1,10 @@
 // op.* migration fixture — the DECLARED-ONLY column facets
-// the recorder captures on the wire `IrColumn`. Proves `t.id({ prefix })` records
-// `idPrefix` (previously dropped) and
+// the recorder captures on the wire `IrColumn`. Proves
 // `t.vector({ dimensions, metric })` records `vectorMetric` (previously dropped), and
-// that the JS↔Rust value-checksum round-trip agrees on the new optional fields.
+// that the JS↔Rust value-checksum round-trip agrees on the optional facet.
+//
+// This confined-platform fixture intentionally omits an authored `id`: policy
+// injects its internal text/base62 UUIDv7 platform id. That value is not a TypeID.
 //
 // A plain column (no facet) is unchanged on the wire — the fixture mixes facet
 // and non-facet columns so the byte-identity golden also covers the absent case.
@@ -14,9 +16,6 @@ export default {
   up() {
     table("posts").create({
       columns: {
-        // t.id({ prefix }) → IrColumn.idPrefix on the wire (a declared-only,
-        // uncatalogable typed-id brand).
-        id: t.id({ prefix: "post" }),
         title: t.text().notNull(),
         // t.vector({ dimensions, metric }) → IrColumn.vectorMetric (the closed cosine|l2|
         // innerProduct set) — the other declared-only hint.

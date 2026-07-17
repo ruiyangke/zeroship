@@ -6651,14 +6651,14 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // inverse the descriptor models. An explicit `nullable: false` ⇒ required.
     let required = !c.nullable.unwrap_or(true);
     let (mut ty, references) = col_type_to_token(&c.ty);
-    // A `t.id({prefix})` authoring records the
-    // `id` column as a `uuid` PK carrying `id_prefix`. The shared descriptor kernel
+    // A legacy internal platform-ID descriptor records the `id` column as a
+    // `uuid` carrier with `id_prefix`. The shared descriptor kernel
     // expects an `id`-named field to declare type `"id"` (so it FOLDS into the
     // system PK instead of being rejected as a second `id` column —
     // `declarative.rs` `validate_desired`); map it here so the carried prefix
     // round-trips through `descriptor_to_sdk_schema` as `{ type: "id", idPrefix }`.
-    // (The earlier op.* convention authored NO `id` column — the platform injected
-    // it — so this arm only fires for an explicit `t.id({prefix})` re-declaration.)
+    // Public migration authoring cannot produce this facet; the arm remains only
+    // for legacy internal descriptors and old platform artifacts.
     if c.name == "id" && matches!(c.ty, ColType::Uuid) {
         ty = "id".to_string();
     }
@@ -6707,8 +6707,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     };
     // Thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose if the IR doesn't carry them:
-    //   - `id_prefix` (`t.id({prefix})`) → the descriptor's `id_prefix` so the
-    //     shared kernel keeps the typed-id brand on the `id` column;
+    //   - legacy internal `id_prefix` → the descriptor's `id_prefix` so the
+    //     shared kernel keeps the base62-UUIDv7 platform brand on the `id` column;
     //   - `vector_metric` (`t.vector(n, {metric})`) → the descriptor's
     //     `vector_metric` (camelCase token) so the ivfflat/hnsw opclass renders the
     //     declared metric instead of defaulting.

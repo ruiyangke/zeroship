@@ -54,6 +54,7 @@ import {
   type PerRowGenerator,
   type PerRowGeneratorValue,
   type PerRowGenerators,
+  type TypeLexicon,
   type TypeIdOptions,
   type ValueFormat,
   type DecimalValue,
@@ -65,6 +66,10 @@ import { and as removedAnd, or as removedOr, not as removedNot } from "../../src
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
 import type { Classification, MaskKind, VectorMetric } from "../../src/generated/ir.js";
+
+// The removed universal ID shortcut must stay absent from the migration lexicon.
+const migrationIdShortcutIsAbsent: "id" extends keyof TypeLexicon ? never : true = true;
+void migrationIdShortcutIsAbsent;
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee.

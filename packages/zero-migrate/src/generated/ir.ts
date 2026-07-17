@@ -271,8 +271,9 @@ export interface IrColumn {
   /** Canonical value-format semantics. `ids.typeId()` and `ids.ulid()` store
    *  text while this facet carries the exact persisted format. Default-absent. */
   valueFormat?: ValueFormat | null;
-  /** The `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
-   *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
+  /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix, retained
+   *  for old internal descriptors. It is not TypeID or public authoring.
+   *  Camel-cased on the wire and default-absent. */
   idPrefix?: string | null;
   /** The `t.vector(n, { metric })` distance metric (closed
    *  {@link VectorMetric}). Default-absent. */

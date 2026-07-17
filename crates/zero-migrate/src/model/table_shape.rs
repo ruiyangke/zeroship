@@ -54,7 +54,7 @@ pub enum TableShapeError {
         /// Table being resolved.
         table: String,
     },
-    /// The `id: t.id({ prefix })` fold found a malformed prefix.
+    /// The legacy internal platform-ID fold found a malformed prefix.
     #[error("createTable {table:?} declares invalid id prefix {prefix:?}: {message}")]
     InvalidIdPrefix {
         /// Table being resolved.
@@ -302,7 +302,7 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
 }
 
 fn is_id_prefix_declaration(column: &IrColumn) -> bool {
-    column.name == "id" && matches!(column.ty, ColType::Uuid)
+    column.name == "id" && matches!(column.ty, ColType::Uuid) && column.id_prefix.is_some()
 }
 
 fn is_id_identity_replacement(column: &IrColumn) -> bool {
@@ -911,6 +911,25 @@ indexes = [
         };
         assert_eq!(columns.iter().filter(|c| c.name == "id").count(), 1);
         assert_eq!(columns[0].id_prefix.as_deref(), Some("post"));
+    }
+
+    #[test]
+    fn explicit_uuid_primary_key_is_not_reinterpreted_as_the_platform_id() {
+        let mut id = text_col("id");
+        id.ty = ColType::Uuid;
+        id.nullable = Some(false);
+        id.default = Some(uuid_v4_default());
+
+        let err = resolve_create_table_policy(
+            &ir(vec![id], Some(vec!["id".into()])),
+            &zeroship_confined_ceiling(),
+        )
+        .expect_err("an explicit UUID key must not fold into the injected text key");
+
+        assert!(matches!(
+            err,
+            TableShapeError::SystemColumnCollision { column, .. } if column == "id"
+        ));
     }
 
     #[test]

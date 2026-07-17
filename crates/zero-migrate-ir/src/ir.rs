@@ -1178,20 +1178,23 @@ pub struct IrColumn {
         skip_serializing_if = "Option::is_none"
     )]
     pub value_format: Option<ValueFormat>,
-    /// **Migration-first** — the `t.id({ prefix })` typed-id prefix, a
-    /// DECLARED-ONLY hint DB introspection cannot recover (the minted
-    /// `usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time
-    /// input, not a stored column attribute). Carried so gen-types — and the
-    /// runtime, once it deletes the declared-schema cache — keep the typed-id brand.
+    /// Legacy internal platform-ID prefix for the
+    /// `<prefix>_<22 base62 UUIDv7>` format. This is a DECLARED-ONLY hint DB
+    /// introspection cannot recover (the minted value is opaque text in the
+    /// catalog; the prefix is a mint-time input, not a stored column attribute).
+    /// It is retained for internal platform descriptors and old data only; it is
+    /// neither TypeID nor public migration authoring. Carried so gen-types — and
+    /// the runtime, once it deletes the declared-schema cache — keep that legacy
+    /// internal brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
     /// BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image. Bounded
     #[cfg_attr(
         doc,
-        doc = "at validate-time ([`crate::model::validate`]) to the `typed_id` charset/length + the"
+        doc = "at validate-time ([`crate::model::validate`]) to the legacy internal prefix charset/length + the"
     )]
     #[cfg_attr(
         not(doc),
-        doc = "at validate-time ([`crate::validate`]) to the `typed_id` charset/length + the"
+        doc = "at validate-time ([`crate::validate`]) to the legacy internal prefix charset/length + the"
     )]
     /// reserved-prefix deny-list (a hand-crafted IR envelope is the threat model).
     ///
@@ -2752,8 +2755,8 @@ pub enum Op {
         /// so it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]
         /// type (`validate_column_facets`). Default-absent + `skip_serializing_if` ⇒
         /// byte-identical when absent. (No `id_prefix` slot: an added column is NEVER the
-        /// system PK, so a typed-id prefix is meaningless — the recorder keeps that
-        /// fail-closed.)
+        /// system PK, so the legacy internal platform-ID prefix is meaningless — the
+        /// recorder keeps that fail-closed.)
         #[serde(
             rename = "vectorMetric",
             default,

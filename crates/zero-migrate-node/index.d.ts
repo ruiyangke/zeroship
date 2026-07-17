@@ -152,7 +152,7 @@ export interface FieldDescriptorDto {
   max?: number
   /** Enum membership (string or numeric members). */
   enum?: Array<JsonValue>
-  /** A `t.id(prefix)` typed-id prefix. */
+  /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix. */
   idPrefix?: string
   /** A `t.vector(dims, …)` dimensionality. */
   vectorDims?: number

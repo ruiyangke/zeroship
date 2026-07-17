@@ -116,9 +116,9 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "bytes";
     case "geoPoint":
       return "geoPoint";
-    // `t.id(...)` is a typed_id stored as a uuid/text PK candidate (the runtime
-    // mints `<prefix>_<base62>`); it reduces to the neutral `uuid` ColType, the
-    // same column the migration DSL's `t.id()` carries.
+    // `dbType.id(...)` is the legacy internal platform ID field. The runtime mints
+    // `<prefix>_<22 base62 UUIDv7>` values; this is neither TypeID nor a public
+    // migration-column shortcut. Its historical bridge carrier is neutral `uuid`.
     case "id":
       return "uuid";
     // A foreign-key column: the neutral `ref` arm carries the target table as a

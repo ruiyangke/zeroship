@@ -10,8 +10,7 @@
         {
           "name": "id",
           "type": "text",
-          "nullable": false,
-          "idPrefix": "post"
+          "nullable": false
         },
         {
           "name": "created_at",

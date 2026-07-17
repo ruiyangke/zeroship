@@ -3813,12 +3813,13 @@ fn validate_default_expr(
 /// Three fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
 /// mind (the closed-enum + `deny_unknown_fields` design):
 ///
-/// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
+/// 1. **`id_prefix`** — a legacy internal platform-ID prefix, distinct from
+///    TypeID, which must obey the internal `^[a-z][a-z0-9_]*$`
 ///    charset rule + reserved-prefix deny-list (`usr`, …) the runtime enforces via
 ///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth,
 ///    mirroring `crates/core/src/typed_id.rs` + `system_fields_pass`'s
 ///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
-///    hand-authored prefix keeps the compact `<prefix>_<22 base62>` typed-id shape.
+///    hand-authored prefix keeps the compact `<prefix>_<22 base62 UUIDv7>` shape.
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
 ///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
 /// 2. **`value_format`** — TypeID prefixes obey the distinct TypeID 0.3 grammar;
@@ -3956,7 +3957,7 @@ fn validate_column_facets(
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(
-                    "column {:?} declares an invalid t.id() prefix {prefix:?}: {e}",
+                    "column {:?} declares an invalid internal platform-ID prefix {prefix:?}: {e}",
                     col.name
                 ),
                 "use a prefix matching ^[a-z][a-z0-9_]*$ that is not platform-reserved \
@@ -3969,9 +3970,9 @@ fn validate_column_facets(
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(
-                    "column {:?} declares a t.id() prefix {prefix:?} of {} bytes; the \
-                     maximum is {MAX_ID_PREFIX_LEN} (a typed-id prefix is kept short so \
-                     the minted `<prefix>_<22 base62>` id stays compact)",
+                    "column {:?} declares an internal platform-ID prefix {prefix:?} of {} bytes; the \
+                     maximum is {MAX_ID_PREFIX_LEN} (the legacy prefix is kept short so \
+                     the minted `<prefix>_<22 base62 UUIDv7>` id stays compact)",
                     col.name,
                     prefix.len()
                 ),

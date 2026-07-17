@@ -397,11 +397,10 @@ var ColumnDefImpl = class _ColumnDefImpl {
   _default;
   _primaryKey;
   _unique;
-  // Semantic facets carried on the IrColumn: the old typed-id prefix
-  // (`t.id({prefix})`), canonical value format (`ids.typeId({prefix})`), pgvector
-  // distance metric, and the remaining standalone column facets.
+  // Semantic facets carried on the IrColumn: canonical value format
+  // (`ids.typeId({prefix})`), pgvector distance metric, and the remaining
+  // standalone column facets.
   // Absent ⇒ omitted on the wire.
-  _idPrefix;
   _valueFormat;
   _vectorMetric;
   _caseSensitive;
@@ -414,7 +413,6 @@ var ColumnDefImpl = class _ColumnDefImpl {
     this._default = fields?.default;
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
-    this._idPrefix = fields?.idPrefix;
     this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
@@ -429,7 +427,6 @@ var ColumnDefImpl = class _ColumnDefImpl {
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
-      idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
@@ -437,10 +434,6 @@ var ColumnDefImpl = class _ColumnDefImpl {
       generated: "generated" in over ? over.generated : this._generated,
       identity: "identity" in over ? over.identity : this._identity
     });
-  }
-  /** Internal: carry the typed-id prefix (`t.id({prefix})`). */
-  __withIdPrefix(prefix) {
-    return this.with({ idPrefix: prefix });
   }
   /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
   __withVectorMetric(metric) {
@@ -526,10 +519,9 @@ var ColumnDefImpl = class _ColumnDefImpl {
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : void 0,
       // Carry the semantic facets onto the wire IrColumn (camelCase keys
-      // `idPrefix`/`valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
+      // `valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
       // plain column is byte-identical to the pre-facet image (checksum-neutral).
       valueFormat: this._valueFormat,
-      idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
       mask: this._mask,
@@ -538,13 +530,6 @@ var ColumnDefImpl = class _ColumnDefImpl {
     });
   }
   __toAddColumnTail() {
-    if (this._idPrefix !== void 0) {
-      throw structuredError(
-        "OP_INVALID",
-        "a t.id({ prefix }) typed-id prefix can only be declared in create(); an added column is never the system primary key, so an addColumn carries no prefix slot",
-        { facet: "idPrefix" }
-      );
-    }
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : void 0,
@@ -1033,14 +1018,6 @@ var perRow = Object.freeze({
   ulid: () => perRowGeneratorValue("ulid")
 });
 var t = {
-  id: (opts) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default(genRandomUuid());
-    if (opts && opts.prefix !== void 0) {
-      requireString(opts.prefix, "t.id({ prefix })");
-      col = col.__withIdPrefix(opts.prefix);
-    }
-    return col;
-  },
   text: (opts) => textColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
   numeric: (opts = {}) => {

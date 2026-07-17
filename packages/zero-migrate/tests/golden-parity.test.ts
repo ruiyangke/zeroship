@@ -82,23 +82,15 @@ function resolveConfinedCreateTables(ops: any[]): any[] {
   return ops.map((op) => {
     if (op.op !== "createTable") return op;
 
-    let foldedId = false;
     const authorColumns = [];
     for (const col of op.columns) {
-      if (col.name === "id" && col.type === "uuid") {
-        foldedId = true;
-        continue;
-      }
       if (confinedSystemColumnNames.has(col.name)) {
         throw new Error(`unexpected confined system-column collision in JS parity fixture: ${col.name}`);
       }
       authorColumns.push(col);
     }
     if (op.primaryKey !== undefined && op.primaryKey !== null) {
-      const authorPkIsFoldedId = foldedId && op.primaryKey.length === 1 && op.primaryKey[0] === "id";
-      if (!authorPkIsFoldedId) {
-        throw new Error("unexpected author primaryKey in confined JS parity fixture");
-      }
+      throw new Error("unexpected author primaryKey in confined JS parity fixture");
     }
 
     return {
@@ -120,7 +112,6 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
   const ops = record(() => {
     table("accounts").create({
       columns: {
-        id: t.id(),
         email: t.text().notNull().unique(),
         balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
         authored_at: t.timestamp().notNull().default(now()),

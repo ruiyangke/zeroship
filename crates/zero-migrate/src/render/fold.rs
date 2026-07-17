@@ -2932,8 +2932,9 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
         })
     };
     match f.ty.as_str() {
-        // `t.id({prefix})` re-declares the system `id` PK as a `uuid` carrying the
-        // prefix; the inverse of `ir_column_to_field`'s `name=="id" && Uuid → "id"`.
+        // A legacy internal platform-ID descriptor represents the system `id` PK as
+        // a `uuid` carrier with an `id_prefix`; this is the inverse of
+        // `ir_column_to_field`'s internal `name=="id" && Uuid → "id"` mapping.
         "id" => Some(ColType::Uuid),
         // A `ref` column carries the FK target on `references`.
         "ref" => f
@@ -4097,7 +4098,7 @@ mod tests {
         // A rename cannot collide with a live table.
         let err = fold(&[
             create("accounts", vec![col("email", ColType::Text, false)]),
-            create("members", vec![col("id", ColType::Uuid, false)]),
+            create("members", vec![col("member_key", ColType::Uuid, false)]),
             rename_table("accounts", "members"),
         ])
         .unwrap_err();

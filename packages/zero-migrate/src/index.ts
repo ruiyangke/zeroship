@@ -219,7 +219,6 @@ export type {
   VectorMetric,
   ValueFormat,
   PerRowGenerator,
-  IdOptions,
   TypeIdOptions,
   TextOptions,
   NumericOptions,

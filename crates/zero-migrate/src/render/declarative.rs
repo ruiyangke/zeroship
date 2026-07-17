@@ -2202,7 +2202,8 @@ fn build_table_snapshot_impl(
     }
 
     for f in &d.fields {
-        // id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
+        // id-fold: a legacy internal `type: "id"` descriptor is a PREFIX
+        // DECLARATION for the
         // system `id` PK column already injected by `system_field_columns`,
         // NOT a second column. FOLD it: validate the declared prefix (defense
         // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
@@ -2227,20 +2228,20 @@ fn build_table_snapshot_impl(
                 //
                 // NOTE — only `unique` + a user `default` are checked, NOT
                 // nullability: the system PK is ALWAYS NOT NULL irrespective of the
-                // folded field's `required` flag, and the declarative `t.id(prefix)`
+                // folded field's `required` flag, and the internal platform-ID
                 // descriptor legitimately leaves `required` at its default (`false`)
                 // — the NOT NULL is injected by `system_field_columns`, not carried
                 // on the field — so the fold ignoring `nullable` is correct, not a
-                // drop. A legitimate `t.id(prefix?)` carries NO user `default` (its
-                // structured UUIDv4 default maps to `None`) and is never a column-level
+                // drop. A legitimate internal ID descriptor carries NO user
+                // `default` and is never a column-level
                 // UNIQUE (the PK implies it), so this never fires for the real id
                 // shape — only for a modifier that would otherwise vanish.
                 if f.unique || f.default.is_some() {
                     return Err(DeclarativeError::Invalid(format!(
                         "field 'id' folds into the system primary key, so a \
                          column-level modifier on it would be silently discarded: \
-                         {}{}— declare the id as a bare `t.id(prefix?)` (the system \
-                         PK is already NOT NULL, unique, and DB-defaulted)",
+                         {}{}— omit the platform-managed id declaration (the system \
+                         PK is already NOT NULL and unique)",
                         if f.unique { "unique " } else { "" },
                         if f.default.is_some() { "default " } else { "" },
                     )));
@@ -2263,7 +2264,7 @@ fn build_table_snapshot_impl(
             }
             return Err(DeclarativeError::Invalid(format!(
                 "field 'id' is reserved for the platform system primary key; a \
-                 re-declaration must be `t.id(prefix?)` (type 'id') or an integer \
+                 re-declaration must be an internal type 'id' descriptor or an integer \
                  identity primary key, not '{}'",
                 f.ty
             )));
@@ -2857,7 +2858,7 @@ fn fts_index_snapshot_sqlite(table: &str, fields: &[FieldDescriptor]) -> Option<
     })
 }
 
-/// Validate a creator-declared typed-id prefix (`t.id("blog")`).
+/// Validate a legacy internal platform-ID prefix.
 ///
 /// Schema-authority: DELEGATES to the shared kernel's
 /// [`crate::schema::query::validate_id_prefix`] (the single source of truth for
@@ -7248,8 +7249,9 @@ mod snapshot_builder_refactor_safety_tests {
 
     /// One-field `id` descriptor with the given modifiers — mirrors what
     /// `ir_column_to_field` produces for an `id`-named uuid column under the id
-    /// remap (`ty = "id"`). The op.* `t.id()` synth default maps to `default: None`,
-    /// so a `Some(default)` here models the dangerous `id: t.uuid().default(<lit>)`.
+    /// remap (`ty = "id"`). An internal platform-ID descriptor carries no SQL
+    /// default, so a `Some(default)` here models a dangerous modifier that would
+    /// otherwise be discarded.
     fn id_descriptor(
         required: bool,
         unique: bool,
@@ -7306,7 +7308,7 @@ mod snapshot_builder_refactor_safety_tests {
 
     /// **nullability is NOT a discarded modifier.** The system PK is always
     /// NOT NULL irrespective of the folded field's `required` flag, and the
-    /// declarative `t.id(prefix)` descriptor legitimately leaves `required` at its
+    /// legacy internal ID descriptor legitimately leaves `required` at its
     /// `false` default (the NOT NULL is injected by `system_field_columns`). So a
     /// folded `id` field with `required:false` and no `unique`/`default` must STILL
     /// fold cleanly — the reject must NOT over-fire on nullability. (Guards the fix
@@ -7316,7 +7318,7 @@ mod snapshot_builder_refactor_safety_tests {
     fn id_field_with_default_required_flag_still_folds() {
         let d = id_descriptor(/* required */ false, false, None);
         let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
-            .expect("a t.id() with the descriptor's default required:false still folds");
+            .expect("an internal ID descriptor with required:false still folds");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
             id_cols, 1,
@@ -7324,7 +7326,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
     }
 
-    /// **the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
+    /// **the legitimate shape STILL folds.** A clean internal platform-ID descriptor
     /// (`ty = "id"`, no user default, not column-unique — exactly what
     /// `ir_column_to_field` produces, since the structured UUIDv4 default maps to
     /// `None`) must fold into the single system PK with NO error and NO second column.
@@ -7333,7 +7335,7 @@ mod snapshot_builder_refactor_safety_tests {
     fn clean_id_field_still_folds_into_the_system_pk() {
         let d = id_descriptor(/* required */ true, false, None);
         let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
-            .expect("a clean t.id() folds cleanly");
+            .expect("a clean internal ID descriptor folds cleanly");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
             id_cols, 1,

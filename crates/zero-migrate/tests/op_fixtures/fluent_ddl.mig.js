@@ -5,8 +5,9 @@
 // the immutable t.* lexicon. Proves the fluent authoring records the frozen wire
 // ops (the byte-identity oracle's golden).
 //
-// Covers EVERY t.* column type + EVERY modifier:
-//   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
+// Covers the physical t.* column types + modifiers. This confined-platform
+// fixture intentionally omits `id`; policy injects the internal platform key:
+//   t.text().notNull(), t.numeric(),
 //   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted), t.bigInt(),
@@ -20,7 +21,6 @@ export default {
   up() {
     table("accounts").create({
       columns: {
-        id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
         balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
         authored_at: t.timestamp().notNull().default(now()),

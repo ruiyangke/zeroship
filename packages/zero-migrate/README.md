@@ -16,7 +16,7 @@ npm install zero-migrate
 ## Write a migration
 
 ```ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_orders";
 
@@ -24,7 +24,7 @@ export default {
   up() {
     table("orders").create({
       columns: {
-        id: t.id({ prefix: "ord" }),
+        id: ids.typeId({ prefix: "ord" }).primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).notNull(),
         status: t.text().notNull().default("pending"),
         created_at: t.timestamp().notNull().default(now()),
@@ -35,6 +35,9 @@ export default {
   },
 };
 ```
+
+TypeID columns do not add a database default. Supply a valid value with the
+matching prefix whenever you insert a row.
 
 Calling these helpers describes the change as structured operations; it does not
 connect to a database. Common features share one API, and vendor-only behavior is

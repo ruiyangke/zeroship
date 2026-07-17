@@ -14,7 +14,6 @@ export const name = "fluent_scalars";
 export function up() {
   table("ledger").create({
     columns: {
-      id: t.id(),
       // a large-int column default carried via the decimal() -> {decimal} carrier
       seq: t.numeric({ precision: 38, scale: 0 }).notNull().default(decimal("9007199254740993")),
       // a bytes column default carried via the Uint8Array -> {bytes} carrier

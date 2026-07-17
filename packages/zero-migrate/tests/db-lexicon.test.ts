@@ -36,7 +36,8 @@ test("ONE lexicon: a db field reduces to the same ColType the migration t.* prod
   assert.deepEqual(colTypeFromDbField(dbT.geoPoint()), migrateColType(t.geoPoint()));
   // `t.number()` (a db float) maps to the neutral `double` ColType.
   assert.deepEqual(colTypeFromDbField(dbT.number()), migrateColType(t.double()));
-  // `t.id(...)` reduces to the neutral `uuid` ColType (the typed_id PK candidate).
+  // The separate db schema's legacy internal platform ID reduces to its
+  // historical neutral `uuid` bridge carrier; it is not TypeID or migration sugar.
   assert.equal(colTypeFromDbField(dbT.id("post")), "uuid");
 });
 

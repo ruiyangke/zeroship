@@ -99,14 +99,6 @@ export type {
 // and re-exported above. The OPTION-BAG shapes the authoring `t.*` factories /
 // `.mask()` take live here.
 
-/** Options for `t.id({ prefix })` — the typed-id prefix (`usr_<base62>`-style
- *  brand). DECLARED-ONLY: carried on `IrColumn.idPrefix` so the fold / gen-types
- *  keep the brand. Bounded (charset/length/reserved deny-list) by the engine at
- *  validate time. */
-export interface IdOptions {
-  prefix: string;
-}
-
 /** Options for the published TypeID 0.3 text format. The empty prefix is
  * valid and stores the 26-character suffix without a leading underscore. */
 export interface TypeIdOptions {
@@ -258,15 +250,10 @@ export interface ColumnDef {
   autoIncrement(): ColumnDef;
 }
 
-/** The fluent `t.*` column-type lexicon (shared in shape with `db`).
- *  Canonical names only — the `string`/`int` aliases and the `{notNull,default}`
- *  options-bag overload are REMOVED. */
+/** The fluent migration `t.*` physical column-type lexicon. Canonical names only
+ * — the universal ID shortcut, the `string`/`integer` aliases, and the
+ * `{notNull,default}` options-bag overload are removed. */
 export interface TypeLexicon {
-  /** A conventional id: a non-null UUID PK defaulting to `gen_random_uuid()`.
-   *  `t.id({ prefix })` records the typed-id prefix on `IrColumn.idPrefix` so the
-   *  fold / gen-types keep the `usr_<base62>`-style brand (declared-only in
-   *  `create()` — an added column is never the system PK). */
-  id(opts?: IdOptions): ColumnDef;
   text(opts?: TextOptions): ColumnDef;
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
   textArray(): ColumnDef;

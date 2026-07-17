@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): `t.id({ prefix })`, `ids.typeId({ prefix })`, `ids.ulid()`,
+// generated/identity): `ids.typeId({ prefix })`, `ids.ulid()`,
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
@@ -11,7 +11,7 @@
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
 // two recorded op lists are byte-identical — proving the shipped engine artifact
-// records the EXACT camelCase wire form (`idPrefix` / `valueFormat` / `vectorMetric` /
+// records the EXACT camelCase wire form (`valueFormat` / `vectorMetric` /
 // `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
 // the source authors, with no compile-time drift.
 
@@ -74,7 +74,6 @@ const ENGINE: Rec = {
 function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
-  //  - t.id({ prefix })            → IrColumn.idPrefix
   //  - ids.typeId({ prefix })      → IrColumn.valueFormat.typeId
   //  - ids.ulid()                  → IrColumn.valueFormat "ulid"
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
@@ -83,7 +82,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   //  - t.bigInt().identity(opts)   → IrColumn.identity:{always}
   table("documents").create({
     columns: {
-      id: t.id({ prefix: "doc" }),
+      id: ids.typeId({ prefix: "doc" }).primaryKey(),
       public_id: ids.typeId({ prefix: "document" }).notNull().unique(),
       opaque_id: ids.typeId({ prefix: "" }),
       event_id: ids.ulid().notNull().unique(),
@@ -103,7 +102,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
       title: t.text(),
     },
   });
-  // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
+  // addColumn carries valueFormat + vectorMetric + mask:
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("external_id").add({ type: ids.typeId({ prefix: "external" }) });
   table("documents").column("external_event_id").add({ type: ids.ulid() });
@@ -127,8 +126,9 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(create.op, "createTable");
   const byName = (n: string) => create.columns.find((column: any) => column.name === n);
 
-  // t.id({ prefix }) → idPrefix
-  assert.equal(byName("id").idPrefix, "doc");
+  // The public TypeID builder records valueFormat and never the legacy idPrefix facet.
+  assert.deepEqual(byName("id").valueFormat, { typeId: { prefix: "doc" } });
+  assert.ok(!("idPrefix" in byName("id")));
 
   // t.vector({ dimensions, metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
@@ -228,21 +228,6 @@ test("an out-of-set mask kind/classification/metric is a structured OP_INVALID (
     );
     assert.throws(
       () => pubT.vector(8, { metric: "manhattan" as any }),
-      (e: any) => e.code === "OP_INVALID",
-    );
-  } finally {
-    pubDrain();
-  }
-});
-
-// A typed-id prefix on an ADDED column is fail-closed (an added column is never the
-// system PK) — the public surface must REFUSE it with the same structured error
-// the engine recorder raises, never silently drop it.
-test("t.id({ prefix }) on an addColumn is a structured OP_INVALID (fail-closed)", () => {
-  pubBegin();
-  try {
-    assert.throws(
-      () => pubTable("documents").column("alt_id").add({ type: pubT.id({ prefix: "doc" }) }),
       (e: any) => e.code === "OP_INVALID",
     );
   } finally {

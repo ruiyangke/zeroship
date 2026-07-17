@@ -571,7 +571,7 @@ fn render_builder_chain(def: &Value) -> String {
             "bytes" => "t.bytes()".to_string(),
             "geoPoint" => "t.geoPoint()".to_string(),
             "calendarDate" => "t.calendarDate()".to_string(),
-            "id" => render_id_base(obj),
+            "id" => render_internal_platform_id_base(obj),
             "ref" => render_ref_base(obj),
             "vector" => render_vector_base(obj),
             // An unknown token degrades to `t.json()` rather than a panic — the
@@ -692,11 +692,14 @@ fn render_encrypted_base(obj: &serde_json::Map<String, Value>) -> String {
     }
 }
 
-/// `t.id(prefix?)` — render the typed-id base, threading the recovered `idPrefix`.
-fn render_id_base(obj: &serde_json::Map<String, Value>) -> String {
+/// Render the private `@zeroship/db` legacy platform-ID builder, threading the
+/// recovered `idPrefix`. Bracket access keeps this internal compatibility path
+/// visibly separate from zero-migrate's public `t.*` migration lexicon. The
+/// stored format is `<prefix>_<22 base62 UUIDv7>`, not TypeID.
+fn render_internal_platform_id_base(obj: &serde_json::Map<String, Value>) -> String {
     match obj.get("idPrefix").and_then(Value::as_str) {
-        Some(prefix) => format!("t.id({})", js_str(prefix)),
-        None => "t.id()".to_string(),
+        Some(prefix) => format!("t[\"id\"]({})", js_str(prefix)),
+        None => "t[\"id\"]()".to_string(),
     }
 }
 
@@ -893,9 +896,9 @@ mod tests {
     fn renders_id_ref_vector_facets() {
         assert_eq!(
             chain(json!({ "type": "id", "idPrefix": "post" })),
-            "t.id(\"post\")"
+            "t[\"id\"](\"post\")"
         );
-        assert_eq!(chain(json!({ "type": "id" })), "t.id()");
+        assert_eq!(chain(json!({ "type": "id" })), "t[\"id\"]()");
         assert_eq!(
             chain(
                 json!({ "type": "ref", "refTarget": "users", "onDelete": "cascade", "deferrable": true })

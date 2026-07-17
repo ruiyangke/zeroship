@@ -48,8 +48,26 @@ function exportedNamesFromDts(fileName: string): Set<string> {
   return names;
 }
 
+function interfaceMemberNamesFromDts(fileName: string, interfaceName: string): Set<string> {
+  const sourceText = readFileSync(new URL(`../dist/${fileName}`, import.meta.url), "utf8");
+  const source = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const declaration = source.statements.find(
+    (statement): statement is ts.InterfaceDeclaration =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName,
+  );
+  assert.ok(declaration, `${fileName} must declare ${interfaceName}`);
+
+  const names = new Set<string>();
+  for (const member of declaration.members) {
+    if (!ts.isMethodSignature(member) && !ts.isPropertySignature(member)) continue;
+    if (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) names.add(member.name.text);
+  }
+  return names;
+}
+
 test("public root .d.ts exposes vendor DDL and omits recorder internals", async () => {
   const coreExports = exportedNamesFromDts("index.d.ts");
+  const migrationTypeMembers = interfaceMemberNamesFromDts("index.d.ts", "TypeLexicon");
 
   const rootedVendorExports = [
     "createFunction",
@@ -66,6 +84,8 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   ];
   assert.equal(coreExports.has("table"), true, "table must be exported from zero-migrate root declarations");
   assert.equal(coreExports.has("ids"), true, "ids must be exported from zero-migrate root declarations");
+  assert.equal(coreExports.has("IdOptions"), false, "the removed migration id options must not be exported");
+  assert.equal(migrationTypeMembers.has("id"), false, "the migration t declaration must not expose id");
   for (const name of [
     "BackfillSetValue",
     "IdFormats",
@@ -103,6 +123,11 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
 
   const runtimeRoot = await import("zero-migrate");
+  assert.equal(
+    (runtimeRoot.t as unknown as Record<string, unknown>).id,
+    undefined,
+    "the migration t runtime must not expose id",
+  );
   assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
   assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");
   assert.equal(typeof runtimeRoot.ids.ulid, "function", "ids.ulid must be a root runtime builder");

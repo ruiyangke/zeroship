@@ -78,8 +78,8 @@ pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 /// an `ifExists` on a create*/add* op, or an `ifNotExists` on a
 /// drop*/rename/alter op. A structured authoring error, not a render-time blow-up.
 pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
-/// A `t.id({prefix})` `id_prefix` that is not a
-/// valid typed-id prefix (charset / length) or is in the reserved-prefix
+/// A legacy internal platform `id_prefix` that is not a valid base62-UUIDv7 ID
+/// prefix (charset / length) or is in the reserved-prefix
 /// deny-list (`usr`, …). The IR's threat model is a hand-crafted IR envelope, so a
 /// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time
 /// surprise (it would otherwise mint ids colliding with platform `usr_…` ids).
@@ -142,11 +142,12 @@ pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED"
 /// Partition tier split: hash child drops have no portable collapse predicate.
 pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
-/// The MAX byte length a `t.id({prefix})` prefix may carry. Mirrors the
-/// `typed_id` convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
+/// The maximum byte length a legacy internal platform-ID prefix may carry.
+/// Mirrors the internal convention (`usr`/`app`/`ses` are 3
 /// chars; the auto-derivation in `plugin-db`'s `system_fields_pass` caps at 4 for
 /// collection-derived prefixes). A hand-authored prefix is bounded to the SAME 4
-/// so the minted `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
+/// so the minted `<prefix>_<22 base62 UUIDv7>` value keeps the compact platform
+/// shape. This bound is unrelated to the public TypeID prefix grammar.
 pub const MAX_ID_PREFIX_LEN: usize = 4;
 
 /// The dialect a structured rejection pertains to (the `dialect` field).
