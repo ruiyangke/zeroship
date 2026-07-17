@@ -812,6 +812,11 @@ export interface AttachPartitionArgs {
 
 export type IndexStorageParamsArg = IndexStorageParams;
 
+/** A non-empty, ordered tuple of column names. Array order is schema semantics
+ *  for primary keys and foreign keys: position `n` on the local side maps to
+ *  position `n` on the referenced side. */
+export type OrderedColumns = readonly [string, ...string[]];
+
 /** A named foreign-key reference (the `references` half of a FK add / a
  *  `create.foreignKeys[]` entry). */
 export interface ForeignKeyReference {
@@ -819,7 +824,20 @@ export interface ForeignKeyReference {
    *  must match the table/op schema when provided. */
   schema?: string;
   table: string;
-  columns: string[];
+  columns: OrderedColumns;
+}
+
+/** A named table-level foreign key. Composite relationships are authored only
+ *  through this ordered tuple shape; repeated column-level `.references()`
+ *  facets remain independent single-column constraints. */
+export interface TableForeignKey {
+  name: string;
+  columns: OrderedColumns;
+  references: ForeignKeyReference;
+  onDelete?: RefAction;
+  onUpdate?: RefAction;
+  deferrable?: boolean;
+  initiallyDeferred?: boolean;
 }
 
 export interface InsertArgs<R extends Row = Row> {
@@ -1068,14 +1086,11 @@ export interface TableRuntimeOptions {
  *  `name` (name-first).
  *
  *  Apply-level lowering (what reaches the live DDL):
- *  - `uniques`, `foreignKeys`, `indexes` LOWER to DDL on Postgres (a named UNIQUE
- *    + a single-`id` FOREIGN KEY + extra indexes appear in the live catalog).
- *  - `indexes` also lower on SQLite (plain btree); a table-level `uniques` /
- *    `foreignKeys` on SQLite is a HARD authoring error (the SQLite CREATE renders
- *    from the column descriptor — a table-level constraint is not threaded into
- *    the emitter; refused fail-closed rather than silently dropped).
- *  - `foreignKeys` can name one or more local columns and one or more referenced
- *    columns. Composite/non-`id` forms are PostgreSQL-only in the current engine.
+ *  - `uniques`, `foreignKeys`, and `indexes` lower to target DDL. Create-time
+ *    table-level composite foreign keys lower directly on PostgreSQL, MySQL, and
+ *    SQLite; SQLite lifecycle changes use the engine's table-rebuild path.
+ *  - `foreignKeys` name non-empty ordered local and referenced column tuples.
+ *    Tuple positions correspond exactly, and both sides must have equal arity.
  *  - `checks` lower from the closed `Expr` AST through the engine renderer.
  *    Partial-index `where` renders on PostgreSQL and SQLite; MySQL refuses it
  *    fail-closed because MySQL has no partial indexes.
@@ -1096,18 +1111,10 @@ export interface CreateTableArgs {
   /** Table primary key intent: undefined leaves the policy default unresolved,
    *  null requests no PK, and a non-empty ordered column-name array records an
    *  explicit single-column or composite PK. */
-  primaryKey?: string[] | null;
+  primaryKey?: OrderedColumns | null;
   uniques?: Array<{ name: string; columns: string[] }>;
   checks?: CheckDef[];
-  foreignKeys?: Array<{
-    name: string;
-    columns: string[];
-    references: ForeignKeyReference;
-    onDelete?: RefAction;
-    onUpdate?: RefAction;
-    deferrable?: boolean;
-    initiallyDeferred?: boolean;
-  }>;
+  foreignKeys?: readonly TableForeignKey[];
   exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
     name: string;
@@ -1152,7 +1159,7 @@ export interface ColumnRef {
 /** The `.foreignKey(name)` selector sub-handle. */
 export interface ForeignKeyRef {
   add(args: {
-    columns: string[];
+    columns: OrderedColumns;
     references: ForeignKeyReference;
     onDelete?: RefAction;
     onUpdate?: RefAction;

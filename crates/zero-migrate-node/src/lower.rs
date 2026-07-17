@@ -808,25 +808,25 @@ fn ops_without_completed_journal_evidence(
 ) -> Result<Vec<(Op, bool)>, String> {
     let mut pending = Vec::new();
     for span in &artifact.op_spans {
-        let steps = artifact
-            .plan
-            .steps
-            .get(span.step_range.clone())
-            .ok_or_else(|| {
+        let mut completed = false;
+        let mut inflight = false;
+        for range in std::iter::once(&span.step_range).chain(&span.additional_step_ranges) {
+            let steps = artifact.plan.steps.get(range.clone()).ok_or_else(|| {
                 format!(
                     "lowered operation has invalid plan-step range {}..{} for {} steps",
-                    span.step_range.start,
-                    span.step_range.end,
+                    range.start,
+                    range.end,
                     artifact.plan.steps.len()
                 )
             })?;
-        let completed = steps
-            .iter()
-            .any(|step| step_has_journal_phase(step, journal_entries, Phase::Completed));
-        if !completed {
-            let inflight = steps
+            completed |= steps
+                .iter()
+                .any(|step| step_has_journal_phase(step, journal_entries, Phase::Completed));
+            inflight |= steps
                 .iter()
                 .any(|step| step_has_journal_phase(step, journal_entries, Phase::Started));
+        }
+        if !completed {
             pending.push((span.op.clone(), inflight));
         }
     }

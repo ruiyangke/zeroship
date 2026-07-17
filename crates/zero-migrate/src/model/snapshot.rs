@@ -62,6 +62,16 @@ pub struct ColumnSnapshot {
     /// `information_schema.COLUMNS.COLLATION_NAME`). `None` is the
     /// byte-identical default case-sensitive text behavior.
     pub case_sensitive: Option<bool>,
+    /// Exact non-default catalog collation identity for PostgreSQL and SQLite.
+    ///
+    /// This is deliberately separate from [`Self::case_sensitive`]: `C` and
+    /// `POSIX` are both case-sensitive PostgreSQL collations but are distinct
+    /// foreign-key storage contracts. SQLite's default `BINARY` collation is
+    /// canonicalized to `None`, while `NOCASE` continues to round-trip through
+    /// `case_sensitive = Some(false)`; named alternatives such as `RTRIM` stay
+    /// here. MySQL uses [`Self::mysql_text_storage`] because character-set
+    /// identity is part of its compatibility contract too.
+    pub collation: Option<ColumnCollationSnapshot>,
     /// Exact MySQL character storage recovered from
     /// `information_schema.COLUMNS`. This is introspection-only metadata used
     /// to validate character foreign-key compatibility; author-built desired
@@ -126,7 +136,8 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         s.field("generated", &self.generated)
             .field("identity", &self.identity)
-            .field("case_sensitive", &self.case_sensitive);
+            .field("case_sensitive", &self.case_sensitive)
+            .field("collation", &self.collation);
         if self.mysql_text_storage.is_some() {
             s.field("mysql_text_storage", &self.mysql_text_storage);
         }
@@ -134,6 +145,26 @@ impl std::fmt::Debug for ColumnSnapshot {
             .field("comment_sentinel", &self.comment_sentinel)
             .field("comment", &self.comment)
             .finish()
+    }
+}
+
+/// Exact PostgreSQL/SQLite catalog identity for a non-default column collation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnCollationSnapshot {
+    /// PostgreSQL collation schema; SQLite collations are unqualified.
+    pub schema: Option<String>,
+    /// Catalog collation name, preserving PostgreSQL identifier case.
+    pub name: String,
+}
+
+impl ColumnCollationSnapshot {
+    /// Stable diagnostic spelling without losing the structured comparison key.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.schema.as_ref().map_or_else(
+            || self.name.clone(),
+            |schema| format!("{schema}.{}", self.name),
+        )
     }
 }
 
@@ -156,6 +187,7 @@ impl PartialEq for ColumnSnapshot {
             && self.data_type == other.data_type
             && self.nullable == other.nullable
             && self.case_sensitive == other.case_sensitive
+            && self.collation == other.collation
             && self.comment == other.comment
     }
 }
@@ -166,6 +198,7 @@ impl std::hash::Hash for ColumnSnapshot {
         self.data_type.hash(state);
         self.nullable.hash(state);
         self.case_sensitive.hash(state);
+        self.collation.hash(state);
         self.comment.hash(state);
     }
 }

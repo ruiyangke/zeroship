@@ -7,6 +7,7 @@
 //! `CHECK` consumed by the shared DDL emitters.
 
 use crate::model::ir::{validate_type_id_prefix, ValueFormat};
+use crate::model::snapshot::ColumnCollationSnapshot;
 use crate::render::dml::{
     mysql_grammar_string_literal, quote_ident_for_dialect, sql_string_literal,
 };
@@ -23,6 +24,9 @@ const UUID_TEXT_LEN: usize = 36;
 pub(crate) struct ValueFormatColumnMetadata {
     /// Exact dialect DDL type, including the format's bytewise collation.
     pub ddl_type: String,
+    /// Exact non-default catalog collation identity, when the dialect exposes
+    /// one independently from its DDL type spelling.
+    pub collation: Option<ColumnCollationSnapshot>,
     /// Null-tolerant canonical spelling check, including its `CHECK` wrapper.
     pub inline_check: String,
 }
@@ -44,6 +48,7 @@ pub(crate) fn uuid_column_metadata(
             );
             ValueFormatColumnMetadata {
                 ddl_type: "VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
+                collation: None,
                 inline_check: format!(
                     "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {UUID_TEXT_LEN} AND \
                      REGEXP_LIKE({quoted}, {regex}, 'c')))"
@@ -52,6 +57,8 @@ pub(crate) fn uuid_column_metadata(
         }
         SqlDialect::Sqlite => ValueFormatColumnMetadata {
             ddl_type: "TEXT COLLATE BINARY".to_string(),
+            // BINARY is SQLite's canonical default and is represented by None.
+            collation: None,
             inline_check: format!(
                 "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
                  length({quoted}) = {UUID_TEXT_LEN} AND \
@@ -126,6 +133,7 @@ fn ulid_column_metadata(
 
     Ok(ValueFormatColumnMetadata {
         ddl_type,
+        collation: bytewise_catalog_collation(dialect),
         inline_check,
     })
 }
@@ -198,6 +206,14 @@ fn type_id_column_metadata(
 
     Ok(ValueFormatColumnMetadata {
         ddl_type,
+        collation: bytewise_catalog_collation(dialect),
         inline_check,
+    })
+}
+
+fn bytewise_catalog_collation(dialect: SqlDialect) -> Option<ColumnCollationSnapshot> {
+    matches!(dialect, SqlDialect::Postgres).then(|| ColumnCollationSnapshot {
+        schema: Some("pg_catalog".to_string()),
+        name: "C".to_string(),
     })
 }

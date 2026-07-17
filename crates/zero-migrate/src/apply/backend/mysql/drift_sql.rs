@@ -19,6 +19,29 @@ struct IndexParts {
     elements: Vec<IndexElementSnapshot>,
 }
 
+#[derive(Debug)]
+struct ForeignKeyParts {
+    referenced_schema: String,
+    referenced_table: String,
+    update_rule: String,
+    delete_rule: String,
+    columns: Vec<String>,
+    referenced_columns: Vec<String>,
+}
+
+fn mysql_fk_action(rule: &str) -> Result<&'static str, DriftError> {
+    match rule.trim().to_ascii_uppercase().as_str() {
+        "CASCADE" => Ok("CASCADE"),
+        "SET NULL" => Ok("SET NULL"),
+        "SET DEFAULT" => Ok("SET DEFAULT"),
+        // InnoDB implements both spellings as the same immediate-reject action.
+        "NO ACTION" | "RESTRICT" => Ok("NO ACTION"),
+        other => Err(DriftError::Snapshot(format!(
+            "MySQL catalog returned an unrecognized foreign-key action {other:?}"
+        ))),
+    }
+}
+
 /// Normalize MySQL's catalog collation name into the portable
 /// `caseSensitive` intent carried by [`ColumnSnapshot`]. MySQL's built-in
 /// character collations encode that property in their final token:
@@ -138,6 +161,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             generated: None,
             identity: None,
             case_sensitive: case_sensitive_from_collation(collation.as_deref())?,
+            collation: None,
             mysql_text_storage,
             encryption_sentinel: None,
             comment_sentinel: None,
@@ -270,6 +294,141 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
                 comment: None,
             });
         }
+    }
+
+    let foreign_key_rows = conn
+        .query(
+            "SELECT kcu.TABLE_NAME AS table_name,
+                    kcu.CONSTRAINT_NAME AS constraint_name,
+                    kcu.ORDINAL_POSITION AS ordinal_position,
+                    kcu.POSITION_IN_UNIQUE_CONSTRAINT AS position_in_unique_constraint,
+                    kcu.COLUMN_NAME AS column_name,
+                    kcu.REFERENCED_TABLE_SCHEMA AS referenced_table_schema,
+                    kcu.REFERENCED_TABLE_NAME AS referenced_table_name,
+                    kcu.REFERENCED_COLUMN_NAME AS referenced_column_name,
+                    rc.UPDATE_RULE AS update_rule,
+                    rc.DELETE_RULE AS delete_rule
+               FROM information_schema.KEY_COLUMN_USAGE kcu
+               JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+                 ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+                AND rc.TABLE_NAME = kcu.TABLE_NAME
+                AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+              WHERE kcu.CONSTRAINT_SCHEMA = ?
+                AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+              ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+            &[schema.into()],
+        )
+        .await?;
+    let mut foreign_keys = BTreeMap::<(String, String), ForeignKeyParts>::new();
+    for row in foreign_key_rows {
+        let table_name: String = row.try_get("table_name")?;
+        if !tables.contains_key(&table_name) {
+            return Err(DriftError::Snapshot(format!(
+                "MySQL catalog returned foreign-key metadata for unknown table {table_name:?}"
+            )));
+        }
+        let constraint_name: String = row.try_get("constraint_name")?;
+        let ordinal: i64 = row.try_get("ordinal_position")?;
+        let unique_position: i64 = row.try_get("position_in_unique_constraint")?;
+        let column: String = row.try_get("column_name")?;
+        let referenced_schema: String = row.try_get("referenced_table_schema")?;
+        let referenced_table: String = row.try_get("referenced_table_name")?;
+        let referenced_column: String = row.try_get("referenced_column_name")?;
+        let raw_update_rule: String = row.try_get("update_rule")?;
+        let raw_delete_rule: String = row.try_get("delete_rule")?;
+        let update_rule = mysql_fk_action(&raw_update_rule)?.to_string();
+        let delete_rule = mysql_fk_action(&raw_delete_rule)?.to_string();
+
+        let key = (table_name.clone(), constraint_name.clone());
+        let parts = foreign_keys
+            .entry(key.clone())
+            .or_insert_with(|| ForeignKeyParts {
+                referenced_schema: referenced_schema.clone(),
+                referenced_table: referenced_table.clone(),
+                update_rule: update_rule.clone(),
+                delete_rule: delete_rule.clone(),
+                columns: Vec::new(),
+                referenced_columns: Vec::new(),
+            });
+        let expected_ordinal = i64::try_from(parts.columns.len() + 1).unwrap_or(i64::MAX);
+        if ordinal != expected_ordinal
+            || unique_position != expected_ordinal
+            || parts.referenced_schema != referenced_schema
+            || parts.referenced_table != referenced_table
+            || parts.update_rule != update_rule
+            || parts.delete_rule != delete_rule
+            || parts.columns.iter().any(|existing| existing == &column)
+            || parts
+                .referenced_columns
+                .iter()
+                .any(|existing| existing == &referenced_column)
+        {
+            return Err(DriftError::Snapshot(format!(
+                "MySQL catalog returned inconsistent foreign-key metadata for {}.{} at ordinal {ordinal}",
+                key.0, key.1
+            )));
+        }
+        parts.columns.push(column);
+        parts.referenced_columns.push(referenced_column);
+    }
+
+    for ((table_name, constraint_name), parts) in foreign_keys {
+        let Some(table) = tables.get(&table_name) else {
+            return Err(DriftError::Snapshot(format!(
+                "MySQL catalog lost table {table_name:?} while assembling foreign key {constraint_name:?}"
+            )));
+        };
+        if parts.columns.is_empty() || parts.columns.len() != parts.referenced_columns.len() {
+            return Err(DriftError::Snapshot(format!(
+                "MySQL catalog returned an empty or arity-mismatched foreign key {table_name}.{constraint_name}"
+            )));
+        }
+        if parts.columns.iter().any(|column| {
+            !table
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == *column)
+        }) {
+            return Err(DriftError::Snapshot(format!(
+                "MySQL catalog foreign key {table_name}.{constraint_name} names an unknown local column"
+            )));
+        }
+        if parts.referenced_schema.eq_ignore_ascii_case(schema) {
+            let Some(referenced_table) = tables.get(&parts.referenced_table) else {
+                return Err(DriftError::Snapshot(format!(
+                    "MySQL catalog foreign key {table_name}.{constraint_name} names unknown referenced table {:?}",
+                    parts.referenced_table
+                )));
+            };
+            if parts.referenced_columns.iter().any(|column| {
+                !referenced_table
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+            }) {
+                return Err(DriftError::Snapshot(format!(
+                    "MySQL catalog foreign key {table_name}.{constraint_name} names an unknown referenced column"
+                )));
+            }
+        }
+
+        let constraint = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+            &parts.referenced_schema,
+            Some(&constraint_name),
+            &parts.columns,
+            &parts.referenced_table,
+            &parts.referenced_columns,
+            Some(&parts.delete_rule),
+            Some(&parts.update_rule),
+            false,
+            false,
+            crate::schema::query::SqlDialect::Mysql,
+        );
+        tables
+            .get_mut(&table_name)
+            .expect("the immutable table lookup above proved this table exists")
+            .constraints
+            .push(constraint);
     }
     for table in tables.values_mut() {
         table

@@ -336,6 +336,508 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Locate the outer column/constraint list of a stored SQLite `CREATE TABLE`.
+///
+/// This deliberately understands SQLite's four identifier/string quoting forms
+/// and both comment forms. A comma or parenthesis inside a generated expression,
+/// CHECK, quoted default, or comment therefore cannot be mistaken for table DDL
+/// structure.
+fn sqlite_create_body_bounds(sql: &str) -> Option<(usize, usize)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Normal;
+    let mut cursor = 0_usize;
+    let mut open = None;
+    let mut depth = 0_usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor + 1).copied();
+        match state {
+            State::Normal => match (byte, next) {
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'\'', _) => state = State::Single,
+                (b'"', _) => state = State::Double,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (b'(', _) => {
+                    if open.is_none() {
+                        open = Some(cursor);
+                    }
+                    depth += 1;
+                }
+                (b')', _) if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open.map(|open| (open, cursor));
+                    }
+                }
+                _ => {}
+            },
+            State::Single if byte == b'\'' => {
+                if next == Some(b'\'') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Double if byte == b'"' => {
+                if next == Some(b'"') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Backtick if byte == b'`' => {
+                if next == Some(b'`') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Bracket if byte == b']' => {
+                if next == Some(b']') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::LineComment if matches!(byte, b'\n' | b'\r') => state = State::Normal,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Normal;
+                cursor += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
+/// Split an outer SQLite table body into its column/constraint clauses while
+/// retaining each clause's bytes verbatim.
+fn sqlite_table_clauses(body: &str) -> Option<Vec<&str>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = body.as_bytes();
+    let mut state = State::Normal;
+    let mut depth = 0_usize;
+    let mut cursor = 0_usize;
+    let mut start = 0_usize;
+    let mut clauses = Vec::new();
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor + 1).copied();
+        match state {
+            State::Normal => match (byte, next) {
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'\'', _) => state = State::Single,
+                (b'"', _) => state = State::Double,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (b'(', _) => depth += 1,
+                (b')', _) => depth = depth.checked_sub(1)?,
+                (b',', _) if depth == 0 => {
+                    clauses.push(&body[start..cursor]);
+                    start = cursor + 1;
+                }
+                _ => {}
+            },
+            State::Single if byte == b'\'' => {
+                if next == Some(b'\'') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Double if byte == b'"' => {
+                if next == Some(b'"') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Backtick if byte == b'`' => {
+                if next == Some(b'`') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Bracket if byte == b']' => {
+                if next == Some(b']') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::LineComment if matches!(byte, b'\n' | b'\r') => state = State::Normal,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Normal;
+                cursor += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    if depth != 0
+        || matches!(
+            state,
+            State::Single | State::Double | State::Backtick | State::Bracket | State::BlockComment
+        )
+    {
+        return None;
+    }
+    clauses.push(&body[start..]);
+    Some(clauses)
+}
+
+fn sqlite_skip_space_and_comments(sql: &str, cursor: &mut usize) {
+    let bytes = sql.as_bytes();
+    loop {
+        while bytes.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+        if bytes.get(*cursor..*cursor + 2) == Some(b"--") {
+            *cursor += 2;
+            while bytes
+                .get(*cursor)
+                .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+            {
+                *cursor += 1;
+            }
+            continue;
+        }
+        if bytes.get(*cursor..*cursor + 2) == Some(b"/*") {
+            *cursor += 2;
+            while *cursor + 1 < bytes.len() && bytes.get(*cursor..*cursor + 2) != Some(b"*/") {
+                *cursor += 1;
+            }
+            *cursor = (*cursor + 2).min(bytes.len());
+            continue;
+        }
+        break;
+    }
+}
+
+/// Consume one SQLite DDL word or quoted identifier. Quoted identifier escapes
+/// are decoded so catalog and desired constraint names can be compared by name.
+fn sqlite_ddl_word(sql: &str, cursor: &mut usize) -> Option<String> {
+    sqlite_skip_space_and_comments(sql, cursor);
+    let bytes = sql.as_bytes();
+    let first = *bytes.get(*cursor)?;
+    let (close, doubled) = match first {
+        b'"' => (b'"', true),
+        b'`' => (b'`', true),
+        b'[' => (b']', true),
+        _ => {
+            let start = *cursor;
+            while bytes.get(*cursor).is_some_and(|byte| {
+                !byte.is_ascii_whitespace() && !matches!(byte, b'(' | b')' | b',' | b'.' | b';')
+            }) {
+                *cursor += 1;
+            }
+            return (*cursor > start).then(|| sql[start..*cursor].to_string());
+        }
+    };
+
+    *cursor += 1;
+    let mut word = Vec::new();
+    while let Some(&byte) = bytes.get(*cursor) {
+        if byte == close {
+            if doubled && bytes.get(*cursor + 1) == Some(&close) {
+                word.push(close);
+                *cursor += 2;
+                continue;
+            }
+            *cursor += 1;
+            return String::from_utf8(word).ok();
+        }
+        word.push(byte);
+        *cursor += 1;
+    }
+    None
+}
+
+fn sqlite_named_foreign_key_clause(clause: &str) -> Option<String> {
+    let mut cursor = 0_usize;
+    if !sqlite_ddl_word(clause, &mut cursor)?.eq_ignore_ascii_case("CONSTRAINT") {
+        return None;
+    }
+    let name = sqlite_ddl_word(clause, &mut cursor)?;
+    if !sqlite_ddl_word(clause, &mut cursor)?.eq_ignore_ascii_case("FOREIGN")
+        || !sqlite_ddl_word(clause, &mut cursor)?.eq_ignore_ascii_case("KEY")
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn sqlite_constraint_by_name<'a>(
+    constraints: &'a [ConstraintSnapshot],
+    name: &str,
+) -> Option<&'a ConstraintSnapshot> {
+    constraints.iter().find(|constraint| {
+        constraint.kind == "FOREIGN KEY" && constraint.name.eq_ignore_ascii_case(name)
+    })
+}
+
+/// Find an unquoted SQLite keyword, ignoring strings, quoted identifiers, and
+/// comments. This must not classify `DEFAULT 'generated'` as a generated column:
+/// doing so would omit an ordinary column from the rebuild copy and lose data.
+fn sqlite_has_unquoted_keyword(sql: &str, keyword: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Normal;
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor + 1).copied();
+        match state {
+            State::Normal => match (byte, next) {
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'\'', _) => state = State::Single,
+                (b'"', _) => state = State::Double,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (_, _) if is_sql_ident_byte(byte) => {
+                    let start = cursor;
+                    while bytes
+                        .get(cursor)
+                        .is_some_and(|byte| is_sql_ident_byte(*byte))
+                    {
+                        cursor += 1;
+                    }
+                    if sql[start..cursor].eq_ignore_ascii_case(keyword) {
+                        return true;
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+            State::Single if byte == b'\'' => {
+                if next == Some(b'\'') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Double if byte == b'"' => {
+                if next == Some(b'"') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Backtick if byte == b'`' => {
+                if next == Some(b'`') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Bracket if byte == b']' => {
+                if next == Some(b']') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::LineComment if matches!(byte, b'\n' | b'\r') => state = State::Normal,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Normal;
+                cursor += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    false
+}
+
+/// Return column names whose stored definition is explicitly generated. SQLite's
+/// `PRAGMA table_info` omits generated columns on supported versions, but this
+/// extra filter makes the copy mapping safe if a catalog adapter ever exposes
+/// them (inserting into a generated column is illegal).
+fn sqlite_generated_columns(create_sql: &str) -> BTreeSet<String> {
+    let Some((open, close)) = sqlite_create_body_bounds(create_sql) else {
+        return BTreeSet::new();
+    };
+    let Some(clauses) = sqlite_table_clauses(&create_sql[open + 1..close]) else {
+        return BTreeSet::new();
+    };
+    clauses
+        .into_iter()
+        .filter_map(|clause| {
+            let mut cursor = 0_usize;
+            let name = sqlite_ddl_word(clause, &mut cursor)?;
+            if matches!(
+                name.to_ascii_uppercase().as_str(),
+                "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "CHECK" | "FOREIGN"
+            ) {
+                return None;
+            }
+            sqlite_has_unquoted_keyword(&clause[cursor..], "GENERATED").then_some(name)
+        })
+        .collect()
+}
+
+/// Reconcile only named table-level FOREIGN KEY clauses in SQLite's verbatim
+/// stored `CREATE TABLE`, leaving column definitions (including defaults,
+/// generated expressions, collations, and inline checks), unrelated table
+/// constraints, comments, and trailing table options untouched.
+fn rewrite_sqlite_stored_foreign_keys(
+    table: &str,
+    stored: &str,
+    live: &TableSnapshot,
+    desired: &TableSnapshot,
+) -> Result<String, DeclarativeError> {
+    let (open, close) = sqlite_create_body_bounds(stored).ok_or_else(|| {
+        DeclarativeError::Invalid(format!(
+            "SQLite constraint rebuild of '{table}' could not parse its stored CREATE TABLE body"
+        ))
+    })?;
+    let clauses = sqlite_table_clauses(&stored[open + 1..close]).ok_or_else(|| {
+        DeclarativeError::Invalid(format!(
+            "SQLite constraint rebuild of '{table}' found malformed stored CREATE TABLE clauses"
+        ))
+    })?;
+    let mut rewritten = Vec::with_capacity(clauses.len() + desired.constraints.len());
+    let mut seen_names = BTreeSet::new();
+    for clause in clauses {
+        let Some(name) = sqlite_named_foreign_key_clause(clause) else {
+            rewritten.push(clause.to_string());
+            continue;
+        };
+        let folded = name.to_ascii_lowercase();
+        if !seen_names.insert(folded) {
+            return Err(DeclarativeError::Invalid(format!(
+                "SQLite constraint rebuild of '{table}' found duplicate stored foreign key name {name:?}"
+            )));
+        }
+        if let Some(constraint) = sqlite_constraint_by_name(&desired.constraints, &name) {
+            rewritten.push(format!(
+                "CONSTRAINT {} {}",
+                quote_ident(&constraint.name),
+                constraint.definition
+            ));
+        } else if sqlite_constraint_by_name(&live.constraints, &name).is_none() {
+            // A named FK absent from the structured snapshot is not ours to
+            // reconcile. Preserve it rather than deleting unmanaged DDL.
+            rewritten.push(clause.to_string());
+        }
+        // Otherwise this is a known live FK absent from desired: omit it.
+    }
+
+    for desired_fk in desired
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.kind == "FOREIGN KEY")
+    {
+        let folded = desired_fk.name.to_ascii_lowercase();
+        if seen_names.contains(&folded) {
+            continue;
+        }
+        match sqlite_constraint_by_name(&live.constraints, &desired_fk.name) {
+            Some(live_fk) if live_fk.definition == desired_fk.definition => {
+                // An unnamed/column-level live FK has only a synthetic catalog
+                // name. Its original clause was preserved above; do not append a
+                // second relationship merely because no declared name was parsed.
+            }
+            Some(_) => {
+                return Err(DeclarativeError::Invalid(format!(
+                    "SQLite constraint rebuild of '{table}' cannot replace foreign key {:?}: its named table-level clause was not found in stored CREATE TABLE",
+                    desired_fk.name
+                )));
+            }
+            None => rewritten.push(format!(
+                "CONSTRAINT {} {}",
+                quote_ident(&desired_fk.name),
+                desired_fk.definition
+            )),
+        }
+    }
+    for live_fk in live
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.kind == "FOREIGN KEY")
+    {
+        if sqlite_constraint_by_name(&desired.constraints, &live_fk.name).is_none()
+            && !seen_names.contains(&live_fk.name.to_ascii_lowercase())
+        {
+            return Err(DeclarativeError::Invalid(format!(
+                "SQLite constraint rebuild of '{table}' cannot drop foreign key {:?}: its named table-level clause was not found in stored CREATE TABLE",
+                live_fk.name
+            )));
+        }
+    }
+
+    Ok(format!(
+        "{}({}){}",
+        &stored[..open],
+        rewritten.join(","),
+        &stored[close + 1..]
+    ))
+}
+
 /// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
 /// column (the `__fts` tsvector). When the `default` body starts with this
 /// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
@@ -704,6 +1206,64 @@ fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
         .join(", ")
 }
 
+fn index_supports_fk_columns(index: &IndexSnapshot, columns: &[String]) -> bool {
+    index.predicate.is_none()
+        && !index.only
+        && index.access_method.eq_ignore_ascii_case("btree")
+        && index.columns.starts_with(columns)
+        && index.elements.len() >= columns.len()
+        && index
+            .elements
+            .iter()
+            .take(columns.len())
+            .zip(columns)
+            .all(|(element, column)| {
+                matches!(
+                    element,
+                    IndexElementSnapshot::Column {
+                        name,
+                        opclass: None,
+                        collation: None,
+                        ..
+                    } if name == column
+                )
+            })
+}
+
+fn constraint_supports_fk_columns(constraint: &ConstraintSnapshot, columns: &[String]) -> bool {
+    matches!(constraint.kind.as_str(), "PRIMARY KEY" | "UNIQUE")
+        && fk_definition_column_group(&constraint.definition, 0)
+            .is_some_and(|(key, _)| key.starts_with(columns))
+}
+
+fn mysql_inline_fk_supporting_indexes<'a>(
+    table: &'a TableSnapshot,
+    inline_fks: &[&ConstraintSnapshot],
+) -> Vec<&'a IndexSnapshot> {
+    let mut names = BTreeSet::new();
+    let mut indexes = Vec::new();
+    for fk in inline_fks {
+        let columns = fk_local_columns(&fk.definition);
+        if table
+            .constraints
+            .iter()
+            .any(|constraint| constraint_supports_fk_columns(constraint, &columns))
+        {
+            continue;
+        }
+        if let Some(index) = table
+            .indexes
+            .iter()
+            .find(|index| index_supports_fk_columns(index, &columns))
+        {
+            if names.insert(index.name.as_str()) {
+                indexes.push(index);
+            }
+        }
+    }
+    indexes
+}
+
 fn render_index_order_suffix(order: Option<IndexSortOrder>) -> &'static str {
     match canonical_index_sort_order(order) {
         Some(IndexSortOrder::Desc) => " DESC",
@@ -719,6 +1279,27 @@ fn render_index_order_suffix(order: Option<IndexSortOrder>) -> &'static str {
 /// literal column DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
 /// stays inside its one statement. Single-statement migrations carry `[up]`.
 pub(crate) type LoweredUnit = (Migration, Vec<String>);
+
+/// One create-time foreign-key unit that cannot execute until its referenced
+/// table has been created. The target is extracted once from the canonical
+/// [`ConstraintSnapshot`] definition while the FK metadata is still available;
+/// higher-level plan assembly never has to classify rendered SQL text.
+pub(crate) struct DeferredForeignKeyUnit {
+    pub(crate) target_table: String,
+    pub(crate) source_table: String,
+    pub(crate) constraint_name: String,
+    pub(crate) unit: LoweredUnit,
+}
+
+/// Structured result of lowering one `createTable` operation.
+///
+/// `immediate_units` contains the table CREATE followed by that table's explicit
+/// indexes. `deferred_foreign_keys` contains only PG/MySQL forward-reference FK
+/// ALTERs and carries their canonical target metadata for graph-aware ordering.
+pub(crate) struct LoweredCreateTable {
+    pub(crate) immediate_units: Vec<LoweredUnit>,
+    pub(crate) deferred_foreign_keys: Vec<DeferredForeignKeyUnit>,
+}
 
 /// Wrap a single-statement migration as a [`LoweredUnit`]: the statement list is
 /// exactly `[up]` (the canonical `up` is one indivisible statement). Used by every
@@ -2656,6 +3237,71 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     }
 }
 
+/// Ensure a table-level foreign key has a child-side B-tree index whose leading
+/// columns exactly follow the declared FK tuple order. Existing wider indexes
+/// are accepted only when the FK tuple is their plain leading prefix. Otherwise
+/// a deterministic `<constraint>_idx` index is added to the snapshot (or the
+/// first free numeric suffix when that name is already an unrelated/obsolete
+/// index), which
+/// makes the created index an explicit migration/preview unit on every dialect
+/// instead of relying on MySQL's implicit index creation.
+pub(crate) fn ensure_fk_supporting_index(
+    table: &str,
+    snapshot: &mut TableSnapshot,
+    constraint_name: &str,
+    columns: &[String],
+) -> Result<(), String> {
+    if columns.is_empty() {
+        return Err(format!(
+            "foreign key {table}.{constraint_name} has no local columns"
+        ));
+    }
+
+    if snapshot
+        .indexes
+        .iter()
+        .any(|index| index_supports_fk_columns(index, columns))
+    {
+        return Ok(());
+    }
+
+    // PRIMARY/UNIQUE constraints materialize ordered B-tree indexes even when a
+    // dialect's desired snapshot does not duplicate that implicit index in the
+    // explicit index bucket.
+    let constraint_supports = snapshot
+        .constraints
+        .iter()
+        .any(|constraint| constraint_supports_fk_columns(constraint, columns));
+    if constraint_supports {
+        return Ok(());
+    }
+
+    // A same-named FK may legitimately change tuple/order on SQLite through a
+    // rebuild. Its previously planned `<fk>_idx` is a remaining schema object and
+    // must not be silently dropped, but it no longer supports the new tuple. Pick
+    // the first deterministic free suffix so both lowering and offline folding
+    // converge on the same additional index while preserving the old one.
+    let mut ordinal = 1_u32;
+    let index_name = loop {
+        let raw = if ordinal == 1 {
+            format!("{constraint_name}_idx")
+        } else {
+            format!("{constraint_name}_idx_{ordinal}")
+        };
+        let candidate = crate::plan::author::cap_ident_name(&raw);
+        if snapshot.indexes.iter().all(|index| index.name != candidate) {
+            break candidate;
+        }
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            format!("foreign key {table}.{constraint_name} exhausted supporting-index suffixes")
+        })?;
+    };
+    snapshot
+        .indexes
+        .push(IndexSnapshot::btree(index_name, false, columns.to_vec()));
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // vector-ANN + full-text search index modeling.
 //
@@ -2804,6 +3450,7 @@ fn fts_objects_pg(
         generated: None,
         identity: None,
         case_sensitive: None,
+        collation: None,
         mysql_text_storage: None,
         encryption_sentinel: None,
         comment_sentinel: None,
@@ -3415,8 +4062,9 @@ pub struct SqliteRebuild {
     /// The journal migration: its `version` is the rebuild's identity, its
     /// `checksum` certifies the rebuild, and its flags (`destructive = true,
     /// requires_approval = true`) route it through the gate. Its `up` carries the
-    /// new-table CREATE for inspection/checksum; the actual apply is structured (the
-    /// `spec`), NOT a plain `up` execution.
+    /// new-table CREATE plus any newly planned schema-object DDL for
+    /// inspection/checksum; the actual apply is structured (the `spec`), NOT a
+    /// plain `up` execution.
     pub migration: Migration,
     /// The fully-resolved 12-step rebuild specification the backend executes.
     pub spec: SqliteRebuildSpec,
@@ -3818,8 +4466,8 @@ impl DeclarativeAuthor {
         for table in &order {
             let t = &desired.tables[*table];
             // Inline only the FKs whose target table already exists (live) or
-            // was created earlier in this batch; defer the rest (PG only — SQLite
-            // errors instead of deferring).
+            // was created earlier in this batch; defer the rest (PostgreSQL/MySQL —
+            // SQLite errors instead of deferring).
             let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
             let mut depends_on: Vec<MigrationId> = Vec::new();
             for c in &t.constraints {
@@ -3848,6 +4496,15 @@ impl DeclarativeAuthor {
                     }
                 }
             }
+            let mysql_inline_fk_indexes: BTreeSet<&str> =
+                if matches!(self.dialect, SqlDialect::Mysql) {
+                    mysql_inline_fk_supporting_indexes(t, &inline_fks)
+                        .into_iter()
+                        .map(|index| index.name.as_str())
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
 
             // the Confined SQLite path ROUTES the new-table CREATE through
             // the shared `crate::schema::query` emitter (unqualified, `main` = the
@@ -3889,6 +4546,9 @@ impl DeclarativeAuthor {
             out.push(mig);
             for idx in &t.indexes {
                 if is_pk_index(table, &idx.name) {
+                    continue;
+                }
+                if mysql_inline_fk_indexes.contains(idx.name.as_str()) {
                     continue;
                 }
                 // on SQLite the shared CREATE-TABLE emitter ALREADY emits
@@ -4749,13 +5409,127 @@ impl DeclarativeAuthor {
     /// build the [`SqliteRebuild`] (spec + journal migration) that
     /// reconciles `live` → `desired` for one existing table via the 12-step rebuild.
     ///
-    /// The new-table CREATE comes from the shared Sqlite/MainUnqualified emitter
-    /// (goodie sentinels + FKs), re-pointed to the engine-chosen TEMP name. The copy
-    /// mapping carries every column present in BOTH shapes (a RENAME maps `to ←
-    /// from`); a dropped column is excluded, an added one takes its DEFAULT/NULL. The
-    /// recreate set is the desired table's non-PK, non-system indexes (the
-    /// system-field indexes are emitted inline in the new CREATE by the shared
-    /// emitter, like the create-table path).
+    /// For a catalog-introspected table, the new-table CREATE is a surgical rewrite
+    /// of [`TableSnapshot::stored_create_sql`]: only named table-level foreign-key
+    /// clauses are reconciled. This is required because SQLite's structured PRAGMAs
+    /// do not recover defaults, generated expressions, or CHECK bodies. Synthetic
+    /// snapshots have no stored SQL and retain the shared-emitter fallback. The
+    /// copy mapping carries every non-generated column present in BOTH shapes; a
+    /// dropped column is excluded, an added one takes its DEFAULT/NULL. The recreate
+    /// set contains indexes newly planned to support the desired FK; the backend
+    /// separately captures and replays every existing index and trigger verbatim.
+    pub(crate) fn build_sqlite_constraint_rebuild(
+        &self,
+        table: &str,
+        live: &TableSnapshot,
+        desired: &mut TableSnapshot,
+        reason: String,
+    ) -> Result<SqliteRebuild, DeclarativeError> {
+        if self.dialect != SqlDialect::Sqlite {
+            return Err(DeclarativeError::Invalid(format!(
+                "internal: requested a SQLite constraint rebuild from a {:?} author",
+                self.dialect
+            )));
+        }
+
+        let create_real = if let Some(stored) = live.stored_create_sql.as_deref() {
+            rewrite_sqlite_stored_foreign_keys(table, stored, live, desired)?
+        } else {
+            self.render_create_table_sqlite_snapshot_statements(table, desired)
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    DeclarativeError::Invalid(format!(
+                        "internal: SQLite constraint rebuild of '{table}' emitted no CREATE TABLE"
+                    ))
+                })?
+        };
+        // Carry the exact post-rebuild CREATE forward in the in-memory working
+        // snapshot. A second FK op in the same migration must rewrite the first
+        // operation's shape, never resurrect the original catalog text.
+        desired.stored_create_sql = Some(create_real.clone());
+        let tmp = SqliteRebuildSpec::tmp_name(table);
+        let Some((open, _)) = sqlite_create_body_bounds(&create_real) else {
+            return Err(DeclarativeError::Invalid(format!(
+                "internal: SQLite constraint rebuild of '{table}' could not locate the emitted CREATE TABLE body"
+            )));
+        };
+        // The target is canonicalized, while the entire body and trailing SQLite
+        // options (`STRICT`, `WITHOUT ROWID`, etc.) remain byte-for-byte the
+        // rewritten stored text.
+        let new_table_create = format!(
+            "CREATE TABLE {} {}",
+            quote_ident(&tmp),
+            &create_real[open..]
+        );
+
+        let live_columns: BTreeSet<&str> = live
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        let desired_columns: BTreeSet<&str> = desired
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        let generated_columns = sqlite_generated_columns(&create_real);
+        let copy_columns = desired
+            .columns
+            .iter()
+            .filter(|column| {
+                live_columns.contains(column.name.as_str())
+                    && !generated_columns
+                        .iter()
+                        .any(|generated| generated.eq_ignore_ascii_case(&column.name))
+            })
+            .map(|column| (column.name.clone(), column.name.clone()))
+            .collect();
+        let dropped_columns = live
+            .columns
+            .iter()
+            .filter(|column| !desired_columns.contains(column.name.as_str()))
+            .map(|column| column.name.clone())
+            .collect();
+
+        // The backend captures and replays every live index/trigger verbatim.
+        // Only indexes introduced by this desired FK shape are absent from that
+        // capture and therefore need explicit recreation after the table swap.
+        let live_indexes: BTreeSet<&str> = live
+            .indexes
+            .iter()
+            .map(|index| index.name.as_str())
+            .collect();
+        let recreate_objects = desired
+            .indexes
+            .iter()
+            .filter(|index| !live_indexes.contains(index.name.as_str()))
+            .map(|index| self.emitter().create_index(table, index).0)
+            .collect();
+
+        let spec = SqliteRebuildSpec {
+            table: table.to_string(),
+            tmp_table: tmp,
+            new_table_create,
+            copy_columns,
+            recreate_objects,
+            dropped_columns,
+            reason,
+        };
+        let preview_up = std::iter::once(spec.new_table_create.as_str())
+            .chain(spec.recreate_objects.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(";\n");
+        let migration = self.make(
+            &format!("sqlite_rebuild_{table}"),
+            preview_up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        );
+        Ok(SqliteRebuild { migration, spec })
+    }
+
     fn build_sqlite_rebuild(
         &self,
         table: &str,
@@ -5387,6 +6161,19 @@ impl DeclarativeAuthor {
                 checks,
             ));
         }
+        // InnoDB creates an implicit child index when an inline FK has no index
+        // in the same CREATE TABLE statement. The planned index must therefore be
+        // inline too; emitting it only as a later CREATE INDEX would conceal the
+        // implicit object from the preview and can leave a redundant index. These
+        // exact snapshots are skipped from the follow-on index-unit loop below.
+        for idx in mysql_inline_fk_supporting_indexes(t, inline_fks) {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            parts.push(format!(
+                "{unique}KEY {} ({})",
+                mysql_quote_ident(&idx.name),
+                render_index_elements_mysql(idx)
+            ));
+        }
         for fk in inline_fks {
             parts.push(self.mysql_fk_clause(fk));
         }
@@ -5896,10 +6683,10 @@ impl DeclarativeAuthor {
         sqlite_schema: &serde_json::Value,
         live_tables: &std::collections::BTreeSet<String>,
         guard: Option<crate::model::probe::GuardDir>,
-    ) -> Result<Vec<LoweredUnit>, DeclarativeError> {
+    ) -> Result<LoweredCreateTable, DeclarativeError> {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
-        let mut deferred: Vec<&ConstraintSnapshot> = Vec::new();
+        let mut deferred: Vec<(&ConstraintSnapshot, String)> = Vec::new();
         for c in &snapshot.constraints {
             if c.kind != "FOREIGN KEY" {
                 continue;
@@ -5920,9 +6707,23 @@ impl DeclarativeAuthor {
                     target: target.unwrap_or_default(),
                 });
             } else {
-                deferred.push(c);
+                let target = target.ok_or_else(|| {
+                    DeclarativeError::Invalid(format!(
+                        "foreign key {table}.{} has no canonical referenced table",
+                        c.name
+                    ))
+                })?;
+                deferred.push((c, target));
             }
         }
+        let mysql_inline_fk_indexes: BTreeSet<&str> = if matches!(self.dialect, SqlDialect::Mysql) {
+            mysql_inline_fk_supporting_indexes(snapshot, &inline_fks)
+                .into_iter()
+                .map(|index| index.name.as_str())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
 
         let mut out: Vec<LoweredUnit> = Vec::new();
         // The STRUCTURAL statement list for the create (CREATE + follow-on COMMENT
@@ -6009,6 +6810,9 @@ impl DeclarativeAuthor {
             if is_pk_index(table, &idx.name) {
                 continue;
             }
+            if mysql_inline_fk_indexes.contains(idx.name.as_str()) {
+                continue;
+            }
             if is_sqlite && is_system_field_index(table, &idx.name) {
                 continue;
             }
@@ -6028,9 +6832,10 @@ impl DeclarativeAuthor {
             out.push(single_stmt(idx_mig));
         }
 
-        // Deferred FKs (PG only) as follow-on ALTER TABLE ADD CONSTRAINT — each a
-        // single statement.
-        for fk in deferred {
+        // Deferred FKs (PostgreSQL/MySQL) as follow-on ALTER TABLE ADD CONSTRAINT —
+        // each a single statement.
+        let mut deferred_foreign_keys = Vec::with_capacity(deferred.len());
+        for (fk, target_table) in deferred {
             let mut fk_mig = self.render_add_fk(table, fk, vec![table_version.clone()]);
             if let Some(dir) = guard {
                 // Object-scoped probe for THIS FK constraint. **F2** — UNLIKE the
@@ -6052,9 +6857,17 @@ impl DeclarativeAuthor {
                     expect_definition: Some(fk.definition.clone()),
                 });
             }
-            out.push(single_stmt(fk_mig));
+            deferred_foreign_keys.push(DeferredForeignKeyUnit {
+                target_table,
+                source_table: table.to_string(),
+                constraint_name: fk.name.clone(),
+                unit: single_stmt(fk_mig),
+            });
         }
-        Ok(out)
+        Ok(LoweredCreateTable {
+            immediate_units: out,
+            deferred_foreign_keys,
+        })
     }
 
     /// render an `addColumn` the SAME way `diff` does, from a
@@ -6183,6 +6996,35 @@ impl DeclarativeAuthor {
             self.qualified(table),
             quote_ident(name),
         );
+        single_stmt(self.make(
+            &format!("drop_constraint_{table}_{name}"),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        ))
+    }
+
+    /// Render the dialect-specific removal of a named foreign key. MySQL calls
+    /// this object class `FOREIGN KEY` in `ALTER TABLE` syntax; PostgreSQL uses
+    /// the generic `CONSTRAINT` spelling. SQLite never reaches this renderer —
+    /// its caller routes the operation through a structured table rebuild.
+    pub(crate) fn lower_drop_fk(&self, table: &str, name: &str) -> LoweredUnit {
+        let up = match self.dialect {
+            SqlDialect::Mysql => format!(
+                "ALTER TABLE {} DROP FOREIGN KEY {}",
+                mysql_qualified(&self.project_schema, table),
+                mysql_quote_ident(name),
+            ),
+            SqlDialect::Postgres => format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                self.qualified(table),
+                quote_ident(name),
+            ),
+            SqlDialect::Sqlite => {
+                unreachable!("SQLite foreign-key drops must lower through a table rebuild")
+            }
+        };
         single_stmt(self.make(
             &format!("drop_constraint_{table}_{name}"),
             up,

@@ -49,7 +49,8 @@ use crate::model::snapshot::{
 use crate::render::declarative::{
     build_resolved_table_snapshot, build_table_snapshot, json_value_default_expr_for_col_type,
     json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
+    DeclarativeAuthor, DeclarativeError, DeferredForeignKeyUnit, FieldDescriptor,
+    LoweredCreateTable, LoweredUnit,
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
@@ -77,6 +78,12 @@ enum LoweredOp {
     /// DDL units (createTable / addColumn / alter* / addConstraint / …) — each a
     /// `Migration` + its structural per-statement list (for guard-per-fragment).
     Ddl(Vec<LoweredUnit>),
+    /// A create-table operation whose table/index units execute immediately but
+    /// whose forward-reference FK units wait for their canonical target CREATE.
+    CreateTable {
+        table: String,
+        lowered: LoweredCreateTable,
+    },
     /// An online `renameColumn` — ONE plan step, dialect-chosen.
     /// The variant's `Migration`s (PG E1..C2, or the SQLite rebuild journal mig)
     /// are restamped with plan-relative, content-independent ids after the full
@@ -96,6 +103,37 @@ enum LoweredOp {
     /// backfill executor itself before any batch runs (`backfill.rs`). The DML op's
     /// expression AST is gated by the structural validator BEFORE assembly.
     Dml(PlanStep),
+}
+
+/// A guarded create-time FK held until its target table's immediate CREATE and
+/// index units have been emitted. The originating op metadata travels with it so
+/// guard failures, fragments, and the eventual non-contiguous op span remain
+/// attributed to the child `createTable`, not to the target op that unblocks it.
+struct PendingGuardedForeignKey {
+    deferred: DeferredForeignKeyUnit,
+    op: Op,
+    op_index: usize,
+    op_kind: &'static str,
+    op_span_index: usize,
+}
+
+/// Drain, in original encounter order, every create-time FK unblocked by this
+/// target table. A small indexed drain keeps unrelated forward edges pending and
+/// makes cycles deterministic without parsing or sorting rendered SQL.
+fn flush_pending_foreign_keys_for_target<E>(
+    target_table: &str,
+    pending: &mut Vec<DeferredForeignKeyUnit>,
+    mut emit: impl FnMut(DeferredForeignKeyUnit) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut index = 0;
+    while index < pending.len() {
+        if pending[index].target_table == target_table {
+            emit(pending.remove(index))?;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -482,6 +520,14 @@ impl LiveSchema {
             project_schema,
             default_schema,
         )?;
+        crate::model::validate::validate_table_foreign_keys_for_lower(
+            ir,
+            target,
+            &[],
+            &self.logical_columns,
+            project_schema,
+            default_schema,
+        )?;
         self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             target,
@@ -533,6 +579,16 @@ struct TypedReferenceSite<'a> {
     op_index: usize,
 }
 
+/// One authored table-level foreign key in the selected dialect leg. Unlike
+/// repeated column-level references, this site retains both ordered tuples as
+/// one relationship.
+struct TableForeignKeySite<'a> {
+    op: &'a Op,
+    table: &'a str,
+    constraint: &'a IrConstraint,
+    op_index: usize,
+}
+
 fn collect_typed_reference_sites<'a>(
     op: &'a Op,
     dialect: SqlDialect,
@@ -570,6 +626,60 @@ fn collect_typed_reference_sites<'a>(
                         op_index,
                     }),
             );
+        }
+        _ => {}
+    }
+}
+
+fn collect_table_foreign_key_sites<'a>(
+    op: &'a Op,
+    dialect: SqlDialect,
+    op_index: usize,
+    out: &mut Vec<TableForeignKeySite<'a>>,
+) {
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let selected = match dialect {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            }
+            .or(default.as_deref());
+            if let Some(ops) = selected {
+                for inner in ops {
+                    collect_table_foreign_key_sites(inner, dialect, op_index, out);
+                }
+            }
+        }
+        Op::CreateTable {
+            name, constraints, ..
+        } => {
+            out.extend(
+                constraints
+                    .iter()
+                    .filter(|constraint| matches!(constraint.kind, IrConstraintKind::Fk { .. }))
+                    .map(|constraint| TableForeignKeySite {
+                        op,
+                        table: name,
+                        constraint,
+                        op_index,
+                    }),
+            );
+        }
+        Op::AddConstraint {
+            table, constraint, ..
+        } if matches!(constraint.kind, IrConstraintKind::Fk { .. }) => {
+            out.push(TableForeignKeySite {
+                op,
+                table,
+                constraint,
+                op_index,
+            });
         }
         _ => {}
     }
@@ -690,16 +800,21 @@ fn sqlite_identity_columns_are_safe(snapshot: &TableSnapshot, columns: &[String]
 /// accepted: physical catalog validation must be at least as strict as the
 /// authored-graph key contract.
 fn snapshot_has_single_column_reference_key(snapshot: &TableSnapshot, column: &str) -> bool {
+    snapshot_has_reference_key(snapshot, &[column.to_string()])
+}
+
+/// Return whether the live catalog proves an exact ordered PRIMARY/UNIQUE
+/// candidate key. Prefix, reordered, partial, expression, and wider unique keys
+/// are deliberately not treated as the same tuple.
+fn snapshot_has_reference_key(snapshot: &TableSnapshot, columns: &[String]) -> bool {
     let constraint_key = ["PRIMARY KEY", "UNIQUE"].into_iter().any(|kind| {
         snapshot
             .constraints
             .iter()
             .filter(|constraint| constraint.kind.eq_ignore_ascii_case(kind))
             .any(|constraint| {
-                matches!(
-                    parse_constraint_identity_columns(&constraint.definition, kind).as_deref(),
-                    Some([candidate]) if candidate == column
-                )
+                parse_constraint_identity_columns(&constraint.definition, kind)
+                    .is_some_and(|candidate| candidate == columns)
             })
     });
     if constraint_key {
@@ -711,16 +826,19 @@ fn snapshot_has_single_column_reference_key(snapshot: &TableSnapshot, column: &s
             && index.predicate.is_none()
             && !index.only
             && index.access_method.eq_ignore_ascii_case("btree")
-            && matches!(index.columns.as_slice(), [candidate] if candidate == column)
-            && matches!(
-                index.elements.as_slice(),
-                [IndexElementSnapshot::Column {
-                    name,
-                    opclass: None,
-                    collation: None,
-                    ..
-                }] if name == column
-            )
+            && index.columns == columns
+            && index.elements.len() == columns.len()
+            && index.elements.iter().zip(columns).all(|(element, column)| {
+                matches!(
+                    element,
+                    IndexElementSnapshot::Column {
+                        name,
+                        opclass: None,
+                        collation: None,
+                        ..
+                    } if name == column
+                )
+            })
     })
 }
 
@@ -845,6 +963,18 @@ pub enum IrLowerError {
     /// DDL ops; DML / online-intent ops compile elsewhere). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only)")]
     UnsupportedOp(&'static str),
+    /// A PG/MySQL create-time FK was correctly withheld from a forward
+    /// reference, but no matching target-table CREATE appeared later in the
+    /// selected artifact leg. Emitting the ALTER anyway would only fail later at
+    /// apply time and could leave a partially applied schema, so lower refuses.
+    #[error(
+        "createTable {source_table:?} foreign key {constraint_name:?} references +         non-live target {target_table:?}, but that target was never created later +         in the selected artifact leg"
+    )]
+    DeferredForeignKeyTargetNotCreated {
+        source_table: String,
+        target_table: String,
+        constraint_name: String,
+    },
     /// A repeatable artifact contained a step that cannot honor run-on-change
     /// semantics. Repeatables are replace-style DDL migrations; silently routing a
     /// DML, backfill, or online-rename step through its once-only executor would
@@ -878,17 +1008,13 @@ pub enum IrLowerError {
         /// Why it cannot be rendered.
         reason: &'static str,
     },
-    /// A stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` op on the
-    /// SQLite dialect. SQLite has no native `ALTER COLUMN` / `ALTER TABLE
-    /// ADD|DROP CONSTRAINT`; the differ reconciles these via the 12-step table
-    /// REBUILD, which needs the full LIVE table structure (unavailable in this
-    /// pure-render lower). So stand-alone IR lowering of these ops is PG-only; the
-    /// SQLite leg routes through the declarative diff rebuild seam. Carries the op
-    /// tag.
+    /// A SQLite operation that requires a table rebuild but lacks the complete
+    /// live table snapshot (or is a non-FK constraint shape this IR path does not
+    /// rebuild). Named FK add/drop changes do lower to the structured 12-step
+    /// rebuild when full live structure is available.
     #[error(
-        "IrAuthor::lower of stand-alone op {0:?} is Postgres-only — SQLite has no \
-         native ALTER COLUMN / ADD|DROP CONSTRAINT; route it through the \
-         declarative diff rebuild seam (the 12-step table rebuild)"
+        "IrAuthor::lower of SQLite op {0:?} requires a full live table snapshot \
+         and a supported rebuild shape; refusing to emit a partial table rebuild"
     )]
     SqliteRebuildOnly(&'static str),
     /// a guarded op whose shape cannot produce a verifiable
@@ -1548,6 +1674,11 @@ pub struct LoweredOpSpan {
     pub op: Op,
     /// The half-open range of plan steps emitted by this operation.
     pub step_range: std::ops::Range<usize>,
+    /// Additional disjoint ranges emitted later for the same operation. A
+    /// child-first createTable uses this for its FK ALTER after the target
+    /// CREATE/index units. Keeping one op record prevents recovery projection
+    /// from replaying the full createTable twice.
+    pub additional_step_ranges: Vec<std::ops::Range<usize>>,
 }
 
 type GuardedLowerParts = (Vec<PlanStep>, Vec<GuardedFragment>, Vec<LoweredOpSpan>);
@@ -2546,11 +2677,22 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_table_foreign_keys_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut working_live = live.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
+        let mut pending_foreign_keys: Vec<DeferredForeignKeyUnit> = Vec::new();
         let mut plan_index = 0usize;
         for op in &ir.ops {
             self.lower_op_into_steps(
@@ -2559,9 +2701,17 @@ impl IrAuthor {
                 &mut out,
                 &mut live_tables,
                 &mut partition_state,
-                live,
+                &mut working_live,
                 &mut named_types,
+                &mut pending_foreign_keys,
             )?;
+        }
+        if let Some(pending) = pending_foreign_keys.first() {
+            return Err(IrLowerError::DeferredForeignKeyTargetNotCreated {
+                source_table: pending.source_table.clone(),
+                target_table: pending.target_table.clone(),
+                constraint_name: pending.constraint_name.clone(),
+            });
         }
         validate_repeatable_ir_steps(ir, &out)?;
         stamp_ir_plan_steps(ir, &mut out);
@@ -2649,27 +2799,7 @@ impl IrAuthor {
                 ));
             }
 
-            let mut local_column = self.add_column_snapshot(
-                site.table,
-                &site.column.name,
-                &site.column.ty,
-                site.column.nullable,
-                None,
-                site.column.vector_metric,
-                site.column.case_sensitive,
-                None,
-                None,
-                None,
-            )?;
-            apply_author_type_override_to_column(
-                site.table,
-                &site.column.name,
-                &site.column.ty,
-                &mut local_column,
-                self.dialect,
-            )?;
-            self.apply_uuid_column_metadata(site.column, &mut local_column)?;
-            self.apply_value_format_column_metadata(site.column, &mut local_column)?;
+            let local_column = self.authored_reference_column_snapshot(site.table, site.column)?;
             // PostgreSQL's catalog exposes the base storage family separately
             // from a column's COLLATE clause. TypeID and ULID intentionally use
             // `text COLLATE "C"`, but information_schema reports that target as
@@ -2738,7 +2868,516 @@ impl IrAuthor {
             }
         }
 
+        self.validate_table_foreign_key_catalogs(ir, live, logical_columns)
+    }
+
+    fn authored_reference_column_snapshot(
+        &self,
+        table: &str,
+        column: &IrColumn,
+    ) -> Result<ColumnSnapshot, IrLowerError> {
+        let mut snapshot = self.add_column_snapshot(
+            table,
+            &column.name,
+            &column.ty,
+            column.nullable,
+            None,
+            column.vector_metric,
+            column.case_sensitive,
+            None,
+            None,
+            None,
+        )?;
+        apply_author_type_override_to_column(
+            table,
+            &column.name,
+            &column.ty,
+            &mut snapshot,
+            self.dialect,
+        )?;
+        self.apply_uuid_column_metadata(column, &mut snapshot)?;
+        self.apply_value_format_column_metadata(column, &mut snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Reconstruct the physical shape implied by an authored logical contract.
+    ///
+    /// This is used only when a composite FK target is declared in the ordered
+    /// project graph but is not present in the input live catalog yet. Catalog
+    /// state must still prove an `addConstraint` local column; the authored
+    /// target merely supplies the other side of the positional physical check.
+    fn authored_logical_reference_column_snapshot(
+        &self,
+        table: &str,
+        column: &str,
+        contract: &crate::model::validate::LogicalColumnContract,
+    ) -> Result<ColumnSnapshot, IrLowerError> {
+        self.authored_reference_column_snapshot(
+            table,
+            &IrColumn {
+                name: column.to_string(),
+                ty: contract.ty.clone(),
+                nullable: None,
+                default: None,
+                unique: None,
+                value_format: contract.value_format.clone(),
+                references: None,
+                id_prefix: None,
+                vector_metric: None,
+                case_sensitive: contract.case_sensitive,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+        )
+    }
+
+    fn validate_table_foreign_key_catalogs(
+        &self,
+        ir: &MigrationIr,
+        live: &LiveSchema,
+        logical_columns: &crate::model::validate::LogicalColumnContracts,
+    ) -> Result<(), IrLowerError> {
+        let mut sites = Vec::new();
+        for (op_index, op) in ir.ops.iter().enumerate() {
+            collect_table_foreign_key_sites(op, self.dialect, op_index, &mut sites);
+        }
+
+        for site in sites {
+            let IrConstraintKind::Fk {
+                columns,
+                references_table,
+                references_columns,
+                ..
+            } = &site.constraint.kind
+            else {
+                continue;
+            };
+            // Column-level references have their established single-column
+            // validation/catalog path. This table-level pass is the stronger
+            // ordered-tuple proof needed for composite relationships.
+            if columns.len() <= 1 {
+                continue;
+            }
+            let schema = self.effective_schema(site.op);
+            let target_declared = references_columns.iter().all(|column| {
+                logical_columns.contains_key(&crate::model::validate::LogicalColumnKey {
+                    schema: Some(schema.to_string()),
+                    table: references_table.clone(),
+                    column: column.clone(),
+                })
+            });
+            let target_snapshot = live.table_snapshots.get(references_table);
+            if target_snapshot.is_none() && !target_declared {
+                return Err(self.table_foreign_key_catalog_error(
+                    &site,
+                    format!(
+                        "unmanaged target {references_table:?} has no live catalog snapshot"
+                    ),
+                    "introspect the unmanaged target or import its declaration into the project graph",
+                ));
+            }
+            let replayed_target = target_snapshot
+                .cloned()
+                .map(|mut snapshot| {
+                    self.replay_candidate_key_catalog_before_site(
+                        ir,
+                        &site,
+                        references_table,
+                        &mut snapshot,
+                    )?;
+                    Ok::<_, IrLowerError>(snapshot)
+                })
+                .transpose()?;
+            if replayed_target
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot_has_reference_key(snapshot, references_columns))
+            {
+                return Err(self.table_foreign_key_catalog_error(
+                    &site,
+                    format!(
+                        "live target tuple {references_table}({}) is not an exact ordered PRIMARY/UNIQUE candidate key",
+                        references_columns.join(", ")
+                    ),
+                    "reference an exact ordered primary or unique candidate key",
+                ));
+            }
+
+            let local_snapshot = live.table_snapshots.get(site.table);
+            for (position, (local_name, target_name)) in
+                columns.iter().zip(references_columns).enumerate()
+            {
+                let authored_target = if target_snapshot.is_none() {
+                    let target_key = crate::model::validate::LogicalColumnKey {
+                        schema: Some(schema.to_string()),
+                        table: references_table.clone(),
+                        column: target_name.clone(),
+                    };
+                    let contract = logical_columns.get(&target_key).ok_or_else(|| {
+                        self.table_foreign_key_catalog_error(
+                            &site,
+                            format!(
+                                "declared target {references_table:?} has no logical column {target_name:?} at position {}",
+                                position + 1
+                            ),
+                            "declare every referenced target column in the ordered project graph",
+                        )
+                    })?;
+                    Some(self.authored_logical_reference_column_snapshot(
+                        references_table,
+                        target_name,
+                        contract,
+                    )?)
+                } else {
+                    None
+                };
+                let target_column = if let Some(target_snapshot) = target_snapshot {
+                    target_snapshot
+                        .columns
+                        .iter()
+                        .find(|column| column.name == *target_name)
+                        .ok_or_else(|| {
+                            self.table_foreign_key_catalog_error(
+                                &site,
+                                format!(
+                                    "live target {references_table:?} has no column {target_name:?} at position {}",
+                                    position + 1
+                                ),
+                                "reference existing target columns in declared tuple order",
+                            )
+                        })?
+                } else {
+                    authored_target
+                        .as_ref()
+                        .expect("the declared-target branch constructs an authored shape")
+                };
+                let authored_local = match site.op {
+                    Op::CreateTable { columns, .. } => columns
+                        .iter()
+                        .find(|column| column.name == *local_name)
+                        .map(|column| self.authored_reference_column_snapshot(site.table, column))
+                        .transpose()?,
+                    _ => {
+                        let local_key = crate::model::validate::LogicalColumnKey {
+                            schema: Some(schema.to_string()),
+                            table: site.table.to_string(),
+                            column: local_name.clone(),
+                        };
+                        logical_columns
+                            .get(&local_key)
+                            .map(|contract| {
+                                self.authored_logical_reference_column_snapshot(
+                                    site.table, local_name, contract,
+                                )
+                            })
+                            .transpose()?
+                    }
+                };
+                let local_column = local_snapshot
+                    .and_then(|snapshot| {
+                        snapshot
+                            .columns
+                            .iter()
+                            .find(|column| column.name == *local_name)
+                    })
+                    .or(authored_local.as_ref());
+                let Some(local_column) = local_column else {
+                    return Err(self.table_foreign_key_catalog_error(
+                        &site,
+                        format!(
+                            "local column {local_name:?} at position {} has no authored or live catalog shape",
+                            position + 1
+                        ),
+                        "declare the local table in the project graph or introspect it before adding the constraint",
+                    ));
+                };
+
+                let local_catalog_type = match self.dialect {
+                    SqlDialect::Postgres => &local_column.data_type,
+                    SqlDialect::Mysql | SqlDialect::Sqlite => local_column
+                        .ddl_type_override
+                        .as_deref()
+                        .unwrap_or(&local_column.data_type),
+                };
+                let local_type = canonical_reference_catalog_type(self.dialect, local_catalog_type);
+                let target_catalog_type = match self.dialect {
+                    SqlDialect::Postgres => &target_column.data_type,
+                    SqlDialect::Mysql | SqlDialect::Sqlite => target_column
+                        .ddl_type_override
+                        .as_deref()
+                        .unwrap_or(&target_column.data_type),
+                };
+                let target_type =
+                    canonical_reference_catalog_type(self.dialect, target_catalog_type);
+                if local_type != target_type {
+                    return Err(self.table_foreign_key_catalog_error(
+                        &site,
+                        format!(
+                            "position {} local {local_name:?} type {local_type:?} does not match live target {target_name:?} type {target_type:?}",
+                            position + 1
+                        ),
+                        "use the same exact logical storage and integer width at each tuple position",
+                    ));
+                }
+                if self.dialect == SqlDialect::Mysql {
+                    // A live local column already carries the exact catalog
+                    // CHARACTER_SET_NAME/COLLATION_NAME pair. Prefer that metadata
+                    // over reparsing its display type: information_schema normally
+                    // spells text columns as `varchar(…)` and keeps the decisive
+                    // collation in separate fields. Falling back to an explicit DDL
+                    // spelling is useful for an authored createTable column, but it
+                    // must never erase a live local collation mismatch.
+                    let parsed_local_storage = mysql_explicit_text_storage(local_catalog_type);
+                    let local_storage = local_column
+                        .mysql_text_storage
+                        .as_ref()
+                        .or(parsed_local_storage.as_ref());
+                    let parsed_target_storage = mysql_explicit_text_storage(target_catalog_type);
+                    let target_storage = target_column
+                        .mysql_text_storage
+                        .as_ref()
+                        .or(parsed_target_storage.as_ref());
+                    match (local_storage, target_storage) {
+                        (Some(local_storage), Some(target_storage))
+                            if local_storage != target_storage =>
+                        {
+                            return Err(self.table_foreign_key_catalog_error(
+                                &site,
+                                format!(
+                                    "position {} MySQL character storage differs ({} / {} local vs {} / {} target)",
+                                    position + 1,
+                                    local_storage.character_set,
+                                    local_storage.collation,
+                                    target_storage.character_set,
+                                    target_storage.collation
+                                ),
+                                "use the same exact MySQL character set and collation at each tuple position",
+                            ));
+                        }
+                        (Some(local_storage), None) => {
+                            return Err(self.table_foreign_key_catalog_error(
+                                &site,
+                                format!(
+                                    "position {} has explicit local MySQL storage {} / {}, but the live target has no exact character metadata",
+                                    position + 1,
+                                    local_storage.character_set,
+                                    local_storage.collation
+                                ),
+                                "introspect exact CHARACTER_SET_NAME and COLLATION_NAME metadata for the target",
+                            ));
+                        }
+                        (None, Some(target_storage)) => {
+                            return Err(self.table_foreign_key_catalog_error(
+                                &site,
+                                format!(
+                                    "position {} live target has exact MySQL storage {} / {}, but the local column has no exact character metadata",
+                                    position + 1,
+                                    target_storage.character_set,
+                                    target_storage.collation
+                                ),
+                                "introspect exact CHARACTER_SET_NAME and COLLATION_NAME metadata for the local column",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                let local_case_sensitive = local_column.case_sensitive.unwrap_or(true);
+                let target_case_sensitive = target_column.case_sensitive.unwrap_or(true);
+                if local_case_sensitive != target_case_sensitive {
+                    return Err(self.table_foreign_key_catalog_error(
+                        &site,
+                        format!(
+                            "position {} collation intent differs (caseSensitive={local_case_sensitive} local vs caseSensitive={target_case_sensitive} target)",
+                            position + 1
+                        ),
+                        "use matching collation intent at each tuple position",
+                    ));
+                }
+                if !matches!(self.dialect, SqlDialect::Mysql)
+                    && local_column.collation != target_column.collation
+                {
+                    let local_collation = local_column
+                        .collation
+                        .as_ref()
+                        .map_or_else(|| "default".to_string(), |c| c.display_name());
+                    let target_collation = target_column
+                        .collation
+                        .as_ref()
+                        .map_or_else(|| "default".to_string(), |c| c.display_name());
+                    return Err(self.table_foreign_key_catalog_error(
+                        &site,
+                        format!(
+                            "position {} exact catalog collation differs ({local_collation} local vs {target_collation} target)",
+                            position + 1
+                        ),
+                        "use the same exact catalog collation at each tuple position",
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Replay only ordered UNIQUE candidate-key catalog objects before one FK
+    /// site. Physical validation runs before SQL lowering, so the input snapshot
+    /// alone cannot see a `createIndex` / `addConstraint(UNIQUE)` earlier in the
+    /// same artifact. This deliberately excludes PRIMARY KEY lifecycle work.
+    fn replay_candidate_key_catalog_before_site(
+        &self,
+        ir: &MigrationIr,
+        site: &TableForeignKeySite<'_>,
+        table: &str,
+        snapshot: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        fn replay_ops(
+            author: &IrAuthor,
+            ops: &[Op],
+            stop: &Op,
+            table: &str,
+            snapshot: &mut TableSnapshot,
+        ) -> Result<bool, IrLowerError> {
+            for op in ops {
+                if std::ptr::eq(op, stop) {
+                    return Ok(true);
+                }
+                if let Op::Dialectal {
+                    default,
+                    pg,
+                    sqlite,
+                    mysql,
+                } = op
+                {
+                    let selected = match author.dialect {
+                        SqlDialect::Postgres => pg.as_deref(),
+                        SqlDialect::Sqlite => sqlite.as_deref(),
+                        SqlDialect::Mysql => mysql.as_deref(),
+                    }
+                    .or(default.as_deref());
+                    if let Some(selected) = selected {
+                        if replay_ops(author, selected, stop, table, snapshot)? {
+                            return Ok(true);
+                        }
+                    }
+                    continue;
+                }
+
+                match op {
+                    Op::CreateIndex {
+                        table: index_table,
+                        columns,
+                        name,
+                        unique,
+                        using,
+                        r#where,
+                        include,
+                        with,
+                        only,
+                        nulls_not_distinct,
+                        ..
+                    } if index_table == table => {
+                        let index = create_index_snapshot(
+                            table,
+                            columns,
+                            name.as_deref(),
+                            *unique,
+                            *using,
+                            r#where.as_ref(),
+                            include,
+                            with.as_ref(),
+                            *only,
+                            *nulls_not_distinct,
+                            author.dialect,
+                        )?;
+                        snapshot
+                            .indexes
+                            .retain(|candidate| candidate.name != index.name);
+                        snapshot.indexes.push(index);
+                    }
+                    Op::DropIndex {
+                        table: Some(index_table),
+                        name,
+                        ..
+                    } if index_table == table => {
+                        snapshot.indexes.retain(|candidate| candidate.name != *name);
+                    }
+                    Op::AddConstraint {
+                        table: constraint_table,
+                        constraint:
+                            IrConstraint {
+                                name,
+                                kind: IrConstraintKind::Unique { columns },
+                            },
+                        ..
+                    } if constraint_table == table => {
+                        let name = name
+                            .clone()
+                            .unwrap_or_else(|| derived_constraint_name(table, columns, "key"));
+                        snapshot
+                            .constraints
+                            .retain(|candidate| candidate.name != name);
+                        snapshot.constraints.push(ConstraintSnapshot {
+                            name,
+                            kind: "UNIQUE".to_string(),
+                            definition: format!(
+                                "UNIQUE ({})",
+                                crate::render::declarative::constraintdef_cols(columns)
+                            ),
+                            comment: None,
+                        });
+                    }
+                    Op::DropConstraint {
+                        table: constraint_table,
+                        name,
+                        ..
+                    } if constraint_table == table => {
+                        let drops_unique =
+                            snapshot.constraints.iter().any(|candidate| {
+                                candidate.name == *name && candidate.kind == "UNIQUE"
+                            }) || (author.dialect == SqlDialect::Mysql
+                                && snapshot
+                                    .indexes
+                                    .iter()
+                                    .any(|candidate| candidate.name == *name && candidate.unique));
+                        snapshot
+                            .constraints
+                            .retain(|candidate| candidate.name != *name);
+                        if drops_unique {
+                            // PostgreSQL/MySQL/SQLite catalog snapshots may expose
+                            // the UNIQUE constraint's same-name backing index too.
+                            // Removing only the constraint would leave a phantom
+                            // candidate key in `snapshot_has_reference_key`.
+                            snapshot.indexes.retain(|candidate| candidate.name != *name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(false)
+        }
+
+        let _ = replay_ops(self, &ir.ops, site.op, table, snapshot)?;
+        Ok(())
+    }
+
+    fn table_foreign_key_catalog_error(
+        &self,
+        site: &TableForeignKeySite<'_>,
+        reason: String,
+        suggested_fix: &str,
+    ) -> IrLowerError {
+        IrLowerError::DmlValidate(Box::new(crate::model::validate::AuthoringError {
+            code: crate::model::validate::CODE_OP_INVALID.to_string(),
+            kind: Some(crate::model::validate::UnsupportedKind::Op),
+            op_index: site.op_index,
+            ts_location: None,
+            dialect: self.validation_dialect(),
+            reason: format!(
+                "table-level foreign key {}.{} is incompatible with the live catalog: {reason}",
+                site.table,
+                site.constraint.name.as_deref().unwrap_or("<derived>")
+            ),
+            suggested_fix: Some(suggested_fix.to_string()),
+        }))
     }
 
     fn typed_reference_catalog_error(
@@ -2788,8 +3427,9 @@ impl IrAuthor {
         out: &mut Vec<PlanStep>,
         live_tables: &mut BTreeSet<String>,
         partition_state: &mut PartitionLowerState,
-        live: &LiveSchema,
+        live: &mut LiveSchema,
         named_types: &mut NamedTypeRegistry,
+        pending_foreign_keys: &mut Vec<DeferredForeignKeyUnit>,
     ) -> Result<(), IrLowerError> {
         if let Op::Dialectal {
             default,
@@ -2813,6 +3453,7 @@ impl IrAuthor {
                         partition_state,
                         live,
                         named_types,
+                        pending_foreign_keys,
                     )?;
                 }
             }
@@ -2841,6 +3482,19 @@ impl IrAuthor {
                         .map(|(mig, _statements)| PlanStep::Ddl(mig)),
                 );
             }
+            LoweredOp::CreateTable { table, lowered } => {
+                out.extend(
+                    lowered
+                        .immediate_units
+                        .into_iter()
+                        .map(|(migration, _)| PlanStep::Ddl(migration)),
+                );
+                pending_foreign_keys.extend(lowered.deferred_foreign_keys);
+                flush_pending_foreign_keys_for_target(&table, pending_foreign_keys, |pending| {
+                    out.push(PlanStep::Ddl(pending.unit.0));
+                    Ok::<(), IrLowerError>(())
+                })?;
+            }
             LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
             LoweredOp::Dml(step) => out.push(step),
         }
@@ -2868,10 +3522,10 @@ impl IrAuthor {
         op: &Op,
         live_tables: &mut BTreeSet<String>,
         partition_state: &mut PartitionLowerState,
-        live_schema: &LiveSchema,
+        live_schema: &mut LiveSchema,
         named_types: &mut NamedTypeRegistry,
     ) -> Result<LoweredOp, IrLowerError> {
-        let live_unique_indexes = &live_schema.unique_indexes;
+        let live_unique_indexes = live_schema.unique_indexes.clone();
         // The DDL arms advance / read the working table set under the short name
         // `live` (the name the fragment logic already uses).
         let live = live_tables;
@@ -3122,7 +3776,7 @@ impl IrAuthor {
                 // a re-run stays idempotent unit-by-unit. We pass the guard direction in
                 // and DO NOT build/stamp a single shared probe here (the bottom-of-fn
                 // generic stamp is skipped for CreateTable).
-                let mut migs = decl.lower_create_table(
+                let mut lowered = decl.lower_create_table(
                     name,
                     &snap,
                     &sqlite_schema,
@@ -3132,7 +3786,7 @@ impl IrAuthor {
                 if partition_by.as_ref().is_some_and(PartitionSpec::collapse)
                     && !matches!(self.dialect, SqlDialect::Postgres)
                 {
-                    if let Some((mig, statements)) = migs.first_mut() {
+                    if let Some((mig, statements)) = lowered.immediate_units.first_mut() {
                         let note =
                             "/* zero-migrate: partitionBy collapsed to a plain table on this dialect */\n";
                         if let Some(first) = statements.first_mut() {
@@ -3142,6 +3796,10 @@ impl IrAuthor {
                         mig.recompute_checksum();
                     }
                 }
+                live_schema
+                    .table_snapshots
+                    .insert(name.clone(), snap.clone());
+                live_schema.tables.insert(name.clone());
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
                 if let Some(spec) = partition_by {
@@ -3149,7 +3807,24 @@ impl IrAuthor {
                 } else {
                     partition_state.remove_parent(name);
                 }
-                migs
+                if guard.is_some()
+                    && lowered
+                        .immediate_units
+                        .iter()
+                        .chain(
+                            lowered
+                                .deferred_foreign_keys
+                                .iter()
+                                .map(|deferred| &deferred.unit),
+                        )
+                        .any(|(migration, _)| migration.existence_guard.is_none())
+                {
+                    return Err(IrLowerError::GuardProbeUnbuildable("createTable"));
+                }
+                return Ok(LoweredOp::CreateTable {
+                    table: name.clone(),
+                    lowered,
+                });
             }
             Op::SetTableOptions { .. } => Vec::new(),
             Op::AddColumn {
@@ -3702,7 +4377,31 @@ impl IrAuthor {
             Op::AddConstraint {
                 table, constraint, ..
             } => {
-                let units = self.lower_add_constraint(&decl, &eff_schema, table, constraint)?;
+                if self.dialect == SqlDialect::Sqlite
+                    && matches!(constraint.kind, IrConstraintKind::Fk { .. })
+                {
+                    if guard.is_some() {
+                        return Err(IrLowerError::GuardProbeUnbuildable("addConstraint"));
+                    }
+                    let (rebuild, desired) = self.lower_sqlite_add_fk_rebuild(
+                        &decl,
+                        &eff_schema,
+                        table,
+                        constraint,
+                        live_schema,
+                    )?;
+                    live_schema.table_snapshots.insert(table.clone(), desired);
+                    return Ok(LoweredOp::Rename(Box::new(RenameStep::SqliteRebuild(
+                        rebuild,
+                    ))));
+                }
+                let mut units = self.lower_add_constraint(
+                    &decl,
+                    &eff_schema,
+                    table,
+                    constraint,
+                    live_schema.table_snapshots.get(table),
+                )?;
                 // addConstraint ifNotExists: the probe compares the
                 // catalog KIND, and a PRESENT same-name + same-kind
                 // constraint is FailDrift NOT SatisfiedNoop — the live
@@ -3715,7 +4414,7 @@ impl IrAuthor {
                 if let Some(g) = guard {
                     let (cname, ckind) =
                         ir_constraint_name_and_kind(table, constraint, self.dialect);
-                    probe = Some(crate::model::probe::GuardProbe::Constraint {
+                    let constraint_probe = crate::model::probe::GuardProbe::Constraint {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         name: cname,
@@ -3729,12 +4428,81 @@ impl IrAuthor {
                         // createTable deferred-FK unit, whose body IS the canonical
                         // `pg_get_constraintdef` spelling, sets `expect_definition`.
                         expect_definition: None,
-                    });
+                    };
+                    if let IrConstraintKind::Fk { columns, .. } = &constraint.kind {
+                        if columns.len() > 1 {
+                            // A composite FK add can first create a supporting
+                            // index. Those are two independently guardable catalog
+                            // objects: probing the index unit as the FK constraint
+                            // would either skip the wrong statement or report false
+                            // drift. The renderer guarantees the FK is the final
+                            // unit; every preceding unit is the planned index.
+                            let Some(((fk_migration, _), support_units)) = units.split_last_mut()
+                            else {
+                                return Err(IrLowerError::GuardProbeUnbuildable("addConstraint"));
+                            };
+                            fk_migration.existence_guard = Some(constraint_probe);
+                            for (migration, _) in support_units {
+                                let index_name = migration
+                                    .name
+                                    .strip_prefix("create_index_")
+                                    .ok_or(IrLowerError::GuardProbeUnbuildable("addConstraint"))?
+                                    .to_string();
+                                migration.existence_guard =
+                                    Some(crate::model::probe::GuardProbe::Index {
+                                        schema: eff_schema.clone(),
+                                        table: table.clone(),
+                                        name: index_name,
+                                        direction: g.into(),
+                                        expect: Some((false, columns.clone())),
+                                    });
+                            }
+                        } else {
+                            probe = Some(constraint_probe);
+                        }
+                    } else {
+                        probe = Some(constraint_probe);
+                    }
                 }
                 units
             }
             Op::DropConstraint { table, name, .. } => {
-                // SQLite has no `ALTER TABLE … DROP CONSTRAINT` (rebuild-only); PG only.
+                if self.dialect == SqlDialect::Sqlite {
+                    if guard.is_some() {
+                        return Err(IrLowerError::GuardProbeUnbuildable("dropConstraint"));
+                    }
+                    let live_table = live_schema
+                        .table_snapshots
+                        .get(table)
+                        .cloned()
+                        .ok_or(IrLowerError::SqliteRebuildOnly("dropConstraint"))?;
+                    let Some(existing) = live_table
+                        .constraints
+                        .iter()
+                        .find(|constraint| constraint.name == *name)
+                    else {
+                        return Err(IrLowerError::Snapshot(DeclarativeError::Invalid(format!(
+                            "SQLite table {table:?} has no live constraint named {name:?}"
+                        ))));
+                    };
+                    if existing.kind != "FOREIGN KEY" {
+                        return Err(IrLowerError::SqliteRebuildOnly("dropConstraint"));
+                    }
+                    let mut desired = live_table.clone();
+                    desired
+                        .constraints
+                        .retain(|constraint| constraint.name != *name);
+                    let rebuild = decl.build_sqlite_constraint_rebuild(
+                        table,
+                        &live_table,
+                        &mut desired,
+                        format!("drop foreign key {name}"),
+                    )?;
+                    live_schema.table_snapshots.insert(table.clone(), desired);
+                    return Ok(LoweredOp::Rename(Box::new(RenameStep::SqliteRebuild(
+                        rebuild,
+                    ))));
+                }
                 self.require_capability_for(
                     Capability::AlterTableDropConstraint,
                     "dropConstraint",
@@ -3751,7 +4519,21 @@ impl IrAuthor {
                         expect_definition: None,
                     });
                 }
-                vec![decl.lower_drop_constraint(table, name)]
+                let is_live_fk = live_schema
+                    .table_snapshots
+                    .get(table)
+                    .and_then(|snapshot| {
+                        snapshot
+                            .constraints
+                            .iter()
+                            .find(|constraint| constraint.name == *name)
+                    })
+                    .is_some_and(|constraint| constraint.kind == "FOREIGN KEY");
+                if is_live_fk {
+                    vec![decl.lower_drop_fk(table, name)]
+                } else {
+                    vec![decl.lower_drop_constraint(table, name)]
+                }
             }
             Op::ValidateConstraint { table, name, .. } => {
                 // PostgreSQL-only online constraint adoption — SQLite/MySQL have no
@@ -3858,12 +4640,9 @@ impl IrAuthor {
         // stamping the one probe on every unit is correct: each re-probes the live
         // catalog under the held lock and gets the same verdict.
         //
-        // **C1 fix** — `createTable` is the ONE multi-OBJECT op: it lowers to the
-        // CREATE TABLE + a CREATE INDEX per non-PK index + deferred FKs, each a
-        // DIFFERENT object. A single shared probe would silently drop the secondary
-        // index/FK units (see the CreateTable arm). It therefore attributes an
-        // object-scoped probe to each unit INSIDE `lower_create_table` and leaves
-        // `probe == None` here; we must NOT clobber those per-unit probes with a
+        // `createTable` and a composite-FK `addConstraint` are multi-OBJECT ops:
+        // each attributes an object-scoped probe to every unit inside its arm and
+        // leaves `probe == None` here. Do not clobber those per-unit probes with a
         // single shared one. Detect that case (guard set, no shared probe, units
         // already carry per-unit guards) and skip the generic stamp.
         if guard.is_some() {
@@ -3874,7 +4653,7 @@ impl IrAuthor {
                     }
                 }
                 // No shared probe built. This is legal ONLY for the multi-object
-                // createTable path, which has already stamped a per-unit probe on
+                // multi-object path, which has already stamped a per-unit probe on
                 // EVERY unit. If any unit is unstamped, the guard would be silently
                 // dropped on the bare op — refuse fail-closed.
                 None => {
@@ -4524,6 +5303,15 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_table_foreign_keys_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
@@ -4532,8 +5320,10 @@ impl IrAuthor {
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut op_spans: Vec<LoweredOpSpan> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut working_live = live.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
+        let mut pending_foreign_keys: Vec<PendingGuardedForeignKey> = Vec::new();
 
         crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
             let op_kind = ir
@@ -4558,17 +5348,121 @@ impl IrAuthor {
                 &mut op_spans,
                 &mut live_tables,
                 &mut partition_state,
-                live,
+                &mut working_live,
                 &mut named_types,
+                &mut pending_foreign_keys,
                 guard_scope.as_ref(),
                 guard.as_ref(),
                 &raw_island_guard,
                 guard_cfg.skips_denylist_belt(),
             )?;
         }
+        if let Some(pending) = pending_foreign_keys.first() {
+            return Err(IrLowerError::DeferredForeignKeyTargetNotCreated {
+                source_table: pending.deferred.source_table.clone(),
+                target_table: pending.deferred.target_table.clone(),
+                constraint_name: pending.deferred.constraint_name.clone(),
+            }
+            .into());
+        }
         validate_repeatable_ir_steps(ir, &steps)?;
         stamp_ir_plan_steps(ir, &mut steps);
         Ok((steps, fragments, op_spans))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn guard_lowered_unit(
+        op: &Op,
+        op_index: usize,
+        op_kind: &'static str,
+        unit: LoweredUnit,
+        steps: &mut Vec<PlanStep>,
+        fragments: &mut Vec<GuardedFragment>,
+        guard: &dyn MigrationGuard,
+        raw_island_guard: &SqlGuard,
+        skips_static_guard: bool,
+    ) -> Result<(), IrGuardedLowerError> {
+        let (migration, statements) = unit;
+        // Guard EACH true statement individually so a denial is attributed to
+        // the originating op even when this is a forward FK emitted later.
+        for statement in &statements {
+            let mut advisories = Vec::new();
+            if skips_static_guard {
+                match op {
+                    Op::PgRaw { .. } => raw_island_guard
+                        .check_raw_island_sql_backstop(statement)
+                        .map_err(|source| FragmentGuardDenied {
+                            op_index,
+                            op_kind,
+                            source,
+                        })
+                        .and_then(|()| {
+                            guard
+                                .check(statement)
+                                .map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                        })
+                        .map(|outcome| advisories.extend(outcome.advisories))?,
+                    Op::CreateFunction { body, .. } => raw_island_guard
+                        .check_raw_island_body_backstop(body, statement)
+                        .map_err(|source| FragmentGuardDenied {
+                            op_index,
+                            op_kind,
+                            source,
+                        })
+                        .and_then(|()| {
+                            guard
+                                .check(statement)
+                                .map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                        })
+                        .map(|outcome| advisories.extend(outcome.advisories))?,
+                    _ => {
+                        let outcome =
+                            guard
+                                .check(statement)
+                                .map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })?;
+                        advisories.extend(outcome.advisories);
+                    }
+                }
+            } else {
+                let outcome = guard
+                    .check(statement)
+                    .map_err(|source| FragmentGuardDenied {
+                        op_index,
+                        op_kind,
+                        source,
+                    })?;
+                advisories.extend(outcome.advisories);
+            }
+            fragments.push(GuardedFragment {
+                op_index,
+                op_kind,
+                sql: statement.clone(),
+                advisories,
+            });
+        }
+        // Byte-identity invariant: the step's `up` is exactly the structural
+        // statements guarded above, including for a unit held in the pending FK
+        // queue and emitted after another operation.
+        let reassembled = statements.join(";\n");
+        if reassembled != migration.up {
+            return Err(IrGuardedLowerError::ReassemblyMismatch {
+                name: migration.name,
+            });
+        }
+        steps.push(PlanStep::Ddl(migration));
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4581,8 +5475,9 @@ impl IrAuthor {
         op_spans: &mut Vec<LoweredOpSpan>,
         live_tables: &mut BTreeSet<String>,
         partition_state: &mut PartitionLowerState,
-        live: &LiveSchema,
+        live: &mut LiveSchema,
         named_types: &mut NamedTypeRegistry,
+        pending_foreign_keys: &mut Vec<PendingGuardedForeignKey>,
         guard_scope: Option<&crate::model::policy::SchemaScope>,
         guard: &dyn MigrationGuard,
         raw_island_guard: &SqlGuard,
@@ -4616,6 +5511,7 @@ impl IrAuthor {
                         partition_state,
                         live,
                         named_types,
+                        pending_foreign_keys,
                         guard_scope,
                         guard,
                         raw_island_guard,
@@ -4644,6 +5540,67 @@ impl IrAuthor {
             named_types,
         )? {
             LoweredOp::Ddl(units) => units,
+            LoweredOp::CreateTable { table, lowered } => {
+                for unit in lowered.immediate_units {
+                    Self::guard_lowered_unit(
+                        op,
+                        op_index,
+                        op_kind,
+                        unit,
+                        steps,
+                        fragments,
+                        guard,
+                        raw_island_guard,
+                        skips_static_guard,
+                    )?;
+                }
+                let op_span_index = op_spans.len();
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
+                });
+
+                pending_foreign_keys.extend(lowered.deferred_foreign_keys.into_iter().map(
+                    |deferred| PendingGuardedForeignKey {
+                        deferred,
+                        op: op.clone(),
+                        op_index,
+                        op_kind,
+                        op_span_index,
+                    },
+                ));
+
+                // The target's CREATE and every immediate index are now in the
+                // plan. Flush incoming forward edges afterwards. Each one adds a
+                // disjoint exact range to its original child op; no range claims
+                // the intervening target steps belong to that child, and recovery
+                // still sees exactly one record for the originating operation.
+                let mut pending_index = 0;
+                while pending_index < pending_foreign_keys.len() {
+                    if pending_foreign_keys[pending_index].deferred.target_table == table {
+                        let pending = pending_foreign_keys.remove(pending_index);
+                        let deferred_start = steps.len();
+                        Self::guard_lowered_unit(
+                            &pending.op,
+                            pending.op_index,
+                            pending.op_kind,
+                            pending.deferred.unit,
+                            steps,
+                            fragments,
+                            guard,
+                            raw_island_guard,
+                            skips_static_guard,
+                        )?;
+                        op_spans[pending.op_span_index]
+                            .additional_step_ranges
+                            .push(deferred_start..steps.len());
+                    } else {
+                        pending_index += 1;
+                    }
+                }
+                return Ok(());
+            }
             LoweredOp::Rename(step) => {
                 // one online-rename plan step, carried verbatim. NOT
                 // fragment-guarded (the producer is trusted; `apply_plan`
@@ -4652,6 +5609,7 @@ impl IrAuthor {
                 op_spans.push(LoweredOpSpan {
                     op: op.clone(),
                     step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
                 });
                 return Ok(());
             }
@@ -4669,85 +5627,29 @@ impl IrAuthor {
                 op_spans.push(LoweredOpSpan {
                     op: op.clone(),
                     step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
                 });
                 return Ok(());
             }
         };
 
-        for (mig, statements) in op_units {
-            // Guard EACH true statement individually so a denial is attributed to
-            // THIS op — not buried in a concatenated blob.
-            for stmt in &statements {
-                let mut advisories = Vec::new();
-                if skips_static_guard {
-                    match op {
-                        Op::PgRaw { .. } => raw_island_guard
-                            .check_raw_island_sql_backstop(stmt)
-                            .map_err(|source| FragmentGuardDenied {
-                                op_index,
-                                op_kind,
-                                source,
-                            })
-                            .and_then(|()| {
-                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                            })
-                            .map(|outcome| advisories.extend(outcome.advisories))?,
-                        Op::CreateFunction { body, .. } => raw_island_guard
-                            .check_raw_island_body_backstop(body, stmt)
-                            .map_err(|source| FragmentGuardDenied {
-                                op_index,
-                                op_kind,
-                                source,
-                            })
-                            .and_then(|()| {
-                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                            })
-                            .map(|outcome| advisories.extend(outcome.advisories))?,
-                        _ => {
-                            let outcome =
-                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })?;
-                            advisories.extend(outcome.advisories);
-                        }
-                    }
-                } else {
-                    let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                        op_index,
-                        op_kind,
-                        source,
-                    })?;
-                    advisories.extend(outcome.advisories);
-                }
-                fragments.push(GuardedFragment {
-                    op_index,
-                    op_kind,
-                    sql: stmt.clone(),
-                    advisories,
-                });
-            }
-            // Byte-identity invariant: the step's `up` MUST be exactly the join of
-            // the structural statements we just guarded — nothing inserted,
-            // rewritten, or re-quoted between guarding and concatenation.
-            let reassembled = statements.join(";\n");
-            if reassembled != mig.up {
-                return Err(IrGuardedLowerError::ReassemblyMismatch { name: mig.name });
-            }
-            steps.push(PlanStep::Ddl(mig));
+        for unit in op_units {
+            Self::guard_lowered_unit(
+                op,
+                op_index,
+                op_kind,
+                unit,
+                steps,
+                fragments,
+                guard,
+                raw_island_guard,
+                skips_static_guard,
+            )?;
         }
         op_spans.push(LoweredOpSpan {
             op: op.clone(),
             step_range: step_start..steps.len(),
+            additional_step_ranges: Vec::new(),
         });
         Ok(())
     }
@@ -4851,6 +5753,7 @@ impl IrAuthor {
         constraints: &[IrConstraint],
         indexes: &[IrIndex],
     ) -> Result<(), IrLowerError> {
+        let mut table_foreign_keys: Vec<(String, Vec<String>)> = Vec::new();
         for c in constraints {
             match &c.kind {
                 IrConstraintKind::Check { expr, not_valid } => {
@@ -4897,7 +5800,7 @@ impl IrAuthor {
                     }
                     if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
-                            "validated SQLite createTable table-level FOREIGN KEY reached lower",
+                            "validated unsupported createTable table-level FOREIGN KEY reached lower",
                         ));
                     }
                     if columns.is_empty() {
@@ -4917,6 +5820,7 @@ impl IrAuthor {
                         initially_deferred.unwrap_or(false),
                         self.dialect,
                     );
+                    table_foreign_keys.push((fk.name.clone(), columns.clone()));
                     snap.constraints.push(fk);
                 }
                 IrConstraintKind::Unique { columns } => {
@@ -4988,6 +5892,15 @@ impl IrAuthor {
             )?;
             snap_idx.access_method = access.to_string();
             snap.indexes.push(snap_idx);
+        }
+        for (constraint_name, columns) in table_foreign_keys {
+            crate::render::declarative::ensure_fk_supporting_index(
+                table,
+                snap,
+                &constraint_name,
+                &columns,
+            )
+            .map_err(|error| IrLowerError::Snapshot(DeclarativeError::Invalid(error)))?;
         }
         // Keep the snapshot's deterministic name ordering (build_table_snapshot
         // sorts constraints + indexes by name — a re-diff against live, which is
@@ -5174,6 +6087,7 @@ impl IrAuthor {
         else {
             return Ok(());
         };
+        col.collation = metadata.collation;
         col.ddl_type_override = Some(metadata.ddl_type);
         if source.references.is_none() {
             col.inline_checks.push(metadata.inline_check);
@@ -5191,6 +6105,7 @@ impl IrAuthor {
         };
         let metadata = value_format_column_metadata(&source.name, value_format, self.dialect)
             .map_err(DeclarativeError::Invalid)?;
+        col.collation = metadata.collation;
         col.ddl_type_override = Some(metadata.ddl_type);
         if source.references.is_none() {
             col.inline_checks.push(metadata.inline_check);
@@ -5578,17 +6493,103 @@ impl IrAuthor {
         }
     }
 
+    fn lower_sqlite_add_fk_rebuild(
+        &self,
+        decl: &DeclarativeAuthor,
+        eff_schema: &str,
+        table: &str,
+        constraint: &IrConstraint,
+        live_schema: &LiveSchema,
+    ) -> Result<(crate::render::declarative::SqliteRebuild, TableSnapshot), IrLowerError> {
+        let IrConstraintKind::Fk {
+            columns,
+            references_table,
+            references_columns,
+            on_delete,
+            on_update,
+            deferrable,
+            initially_deferred,
+            not_valid,
+        } = &constraint.kind
+        else {
+            return Err(IrLowerError::UnsupportedOp(
+                "non-foreign-key reached SQLite FK rebuild lowerer",
+            ));
+        };
+        if columns.is_empty() {
+            return Err(IrLowerError::UnsupportedOp(
+                "validated addConstraint(fk) with no local column reached lower",
+            ));
+        }
+        if not_valid.is_some() {
+            return Err(IrLowerError::UnsupportedOp(
+                "validated SQLite addConstraint(fk) NOT VALID reached lower",
+            ));
+        }
+        let live_table = live_schema
+            .table_snapshots
+            .get(table)
+            .cloned()
+            .ok_or(IrLowerError::SqliteRebuildOnly("addConstraint"))?;
+        let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+            eff_schema,
+            constraint.name.as_deref(),
+            columns,
+            references_table,
+            references_columns,
+            on_delete.map(RefAction::as_token),
+            on_update.map(RefAction::as_token),
+            deferrable.unwrap_or(false),
+            initially_deferred.unwrap_or(false),
+            self.dialect,
+        );
+        let mut desired = live_table.clone();
+        if let Some(existing) = desired
+            .constraints
+            .iter()
+            .find(|candidate| candidate.name == fk.name)
+        {
+            if existing.kind != "FOREIGN KEY" {
+                return Err(IrLowerError::Snapshot(DeclarativeError::Invalid(format!(
+                    "cannot replace SQLite constraint {:?} on table {table:?}: the live object is {}, not a foreign key",
+                    fk.name, existing.kind
+                ))));
+            }
+            desired
+                .constraints
+                .retain(|candidate| candidate.name != fk.name);
+        }
+        desired.constraints.push(fk.clone());
+        crate::render::declarative::ensure_fk_supporting_index(
+            table,
+            &mut desired,
+            &fk.name,
+            columns,
+        )
+        .map_err(|error| IrLowerError::Snapshot(DeclarativeError::Invalid(error)))?;
+        desired.constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        desired.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        let rebuild = decl.build_sqlite_constraint_rebuild(
+            table,
+            &live_table,
+            &mut desired,
+            format!("add or replace foreign key {}", fk.name),
+        )?;
+        Ok((rebuild, desired))
+    }
+
     /// Lower a stand-alone `addConstraint` op. FK / UNIQUE / CHECK lower to
     /// `ALTER TABLE … ADD CONSTRAINT …` on Postgres, reusing the differ's render
     /// seam (so an FK is byte-identical to a deferred FK). Validate rejects PRIMARY
-    /// KEY and unsupported FK shapes before lower. SQLite is rebuild-only
-    /// ([`IrLowerError::SqliteRebuildOnly`]).
+    /// KEY and unsupported FK shapes before lower. SQLite FKs are intercepted by
+    /// the structured rebuild path before this native renderer.
     fn lower_add_constraint(
         &self,
         decl: &DeclarativeAuthor,
         eff_schema: &str,
         table: &str,
         constraint: &IrConstraint,
+        live_table: Option<&TableSnapshot>,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         if matches!(constraint.kind, IrConstraintKind::Exclusion { .. })
             && !self.dialect.supports(Capability::ExclusionConstraint)
@@ -5648,6 +6649,42 @@ impl IrAuthor {
                     // clauses), where `fk_policy_tail` carries it into the rendered
                     // `ADD CONSTRAINT … FOREIGN KEY … NOT VALID` (PG only).
                     fk.definition.push_str(" NOT VALID");
+                }
+                if columns.len() > 1 {
+                    let mut units = Vec::new();
+                    if let Some(live_table) = live_table {
+                        let mut planned = live_table.clone();
+                        let existing_names: BTreeSet<&str> = live_table
+                            .indexes
+                            .iter()
+                            .map(|index| index.name.as_str())
+                            .collect();
+                        crate::render::declarative::ensure_fk_supporting_index(
+                            table,
+                            &mut planned,
+                            &fk.name,
+                            columns,
+                        )
+                        .map_err(|error| {
+                            IrLowerError::Snapshot(DeclarativeError::Invalid(error))
+                        })?;
+                        if let Some(index) = planned
+                            .indexes
+                            .iter()
+                            .find(|index| !existing_names.contains(index.name.as_str()))
+                        {
+                            units.push(decl.lower_create_index(table, index));
+                        }
+                    } else {
+                        let index = IndexSnapshot::btree(
+                            crate::plan::author::cap_ident_name(&format!("{}_idx", fk.name)),
+                            false,
+                            columns.clone(),
+                        );
+                        units.push(decl.lower_create_index(table, &index));
+                    }
+                    units.push(decl.lower_add_fk(table, &fk));
+                    return Ok(units);
                 }
                 decl.lower_add_fk(table, &fk)
             }
@@ -9618,6 +10655,321 @@ mod tests {
                 );
             }
             other => panic!("expected a Table probe, got {other:?}"),
+        }
+    }
+
+    fn declared_parent_with_composite_add(guarded: bool) -> MigrationIr {
+        let mut add = serde_json::json!({
+            "op": "addConstraint",
+            "table": "children",
+            "constraint": {
+                "name": "children_parent_fk",
+                "kind": {
+                    "kind": "fk",
+                    "columns": ["parent_tenant", "parent_entity"],
+                    "referencesTable": "parents",
+                    "referencesColumns": ["tenant_id", "entity_id"]
+                }
+            }
+        });
+        if guarded {
+            add["existenceGuard"] = serde_json::json!("ifNotExists");
+        }
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "declared_parent_composite_add",
+            "owner_app": "app_a",
+            "ops": [
+                {
+                    "op": "createTable",
+                    "name": "parents",
+                    "columns": [
+                        { "name": "tenant_id", "type": "int", "nullable": false },
+                        { "name": "entity_id", "type": "int", "nullable": false }
+                    ],
+                    "primaryKey": ["tenant_id", "entity_id"]
+                },
+                add
+            ]
+        }))
+        .expect("composite add fixture parses")
+    }
+
+    fn composite_child_live(second_type: &str) -> LiveSchema {
+        LiveSchema::from_catalog_snapshot(
+            crate::model::snapshot::SchemaSnapshot {
+                tables: BTreeMap::from([(
+                    "children".to_string(),
+                    TableSnapshot {
+                        columns: vec![
+                            ColumnSnapshot {
+                                name: "parent_tenant".to_string(),
+                                data_type: "integer".to_string(),
+                                nullable: true,
+                                ..Default::default()
+                            },
+                            ColumnSnapshot {
+                                name: "parent_entity".to_string(),
+                                data_type: second_type.to_string(),
+                                nullable: true,
+                                ..Default::default()
+                            },
+                        ],
+                        indexes: Vec::new(),
+                        constraints: Vec::new(),
+                        runtime_options: Default::default(),
+                        partition_by: None,
+                        comment: None,
+                        stored_create_sql: None,
+                    },
+                )]),
+                ..Default::default()
+            },
+            "app_a",
+        )
+    }
+
+    #[test]
+    fn composite_add_with_declared_nonlive_target_still_requires_compatible_live_local_shape() {
+        let ir = declared_parent_with_composite_add(false);
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+
+        let missing = author
+            .lower(&ir, &LiveSchema::default())
+            .expect_err("an addConstraint local table still needs a catalog shape");
+        assert!(
+            missing
+                .to_string()
+                .contains("has no authored or live catalog shape"),
+            "unexpected missing-local diagnostic: {missing}"
+        );
+
+        let incompatible = author
+            .lower(&ir, &composite_child_live("text"))
+            .expect_err("a declared parent must not bypass live child type validation");
+        assert!(
+            incompatible.to_string().contains("position 2")
+                && incompatible.to_string().contains("does not match"),
+            "unexpected incompatible-local diagnostic: {incompatible}"
+        );
+    }
+
+    #[test]
+    fn guarded_composite_add_probes_support_index_and_constraint_independently() {
+        let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(
+                &declared_parent_with_composite_add(true),
+                &composite_child_live("integer"),
+            )
+            .expect("guarded composite add lowers");
+
+        let index = migrations
+            .iter()
+            .find(|migration| migration.name == "create_index_children_parent_fk_idx")
+            .expect("supporting-index unit");
+        assert!(matches!(
+            index.existence_guard.as_ref(),
+            Some(crate::model::probe::GuardProbe::Index {
+                table,
+                name,
+                direction: crate::model::probe::GuardDir::IfNotExists,
+                expect: Some((false, columns)),
+                ..
+            }) if table == "children"
+                && name == "children_parent_fk_idx"
+                && columns == &["parent_tenant".to_string(), "parent_entity".to_string()]
+        ));
+
+        let constraint = migrations
+            .iter()
+            .find(|migration| migration.up.contains("ADD CONSTRAINT"))
+            .expect("foreign-key unit");
+        assert!(matches!(
+            constraint.existence_guard.as_ref(),
+            Some(crate::model::probe::GuardProbe::Constraint {
+                table,
+                name,
+                direction: crate::model::probe::GuardDir::IfNotExists,
+                expect_kind: Some(kind),
+                ..
+            }) if table == "children"
+                && name == "children_parent_fk"
+                && kind == "FOREIGN KEY"
+        ));
+    }
+
+    fn child_before_parent_composite_ir(existence_guard: bool) -> MigrationIr {
+        let mut child = serde_json::json!({
+            "op": "createTable",
+            "name": "children",
+            "columns": [
+                { "name": "parent_tenant", "type": "int", "nullable": true },
+                { "name": "parent_entity", "type": "int", "nullable": true }
+            ],
+            "constraints": [{
+                "name": "children_parent_fk",
+                "kind": {
+                    "kind": "fk",
+                    "columns": ["parent_tenant", "parent_entity"],
+                    "referencesTable": "parents",
+                    "referencesColumns": ["tenant_id", "entity_id"]
+                }
+            }]
+        });
+        let mut parent = serde_json::json!({
+            "op": "createTable",
+            "name": "parents",
+            "columns": [
+                { "name": "tenant_id", "type": "int", "nullable": false },
+                { "name": "entity_id", "type": "int", "nullable": false }
+            ],
+            "primaryKey": ["tenant_id", "entity_id"],
+            "indexes": [{
+                "name": "parents_lookup_idx",
+                "columns": [{ "kind": "column", "name": "entity_id" }]
+            }]
+        });
+        if existence_guard {
+            child["existenceGuard"] = serde_json::json!("ifNotExists");
+            parent["existenceGuard"] = serde_json::json!("ifNotExists");
+        }
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "child_before_parent_composite",
+            "owner_app": "app_a",
+            "ops": [child, parent]
+        }))
+        .expect("child-before-parent fixture parses")
+    }
+
+    fn migration_position(steps: &[PlanStep], name: &str) -> usize {
+        steps
+            .iter()
+            .position(|step| matches!(step, PlanStep::Ddl(migration) if migration.name == name))
+            .unwrap_or_else(|| panic!("missing migration {name:?}: {steps:#?}"))
+    }
+
+    fn assert_forward_composite_fk_order(steps: &[PlanStep]) {
+        let child = migration_position(steps, "create_table_children");
+        let child_index = migration_position(steps, "create_index_children_parent_fk_idx");
+        let parent = migration_position(steps, "create_table_parents");
+        let parent_index = migration_position(steps, "create_index_parents_lookup_idx");
+        let foreign_key = migration_position(steps, "add_fk_children_children_parent_fk");
+        assert!(
+            child < child_index
+                && child_index < parent
+                && parent < parent_index
+                && parent_index < foreign_key,
+            "forward FK must follow the target CREATE and indexes: {steps:#?}"
+        );
+    }
+
+    #[test]
+    fn forward_composite_create_fk_waits_for_target_create_and_indexes_pg_and_mysql() {
+        let ir = child_before_parent_composite_ir(false);
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            let steps = IrAuthor::new("app", "app_a", dialect)
+                .lower_steps(&ir, &LiveSchema::default())
+                .unwrap_or_else(|error| panic!("{dialect:?} forward FK lowers: {error}"));
+            assert_forward_composite_fk_order(&steps);
+        }
+    }
+
+    #[test]
+    fn guarded_forward_fk_keeps_fragment_and_noncontiguous_span_on_child_op() {
+        let ir = child_before_parent_composite_ir(true);
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            let guard = GuardConfig::confined("app").for_dialect(dialect);
+            let (steps, fragments, spans) = IrAuthor::new("app", "app_a", dialect)
+                .lower_guarded_with_op_spans(&ir, &guard, &LiveSchema::default())
+                .unwrap_or_else(|error| panic!("{dialect:?} guarded forward FK lowers: {error}"));
+            assert_forward_composite_fk_order(&steps);
+
+            let foreign_key = migration_position(&steps, "add_fk_children_children_parent_fk");
+            let fragment = fragments
+                .iter()
+                .find(|fragment| {
+                    fragment.sql.contains("ADD CONSTRAINT")
+                        && fragment.sql.contains("children_parent_fk")
+                })
+                .expect("deferred FK guarded fragment");
+            assert_eq!(fragment.op_index, 0);
+            assert_eq!(fragment.op_kind, "createTable");
+
+            let child_spans = spans
+                .iter()
+                .filter(
+                    |span| matches!(&span.op, Op::CreateTable { name, .. } if name == "children"),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(
+                child_spans.len(),
+                1,
+                "recovery must keep one record for the child op: {spans:#?}"
+            );
+            assert!(child_spans[0]
+                .additional_step_ranges
+                .contains(&(foreign_key..foreign_key + 1)));
+            assert!(
+                std::iter::once(&child_spans[0].step_range)
+                    .chain(&child_spans[0].additional_step_ranges)
+                    .all(|range| !range
+                        .contains(&migration_position(&steps, "create_table_parents"))),
+                "a child span must never absorb the intervening parent CREATE"
+            );
+        }
+    }
+
+    fn cyclic_composite_create_ir() -> MigrationIr {
+        let table = |name: &str, target: &str, constraint: &str| {
+            serde_json::json!({
+                "op": "createTable",
+                "name": name,
+                "columns": [
+                    { "name": "tenant_key", "type": "int", "nullable": false },
+                    { "name": "entity_key", "type": "int", "nullable": false }
+                ],
+                "primaryKey": ["tenant_key", "entity_key"],
+                "constraints": [{
+                    "name": constraint,
+                    "kind": {
+                        "kind": "fk",
+                        "columns": ["tenant_key", "entity_key"],
+                        "referencesTable": target,
+                        "referencesColumns": ["tenant_key", "entity_key"]
+                    }
+                }]
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "cyclic_composite_create",
+            "owner_app": "app_a",
+            "ops": [
+                table("alpha", "beta", "alpha_beta_fk"),
+                table("beta", "alpha", "beta_alpha_fk")
+            ]
+        }))
+        .expect("cyclic composite fixture parses")
+    }
+
+    #[test]
+    fn cyclic_composite_create_defers_only_the_forward_edge_pg_and_mysql() {
+        let ir = cyclic_composite_create_ir();
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            let steps = IrAuthor::new("app", "app_a", dialect)
+                .lower_steps(&ir, &LiveSchema::default())
+                .unwrap_or_else(|error| panic!("{dialect:?} cyclic FK lowers: {error}"));
+            let alpha = migration_position(&steps, "create_table_alpha");
+            let beta = migration_position(&steps, "create_table_beta");
+            let deferred = migration_position(&steps, "add_fk_alpha_alpha_beta_fk");
+            assert!(alpha < beta && beta < deferred, "{steps:#?}");
+            assert!(
+                steps.iter().all(|step| {
+                    !matches!(step, PlanStep::Ddl(migration) if migration.name == "add_fk_beta_beta_alpha_fk")
+                }),
+                "the reverse edge targets an already-created table and stays inline"
+            );
         }
     }
 

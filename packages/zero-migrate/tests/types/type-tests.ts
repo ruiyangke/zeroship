@@ -49,6 +49,7 @@ import {
   type CheckDef,
   type DbFieldType,
   type Int64Value,
+  type OrderedColumns,
   type BackfillSetValue,
   type IdFormats,
   type PerRowGenerator,
@@ -56,6 +57,7 @@ import {
   type PerRowGenerators,
   type TypeLexicon,
   type TypeIdOptions,
+  type TableForeignKey,
   type ValueFormat,
   type DecimalValue,
   type BytesValue,
@@ -72,6 +74,39 @@ const migrationIdShortcutIsAbsent: "id" extends keyof TypeLexicon ? never : true
 void migrationIdShortcutIsAbsent;
 const migrationRefShortcutIsAbsent: "ref" extends keyof TypeLexicon ? never : true = true;
 void migrationRefShortcutIsAbsent;
+
+const compositeForeignKeyColumns: OrderedColumns = ["tenant_id", "parent_id"];
+const compositeForeignKey: TableForeignKey = {
+  name: "child_parent_fk",
+  columns: compositeForeignKeyColumns,
+  references: {
+    table: "parents",
+    columns: ["tenant_id", "id"],
+  },
+  onDelete: "cascade",
+};
+const readonlyCompositeForeignKeys = [compositeForeignKey] as const satisfies readonly TableForeignKey[];
+
+table("children").create({
+  columns: {
+    tenant_id: t.uuid().notNull(),
+    parent_id: t.uuid().notNull(),
+  },
+  primaryKey: ["tenant_id", "parent_id"] as const,
+  foreignKeys: readonlyCompositeForeignKeys,
+});
+
+// @ts-expect-error — ordered key/FK column tuples cannot be empty.
+const emptyOrderedColumns: OrderedColumns = [];
+void emptyOrderedColumns;
+
+const emptyLocalCompositeForeignKey: TableForeignKey = {
+  name: "empty_local_fk",
+  // @ts-expect-error — a table-level foreign key requires at least one local column.
+  columns: [],
+  references: { table: "parents", columns: ["id"] },
+};
+void emptyLocalCompositeForeignKey;
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee.

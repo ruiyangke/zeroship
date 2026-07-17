@@ -19,12 +19,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde_json::json;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
+use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
-    Migration, RebuildError, SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
+    IrAuthor, LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep,
+    SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -106,6 +109,440 @@ async fn foreign_keys_on(be: &SqliteBackend) -> bool {
         .and_then(|r| r.first())
         .and_then(|c| c.as_deref())
         .is_some_and(|s| s == "1")
+}
+
+fn composite_fk_ir(name: &str, on_delete: &str, on_update: &str) -> MigrationIr {
+    composite_fk_tuple_ir(
+        name,
+        &["tenant_id", "parent_id"],
+        &["tenant_id", "parent_id"],
+        on_delete,
+        on_update,
+    )
+}
+
+fn composite_fk_tuple_ir(
+    name: &str,
+    columns: &[&str],
+    references_columns: &[&str],
+    on_delete: &str,
+    on_update: &str,
+) -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": name,
+        "owner_app": APP,
+        "ops": [{
+            "op": "addConstraint",
+            "table": "child",
+            "constraint": {
+                "name": "child_parent_fk",
+                "kind": {
+                    "kind": "fk",
+                    "columns": columns,
+                    "referencesTable": "parent",
+                    "referencesColumns": references_columns,
+                    "onDelete": on_delete,
+                    "onUpdate": on_update
+                }
+            }
+        }]
+    }))
+    .expect("composite FK fixture deserializes")
+}
+
+fn drop_composite_fk_ir() -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": "drop_composite_fk",
+        "owner_app": APP,
+        "ops": [{
+            "op": "dropConstraint",
+            "table": "child",
+            "name": "child_parent_fk"
+        }]
+    }))
+    .expect("composite FK drop fixture deserializes")
+}
+
+fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> SqliteRebuild {
+    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+        .lower_steps(ir, live)
+        .expect("SQLite composite FK lifecycle lowers");
+    assert_eq!(steps.len(), 1, "one FK change is one atomic rebuild");
+    match steps.into_iter().next().expect("one step") {
+        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => rebuild,
+        other => panic!("expected SQLite rebuild, got {other:?}"),
+    }
+}
+
+async fn assert_composite_child_ddl_is_lossless(be: &SqliteBackend, stage: &str) {
+    let rows = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='child'")
+        .await
+        .unwrap_or_else(|error| panic!("read child DDL after {stage}: {error:?}"));
+    let ddl = rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Clone::clone)
+        .unwrap_or_else(|| panic!("child DDL exists after {stage}"));
+    let normalized = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized.contains("DEFAULT 'kept'"),
+        "column default survives {stage}: {ddl}"
+    );
+    assert!(
+        normalized.contains("INTEGER PRIMARY KEY AUTOINCREMENT"),
+        "AUTOINCREMENT identity semantics survive {stage}: {ddl}"
+    );
+    assert!(
+        normalized.contains("ordinary TEXT DEFAULT 'generated'"),
+        "an ordinary default containing the word generated survives {stage}: {ddl}"
+    );
+    assert!(
+        normalized.contains("GENERATED ALWAYS AS (length(note)) STORED"),
+        "generated expression survives {stage}: {ddl}"
+    );
+    assert!(
+        normalized.contains("CHECK (length(note) < 20)"),
+        "inline CHECK survives {stage}: {ddl}"
+    );
+    assert!(
+        normalized.contains(
+            "CONSTRAINT child_positive_tenant CHECK (tenant_id IS NULL OR tenant_id > 0)"
+        ),
+        "unrelated named table CHECK survives {stage}: {ddl}"
+    );
+    assert!(
+        normalized.ends_with("STRICT"),
+        "trailing table options survive {stage}: {ddl}"
+    );
+}
+
+async fn assert_child_sequence_at_least(be: &SqliteBackend, minimum: i64, stage: &str) {
+    let rows = be
+        .actor()
+        .query("SELECT seq FROM main.sqlite_sequence WHERE name = 'child'")
+        .await
+        .unwrap_or_else(|error| panic!("read child sqlite_sequence after {stage}: {error:?}"));
+    let sequence = rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|cell| cell.as_deref())
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or_else(|| panic!("child sqlite_sequence exists after {stage}: {rows:?}"));
+    assert!(
+        sequence >= minimum,
+        "AUTOINCREMENT high-water mark survives {stage}: expected >= {minimum}, got {sequence}"
+    );
+}
+
+// A table-level composite FK lifecycle is routed through the production
+// structured rebuild. This adds the pre-change regression (SQLite previously
+// rejected the add), then exercises replace + drop while proving tuple order,
+// explicit supporting-index preview/recreation, MATCH SIMPLE null behavior,
+// dependent-object preservation, and unconditional FK-enforcement restoration.
+#[compio::test]
+async fn composite_fk_add_change_drop_uses_faithful_rebuild() {
+    let p = paths("rebuild_composite_fk");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec(
+            "CREATE TABLE parent (tenant_id INTEGER NOT NULL, parent_id INTEGER NOT NULL, \
+             legacy_id INTEGER NOT NULL, PRIMARY KEY (tenant_id, parent_id), \
+             UNIQUE (tenant_id, legacy_id))",
+        )
+        .await
+        .expect("create parent");
+    be.actor()
+        .exec(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id INTEGER, \
+             parent_id INTEGER, legacy_id INTEGER, \
+             note TEXT DEFAULT 'kept' CHECK (length(note) < 20), \
+             ordinary TEXT DEFAULT 'generated', \
+             note_len INTEGER GENERATED ALWAYS AS (length(note)) STORED, \
+             CONSTRAINT child_positive_tenant \
+             CHECK (tenant_id IS NULL OR tenant_id > 0)) STRICT",
+        )
+        .await
+        .expect("create child");
+    // Establish historical AUTOINCREMENT state that is strictly above every live
+    // row, then delete it. A rebuild that merely recreates sqlite_sequence from the
+    // copied rows would regress this high-water mark and eventually reuse IDs.
+    be.actor()
+        .exec("INSERT INTO child (id) VALUES (100)")
+        .await
+        .expect("allocate high AUTOINCREMENT id");
+    be.actor()
+        .exec("DELETE FROM child WHERE id = 100")
+        .await
+        .expect("delete high AUTOINCREMENT row while retaining sequence history");
+    be.actor()
+        .exec("CREATE INDEX child_note_idx ON child (note)")
+        .await
+        .expect("create dependent index");
+    be.actor()
+        .exec("CREATE TABLE child_audit (child_id INTEGER)")
+        .await
+        .expect("create audit table");
+    be.actor()
+        .exec(
+            "CREATE TRIGGER child_ai AFTER INSERT ON child \
+             BEGIN INSERT INTO child_audit (child_id) VALUES (NEW.id); END",
+        )
+        .await
+        .expect("create dependent trigger");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    let snapshot = be.snapshot_schema_sqlite().await.expect("initial snapshot");
+    let live = LiveSchema::from_catalog_snapshot(snapshot, APP);
+    let add = lower_sqlite_rebuild(
+        &composite_fk_ir("add_composite_fk", "cascade", "restrict"),
+        &live,
+    );
+    assert!(
+        add.spec
+            .new_table_create
+            .contains("FOREIGN KEY (tenant_id, parent_id) REFERENCES parent(tenant_id, parent_id)"),
+        "the rebuild CREATE preserves exact tuple order: {}",
+        add.spec.new_table_create
+    );
+    assert_eq!(add.spec.recreate_objects.len(), 1);
+    assert!(
+        add.spec.recreate_objects[0]
+            .contains("child_parent_fk_idx\" ON \"child\" (\"tenant_id\", \"parent_id\")"),
+        "the ordered supporting index is recreated explicitly: {:?}",
+        add.spec.recreate_objects
+    );
+    assert!(
+        add.migration.up.contains("child_parent_fk_idx"),
+        "every created index must be visible in the migration preview"
+    );
+    be.rebuild_one(&add.spec, &add.migration, "deployer")
+        .await
+        .expect("add composite FK rebuild");
+    assert_composite_child_ddl_is_lossless(&be, "composite FK add").await;
+    assert_child_sequence_at_least(&be, 100, "composite FK add").await;
+    assert!(
+        foreign_keys_on(&be).await,
+        "FK enforcement restored after add"
+    );
+
+    let fk_rows = be
+        .actor()
+        .query("PRAGMA main.foreign_key_list(child)")
+        .await
+        .expect("FK rows after add");
+    assert_eq!(fk_rows.len(), 2, "one two-column relationship");
+    assert_eq!(fk_rows[0][3].as_deref(), Some("tenant_id"));
+    assert_eq!(fk_rows[0][4].as_deref(), Some("tenant_id"));
+    assert_eq!(fk_rows[1][3].as_deref(), Some("parent_id"));
+    assert_eq!(fk_rows[1][4].as_deref(), Some("parent_id"));
+
+    be.actor()
+        .exec("INSERT INTO parent (tenant_id, parent_id, legacy_id) VALUES (1, 10, 20)")
+        .await
+        .expect("seed parent");
+    be.actor()
+        .exec(
+            "INSERT INTO child (id, tenant_id, parent_id, note, ordinary) \
+             VALUES (1, 999, NULL, 'simple', 'custom')",
+        )
+        .await
+        .expect("MATCH SIMPLE permits any-null tuple without a parent");
+    assert!(
+        be.actor()
+            .exec("INSERT INTO child (id, tenant_id, parent_id) VALUES (2, 999, 999)")
+            .await
+            .is_err(),
+        "a fully non-null orphan must still fail"
+    );
+
+    let snapshot = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("snapshot after add");
+    let live = LiveSchema::from_catalog_snapshot(snapshot, APP);
+    let change = lower_sqlite_rebuild(
+        &composite_fk_ir("change_composite_fk", "setNull", "cascade"),
+        &live,
+    );
+    assert!(
+        change
+            .spec
+            .new_table_create
+            .contains("ON UPDATE CASCADE ON DELETE SET NULL"),
+        "same-name FK policy changes rebuild the constraint"
+    );
+    be.rebuild_one(&change.spec, &change.migration, "deployer")
+        .await
+        .expect("change composite FK rebuild");
+    assert_composite_child_ddl_is_lossless(&be, "composite FK change").await;
+    assert_child_sequence_at_least(&be, 100, "composite FK change").await;
+    assert!(
+        foreign_keys_on(&be).await,
+        "FK enforcement restored after change"
+    );
+
+    // Changing the tuple under the same FK name must not collide with the old
+    // engine-planned child index. Preserve that old schema object and add a
+    // deterministic suffixed index for the new ordered tuple.
+    let snapshot = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("snapshot after policy change");
+    let live = LiveSchema::from_catalog_snapshot(snapshot, APP);
+    let tuple_change = lower_sqlite_rebuild(
+        &composite_fk_tuple_ir(
+            "change_composite_fk_tuple",
+            &["tenant_id", "legacy_id"],
+            &["tenant_id", "legacy_id"],
+            "setNull",
+            "cascade",
+        ),
+        &live,
+    );
+    assert!(
+        tuple_change
+            .spec
+            .new_table_create
+            .contains("FOREIGN KEY (tenant_id, legacy_id) REFERENCES parent(tenant_id, legacy_id)"),
+        "same-name tuple changes preserve declared position/order: {}",
+        tuple_change.spec.new_table_create
+    );
+    assert!(
+        tuple_change.spec.recreate_objects.iter().any(|sql| {
+            sql.contains("child_parent_fk_idx_2") && sql.contains("\"tenant_id\", \"legacy_id\"")
+        }),
+        "a collision-safe ordered support index is planned and previewed: {:?}",
+        tuple_change.spec.recreate_objects
+    );
+    assert!(
+        tuple_change.migration.up.contains("child_parent_fk_idx_2"),
+        "the tuple-change preview shows the newly created index"
+    );
+    be.rebuild_one(&tuple_change.spec, &tuple_change.migration, "deployer")
+        .await
+        .expect("change composite FK tuple rebuild");
+    assert_composite_child_ddl_is_lossless(&be, "composite FK tuple change").await;
+    assert_child_sequence_at_least(&be, 100, "composite FK tuple change").await;
+    assert!(
+        foreign_keys_on(&be).await,
+        "FK enforcement restored after tuple change"
+    );
+    let tuple_rows = be
+        .actor()
+        .query("PRAGMA main.foreign_key_list(child)")
+        .await
+        .expect("FK rows after tuple change");
+    assert_eq!(tuple_rows.len(), 2);
+    assert_eq!(tuple_rows[0][3].as_deref(), Some("tenant_id"));
+    assert_eq!(tuple_rows[0][4].as_deref(), Some("tenant_id"));
+    assert_eq!(tuple_rows[1][3].as_deref(), Some("legacy_id"));
+    assert_eq!(tuple_rows[1][4].as_deref(), Some("legacy_id"));
+
+    let snapshot = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("snapshot after tuple change");
+    let live = LiveSchema::from_catalog_snapshot(snapshot, APP);
+    let drop = lower_sqlite_rebuild(&drop_composite_fk_ir(), &live);
+    be.rebuild_one(&drop.spec, &drop.migration, "deployer")
+        .await
+        .expect("drop composite FK rebuild");
+    assert_composite_child_ddl_is_lossless(&be, "composite FK drop").await;
+    assert_child_sequence_at_least(&be, 100, "composite FK drop").await;
+    assert!(
+        foreign_keys_on(&be).await,
+        "FK enforcement restored after drop"
+    );
+    assert!(
+        be.actor()
+            .query("PRAGMA main.foreign_key_list(child)")
+            .await
+            .expect("FK rows after drop")
+            .is_empty(),
+        "the named composite FK is gone"
+    );
+
+    let objects = be
+        .actor()
+        .query(
+            "SELECT type, name FROM main.sqlite_master \
+             WHERE name IN ('child_note_idx', 'child_parent_fk_idx', \
+                            'child_parent_fk_idx_2', 'child_ai') ORDER BY name",
+        )
+        .await
+        .expect("remaining schema objects");
+    assert_eq!(
+        objects.len(),
+        4,
+        "indexes and trigger survive every rebuild"
+    );
+    let audit = be
+        .actor()
+        .query("SELECT COUNT(*) FROM child_audit")
+        .await
+        .expect("trigger audit");
+    assert_eq!(
+        audit[0][0].as_deref(),
+        Some("1"),
+        "trigger survived and fired"
+    );
+
+    be.actor()
+        .exec("INSERT INTO child (id, tenant_id, parent_id) VALUES (3, NULL, NULL)")
+        .await
+        .expect("preserved default and generated expression remain executable");
+    let generated = be
+        .actor()
+        .query("SELECT note, note_len FROM child WHERE id = 3")
+        .await
+        .expect("read default/generated values");
+    assert_eq!(generated[0][0].as_deref(), Some("kept"));
+    assert_eq!(generated[0][1].as_deref(), Some("4"));
+    let ordinary = be
+        .actor()
+        .query("SELECT ordinary FROM child WHERE id = 1")
+        .await
+        .expect("read copied ordinary column");
+    assert_eq!(
+        ordinary[0][0].as_deref(),
+        Some("custom"),
+        "a normal column whose default contains 'generated' remains in the copy mapping"
+    );
+    assert!(
+        be.actor()
+            .exec("INSERT INTO child (id, tenant_id, parent_id) VALUES (4, -1, NULL)")
+            .await
+            .is_err(),
+        "the preserved table CHECK must still reject invalid rows"
+    );
+    be.actor()
+        .exec("INSERT INTO child (tenant_id, parent_id) VALUES (NULL, NULL)")
+        .await
+        .expect("AUTOINCREMENT remains usable after every FK rebuild");
+    let generated_id = be
+        .actor()
+        .query("SELECT MAX(id) FROM child")
+        .await
+        .expect("read generated AUTOINCREMENT id");
+    assert_eq!(
+        generated_id[0][0].as_deref(),
+        Some("101"),
+        "the rebuilt table continues allocation above the deleted historical high-water mark"
+    );
 }
 
 // ---------------------------------------------------------------------------

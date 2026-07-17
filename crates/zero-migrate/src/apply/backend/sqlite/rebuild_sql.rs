@@ -27,6 +27,7 @@
 //! (engine, EngineJournal) BEGIN IMMEDIATE
 //! (engine, EngineJournal) <capture verbatim sql FROM sqlite_master
 //! for <t>'s indexes + triggers> [main, read]
+//! (engine, EngineJournal) <capture sqlite_sequence high-water mark, if any>
 //! (engine, EngineJournal) DROP TABLE IF EXISTS <tmp> -- clear pollution
 //! (engine→CreatorUp) CREATE TABLE <tmp> (...new shape...) [main]
 //! INSERT INTO <tmp> (cols) SELECT cols FROM <t>
@@ -34,6 +35,7 @@
 //! ALTER TABLE <tmp> RENAME TO <t>
 //! <replay each captured index / trigger
 //! VERBATIM + any explicit recreate_objects> [main]
+//! (engine, EngineJournal) <restore sqlite_sequence high-water mark, if any>
 //! (engine, EngineJournal) PRAGMA foreign_key_check -- UNSCOPED
 //! (engine, EngineJournal) INSERT _mig journal (event_seq AUTOINCREMENT)
 //! (engine, EngineJournal) COMMIT
@@ -321,6 +323,12 @@ async fn run_rebuild_steps(
     // untouched; if a view referenced a now-removed column SQLite surfaces that
     // at query time, not here.
     let captured = capture_dependents(actor, &spec.table).await?;
+    // AUTOINCREMENT's contract is stronger than "next value exceeds the largest
+    // surviving row": SQLite must never reuse a ROWID that was previously handed
+    // out. Rebuilding from live rows alone loses that historical high-water mark
+    // when the largest allocated row was deleted, so capture sqlite_sequence before
+    // dropping the old table and restore it after the swap in this same transaction.
+    let autoincrement_high_water = capture_autoincrement_high_water(actor, &spec.table).await?;
 
     // --- The rebuild DDL runs under CreatorUp (engine-authored, on `main`). ---
     actor
@@ -429,6 +437,10 @@ async fn run_rebuild_steps(
         .await
         .map_err(|e| step_err(table, e))?;
 
+    if let Some(high_water) = autoincrement_high_water.as_deref() {
+        restore_autoincrement_high_water(actor, &spec.table, high_water).await?;
+    }
+
     // (f) PRAGMA foreign_key_check, UNSCOPED (no table arg). This WORKS inside a
     // transaction (unlike the foreign_keys toggle). A check scoped to <t> only
     // catches orphans IN <t>; but a rebuild of a PARENT that drops a referenced
@@ -527,6 +539,72 @@ async fn capture_dependents(
         }
     }
     Ok(out)
+}
+
+/// Capture the historical AUTOINCREMENT high-water mark for `table`, if it has
+/// one. `sqlite_sequence` is created lazily by SQLite, so first prove the system
+/// table exists before naming it. The value is retained as catalog text and always
+/// re-quoted before use; SQLite performs the integer cast when restoring it.
+async fn capture_autoincrement_high_water(
+    actor: &MigrationActor,
+    table: &str,
+) -> Result<Option<String>, RebuildError> {
+    let sequence_table = actor
+        .query(
+            "SELECT 1 FROM main.sqlite_master \
+             WHERE type = 'table' AND name = 'sqlite_sequence'",
+        )
+        .await
+        .map_err(|error| step_err(table, error))?;
+    if sequence_table.is_empty() {
+        return Ok(None);
+    }
+
+    let table_lit = journal_sql::sql_lit(table);
+    let rows = actor
+        .query(&format!(
+            "SELECT CAST(seq AS TEXT) FROM main.sqlite_sequence WHERE name = {table_lit}"
+        ))
+        .await
+        .map_err(|error| step_err(table, error))?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Clone::clone))
+}
+
+/// Raise the rebuilt table's `sqlite_sequence` row to its pre-rebuild value.
+/// Copying explicit IDs into the temporary table may already have established a
+/// higher value, so this is a monotonic max operation. An empty source table does
+/// not create a sequence row for the temporary table; the second statement covers
+/// that case. Both statements run before `foreign_key_check`/COMMIT and therefore
+/// roll back atomically with every other rebuild effect.
+async fn restore_autoincrement_high_water(
+    actor: &MigrationActor,
+    table: &str,
+    high_water: &str,
+) -> Result<(), RebuildError> {
+    let table_lit = journal_sql::sql_lit(table);
+    let high_water_lit = journal_sql::sql_lit(high_water);
+    actor
+        .exec(&format!(
+            "UPDATE main.sqlite_sequence \
+             SET seq = CASE \
+                 WHEN CAST(seq AS INTEGER) < CAST({high_water_lit} AS INTEGER) \
+                 THEN CAST({high_water_lit} AS INTEGER) ELSE seq END \
+             WHERE name = {table_lit}"
+        ))
+        .await
+        .map_err(|error| step_err(table, error))?;
+    actor
+        .exec(&format!(
+            "INSERT INTO main.sqlite_sequence (name, seq) \
+             SELECT {table_lit}, CAST({high_water_lit} AS INTEGER) \
+             WHERE NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = {table_lit})"
+        ))
+        .await
+        .map_err(|error| step_err(table, error))?;
+    Ok(())
 }
 
 /// True iff `ddl` references the column `col` as a whole word (case-insensitive).

@@ -252,3 +252,97 @@ async fn mask_sentinel_recovered_from_sqlite_master() {
     let id = accounts.columns.iter().find(|c| c.name == "id").unwrap();
     assert_eq!(id.comment_sentinel, None);
 }
+
+// ---------------------------------------------------------------------------
+// Composite foreign keys combine PRAGMA's authoritative ordered tuple/actions
+// with the name + deferrability metadata retained in sqlite_master.sql.
+// MATCH SIMPLE is canonicalized to the omitted default.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn composite_fk_introspection_round_trips_name_policy_and_detects_drift() {
+    let p = paths("snap_composite_fk");
+    let be = backend(&p);
+    be.apply_one_additive(
+        &mig(
+            "parent",
+            "CREATE TABLE parent (\
+                tenant TEXT NOT NULL, \
+                parent_id INTEGER NOT NULL, \
+                PRIMARY KEY (tenant, parent_id));",
+        ),
+        "d",
+    )
+    .await
+    .expect("apply parent");
+    be.apply_one_additive(
+        &mig(
+            "child",
+            "CREATE TABLE child (\
+                tenant TEXT, \
+                parent_id INTEGER, \
+                CONSTRAINT fk_child_parent \
+                    FOREIGN KEY (tenant, parent_id) \
+                    REFERENCES parent (tenant, parent_id) \
+                    MATCH SIMPLE \
+                    ON DELETE CASCADE \
+                    ON UPDATE SET NULL \
+                    DEFERRABLE INITIALLY DEFERRED);",
+        ),
+        "d",
+    )
+    .await
+    .expect("apply child");
+
+    let expected = be.snapshot_schema_sqlite().await.expect("snapshot");
+    let child = expected.tables.get("child").expect("child table");
+    let foreign_key = child
+        .constraints
+        .iter()
+        .find(|constraint| constraint.kind == "FOREIGN KEY")
+        .expect("composite foreign key");
+    assert_eq!(foreign_key.name, "fk_child_parent");
+    assert_eq!(
+        foreign_key.definition,
+        "FOREIGN KEY (tenant, parent_id) REFERENCES parent(tenant, parent_id) \
+         ON UPDATE SET NULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+    );
+    assert!(
+        !foreign_key.definition.contains("MATCH"),
+        "MATCH SIMPLE must canonicalize to the portable omitted default"
+    );
+
+    drop(be);
+    {
+        let conn = rusqlite::Connection::open(&p.app).expect("reopen app file raw");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF; \
+             DROP TABLE child; \
+             CREATE TABLE child (\
+                 tenant TEXT, \
+                 parent_id INTEGER, \
+                 CONSTRAINT fk_child_parent \
+                     FOREIGN KEY (tenant, parent_id) \
+                     REFERENCES parent (tenant, parent_id) \
+                     MATCH SIMPLE \
+                     ON DELETE RESTRICT \
+                     ON UPDATE CASCADE \
+                     DEFERRABLE INITIALLY IMMEDIATE);",
+        )
+        .expect("replace child out of band");
+    }
+
+    let be = backend(&p);
+    let actual = be.snapshot_schema_sqlite().await.expect("changed snapshot");
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.altered_objects.iter().any(|altered| {
+            altered.object == "constraint fk_child_parent"
+                && altered.field == "definition"
+                && altered.expected.contains("ON UPDATE SET NULL")
+                && altered.actual.contains("ON UPDATE CASCADE")
+                && altered.expected.contains("INITIALLY DEFERRED")
+                && !altered.actual.contains("INITIALLY DEFERRED")
+        }),
+        "policy and deferrability changes must surface as definition drift: {drift:?}"
+    );
+}

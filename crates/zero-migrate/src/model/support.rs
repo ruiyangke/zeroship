@@ -331,15 +331,7 @@ const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = DialectSupport::postgres_only(
 const UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN: DialectSupport =
     DialectSupport::unsupported_all(UNSUPPORTED, "foreign keys need at least one local column");
 
-const PG_ONLY_COMPOSITE_FK: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "multi-column foreign keys are PostgreSQL-only in the current engine",
-);
-
-const PG_ONLY_NON_ID_FK: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "foreign keys referencing non-id columns are PostgreSQL-only in the current engine",
-);
+const PORTABLE_FOREIGN_KEY: DialectSupport = DialectSupport::all_supported(RenderMode::Offline);
 
 const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
@@ -401,18 +393,11 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::TableLevelForeignKey,
-        DialectSupport::new(
-            supported(RenderMode::Offline),
-            unsupported(
-                UNSUPPORTED,
-                "SQLite createTable table-level foreign keys are not threaded into the emitter",
-            ),
-            supported(RenderMode::Offline),
-        ),
+        PORTABLE_FOREIGN_KEY,
     ),
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
-    FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
-    FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
+    FeatureSupport::new(Feature::CompositeForeignKey, PORTABLE_FOREIGN_KEY),
+    FeatureSupport::new(Feature::NonIdForeignKey, PORTABLE_FOREIGN_KEY),
     FeatureSupport::new(
         Feature::TableLevelUnique,
         DialectSupport::new(
@@ -531,8 +516,8 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
         Feature::ForeignKeyNoLocalColumn,
         UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN,
     ),
-    FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
-    FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
+    FeatureSupport::new(Feature::CompositeForeignKey, PORTABLE_FOREIGN_KEY),
+    FeatureSupport::new(Feature::NonIdForeignKey, PORTABLE_FOREIGN_KEY),
     FeatureSupport::new(Feature::ConstraintNotValid, PG_ONLY_CONSTRAINT_NOT_VALID),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(

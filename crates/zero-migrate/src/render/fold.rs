@@ -1126,15 +1126,40 @@ pub fn fold_ops_onto(
             Op::AddConstraint {
                 table, constraint, ..
             } => {
-                // Build the constraint (+ its implicit index for UNIQUE/PK, which PG
-                // MATERIALIZES and live introspection reports) the SAME way the lower's
-                // snapshot half does: FK via the shared `ir_fk_*`, UNIQUE/PK with a
-                // `pg_get_constraintdef`-matching body + the implicit unique index PG
-                // names after the constraint, CHECK deferred. Verify the target table
-                // FIRST (fail-closed) before stamping.
+                // Build the dialect-canonical object(s) the SAME way the live catalog
+                // reports them: FK via the shared `ir_fk_*`; PostgreSQL UNIQUE as a
+                // constraint plus its implicit index; MySQL UNIQUE as the ordered unique
+                // key alone (MySQL does not preserve constraint-vs-index provenance);
+                // CHECK deferred. Verify the target table FIRST (fail-closed) before
+                // stamping.
                 let folded = add_constraint_snapshot(table, project_schema, constraint, dialect)?;
+                let fk_support = match &constraint.kind {
+                    IrConstraintKind::Fk { columns, .. } if columns.len() > 1 => {
+                        let name = folded
+                            .constraint
+                            .as_ref()
+                            .expect("a folded foreign key always has a constraint snapshot")
+                            .name
+                            .clone();
+                        Some((name, columns.clone()))
+                    }
+                    _ => None,
+                };
                 let snap = table_mut(&mut tables, table)?;
                 push_folded_constraint(table, snap, folded)?;
+                if let Some((constraint_name, columns)) = fk_support {
+                    // Stand-alone composite FK lowering emits an explicit child-side
+                    // supporting index before the ALTER TABLE. Keep the folded desired
+                    // snapshot in lockstep so post-apply introspection does not report
+                    // that planned index as unexplained drift.
+                    crate::render::declarative::ensure_fk_supporting_index(
+                        table,
+                        snap,
+                        &constraint_name,
+                        &columns,
+                    )
+                    .map_err(FoldError::Render)?;
+                }
                 snap.constraints.sort_by(|a, b| a.name.cmp(&b.name));
                 snap.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             }
@@ -1157,7 +1182,20 @@ pub fn fold_ops_onto(
                     .map(|c| c.kind.clone());
                 let before = snap.constraints.len();
                 snap.constraints.retain(|c| &c.name != name);
-                if snap.constraints.len() == before {
+                let removed_constraint = snap.constraints.len() != before;
+                if !removed_constraint && matches!(dialect, SqlDialect::Mysql) {
+                    // MySQL's catalog collapses a named table UNIQUE and its backing
+                    // unique index into one key object. A catalog-seeded fold therefore
+                    // has no ConstraintSnapshot to remove: DROP CONSTRAINT of that
+                    // authored UNIQUE removes the same-name unique key instead.
+                    let index_before = snap.indexes.len();
+                    snap.indexes
+                        .retain(|index| index.name != name.as_str() || !index.unique);
+                    if snap.indexes.len() != index_before {
+                        continue;
+                    }
+                }
+                if !removed_constraint {
                     return Err(FoldError::MissingConstraint {
                         table: table.clone(),
                         name: name.clone(),
@@ -1745,6 +1783,7 @@ fn apply_fold_uuid_column_metadata(
     else {
         return Ok(());
     };
+    col.collation = metadata.collation;
     col.ddl_type_override = Some(metadata.ddl_type);
     if source.references.is_none() {
         col.inline_checks.push(metadata.inline_check);
@@ -1762,6 +1801,7 @@ fn apply_fold_value_format_column_metadata(
     };
     let metadata = value_format_column_metadata(&source.name, value_format, dialect)
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
+    col.collation = metadata.collation;
     col.ddl_type_override = Some(metadata.ddl_type);
     if source.references.is_none() {
         col.inline_checks.push(metadata.inline_check);
@@ -1887,34 +1927,34 @@ fn apply_fold_named_type_column_metadata(
 /// constraint/index NAME and on the UNIQUE definition body (both route through the
 /// shared `constraintdef_cols` speller), so an op-authored table re-diffs clean
 /// against the apply path. They DELIBERATELY differ on one point — NOT "byte
-/// identical": for a table-level UNIQUE the fold ALSO materializes the implicit
-/// unique index, whereas the lower pushes only the `ConstraintSnapshot`
-/// (`render::lower` ~2057-2070, no index). The reason is that the two snapshots
-/// model different things:
+/// identical": for a table-level UNIQUE the fold materializes its catalog unique
+/// key, whereas the lower pushes only the `ConstraintSnapshot` used to emit the
+/// inline clause. The reason is that the two snapshots model different things:
 /// - the lower's is an EMISSION PLAN — `snap.indexes` drives `CREATE INDEX`, and PG
 ///   auto-creates the constraint's implicit index, so emitting it would duplicate;
 /// - the fold's is a LOGICAL-STATE model — it must match what `snapshot_schema`
-///   reports, and live introspection DOES return constraint-backed unique indexes
-///   (the `pg_index` query has no constraint filter, drift.rs ~675).
+///   reports. PostgreSQL returns both a constraint and its backing index; MySQL
+///   collapses constraint and explicit-index syntax to one ordered unique key and
+///   cannot recover which spelling authored it.
 ///
-/// So the fold's implicit-index materialization is REQUIRED for `fold == introspect`
-/// to hold; do NOT "align" it with the lower by removing it — that would break the
-/// round-trip oracle.
+/// The dialect-canonical unique-key materialization is therefore REQUIRED for
+/// `fold == introspect` to hold; aligning it with the lower's emission-only shape
+/// would break the round-trip oracle.
 ///
 /// Fail-closed parity with the lower:
 /// - a create-table PRIMARY KEY is carried by the op's top-level `primary_key`;
 ///   stale constraint-form PKs are ignored here after validation;
 /// - table-level CHECK folds only on PostgreSQL until the non-PG renderers land;
-/// - a multi-column / non-`id`-referencing FK is refused;
-/// - a partial-index `where` is refused (closed-AST predicate);
-/// - on **SQLite**, a table-level FOREIGN KEY, a table-level UNIQUE, and a
-///   non-btree index `using` are refused — BYTE-FOR-BYTE parity with the lower
+/// - table-level single- and multi-column FKs fold on all three targets;
+/// - target-specific partial/non-btree index features remain capability-gated;
+/// - on **SQLite**, a table-level UNIQUE and a non-btree index `using` are
+///   refused — BYTE-FOR-BYTE parity with the lower
 ///   ([`crate::render::lower::IrAuthor::fold_create_table_specs`]).
 ///
 /// The SQLite refusals are NOT cosmetic: in the migration-first model the fold is
 /// the SOLE source of truth for gen-types. The lower (= the apply path) REFUSES
-/// these shapes on SQLite (the SQLite CREATE renders from the descriptor; a
-/// table-level FK/UNIQUE / non-btree `using` is not threaded into the emitter), so
+/// these shapes on SQLite (a table-level UNIQUE / non-btree `using` is not
+/// threaded into the emitter), so
 /// such a `createTable` can NEVER be deployed on SQLite. A fold that ACCEPTED it
 /// would emit types for a schema that never applies — fail-OPEN relative to apply,
 /// breaking the fold's own contract ("a set the engine already applied is
@@ -1928,6 +1968,7 @@ fn fold_create_table_specs(
     indexes: &[IrIndex],
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
+    let mut table_foreign_keys: Vec<(String, Vec<String>)> = Vec::new();
     for c in constraints {
         match &c.kind {
             IrConstraintKind::Check { expr, .. } => {
@@ -1946,12 +1987,12 @@ fn fold_create_table_specs(
                     table,
                     snap,
                     FoldedConstraint {
-                        constraint: ConstraintSnapshot {
+                        constraint: Some(ConstraintSnapshot {
                             name,
                             kind: "CHECK".to_string(),
                             definition: format!("CHECK ({rendered})"),
                             comment: None,
-                        },
+                        }),
                         index: None,
                     },
                 )?;
@@ -1968,9 +2009,7 @@ fn fold_create_table_specs(
             } => {
                 if !dialect.supports(Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
-                        "createTable table-level FOREIGN KEY on SQLite (the SQLite \
-                         CREATE renders from the descriptor; a table-level FK is not \
-                         threaded into the emitter)",
+                        "createTable table-level FOREIGN KEY is unsupported by this dialect",
                     ));
                 }
                 if columns.is_empty() {
@@ -1990,12 +2029,13 @@ fn fold_create_table_specs(
                     initially_deferred.unwrap_or(false),
                     dialect,
                 );
+                table_foreign_keys.push((fk.name.clone(), columns.clone()));
                 // A FOREIGN KEY materializes no index.
                 push_folded_constraint(
                     table,
                     snap,
                     FoldedConstraint {
-                        constraint: fk,
+                        constraint: Some(fk),
                         index: None,
                     },
                 )?;
@@ -2012,7 +2052,7 @@ fn fold_create_table_specs(
                     || derived_constraint_name(table, columns, "key"),
                     str::to_string,
                 );
-                push_folded_constraint(table, snap, unique_constraint(&name, columns))?;
+                push_folded_constraint(table, snap, unique_constraint(&name, columns, dialect))?;
             }
             IrConstraintKind::Exclusion { elements, .. } => {
                 if !dialect.supports(Capability::ExclusionConstraint) {
@@ -2029,7 +2069,7 @@ fn fold_create_table_specs(
                     table,
                     snap,
                     FoldedConstraint {
-                        constraint: ConstraintSnapshot {
+                        constraint: Some(ConstraintSnapshot {
                             name,
                             kind: "EXCLUDE".to_string(),
                             // PG canonicalizes exclusion bodies differently from the
@@ -2037,7 +2077,7 @@ fn fold_create_table_specs(
                             // kind only, matching `snapshot_schema`.
                             definition: String::new(),
                             comment: None,
-                        },
+                        }),
                         index: None,
                     },
                 )?;
@@ -2071,21 +2111,32 @@ fn fold_create_table_specs(
         }
         snap.indexes.push(snap_idx);
     }
+    for (constraint_name, columns) in table_foreign_keys {
+        crate::render::declarative::ensure_fk_supporting_index(
+            table,
+            snap,
+            &constraint_name,
+            &columns,
+        )
+        .map_err(FoldError::Render)?;
+    }
     // Deterministic name ordering (build_table_snapshot sorts; live is name-sorted).
     snap.constraints.sort_by(|a, b| a.name.cmp(&b.name));
     snap.indexes.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(())
 }
 
-/// A folded constraint + the implicit unique INDEX (if any) PG MATERIALIZES for it.
+/// A folded catalog constraint (if recoverable) plus its implicit unique index.
 ///
 /// A UNIQUE / PRIMARY KEY constraint creates a `pg_constraint` row AND an implicit
 /// unique index of the SAME name (`pg_index` reports it), so live introspection
 /// returns BOTH. The fold must mirror both for `fold == introspect` to hold (the
 /// shared `build_table_snapshot` already does this for the system `<table>_pkey`).
-/// A FOREIGN KEY creates no index, so `index` is `None`.
+/// MySQL cannot recover whether a named unique key was authored as a table
+/// constraint or an explicit unique index, so its UNIQUE shape has no synthetic
+/// constraint. A FOREIGN KEY creates no index, so `index` is `None`.
 struct FoldedConstraint {
-    constraint: ConstraintSnapshot,
+    constraint: Option<ConstraintSnapshot>,
     index: Option<IndexSnapshot>,
 }
 
@@ -2096,22 +2147,26 @@ fn push_folded_constraint(
     snap: &mut TableSnapshot,
     folded: FoldedConstraint,
 ) -> Result<(), FoldError> {
-    if snap
-        .constraints
-        .iter()
-        .any(|c| c.name == folded.constraint.name)
-    {
-        return Err(FoldError::DuplicateConstraint {
-            table: table.to_string(),
-            name: folded.constraint.name,
-        });
+    if let Some(constraint) = &folded.constraint {
+        if snap
+            .constraints
+            .iter()
+            .any(|candidate| candidate.name == constraint.name)
+        {
+            return Err(FoldError::DuplicateConstraint {
+                table: table.to_string(),
+                name: constraint.name.clone(),
+            });
+        }
     }
     if let Some(idx) = &folded.index {
         if snap.indexes.iter().any(|i| i.name == idx.name) {
             return Err(FoldError::DuplicateIndex(idx.name.clone()));
         }
     }
-    snap.constraints.push(folded.constraint);
+    if let Some(constraint) = folded.constraint {
+        snap.constraints.push(constraint);
+    }
     if let Some(idx) = folded.index {
         snap.indexes.push(idx);
     }
@@ -2146,16 +2201,21 @@ fn constraint_local_columns_contain(definition: &str, column: &str) -> bool {
         .any(|tok| tok.trim().trim_matches('"') == column)
 }
 
-/// A UNIQUE constraint + its implicit unique index (PG names the index after the
-/// constraint). The index covers the same columns, btree, unique.
-fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
+/// Canonical snapshot shape for a named UNIQUE key.
+///
+/// PostgreSQL exposes both the constraint and its implicit same-name index. MySQL
+/// collapses `CONSTRAINT name UNIQUE (...)` and `UNIQUE KEY name (...)` to the same
+/// `STATISTICS`/`SHOW INDEX` object, so its authoritative snapshot retains only the
+/// ordered unique index. Keeping a synthetic MySQL constraint here would make a
+/// clean apply report that constraint as missing on every re-introspection.
+fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> FoldedConstraint {
     FoldedConstraint {
-        constraint: ConstraintSnapshot {
+        constraint: (!matches!(dialect, SqlDialect::Mysql)).then(|| ConstraintSnapshot {
             name: name.to_string(),
             kind: "UNIQUE".to_string(),
             definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
             comment: None,
-        },
+        }),
         index: Some(IndexSnapshot::btree(
             name.to_string(),
             true,
@@ -2164,10 +2224,9 @@ fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
     }
 }
 
-/// The folded constraint (plus implicit index) a stand-alone `addConstraint` op
-/// produces. FK via the shared `ir_fk_*` (no index); UNIQUE/PK via the derived name
-/// with a `pg_get_constraintdef`-matching body and the implicit unique index; CHECK
-/// deferred.
+/// The folded catalog shape a stand-alone `addConstraint` op produces. FK uses the
+/// shared `ir_fk_*` (no index); UNIQUE uses the dialect-canonical key shape from
+/// [`unique_constraint`]; CHECK is deferred.
 fn add_constraint_snapshot(
     table: &str,
     project_schema: &str,
@@ -2195,7 +2254,7 @@ fn add_constraint_snapshot(
                 ));
             }
             Ok(FoldedConstraint {
-                constraint: ir_fk_constraint_snapshot_for_columns(
+                constraint: Some(ir_fk_constraint_snapshot_for_columns(
                     project_schema,
                     name,
                     columns,
@@ -2206,7 +2265,7 @@ fn add_constraint_snapshot(
                     deferrable.unwrap_or(false),
                     initially_deferred.unwrap_or(false),
                     dialect,
-                ),
+                )),
                 index: None,
             })
         }
@@ -2215,7 +2274,7 @@ fn add_constraint_snapshot(
                 || derived_constraint_name(table, columns, "key"),
                 str::to_string,
             );
-            Ok(unique_constraint(&cname, columns))
+            Ok(unique_constraint(&cname, columns, dialect))
         }
         IrConstraintKind::Check { expr, .. } => {
             if !matches!(dialect, SqlDialect::Postgres) {
@@ -2230,12 +2289,12 @@ fn add_constraint_snapshot(
             let rendered = crate::render::dml::render_expr_inline(expr, dialect)
                 .map_err(|e| FoldError::Render(e.to_string()))?;
             Ok(FoldedConstraint {
-                constraint: ConstraintSnapshot {
+                constraint: Some(ConstraintSnapshot {
                     name: cname,
                     kind: "CHECK".to_string(),
                     definition: format!("CHECK ({rendered})"),
                     comment: None,
-                },
+                }),
                 index: None,
             })
         }
@@ -2252,7 +2311,7 @@ fn add_constraint_snapshot(
             render_exclusion_constraint_body(&constraint.kind, dialect)
                 .map_err(fold_lower_error)?;
             Ok(FoldedConstraint {
-                constraint: ConstraintSnapshot {
+                constraint: Some(ConstraintSnapshot {
                     name: cname,
                     kind: "EXCLUDE".to_string(),
                     // PG canonicalizes exclusion bodies differently from the authored
@@ -2260,7 +2319,7 @@ fn add_constraint_snapshot(
                     // matching `snapshot_schema`.
                     definition: String::new(),
                     comment: None,
-                },
+                }),
                 index: None,
             })
         }
@@ -5088,58 +5147,47 @@ mod tests {
         }
     }
 
-    /// REGRESSION: a createTable TABLE-LEVEL FOREIGN KEY is refused at
-    /// validate-time on SQLite.
+    /// REGRESSION: a createTable table-level FK validates and folds on SQLite.
+    /// Before portable composite-FK support, this witness asserted the opposite.
     #[test]
-    fn create_table_level_fk_unsupported_on_sqlite() {
-        let parents = create("teams", vec![col("label", ColType::Text, false)]);
-        let kids = create_with(
-            "memberships",
-            vec![col("team_id", ColType::Text, false)],
-            vec![IrConstraint {
-                name: Some("m_team_fk".to_string()),
-                kind: IrConstraintKind::Fk {
-                    columns: vec!["team_id".to_string()],
-                    references_table: "teams".to_string(),
-                    references_columns: vec!["id".to_string()],
-                    on_delete: None,
-                    on_update: None,
-                    deferrable: None,
-                    initially_deferred: None,
+    fn create_table_level_fk_supported_on_sqlite() {
+        let ops = vec![
+            create("teams", vec![col("label", ColType::Text, false)]),
+            create_with(
+                "memberships",
+                vec![col("team_id", ColType::Text, false)],
+                vec![IrConstraint {
+                    name: Some("m_team_fk".to_string()),
+                    kind: IrConstraintKind::Fk {
+                        columns: vec!["team_id".to_string()],
+                        references_table: "teams".to_string(),
+                        references_columns: vec!["id".to_string()],
+                        on_delete: None,
+                        on_update: None,
+                        deferrable: None,
+                        initially_deferred: None,
 
-                    not_valid: None,
-                },
-            }],
-            Vec::new(),
-        );
-        let err = validate_ops(vec![parents, kids], Dialect::Sqlite);
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Op));
-        assert!(err.reason.contains("foreign keys"));
-        // The SAME shape FOLDS on Postgres (the parity is dialect-scoped).
-        let parents = create("teams", vec![col("label", ColType::Text, false)]);
-        let kids = create_with(
-            "memberships",
-            vec![col("team_id", ColType::Text, false)],
-            vec![IrConstraint {
-                name: Some("m_team_fk".to_string()),
-                kind: IrConstraintKind::Fk {
-                    columns: vec!["team_id".to_string()],
-                    references_table: "teams".to_string(),
-                    references_columns: vec!["id".to_string()],
-                    on_delete: None,
-                    on_update: None,
-                    deferrable: None,
-                    initially_deferred: None,
+                        not_valid: None,
+                    },
+                }],
+                Vec::new(),
+            ),
+        ];
+        assert_validate_ops_ok(ops.clone(), Dialect::Sqlite);
+        let sqlite =
+            fold_ops(&ops, SqlDialect::Sqlite, SCHEMA).expect("table-level FK folds on SQLite");
+        let memberships = &sqlite.tables["memberships"];
+        assert!(memberships.constraints.iter().any(|constraint| {
+            constraint.name == "m_team_fk" && constraint.kind == "FOREIGN KEY"
+        }));
+        assert!(memberships
+            .indexes
+            .iter()
+            .any(|index| index.columns == ["team_id"]));
 
-                    not_valid: None,
-                },
-            }],
-            Vec::new(),
-        );
         assert!(
-            fold(&[parents, kids]).is_ok(),
-            "table-level FK folds on Postgres"
+            fold(&ops).is_ok(),
+            "the same table-level FK folds on Postgres"
         );
     }
 

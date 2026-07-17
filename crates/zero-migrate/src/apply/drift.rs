@@ -46,10 +46,10 @@ use crate::model::ir::{
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
-    normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot, ConstraintSnapshot,
-    ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot,
-    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, ViewSnapshot,
+    normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
+    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -784,7 +784,7 @@ pub async fn snapshot_schema<D: SqlSession>(
             "SELECT c.table_name, c.column_name, c.data_type, \
                     c.udt_schema, c.udt_name, c.domain_schema, c.domain_name, \
                     column_type.typtype::text AS type_kind, c.is_nullable, \
-                    c.character_maximum_length, \
+                    c.character_maximum_length, c.collation_schema, c.collation_name, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
                     pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
                     col_description(rel.oid, a.attnum) AS comment \
@@ -865,6 +865,17 @@ pub async fn snapshot_schema<D: SqlSession>(
                 // `comment_sentinel` so they do not drift against user-authored
                 // catalog comments.
                 case_sensitive: if is_citext { Some(false) } else { None },
+                collation: r
+                    .try_get::<_, Option<String>>("collation_name")
+                    .ok()
+                    .flatten()
+                    .map(|name| ColumnCollationSnapshot {
+                        schema: r
+                            .try_get::<_, Option<String>>("collation_schema")
+                            .ok()
+                            .flatten(),
+                        name,
+                    }),
                 default: recover_nextval_default(r.try_get("column_default").ok().flatten()),
                 comment,
                 comment_sentinel,
@@ -1708,6 +1719,10 @@ fn format_case_sensitive(case_sensitive: Option<bool>) -> &'static str {
     }
 }
 
+fn format_collation(collation: Option<&ColumnCollationSnapshot>) -> String {
+    collation.map_or_else(String::new, ColumnCollationSnapshot::display_name)
+}
+
 /// Compare the attributes of same-name children (columns/indexes/constraints
 /// present on BOTH sides of one table), pushing an [`AlteredObject`] per diverging
 /// field. Added/removed children are NOT this function's concern (they go to the
@@ -1765,7 +1780,7 @@ fn diff_attrs(
         act_t.comment.as_deref().unwrap_or(""),
     );
 
-    // Columns: data_type + nullable + recoverable text case-sensitivity + catalog comment.
+    // Columns: data_type + nullable + recoverable text collation + catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     for ec in &exp_t.columns {
@@ -1783,6 +1798,12 @@ fn diff_attrs(
                 "case_sensitive",
                 format_case_sensitive(ec.case_sensitive),
                 format_case_sensitive(ac.case_sensitive),
+            );
+            push(
+                &obj,
+                "collation",
+                &format_collation(ec.collation.as_ref()),
+                &format_collation(ac.collation.as_ref()),
             );
             push(
                 &obj,

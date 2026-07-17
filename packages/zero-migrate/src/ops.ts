@@ -98,6 +98,7 @@ import type {
   NextvalDefault,
   NextvalOptions,
   OrderItem,
+  OrderedColumns,
   PartitionBoundArgs,
   PartitionBoundInput,
   PartitionBoundSentinel,
@@ -569,6 +570,38 @@ function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
 function requireString(v: unknown, what: string): asserts v is string {
   if (typeof v !== "string") {
     throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
+  }
+}
+
+function requireNonEmptyString(v: unknown, what: string): asserts v is string {
+  requireString(v, what);
+  if (v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+}
+
+/** Validate the public non-empty tuple contract at the runtime boundary too.
+ *  TypeScript callers get `OrderedColumns`; this catches plain JavaScript and
+ *  values that crossed an `any` boundary before they reach the frozen IR. */
+function requireOrderedColumns(v: unknown, what: string): asserts v is OrderedColumns {
+  if (!Array.isArray(v) || v.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be a non-empty ordered column-name array`,
+    );
+  }
+  const seen = new Set<string>();
+  for (let position = 0; position < v.length; position += 1) {
+    const column = v[position];
+    requireNonEmptyString(column, `${what}[${position}]`);
+    if (seen.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)} more than once`,
+        { column, position },
+      );
+    }
+    seen.add(column);
   }
 }
 
@@ -3245,7 +3278,36 @@ function recordCreateTable(
   for (const exclusion of args.exclusions ?? []) {
     constraints.push(exclusionConstraintFromSpec(exclusion));
   }
-  for (const fkSpec of args.foreignKeys ?? []) {
+  if (args.foreignKeys !== undefined && !Array.isArray(args.foreignKeys)) {
+    throw structuredError("OP_INVALID", `create table "${name}" foreignKeys must be an array`);
+  }
+  const knownColumns = new Set(columnNames);
+  const foreignKeyNames = new Set<string>();
+  for (const [position, fkSpec] of (args.foreignKeys ?? []).entries()) {
+    requirePlainObject(fkSpec, `create table "${name}" foreignKeys[${position}]`);
+    requireNonEmptyString(
+      fkSpec.name,
+      `create table "${name}" foreignKeys[${position}].name`,
+    );
+    if (foreignKeyNames.has(fkSpec.name)) {
+      throw structuredError(
+        "OP_INVALID",
+        `create table "${name}" foreignKeys names constraint ${JSON.stringify(fkSpec.name)} more than once`,
+      );
+    }
+    foreignKeyNames.add(fkSpec.name);
+    requireOrderedColumns(
+      fkSpec.columns,
+      `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} columns`,
+    );
+    for (const column of fkSpec.columns) {
+      if (!knownColumns.has(column)) {
+        throw structuredError(
+          "OP_INVALID",
+          `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} names unknown local column ${JSON.stringify(column)}`,
+        );
+      }
+    }
     constraints.push(
       fkConstraintFromSpec({
         name: fkSpec.name,
@@ -3506,22 +3568,40 @@ function recordDropColumnDefault(table: string, name: string, args: { schema?: s
  *  emitted (compacted — omitted when absent, so an action-free FK is byte-
  *  identical to the action-free wire image). */
 function fkConstraintFromSpec(spec: {
-  name?: string;
-  columns: string[];
-  references: ForeignKeyReference;
-  onDelete?: RefAction;
-  onUpdate?: RefAction;
-  deferrable?: boolean;
-  initiallyDeferred?: boolean;
-  notValid?: boolean;
+  name?: unknown;
+  columns?: unknown;
+  references?: unknown;
+  onDelete?: unknown;
+  onUpdate?: unknown;
+  deferrable?: unknown;
+  initiallyDeferred?: unknown;
+  notValid?: unknown;
   schema?: string;
 }): Node {
-  if (!spec || typeof spec !== "object" || !spec.references) {
+  if (!spec || typeof spec !== "object") {
     throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
   }
+  requireNonEmptyString(spec.name, "foreign key name");
+  requireOrderedColumns(spec.columns, "foreign key columns");
+  requirePlainObject(spec.references, "foreign key references");
+  requireNonEmptyString(spec.references.table, "foreign key references.table");
+  requireOrderedColumns(spec.references.columns, "foreign key references.columns");
+  if (spec.columns.length !== spec.references.columns.length) {
+    throw structuredError(
+      "OP_INVALID",
+      `foreign key local and referenced columns must have equal arity; got ${spec.columns.length} and ${spec.references.columns.length}`,
+      { localArity: spec.columns.length, referencedArity: spec.references.columns.length },
+    );
+  }
   if (spec.references.schema !== undefined) {
-    requireString(spec.references.schema, "foreign key references.schema");
-    if (spec.schema !== undefined && spec.references.schema !== spec.schema) {
+    requireNonEmptyString(spec.references.schema, "foreign key references.schema");
+    if (spec.schema === undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "foreign key references.schema requires an explicit matching table schema; the frozen IR cannot prove an implicit schema or represent a cross-schema FK",
+      );
+    }
+    if (spec.references.schema !== spec.schema) {
       throw structuredError(
         "OP_INVALID",
         "foreign key references.schema must match the table schema; cross-schema FKs are not representable in the frozen IR",
@@ -3535,12 +3615,15 @@ function fkConstraintFromSpec(spec: {
       columns: spec.columns,
       referencesTable: spec.references.table,
       referencesColumns: spec.references.columns,
-      onDelete: spec.onDelete,
-      onUpdate: spec.onUpdate,
-      deferrable: spec.deferrable,
-      initiallyDeferred: spec.initiallyDeferred,
+      onDelete: requireReferenceAction(spec.onDelete, "foreign key onDelete"),
+      onUpdate: requireReferenceAction(spec.onUpdate, "foreign key onUpdate"),
+      deferrable: requireOptionalBoolean(spec.deferrable, "foreign key deferrable"),
+      initiallyDeferred: requireOptionalBoolean(
+        spec.initiallyDeferred,
+        "foreign key initiallyDeferred",
+      ),
       // PG-only online constraint adoption; refused off Postgres at validate.
-      notValid: spec.notValid,
+      notValid: requireOptionalBoolean(spec.notValid, "foreign key notValid"),
     }),
   });
 }
@@ -3549,7 +3632,7 @@ function recordAddForeignKey(
   table: string,
   name: string,
   args: {
-    columns: string[];
+    columns: OrderedColumns;
     references: ForeignKeyReference;
     onDelete?: RefAction;
     onUpdate?: RefAction;
@@ -4411,7 +4494,7 @@ export function __makeTableHandle(
     // `foreignKey(name).add`/`check(name).add` are the SOLE public
     // writers of the `addConstraint` fk/check payload.
     foreignKey(fkName): ForeignKeyRef {
-      requireString(fkName, ".foreignKey(name)");
+      requireNonEmptyString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
       return {
         add(args) {

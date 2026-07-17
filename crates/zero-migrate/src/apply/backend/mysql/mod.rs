@@ -995,7 +995,9 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+    use crate::apply::drift::diff_snapshots;
     use crate::driver::{Bind, DbError, Row, Value};
+    use crate::model::ir::{ColType, IrColumn, IrConstraint, IrConstraintKind, Op};
     use crate::model::migration::{Checksum, MigrationFlags};
     use std::cell::RefCell;
 
@@ -1024,6 +1026,7 @@ mod render_tests {
         catalog_tables: RefCell<Vec<Row>>,
         catalog_columns: RefCell<Vec<Row>>,
         catalog_indexes: RefCell<Vec<Row>>,
+        catalog_foreign_keys: RefCell<Vec<Row>>,
         progress: RefCell<Vec<Row>>,
         progress_table_exists: bool,
         progress_checksum_exists: bool,
@@ -1052,6 +1055,7 @@ mod render_tests {
                 catalog_tables: RefCell::new(Vec::new()),
                 catalog_columns: RefCell::new(Vec::new()),
                 catalog_indexes: RefCell::new(Vec::new()),
+                catalog_foreign_keys: RefCell::new(Vec::new()),
                 progress: RefCell::new(Vec::new()),
                 progress_table_exists: false,
                 progress_checksum_exists: false,
@@ -1107,11 +1111,17 @@ mod render_tests {
             session
         }
 
-        fn with_catalog(tables: Vec<Row>, columns: Vec<Row>, indexes: Vec<Row>) -> Self {
+        fn with_catalog(
+            tables: Vec<Row>,
+            columns: Vec<Row>,
+            indexes: Vec<Row>,
+            foreign_keys: Vec<Row>,
+        ) -> Self {
             let session = Self::new();
             *session.catalog_tables.borrow_mut() = tables;
             *session.catalog_columns.borrow_mut() = columns;
             *session.catalog_indexes.borrow_mut() = indexes;
+            *session.catalog_foreign_keys.borrow_mut() = foreign_keys;
             session
         }
 
@@ -1304,6 +1314,10 @@ mod render_tests {
                 && sql.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
             {
                 self.catalog_indexes.borrow().clone()
+            } else if sql.contains("information_schema.REFERENTIAL_CONSTRAINTS")
+                && sql.contains("POSITION_IN_UNIQUE_CONSTRAINT")
+            {
+                self.catalog_foreign_keys.borrow().clone()
             } else if sql.contains("COLLATION_NAME AS collation_name")
                 && sql.contains("schema_migrations_inflight")
             {
@@ -1531,6 +1545,47 @@ mod render_tests {
                 collation.map_or(Value::Null, |value| Value::Text(value.into())),
                 Value::Text("BTREE".into()),
                 expression.map_or(Value::Null, |value| Value::Text(value.into())),
+            ],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn catalog_foreign_key_part(
+        table: &str,
+        constraint: &str,
+        ordinal: i64,
+        unique_position: i64,
+        column: &str,
+        referenced_schema: &str,
+        referenced_table: &str,
+        referenced_column: &str,
+        update_rule: &str,
+        delete_rule: &str,
+    ) -> Row {
+        Row::new(
+            vec![
+                "table_name".into(),
+                "constraint_name".into(),
+                "ordinal_position".into(),
+                "position_in_unique_constraint".into(),
+                "column_name".into(),
+                "referenced_table_schema".into(),
+                "referenced_table_name".into(),
+                "referenced_column_name".into(),
+                "update_rule".into(),
+                "delete_rule".into(),
+            ],
+            vec![
+                Value::Text(table.into()),
+                Value::Text(constraint.into()),
+                Value::Int(ordinal),
+                Value::Int(unique_position),
+                Value::Text(column.into()),
+                Value::Text(referenced_schema.into()),
+                Value::Text(referenced_table.into()),
+                Value::Text(referenced_column.into()),
+                Value::Text(update_rule.into()),
+                Value::Text(delete_rule.into()),
             ],
         )
     }
@@ -1913,6 +1968,32 @@ mod render_tests {
                     None,
                 ),
             ],
+            vec![
+                catalog_foreign_key_part(
+                    "users",
+                    "users_tenant_email_fkey",
+                    1,
+                    1,
+                    "tenant_id",
+                    "proj_x",
+                    "users",
+                    "tenant_id",
+                    "CASCADE",
+                    "SET NULL",
+                ),
+                catalog_foreign_key_part(
+                    "users",
+                    "users_tenant_email_fkey",
+                    2,
+                    2,
+                    "email",
+                    "proj_x",
+                    "users",
+                    "email",
+                    "CASCADE",
+                    "SET NULL",
+                ),
+            ],
         );
         let backend = MysqlBackend::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
@@ -1970,10 +2051,34 @@ mod render_tests {
         assert_eq!(users.indexes[1].columns, ["tenant_id", "email"]);
         assert!(users.indexes[2].unique);
         assert_eq!(users.indexes[2].columns, ["id"]);
-        assert_eq!(users.constraints.len(), 1);
+        assert_eq!(users.constraints.len(), 2);
         assert_eq!(users.constraints[0].name, "users_pkey");
         assert_eq!(users.constraints[0].kind, "PRIMARY KEY");
         assert_eq!(users.constraints[0].definition, "PRIMARY KEY (id)");
+        assert_eq!(users.constraints[1].name, "users_tenant_email_fkey");
+        assert_eq!(users.constraints[1].kind, "FOREIGN KEY");
+        assert_eq!(
+            users.constraints[1].definition,
+            "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.users(tenant_id, email) ON UPDATE CASCADE ON DELETE SET NULL"
+        );
+        let mut changed = snapshot.clone();
+        changed
+            .tables
+            .get_mut("users")
+            .expect("users table")
+            .constraints
+            .iter_mut()
+            .find(|constraint| constraint.name == "users_tenant_email_fkey")
+            .expect("composite FK")
+            .definition = "FOREIGN KEY (email, tenant_id) REFERENCES proj_x.users(email, tenant_id) ON DELETE CASCADE".to_string();
+        let drift = diff_snapshots(&snapshot, &changed);
+        assert!(
+            drift.altered_objects.iter().any(|altered| {
+                altered.object == "constraint users_tenant_email_fkey"
+                    && altered.field == "definition"
+            }),
+            "ordered-tuple/action changes must surface as MySQL constraint drift: {drift:?}"
+        );
         let all = rec.log.borrow().join("\n");
         assert!(
             all.contains("TABLE_TYPE = 'BASE TABLE'")
@@ -1981,6 +2086,10 @@ mod render_tests {
                 && all.contains("CHARACTER_SET_NAME AS character_set_name")
                 && all.contains("COLLATION_NAME AS collation_name")
                 && all.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
+                && all.contains("information_schema.REFERENTIAL_CONSTRAINTS")
+                && all.contains("POSITION_IN_UNIQUE_CONSTRAINT")
+                && all
+                    .contains("ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION")
                 && !all.contains("INDEX_NAME <> 'PRIMARY'"),
             "snapshot must use schema-scoped authoritative catalog reads: {all}"
         );
@@ -1990,8 +2099,246 @@ mod render_tests {
                 .iter()
                 .filter(|binds| binds.as_slice() == [Bind::Text("proj_x".to_string())])
                 .count(),
-            3,
+            4,
             "every catalog query scopes itself with the project database bind"
+        );
+    }
+
+    #[compio::test]
+    async fn snapshot_schema_rejects_inconsistent_composite_foreign_key_ordinals() {
+        let rec = RecordingSession::with_catalog(
+            vec![Row::new(
+                vec!["table_name".into()],
+                vec![Value::Text("nodes".into())],
+            )],
+            vec![
+                catalog_column("nodes", "tenant_id", "bigint", None, None, false, 1),
+                catalog_column("nodes", "node_id", "bigint", None, None, false, 2),
+            ],
+            Vec::new(),
+            vec![catalog_foreign_key_part(
+                "nodes",
+                "nodes_parent_fkey",
+                2,
+                2,
+                "node_id",
+                "proj_x",
+                "nodes",
+                "node_id",
+                "NO ACTION",
+                "RESTRICT",
+            )],
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+
+        let error = backend
+            .snapshot_schema(&cfg)
+            .await
+            .expect_err("a composite FK whose first row is ordinal two is inconsistent");
+        assert!(
+            error
+                .to_string()
+                .contains("inconsistent foreign-key metadata for nodes.nodes_parent_fkey"),
+            "got: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() {
+        fn bigint_column(name: &str, nullable: bool) -> IrColumn {
+            IrColumn {
+                name: name.to_string(),
+                ty: ColType::BigInt,
+                nullable: Some(nullable),
+                default: None,
+                unique: None,
+                value_format: None,
+                references: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }
+        }
+
+        let parent_key_name = "parents_tenant_external_key";
+        let child_fk_name = "children_parent_fkey";
+        let ops = vec![
+            Op::CreateTable {
+                name: "parents".to_string(),
+                columns: vec![
+                    bigint_column("tenant_id", false),
+                    bigint_column("external_id", false),
+                ],
+                primary_key: None,
+                constraints: vec![IrConstraint {
+                    name: Some(parent_key_name.to_string()),
+                    kind: IrConstraintKind::Unique {
+                        columns: vec!["tenant_id".to_string(), "external_id".to_string()],
+                    },
+                }],
+                indexes: Vec::new(),
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            },
+            Op::CreateTable {
+                name: "children".to_string(),
+                columns: vec![
+                    bigint_column("parent_tenant", true),
+                    bigint_column("parent_external", true),
+                ],
+                primary_key: None,
+                constraints: vec![IrConstraint {
+                    name: Some(child_fk_name.to_string()),
+                    kind: IrConstraintKind::Fk {
+                        columns: vec!["parent_tenant".to_string(), "parent_external".to_string()],
+                        references_table: "parents".to_string(),
+                        references_columns: vec![
+                            "tenant_id".to_string(),
+                            "external_id".to_string(),
+                        ],
+                        on_delete: None,
+                        on_update: None,
+                        deferrable: None,
+                        initially_deferred: None,
+                        not_valid: None,
+                    },
+                }],
+                indexes: Vec::new(),
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            },
+        ];
+        let expected = crate::render::fold::fold_ops(&ops, SqlDialect::Mysql, "proj_x")
+            .expect("named table UNIQUE and composite FK fold for MySQL");
+
+        let parent_candidate = expected.tables["parents"]
+            .indexes
+            .iter()
+            .find(|index| index.name == parent_key_name)
+            .expect("table UNIQUE canonicalizes to its MySQL unique key");
+        assert!(parent_candidate.unique);
+        assert_eq!(parent_candidate.columns, ["tenant_id", "external_id"]);
+        assert!(
+            expected.tables["parents"]
+                .constraints
+                .iter()
+                .all(|constraint| constraint.name != parent_key_name),
+            "MySQL cannot recover whether a unique key was authored as CONSTRAINT or INDEX"
+        );
+
+        let rec = RecordingSession::with_catalog(
+            vec![
+                Row::new(
+                    vec!["table_name".into()],
+                    vec![Value::Text("children".into())],
+                ),
+                Row::new(
+                    vec!["table_name".into()],
+                    vec![Value::Text("parents".into())],
+                ),
+            ],
+            vec![
+                catalog_column("children", "parent_tenant", "bigint", None, None, true, 1),
+                catalog_column("children", "parent_external", "bigint", None, None, true, 2),
+                catalog_column("parents", "tenant_id", "bigint", None, None, false, 1),
+                catalog_column("parents", "external_id", "bigint", None, None, false, 2),
+            ],
+            vec![
+                catalog_index_part(
+                    "children",
+                    "children_parent_fkey_idx",
+                    1,
+                    1,
+                    Some("parent_tenant"),
+                    None,
+                    Some("A"),
+                    None,
+                ),
+                catalog_index_part(
+                    "children",
+                    "children_parent_fkey_idx",
+                    1,
+                    2,
+                    Some("parent_external"),
+                    None,
+                    Some("A"),
+                    None,
+                ),
+                catalog_index_part(
+                    "parents",
+                    parent_key_name,
+                    0,
+                    1,
+                    Some("tenant_id"),
+                    None,
+                    Some("A"),
+                    None,
+                ),
+                catalog_index_part(
+                    "parents",
+                    parent_key_name,
+                    0,
+                    2,
+                    Some("external_id"),
+                    None,
+                    Some("A"),
+                    None,
+                ),
+            ],
+            vec![
+                catalog_foreign_key_part(
+                    "children",
+                    child_fk_name,
+                    1,
+                    1,
+                    "parent_tenant",
+                    "proj_x",
+                    "parents",
+                    "tenant_id",
+                    "RESTRICT",
+                    "RESTRICT",
+                ),
+                catalog_foreign_key_part(
+                    "children",
+                    child_fk_name,
+                    2,
+                    2,
+                    "parent_external",
+                    "proj_x",
+                    "parents",
+                    "external_id",
+                    "RESTRICT",
+                    "RESTRICT",
+                ),
+            ],
+        );
+        let actual = MysqlBackend::new_generic(&rec)
+            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .await
+            .expect("equivalent MySQL catalog snapshot");
+
+        assert_eq!(
+            actual.tables["parents"]
+                .indexes
+                .iter()
+                .find(|index| index.name == parent_key_name)
+                .expect("introspected candidate key")
+                .columns,
+            ["tenant_id", "external_id"],
+            "candidate-key tuple order must survive MySQL introspection"
+        );
+        let drift = diff_snapshots(&expected, &actual);
+        assert!(
+            drift.is_clean(),
+            "named table UNIQUE + composite FK must round-trip without false MySQL drift: {drift:?}"
         );
     }
 

@@ -917,6 +917,192 @@ test(".foreignKey().add() records composite/non-id references without serializin
   });
 });
 
+test("foreign-key reference schemas fail closed unless the local schema is explicit and equal", () => {
+  assert.throws(
+    () =>
+      record(() =>
+        table("children").create({
+          columns: { tenant_id: t.uuid(), parent_id: t.uuid() },
+          foreignKeys: [
+            {
+              name: "children_parent_fk",
+              columns: ["tenant_id", "parent_id"],
+              references: {
+                schema: "zero_migrate",
+                table: "parents",
+                columns: ["tenant_id", "id"],
+              },
+            },
+          ],
+        }),
+      ),
+    (error: any) =>
+      error.code === "OP_INVALID" && /requires an explicit matching table schema/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("children", { schema: "zero_migrate" }).create({
+          columns: { tenant_id: t.uuid(), parent_id: t.uuid() },
+          foreignKeys: [
+            {
+              name: "children_parent_fk",
+              columns: ["tenant_id", "parent_id"],
+              references: {
+                schema: "other",
+                table: "parents",
+                columns: ["tenant_id", "id"],
+              },
+            },
+          ],
+        }),
+      ),
+    (error: any) => error.code === "OP_INVALID" && /must match the table schema/.test(error.message),
+  );
+});
+
+test("create({ foreignKeys }) preserves composite tuple order and referential options", () => {
+  const ops = record(() =>
+    table("order_lines").create({
+      columns: {
+        tenant_id: t.uuid().notNull(),
+        order_id: t.uuid().notNull(),
+        line_no: t.int().notNull(),
+      },
+      foreignKeys: [
+        {
+          name: "order_lines_order_fk",
+          columns: ["order_id", "tenant_id"],
+          references: {
+            table: "orders",
+            columns: ["id", "tenant_id"],
+          },
+          onDelete: "cascade",
+          onUpdate: "restrict",
+          deferrable: true,
+          initiallyDeferred: false,
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(ops[0].constraints, [
+    {
+      name: "order_lines_order_fk",
+      kind: {
+        kind: "fk",
+        columns: ["order_id", "tenant_id"],
+        referencesTable: "orders",
+        referencesColumns: ["id", "tenant_id"],
+        onDelete: "cascade",
+        onUpdate: "restrict",
+        deferrable: true,
+        initiallyDeferred: false,
+      },
+    },
+  ]);
+});
+
+test("create({ foreignKeys }) rejects malformed ordered composite relationships", () => {
+  const valid = {
+    name: "child_parent_fk",
+    columns: ["tenant_id", "parent_id"],
+    references: { table: "parents", columns: ["tenant_id", "id"] },
+  };
+  const rejects = (foreignKey: unknown, message: RegExp): void => {
+    assert.throws(
+      () =>
+        record(() =>
+          table("children").create({
+            columns: { tenant_id: t.uuid(), parent_id: t.uuid() },
+            foreignKeys: [foreignKey] as any,
+          }),
+        ),
+      (error: any) => error.code === "OP_INVALID" && message.test(error.message),
+    );
+  };
+
+  rejects({ ...valid, name: "" }, /name must be a non-empty string/);
+  rejects({ ...valid, name: undefined }, /name must be a string/);
+  rejects({ ...valid, columns: [] }, /non-empty ordered column-name array/);
+  rejects({ ...valid, columns: ["tenant_id", "tenant_id"] }, /more than once/);
+  rejects({ ...valid, columns: ["tenant_id", ""] }, /must be a non-empty string/);
+  rejects({ ...valid, columns: ["tenant_id", 42] }, /columns\[1\] must be a string/);
+  rejects({ ...valid, columns: ["tenant_id", "missing"] }, /unknown local column "missing"/);
+  rejects({ ...valid, columns: undefined }, /non-empty ordered column-name array/);
+  rejects({ ...valid, references: undefined }, /foreign key references must be an object/);
+  rejects(
+    { ...valid, references: { columns: ["tenant_id", "id"] } },
+    /references\.table must be a string/,
+  );
+  rejects(
+    { ...valid, references: { table: "", columns: ["tenant_id", "id"] } },
+    /references\.table must be a non-empty string/,
+  );
+  rejects(
+    { ...valid, references: { table: "parents" } },
+    /references\.columns must be a non-empty ordered column-name array/,
+  );
+  rejects(
+    { ...valid, references: { table: "parents", columns: [] } },
+    /references\.columns must be a non-empty ordered column-name array/,
+  );
+  rejects(
+    { ...valid, references: { table: "parents", columns: ["id", "id"] } },
+    /references\.columns names column "id" more than once/,
+  );
+  rejects(
+    { ...valid, references: { table: "parents", columns: ["tenant_id"] } },
+    /must have equal arity; got 2 and 1/,
+  );
+  rejects({ ...valid, onDelete: "explode" }, /foreign key onDelete must be one of/);
+  rejects({ ...valid, deferrable: "yes" }, /foreign key deferrable must be a boolean/);
+
+  assert.throws(
+    () =>
+      record(() =>
+        table("children").create({
+          columns: { tenant_id: t.uuid(), parent_id: t.uuid() },
+          foreignKeys: valid as any,
+        }),
+      ),
+    (error: any) => error.code === "OP_INVALID" && /foreignKeys must be an array/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("children").create({
+          columns: { tenant_id: t.uuid(), parent_id: t.uuid() },
+          foreignKeys: [valid, { ...valid }] as any,
+        }),
+      ),
+    (error: any) => error.code === "OP_INVALID" && /names constraint "child_parent_fk" more than once/.test(error.message),
+  );
+});
+
+test("foreignKey().add validates its name and ordered tuple arity before recording", () => {
+  assert.throws(
+    () =>
+      record(() =>
+        table("children").foreignKey("").add({
+          columns: ["parent_id"],
+          references: { table: "parents", columns: ["id"] },
+        }),
+      ),
+    (error: any) => error.code === "OP_INVALID" && /must be a non-empty string/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("children").foreignKey("child_parent_fk").add({
+          columns: ["tenant_id", "parent_id"],
+          references: { table: "parents", columns: ["id"] },
+        } as any),
+      ),
+    (error: any) => error.code === "OP_INVALID" && /must have equal arity/.test(error.message),
+  );
+});
+
 test("C1 — .foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent ⇒ omitted", () => {
   const withAction = record(() =>
     table("orders").foreignKey("fk").add({

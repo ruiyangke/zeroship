@@ -256,9 +256,9 @@ pub use model::migration::{
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
 };
 pub use model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, GeneratedColumnSnapshot,
-    IndexElementSnapshot, IndexSnapshot, MysqlTextStorageSnapshot, NamedTypeSnapshot,
-    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot,
+    GeneratedColumnSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlTextStorageSnapshot,
+    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{

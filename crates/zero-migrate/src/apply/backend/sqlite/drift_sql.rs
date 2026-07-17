@@ -41,8 +41,8 @@ use std::collections::BTreeMap;
 use crate::apply::drift::DriftError;
 use crate::model::ir::IndexSortOrder;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, SchemaSnapshot,
-    TableSnapshot, ViewSnapshot,
+    ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot,
+    IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -53,13 +53,38 @@ use super::authorizer::Mode;
 /// the FK, `from`/`to` are the local and referenced column names.
 type ForeignKeyColumn = (i64, String, String);
 
+/// One foreign key reconstructed from `PRAGMA foreign_key_list`. SQLite returns
+/// one row per member column, so the rows are first grouped by id and then sorted
+/// by `seq`. Actions are repeated on every member row; the first row is enough.
+#[derive(Debug)]
+struct PragmaForeignKey {
+    referenced_table: String,
+    columns: Vec<ForeignKeyColumn>,
+    on_update: String,
+    on_delete: String,
+    match_kind: String,
+}
+
 /// Foreign keys grouped by their `PRAGMA foreign_key_list` `id` (a composite FK
-/// spans several rows sharing one `id`). The value is the referenced table name
-/// plus that FK's ordered member columns. Named to keep
-/// [`introspect_foreign_keys`] free of the `clippy::type_complexity` trip the
-/// inline `BTreeMap<i64, (String, Vec<(i64, String, String)>)>` caused (no
-/// behaviour change).
-type ForeignKeysById = BTreeMap<i64, (String, Vec<ForeignKeyColumn>)>;
+/// spans several rows sharing one `id`).
+type ForeignKeysById = BTreeMap<i64, PragmaForeignKey>;
+
+/// Metadata SQLite omits from `PRAGMA foreign_key_list`, recovered from the
+/// table's stored `CREATE TABLE` text. The ordered column tuples also let us
+/// correlate a parsed clause with its authoritative PRAGMA group without relying
+/// on SQLite's implementation-defined FK id ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedForeignKey {
+    name: Option<String>,
+    local_columns: Vec<String>,
+    referenced_table: String,
+    referenced_columns: Vec<String>,
+    on_update: Option<String>,
+    on_delete: Option<String>,
+    match_kind: Option<String>,
+    deferrable: bool,
+    initially_deferred: bool,
+}
 
 /// Map a SQLite actor error onto the dialect-neutral `Backend` arm of [`DriftError`].
 fn drift_err(e: SqliteActorError) -> DriftError {
@@ -275,7 +300,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         let stored = create_sql.get(&table).map_or("", String::as_str);
         introspect_columns(actor, &table, stored, &mut tables).await?;
         introspect_indexes_and_unique(actor, &table, &mut tables).await?;
-        introspect_foreign_keys(actor, &table, &mut tables).await?;
+        introspect_foreign_keys(actor, &table, stored, &mut tables).await?;
     }
 
     // **FTS** — attach each recognised FTS5 vtable as an `IndexSnapshot` on its
@@ -373,6 +398,7 @@ async fn introspect_columns(
             inline_checks: Vec::new(),
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
             case_sensitive: recover_case_sensitive(stored_create_sql, &name),
+            collation: recover_column_collation(stored_create_sql, &name),
             mysql_text_storage: None,
             comment: None,
         });
@@ -621,121 +647,129 @@ fn strip_single_outer_parens(s: &str) -> Option<&str> {
     }
 }
 
-fn find_char_outside_quotes(s: &str, needle: char, from: usize) -> Option<usize> {
-    let mut in_single = false;
-    let mut in_double = false;
+#[derive(Clone, Copy)]
+enum SqliteDdlScanState {
+    Plain,
+    Quoted(char),
+    BracketQuoted,
+    LineComment,
+    BlockComment,
+}
+
+/// Visit SQLite DDL characters that are outside quoted strings/identifiers and
+/// comments. Scanning always starts at the beginning so `from` may safely point
+/// into text whose lexical context began earlier.
+fn scan_sqlite_ddl_outside(
+    s: &str,
+    from: usize,
+    mut visit: impl FnMut(usize, char) -> bool,
+) -> Option<usize> {
+    let mut state = SqliteDdlScanState::Plain;
     let mut chars = s.char_indices().peekable();
     while let Some((i, ch)) = chars.next() {
-        if i < from {
-            continue;
-        }
-        match ch {
-            '\'' if !in_double => {
-                if in_single && matches!(chars.peek(), Some((_, '\''))) {
+        match state {
+            SqliteDdlScanState::Plain => match ch {
+                '\'' | '"' | '`' => state = SqliteDdlScanState::Quoted(ch),
+                '[' => state = SqliteDdlScanState::BracketQuoted,
+                '-' if matches!(chars.peek(), Some((_, '-'))) => {
                     chars.next();
-                } else {
-                    in_single = !in_single;
+                    state = SqliteDdlScanState::LineComment;
+                }
+                '/' if matches!(chars.peek(), Some((_, '*'))) => {
+                    chars.next();
+                    state = SqliteDdlScanState::BlockComment;
+                }
+                _ if i >= from && visit(i, ch) => return Some(i),
+                _ => {}
+            },
+            SqliteDdlScanState::Quoted(delimiter) => {
+                if ch == delimiter {
+                    if matches!(chars.peek(), Some((_, next)) if *next == delimiter) {
+                        chars.next();
+                    } else {
+                        state = SqliteDdlScanState::Plain;
+                    }
                 }
             }
-            '"' if !in_single => {
-                if in_double && matches!(chars.peek(), Some((_, '"'))) {
-                    chars.next();
-                } else {
-                    in_double = !in_double;
+            SqliteDdlScanState::BracketQuoted => {
+                if ch == ']' {
+                    if matches!(chars.peek(), Some((_, ']'))) {
+                        chars.next();
+                    } else {
+                        state = SqliteDdlScanState::Plain;
+                    }
                 }
             }
-            _ if ch == needle && !in_single && !in_double => return Some(i),
-            _ => {}
+            SqliteDdlScanState::LineComment => {
+                if matches!(ch, '\n' | '\r') {
+                    state = SqliteDdlScanState::Plain;
+                }
+            }
+            SqliteDdlScanState::BlockComment => {
+                if ch == '*' && matches!(chars.peek(), Some((_, '/'))) {
+                    chars.next();
+                    state = SqliteDdlScanState::Plain;
+                }
+            }
         }
     }
     None
 }
 
+fn find_char_outside_quotes(s: &str, needle: char, from: usize) -> Option<usize> {
+    scan_sqlite_ddl_outside(s, from, |_, ch| ch == needle)
+}
+
 fn find_matching_paren(s: &str, open: usize) -> Option<usize> {
-    let mut in_single = false;
-    let mut in_double = false;
     let mut depth = 0_usize;
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, ch)) = chars.next() {
-        if i < open {
-            continue;
+    scan_sqlite_ddl_outside(s, open, |_, ch| match ch {
+        '(' => {
+            depth += 1;
+            false
         }
-        match ch {
-            '\'' if !in_double => {
-                if in_single && matches!(chars.peek(), Some((_, '\''))) {
-                    chars.next();
-                } else {
-                    in_single = !in_single;
-                }
-            }
-            '"' if !in_single => {
-                if in_double && matches!(chars.peek(), Some((_, '"'))) {
-                    chars.next();
-                } else {
-                    in_double = !in_double;
-                }
-            }
-            '(' if !in_single && !in_double => depth += 1,
-            ')' if !in_single && !in_double => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
+        ')' if depth > 0 => {
+            depth -= 1;
+            depth == 0
         }
-    }
-    None
+        _ => false,
+    })
 }
 
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0_usize;
     let mut depth = 0_usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, ch)) = chars.next() {
+    let _ = scan_sqlite_ddl_outside(s, 0, |i, ch| {
         match ch {
-            '\'' if !in_double => {
-                if in_single && matches!(chars.peek(), Some((_, '\''))) {
-                    chars.next();
-                } else {
-                    in_single = !in_single;
-                }
-            }
-            '"' if !in_single => {
-                if in_double && matches!(chars.peek(), Some((_, '"'))) {
-                    chars.next();
-                } else {
-                    in_double = !in_double;
-                }
-            }
-            '(' if !in_single && !in_double => depth += 1,
-            ')' if !in_single && !in_double => {
+            '(' => depth += 1,
+            ')' => {
                 depth = depth.saturating_sub(1);
             }
-            ',' if depth == 0 && !in_single && !in_double => {
+            ',' if depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
             }
             _ => {}
         }
-    }
+        false
+    });
     out.push(&s[start..]);
     out
 }
 
 /// Foreign keys via `PRAGMA foreign_key_list(<t>)` → one `FOREIGN KEY`
-/// [`ConstraintSnapshot`] per declared FK. SQLite does not name FKs (they have no
-/// constraint name), so we synthesise a deterministic name from the (id, referenced
-/// table, local columns) — stable across reads of the same schema.
+/// [`ConstraintSnapshot`] per declared FK. PRAGMA is authoritative for the
+/// ordered local/referenced tuples and referential actions. It does not expose a
+/// constraint's declared name or deferrability, so those are correlated from the
+/// verbatim `sqlite_master.sql` `CREATE TABLE` text. Unnamed/unparseable foreign
+/// keys retain a deterministic synthetic-name fallback.
 ///
 /// `foreign_key_list` columns: id, seq, table, from, to, on_update, on_delete,
 /// match. Multiple rows with the same `id` are the columns of one composite FK.
 async fn introspect_foreign_keys(
     actor: &MigrationActor,
     table: &str,
+    stored_create_sql: &str,
     tables: &mut BTreeMap<String, TableSnapshot>,
 ) -> Result<(), DriftError> {
     let rows = actor
@@ -761,34 +795,440 @@ async fn introspect_foreign_keys(
         let ref_table = r.get(2).and_then(Clone::clone).unwrap_or_default();
         let from = r.get(3).and_then(Clone::clone).unwrap_or_default();
         let to = r.get(4).and_then(Clone::clone).unwrap_or_default();
-        let entry = by_id
-            .entry(id)
-            .or_insert_with(|| (ref_table.clone(), Vec::new()));
-        entry.1.push((seq, from, to));
+        let on_update = r
+            .get(5)
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| "NO ACTION".to_string());
+        let on_delete = r
+            .get(6)
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| "NO ACTION".to_string());
+        let match_kind = r
+            .get(7)
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| "NONE".to_string());
+        let entry = by_id.entry(id).or_insert_with(|| PragmaForeignKey {
+            referenced_table: ref_table,
+            columns: Vec::new(),
+            on_update,
+            on_delete,
+            match_kind,
+        });
+        entry.columns.push((seq, from, to));
     }
 
+    let parsed = parse_table_foreign_keys(stored_create_sql);
+    let mut parsed_used = vec![false; parsed.len()];
     let Some(t) = tables.get_mut(table) else {
         return Ok(());
     };
-    for (id, (ref_table, mut cols)) in by_id {
-        cols.sort_by_key(|(seq, _, _)| *seq);
-        let from_cols: Vec<String> = cols.iter().map(|(_, f, _)| f.clone()).collect();
-        let to_cols: Vec<String> = cols.iter().map(|(_, _, to)| to.clone()).collect();
-        // Deterministic synthetic name (SQLite FKs are unnamed): table + columns + id.
-        let name = format!("fk_{table}_{}_{id}", from_cols.join("_"));
+    for (id, mut pragma_fk) in by_id {
+        pragma_fk.columns.sort_by_key(|(seq, _, _)| *seq);
+        let from_cols: Vec<String> = pragma_fk
+            .columns
+            .iter()
+            .map(|(_, from, _)| from.clone())
+            .collect();
+        let to_cols: Vec<String> = pragma_fk
+            .columns
+            .iter()
+            .map(|(_, _, to)| to.clone())
+            .collect();
+
+        // Prefer a full structural + action match (which disambiguates duplicate
+        // tuples with different policies), then fall back to tuple-only matching.
+        // SQLite reports every MATCH spelling as NONE on versions that implement
+        // only MATCH SIMPLE, so MATCH is deliberately not part of correlation.
+        let parsed_idx = parsed
+            .iter()
+            .enumerate()
+            .find(|(idx, candidate)| {
+                !parsed_used[*idx]
+                    && parsed_fk_matches(candidate, &pragma_fk, &from_cols, &to_cols, true)
+            })
+            .or_else(|| {
+                parsed.iter().enumerate().find(|(idx, candidate)| {
+                    !parsed_used[*idx]
+                        && parsed_fk_matches(candidate, &pragma_fk, &from_cols, &to_cols, false)
+                })
+            })
+            .map(|(idx, _)| idx);
+        let parsed_fk = parsed_idx.map(|idx| {
+            parsed_used[idx] = true;
+            &parsed[idx]
+        });
+
+        // Engine-authored SQLite tables always carry explicit names in their
+        // stored table-level clauses. Keep the synthetic fallback for unmanaged
+        // unnamed/column-level REFERENCES clauses.
+        let name = parsed_fk
+            .and_then(|foreign_key| foreign_key.name.clone())
+            .unwrap_or_else(|| format!("fk_{table}_{}_{id}", from_cols.join("_")));
         t.constraints.push(ConstraintSnapshot {
             name,
             kind: "FOREIGN KEY".to_string(),
-            definition: format!(
-                "FOREIGN KEY ({}) REFERENCES {}({})",
-                from_cols.join(", "),
-                ref_table,
-                to_cols.join(", ")
+            definition: canonical_foreign_key_definition(
+                &pragma_fk, &from_cols, &to_cols, parsed_fk,
             ),
             comment: None,
         });
     }
     Ok(())
+}
+
+fn parsed_fk_matches(
+    parsed: &ParsedForeignKey,
+    pragma_fk: &PragmaForeignKey,
+    local_columns: &[String],
+    referenced_columns: &[String],
+    include_actions: bool,
+) -> bool {
+    identifiers_equal(&parsed.referenced_table, &pragma_fk.referenced_table)
+        && identifier_lists_equal(&parsed.local_columns, local_columns)
+        && identifier_lists_equal(&parsed.referenced_columns, referenced_columns)
+        && (!include_actions
+            || (fk_actions_equal(parsed.on_update.as_deref(), &pragma_fk.on_update)
+                && fk_actions_equal(parsed.on_delete.as_deref(), &pragma_fk.on_delete)))
+}
+
+fn identifiers_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn identifier_lists_equal(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| identifiers_equal(left, right))
+}
+
+fn fk_actions_equal(parsed: Option<&str>, pragma: &str) -> bool {
+    use crate::schema::query::{normalize_fk_action_for_dialect, SqlDialect};
+
+    normalize_fk_action_for_dialect(parsed, SqlDialect::Sqlite)
+        == normalize_fk_action_for_dialect(Some(pragma), SqlDialect::Sqlite)
+}
+
+fn canonical_foreign_key_definition(
+    pragma_fk: &PragmaForeignKey,
+    local_columns: &[String],
+    referenced_columns: &[String],
+    parsed: Option<&ParsedForeignKey>,
+) -> String {
+    use std::fmt::Write as _;
+
+    use crate::render::declarative::{constraintdef_cols, quote_ident_if_needed};
+    use crate::schema::query::{normalize_fk_action_for_dialect, SqlDialect};
+
+    let mut definition = format!(
+        "FOREIGN KEY ({}) REFERENCES {}({})",
+        constraintdef_cols(local_columns),
+        quote_ident_if_needed(&pragma_fk.referenced_table),
+        constraintdef_cols(referenced_columns),
+    );
+
+    // MATCH SIMPLE is SQLite's only portable/enforced null contract. SQLite's
+    // PRAGMA commonly spells the default as NONE, while sqlite_master may retain
+    // an explicit MATCH SIMPLE; both canonicalize to omission, matching desired
+    // snapshots. Preserve unsupported non-simple spellings only to make them
+    // visible as drift rather than silently claiming equivalent enforcement.
+    let match_kind = parsed
+        .and_then(|foreign_key| foreign_key.match_kind.as_deref())
+        .unwrap_or(&pragma_fk.match_kind);
+    if !matches!(
+        match_kind.trim().to_ascii_uppercase().as_str(),
+        "" | "NONE" | "SIMPLE"
+    ) {
+        let _ = write!(
+            definition,
+            " MATCH {}",
+            match_kind.trim().to_ascii_uppercase()
+        );
+    }
+
+    let on_update = normalize_fk_action_for_dialect(Some(&pragma_fk.on_update), SqlDialect::Sqlite);
+    let on_delete = normalize_fk_action_for_dialect(Some(&pragma_fk.on_delete), SqlDialect::Sqlite);
+    if on_update != "NO ACTION" {
+        let _ = write!(definition, " ON UPDATE {on_update}");
+    }
+    if on_delete != "NO ACTION" {
+        let _ = write!(definition, " ON DELETE {on_delete}");
+    }
+    if parsed.is_some_and(|foreign_key| foreign_key.deferrable) {
+        definition.push_str(" DEFERRABLE");
+        if parsed.is_some_and(|foreign_key| foreign_key.initially_deferred) {
+            definition.push_str(" INITIALLY DEFERRED");
+        }
+    }
+    definition
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SqliteDdlToken {
+    Word(String),
+    OpenParen,
+    CloseParen,
+    Comma,
+    Dot,
+}
+
+/// Parse table-level foreign-key clauses from a stored SQLite `CREATE TABLE`.
+/// This is intentionally a small DDL tokenizer rather than a regex: quoted
+/// identifiers, comments, nested parentheses, and arbitrary whitespace are all
+/// legal in the stored SQL. Column-level REFERENCES are left to the deterministic
+/// PRAGMA fallback because they have no explicit constraint name to recover.
+fn parse_table_foreign_keys(create_sql: &str) -> Vec<ParsedForeignKey> {
+    let Some(open) = find_char_outside_quotes(create_sql, '(', 0) else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_paren(create_sql, open) else {
+        return Vec::new();
+    };
+    split_top_level_commas(&create_sql[open + 1..close])
+        .into_iter()
+        .filter_map(parse_table_foreign_key_clause)
+        .collect()
+}
+
+fn parse_table_foreign_key_clause(clause: &str) -> Option<ParsedForeignKey> {
+    let tokens = tokenize_sqlite_ddl(clause);
+    let mut cursor = 0_usize;
+    let name = if token_is_keyword(&tokens, cursor, "CONSTRAINT") {
+        cursor += 1;
+        Some(take_word(&tokens, &mut cursor)?)
+    } else {
+        None
+    };
+    if !take_keyword(&tokens, &mut cursor, "FOREIGN") || !take_keyword(&tokens, &mut cursor, "KEY")
+    {
+        return None;
+    }
+    let local_columns = take_identifier_list(&tokens, &mut cursor)?;
+    if !take_keyword(&tokens, &mut cursor, "REFERENCES") {
+        return None;
+    }
+    let mut referenced_table = take_word(&tokens, &mut cursor)?;
+    while matches!(tokens.get(cursor), Some(SqliteDdlToken::Dot)) {
+        cursor += 1;
+        referenced_table = take_word(&tokens, &mut cursor)?;
+    }
+    let referenced_columns = take_identifier_list(&tokens, &mut cursor)?;
+
+    let mut on_update = None;
+    let mut on_delete = None;
+    let mut match_kind = None;
+    let mut deferrable = false;
+    let mut initially_deferred = false;
+    while cursor < tokens.len() {
+        if take_keyword(&tokens, &mut cursor, "ON") {
+            let target = take_word(&tokens, &mut cursor)?;
+            let action = take_fk_action(&tokens, &mut cursor)?;
+            if target.eq_ignore_ascii_case("UPDATE") {
+                on_update = Some(action);
+            } else if target.eq_ignore_ascii_case("DELETE") {
+                on_delete = Some(action);
+            }
+            continue;
+        }
+        if take_keyword(&tokens, &mut cursor, "MATCH") {
+            match_kind = Some(take_word(&tokens, &mut cursor)?.to_ascii_uppercase());
+            continue;
+        }
+        if take_keyword(&tokens, &mut cursor, "NOT") {
+            if take_keyword(&tokens, &mut cursor, "DEFERRABLE") {
+                deferrable = false;
+                initially_deferred = false;
+            }
+            continue;
+        }
+        if take_keyword(&tokens, &mut cursor, "DEFERRABLE") {
+            deferrable = true;
+            continue;
+        }
+        if take_keyword(&tokens, &mut cursor, "INITIALLY") {
+            if take_keyword(&tokens, &mut cursor, "DEFERRED") {
+                deferrable = true;
+                initially_deferred = true;
+            } else {
+                let _ = take_keyword(&tokens, &mut cursor, "IMMEDIATE");
+            }
+            continue;
+        }
+        cursor += 1;
+    }
+
+    Some(ParsedForeignKey {
+        name,
+        local_columns,
+        referenced_table,
+        referenced_columns,
+        on_update,
+        on_delete,
+        match_kind,
+        deferrable,
+        initially_deferred,
+    })
+}
+
+fn tokenize_sqlite_ddl(sql: &str) -> Vec<SqliteDdlToken> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut cursor = 0_usize;
+    while cursor < chars.len() {
+        if chars[cursor].is_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if chars[cursor] == '-' && chars.get(cursor + 1) == Some(&'-') {
+            cursor += 2;
+            while cursor < chars.len() && chars[cursor] != '\n' {
+                cursor += 1;
+            }
+            continue;
+        }
+        if chars[cursor] == '/' && chars.get(cursor + 1) == Some(&'*') {
+            cursor += 2;
+            while cursor + 1 < chars.len() && !(chars[cursor] == '*' && chars[cursor + 1] == '/') {
+                cursor += 1;
+            }
+            cursor = (cursor + 2).min(chars.len());
+            continue;
+        }
+        match chars[cursor] {
+            '(' => {
+                tokens.push(SqliteDdlToken::OpenParen);
+                cursor += 1;
+            }
+            ')' => {
+                tokens.push(SqliteDdlToken::CloseParen);
+                cursor += 1;
+            }
+            ',' => {
+                tokens.push(SqliteDdlToken::Comma);
+                cursor += 1;
+            }
+            '.' => {
+                tokens.push(SqliteDdlToken::Dot);
+                cursor += 1;
+            }
+            '\'' | '"' | '`' => {
+                let delimiter = chars[cursor];
+                cursor += 1;
+                let mut word = String::new();
+                while cursor < chars.len() {
+                    if chars[cursor] == delimiter {
+                        if chars.get(cursor + 1) == Some(&delimiter) {
+                            word.push(delimiter);
+                            cursor += 2;
+                            continue;
+                        }
+                        cursor += 1;
+                        break;
+                    }
+                    word.push(chars[cursor]);
+                    cursor += 1;
+                }
+                tokens.push(SqliteDdlToken::Word(word));
+            }
+            '[' => {
+                cursor += 1;
+                let mut word = String::new();
+                while cursor < chars.len() {
+                    if chars[cursor] == ']' {
+                        if chars.get(cursor + 1) == Some(&']') {
+                            word.push(']');
+                            cursor += 2;
+                            continue;
+                        }
+                        cursor += 1;
+                        break;
+                    }
+                    word.push(chars[cursor]);
+                    cursor += 1;
+                }
+                tokens.push(SqliteDdlToken::Word(word));
+            }
+            _ => {
+                let start = cursor;
+                while cursor < chars.len()
+                    && !chars[cursor].is_whitespace()
+                    && !matches!(chars[cursor], '(' | ')' | ',' | '.')
+                {
+                    if (chars[cursor] == '-' && chars.get(cursor + 1) == Some(&'-'))
+                        || (chars[cursor] == '/' && chars.get(cursor + 1) == Some(&'*'))
+                    {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                if start == cursor {
+                    cursor += 1;
+                } else {
+                    tokens.push(SqliteDdlToken::Word(chars[start..cursor].iter().collect()));
+                }
+            }
+        }
+    }
+    tokens
+}
+
+fn token_is_keyword(tokens: &[SqliteDdlToken], cursor: usize, keyword: &str) -> bool {
+    matches!(
+        tokens.get(cursor),
+        Some(SqliteDdlToken::Word(word)) if word.eq_ignore_ascii_case(keyword)
+    )
+}
+
+fn take_keyword(tokens: &[SqliteDdlToken], cursor: &mut usize, keyword: &str) -> bool {
+    if token_is_keyword(tokens, *cursor, keyword) {
+        *cursor += 1;
+        true
+    } else {
+        false
+    }
+}
+
+fn take_word(tokens: &[SqliteDdlToken], cursor: &mut usize) -> Option<String> {
+    let SqliteDdlToken::Word(word) = tokens.get(*cursor)? else {
+        return None;
+    };
+    *cursor += 1;
+    Some(word.clone())
+}
+
+fn take_identifier_list(tokens: &[SqliteDdlToken], cursor: &mut usize) -> Option<Vec<String>> {
+    if !matches!(tokens.get(*cursor), Some(SqliteDdlToken::OpenParen)) {
+        return None;
+    }
+    *cursor += 1;
+    let mut identifiers = Vec::new();
+    loop {
+        identifiers.push(take_word(tokens, cursor)?);
+        match tokens.get(*cursor) {
+            Some(SqliteDdlToken::Comma) => *cursor += 1,
+            Some(SqliteDdlToken::CloseParen) => {
+                *cursor += 1;
+                break;
+            }
+            _ => return None,
+        }
+    }
+    Some(identifiers)
+}
+
+fn take_fk_action(tokens: &[SqliteDdlToken], cursor: &mut usize) -> Option<String> {
+    let first = take_word(tokens, cursor)?;
+    if first.eq_ignore_ascii_case("SET") || first.eq_ignore_ascii_case("NO") {
+        let second = take_word(tokens, cursor)?;
+        Some(format!(
+            "{} {}",
+            first.to_ascii_uppercase(),
+            second.to_ascii_uppercase()
+        ))
+    } else {
+        Some(first.to_ascii_uppercase())
+    }
 }
 
 /// Recover an inline `zero-migrate:mask:…` or `zero-migrate:enc:…` sentinel for `column` from the
@@ -818,12 +1258,48 @@ fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
 }
 
 fn recover_case_sensitive(create_sql: &str, column: &str) -> Option<bool> {
-    let clause = sqlite_column_clause(create_sql, column)?;
-    if clause.to_ascii_lowercase().contains("collate nocase") {
+    if sqlite_column_collation_name(create_sql, column)
+        .is_some_and(|name| name.eq_ignore_ascii_case("NOCASE"))
+    {
         Some(false)
     } else {
         None
     }
+}
+
+fn recover_column_collation(create_sql: &str, column: &str) -> Option<ColumnCollationSnapshot> {
+    let name = sqlite_column_collation_name(create_sql, column)?;
+    // BINARY is SQLite's implicit default. NOCASE already has a portable,
+    // drift-comparable representation in `case_sensitive`; keeping either here
+    // as well would make engine-authored schemas drift on spelling alone.
+    if name.eq_ignore_ascii_case("BINARY") || name.eq_ignore_ascii_case("NOCASE") {
+        return None;
+    }
+    Some(ColumnCollationSnapshot {
+        schema: None,
+        // SQLite resolves collation names case-insensitively.
+        name: name.to_ascii_uppercase(),
+    })
+}
+
+fn sqlite_column_collation_name(create_sql: &str, column: &str) -> Option<String> {
+    let clause = sqlite_column_clause(create_sql, column)?;
+    let tokens = tokenize_sqlite_ddl(clause);
+    let mut depth = 0_i32;
+    let mut cursor = 0_usize;
+    while cursor < tokens.len() {
+        match &tokens[cursor] {
+            SqliteDdlToken::OpenParen => depth += 1,
+            SqliteDdlToken::CloseParen => depth -= 1,
+            SqliteDdlToken::Word(word) if depth == 0 && word.eq_ignore_ascii_case("COLLATE") => {
+                cursor += 1;
+                return take_word(&tokens, &mut cursor);
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str> {
@@ -840,42 +1316,23 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
     let rest = &create_sql[start + needle_quoted_len(create_sql, start, column)..];
 
     // Find the column-clause boundary: the next top-level comma or the closing `)`.
-    // We do not need perfect SQL parsing — just a bound so a sentinel from a LATER
-    // column is not mis-attributed. CRITICAL: skip `/* … */` regions so a comma
-    // INSIDE the sentinel comment (e.g. `kind=last4,classification=pii`) is NOT
-    // mistaken for a top-level column separator (which would truncate the clause
-    // before the `*/` and lose the sentinel).
-    let mut depth: i32 = 0;
-    let mut clause_end = rest.len();
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Skip a block comment wholesale.
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i += 2;
-            continue;
+    // Reuse the DDL scanner so commas/parens inside strings, quoted identifiers,
+    // and either comment form cannot terminate the clause early.
+    let mut depth = 0_usize;
+    let clause_end = scan_sqlite_ddl_outside(rest, 0, |_, ch| match ch {
+        '(' => {
+            depth += 1;
+            false
         }
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                if depth == 0 {
-                    clause_end = i;
-                    break;
-                }
-                depth -= 1;
-            }
-            b',' if depth == 0 => {
-                clause_end = i;
-                break;
-            }
-            _ => {}
+        ')' if depth == 0 => true,
+        ')' => {
+            depth -= 1;
+            false
         }
-        i += 1;
-    }
+        ',' if depth == 0 => true,
+        _ => false,
+    })
+    .unwrap_or(rest.len());
     Some(&rest[..clause_end])
 }
 
@@ -956,5 +1413,164 @@ mod tests {
             None
         );
         assert!(find_bare_ident("CREATE TABLE t (user TEXT)", "user").is_some());
+    }
+
+    #[test]
+    fn recovers_only_the_columns_top_level_exact_collation() {
+        let sql = r#"CREATE TABLE t (
+            "defaulted" TEXT DEFAULT 'COLLATE fake, )' COLLATE RTRIM,
+            "checked" TEXT CHECK ("checked" COLLATE NOCASE <> '') COLLATE [custom.name],
+            "binary" TEXT COLLATE BINARY,
+            "nocase" TEXT COLLATE NOCASE
+        )"#;
+
+        assert_eq!(
+            recover_column_collation(sql, "defaulted").map(|collation| collation.name),
+            Some("RTRIM".to_string())
+        );
+        assert_eq!(
+            recover_column_collation(sql, "checked").map(|collation| collation.name),
+            Some("CUSTOM.NAME".to_string())
+        );
+        assert_eq!(recover_column_collation(sql, "binary"), None);
+        assert_eq!(recover_column_collation(sql, "nocase"), None);
+        assert_eq!(recover_case_sensitive(sql, "nocase"), Some(false));
+        assert_eq!(recover_case_sensitive(sql, "checked"), None);
+    }
+
+    #[test]
+    fn parses_named_composite_fk_metadata_from_stored_create_sql() {
+        let sql = r#"CREATE TABLE "child" (
+            "tenant" TEXT,
+            "order" INTEGER,
+            CONSTRAINT "fk_child_parent" FOREIGN KEY ("tenant", "order")
+                REFERENCES "Parent" ("tenant", "parent_id")
+                MATCH SIMPLE ON DELETE CASCADE ON UPDATE SET NULL
+                DEFERRABLE INITIALLY DEFERRED
+        )"#;
+
+        assert_eq!(
+            parse_table_foreign_keys(sql),
+            vec![ParsedForeignKey {
+                name: Some("fk_child_parent".to_string()),
+                local_columns: vec!["tenant".to_string(), "order".to_string()],
+                referenced_table: "Parent".to_string(),
+                referenced_columns: vec!["tenant".to_string(), "parent_id".to_string()],
+                on_update: Some("SET NULL".to_string()),
+                on_delete: Some("CASCADE".to_string()),
+                match_kind: Some("SIMPLE".to_string()),
+                deferrable: true,
+                initially_deferred: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_foreign_keys_around_all_sqlite_quotes_and_comments() {
+        let sql = r#"CREATE /* outer comment with (, ) */ TABLE "child,(table)"
+            -- outer line comment with (, )
+            (
+                'local,one' TEXT DEFAULT 'value, ) -- not a comment /* either */',
+                "local(two)" INTEGER,
+                `local,three` INTEGER,
+                [local(four),x] INTEGER,
+                /* A fake clause, comma, and close paren must stay hidden:
+                   CONSTRAINT fake FOREIGN KEY (x) REFERENCES y(z), ) */
+                CONSTRAINT /* comment before the quoted name (, ) */ 'fk''single'
+                    FOREIGN /* comment between keywords */ KEY ('local,one', "local(two)")
+                    REFERENCES /* comment before a qualified table */ [main].[parent,(table)]
+                        ([ref,one], `ref(two)`) ON DELETE CASCADE,
+                CONSTRAINT "fk""double" FOREIGN KEY (`local,three`)
+                    REFERENCES "parent" ("ref,three"),
+                -- comment between clauses with a fake comma, and close paren )
+                CONSTRAINT `fk``tick` FOREIGN KEY ([local(four),x])
+                    REFERENCES 'parent(two)' ('ref(four),x'),
+                CONSTRAINT [fk]]bracket] FOREIGN KEY ("local(two)")
+                    REFERENCES [parent] ([ref])
+            ) /* trailing comment with (, ) */"#;
+
+        let parsed = parse_table_foreign_keys(sql);
+        assert_eq!(parsed.len(), 4);
+
+        assert_eq!(parsed[0].name.as_deref(), Some("fk'single"));
+        assert_eq!(parsed[0].local_columns, ["local,one", "local(two)"]);
+        assert_eq!(parsed[0].referenced_table, "parent,(table)");
+        assert_eq!(parsed[0].referenced_columns, ["ref,one", "ref(two)"]);
+        assert_eq!(parsed[0].on_delete.as_deref(), Some("CASCADE"));
+
+        assert_eq!(parsed[1].name.as_deref(), Some("fk\"double"));
+        assert_eq!(parsed[1].local_columns, ["local,three"]);
+        assert_eq!(parsed[1].referenced_columns, ["ref,three"]);
+
+        assert_eq!(parsed[2].name.as_deref(), Some("fk`tick"));
+        assert_eq!(parsed[2].local_columns, ["local(four),x"]);
+        assert_eq!(parsed[2].referenced_table, "parent(two)");
+        assert_eq!(parsed[2].referenced_columns, ["ref(four),x"]);
+
+        assert_eq!(parsed[3].name.as_deref(), Some("fk]bracket"));
+        assert_eq!(parsed[3].local_columns, ["local(two)"]);
+        assert_eq!(parsed[3].referenced_columns, ["ref"]);
+    }
+
+    #[test]
+    fn unterminated_comments_do_not_expose_phantom_table_structure() {
+        let sql = r#"CREATE TABLE child /* (
+            CONSTRAINT fake FOREIGN KEY (child_id) REFERENCES parent(id)
+        )"#;
+
+        assert!(parse_table_foreign_keys(sql).is_empty());
+    }
+
+    #[test]
+    fn sqlite_fk_definition_is_ordered_and_match_simple_is_implicit() {
+        use crate::render::declarative::ir_fk_constraint_snapshot_for_columns;
+        use crate::schema::query::SqlDialect;
+
+        let pragma = PragmaForeignKey {
+            referenced_table: "Parent".to_string(),
+            columns: Vec::new(),
+            on_update: "SET NULL".to_string(),
+            on_delete: "CASCADE".to_string(),
+            match_kind: "NONE".to_string(),
+        };
+        let parsed = ParsedForeignKey {
+            name: Some("fk_child_parent".to_string()),
+            local_columns: vec!["tenant".to_string(), "order".to_string()],
+            referenced_table: "Parent".to_string(),
+            referenced_columns: vec!["tenant".to_string(), "parent_id".to_string()],
+            on_update: Some("SET NULL".to_string()),
+            on_delete: Some("CASCADE".to_string()),
+            match_kind: Some("SIMPLE".to_string()),
+            deferrable: true,
+            initially_deferred: true,
+        };
+
+        let actual = canonical_foreign_key_definition(
+            &pragma,
+            &["tenant".to_string(), "order".to_string()],
+            &["tenant".to_string(), "parent_id".to_string()],
+            Some(&parsed),
+        );
+        let desired = ir_fk_constraint_snapshot_for_columns(
+            "ignored_by_sqlite",
+            Some("fk_child_parent"),
+            &["tenant".to_string(), "order".to_string()],
+            "Parent",
+            &["tenant".to_string(), "parent_id".to_string()],
+            Some("cascade"),
+            Some("set null"),
+            true,
+            true,
+            SqlDialect::Sqlite,
+        );
+        assert_eq!(
+            actual, desired.definition,
+            "desired snapshot must round-trip"
+        );
+        assert_eq!(
+            actual,
+            "FOREIGN KEY (tenant, \"order\") REFERENCES \"Parent\"(tenant, parent_id) \
+             ON UPDATE SET NULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+        );
     }
 }

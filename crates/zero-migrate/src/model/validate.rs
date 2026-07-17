@@ -137,6 +137,7 @@ pub fn validate_ir_scoped(
         validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
     validate_column_references(ir, target_dialect, ts_locations)?;
+    validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
     validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
@@ -186,6 +187,35 @@ pub struct LogicalColumnContract {
     /// a single-column foreign key: a one-column primary key or UNIQUE key.
     /// Composite keys deliberately do not set this bit for their components.
     pub single_column_reference_key: bool,
+    /// Ordered primary/unique candidate-key tuples declared for this column's
+    /// table. Every column contract for a freshly declared table carries the
+    /// same set so ordered composite-key eligibility survives across migration
+    /// artifacts without being inferred from physical catalog storage.
+    pub candidate_keys: BTreeSet<Vec<String>>,
+    /// Object-identity-preserving sources for `candidate_keys`. This lets ordered
+    /// artifacts replay a later `dropIndex` / `dropConstraint` by name without
+    /// erasing an equivalent tuple still backed by another UNIQUE object. Primary
+    /// keys and column-level UNIQUE declarations remain intrinsic: this slice does
+    /// not implement primary-key lifecycle operations.
+    candidate_key_sources: CandidateKeySources,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CandidateKeySources {
+    intrinsic: BTreeSet<Vec<String>>,
+    indexes: BTreeMap<String, Vec<String>>,
+    constraints: BTreeMap<String, Vec<String>>,
+}
+
+impl CandidateKeySources {
+    fn tuples(&self) -> BTreeSet<Vec<String>> {
+        self.intrinsic
+            .iter()
+            .chain(self.indexes.values())
+            .chain(self.constraints.values())
+            .cloned()
+            .collect()
+    }
 }
 
 /// Cumulative logical project-schema declarations used by strict per-row and
@@ -260,13 +290,14 @@ fn declare_logical_column(
     ty: crate::model::ir::ColType,
     value_format: Option<crate::model::ir::ValueFormat>,
     case_sensitive: Option<bool>,
-    single_column_reference_key: bool,
+    candidate_key_sources: CandidateKeySources,
 ) {
     declared.retain(|candidate, _| {
         candidate.table != table
             || candidate.column != column
             || !schema_mode.declarations_match(candidate.schema.as_deref(), schema)
     });
+    let candidate_keys = candidate_key_sources.tuples();
     declared.insert(
         LogicalColumnKey {
             schema: schema.map(str::to_string),
@@ -277,31 +308,45 @@ fn declare_logical_column(
             ty,
             value_format,
             case_sensitive,
-            single_column_reference_key,
+            single_column_reference_key: candidate_keys.contains(&vec![column.to_string()]),
+            candidate_keys,
+            candidate_key_sources,
         },
     );
 }
 
-fn create_table_single_column_reference_keys(
+fn create_table_candidate_key_sources(
+    table: &str,
     columns: &[crate::model::ir::IrColumn],
     primary_key: Option<&[String]>,
     constraints: &[crate::model::ir::IrConstraint],
     indexes: &[crate::model::ir::IrIndex],
-) -> BTreeSet<String> {
+) -> CandidateKeySources {
     use crate::model::ir::{IndexElement, IndexMethod, IrConstraintKind};
 
-    let mut keys = columns
-        .iter()
-        .filter(|column| column.unique == Some(true))
-        .map(|column| column.name.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some([column]) = primary_key {
-        keys.insert(column.clone());
+    let mut sources = CandidateKeySources {
+        intrinsic: columns
+            .iter()
+            .filter(|column| column.unique == Some(true))
+            .map(|column| vec![column.name.clone()])
+            .collect::<BTreeSet<_>>(),
+        ..CandidateKeySources::default()
+    };
+    if let Some(primary_key) = primary_key {
+        if !primary_key.is_empty() {
+            sources.intrinsic.insert(primary_key.to_vec());
+        }
     }
     for constraint in constraints {
         if let IrConstraintKind::Unique { columns } = &constraint.kind {
-            if let [column] = columns.as_slice() {
-                keys.insert(column.clone());
+            if !columns.is_empty() {
+                let name = constraint.name.clone().unwrap_or_else(|| {
+                    crate::plan::author::cap_ident_name(&format!(
+                        "{table}_{}_key",
+                        columns.join("_")
+                    ))
+                });
+                sources.constraints.insert(name, columns.clone());
             }
         }
     }
@@ -313,32 +358,186 @@ fn create_table_single_column_reference_keys(
         {
             continue;
         }
-        if let [IndexElement::Column {
-            name,
-            opclass: None,
-            collation: None,
-            ..
-        }] = index.columns.as_slice()
-        {
-            keys.insert(name.clone());
+        let key = index
+            .columns
+            .iter()
+            .map(|element| match element {
+                IndexElement::Column {
+                    name,
+                    opclass: None,
+                    collation: None,
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(key) = key.filter(|key| !key.is_empty()) {
+            let name = index.name.clone().unwrap_or_else(|| {
+                crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", key.join("_")))
+            });
+            sources.indexes.insert(name, key);
         }
     }
-    keys
+    sources
 }
 
-fn existing_single_column_reference_key(
+fn existing_candidate_key_sources(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
     table: &str,
     column: &str,
-) -> bool {
-    declared.iter().any(|(candidate, contract)| {
+) -> CandidateKeySources {
+    declared
+        .iter()
+        .find(|(candidate, _)| {
+            candidate.table == table
+                && candidate.column == column
+                && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        })
+        .map(|(_, contract)| contract.candidate_key_sources.clone())
+        .unwrap_or_default()
+}
+
+fn refresh_candidate_keys(column: &str, contract: &mut LogicalColumnContract) {
+    contract.candidate_keys = contract.candidate_key_sources.tuples();
+    contract.single_column_reference_key =
+        contract.candidate_keys.contains(&vec![column.to_string()]);
+}
+
+fn mutate_table_candidate_keys(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    mut mutate: impl FnMut(&mut CandidateKeySources),
+) {
+    for (key, contract) in declared.iter_mut().filter(|(candidate, _)| {
         candidate.table == table
-            && candidate.column == column
             && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-            && contract.single_column_reference_key
-    })
+    }) {
+        mutate(&mut contract.candidate_key_sources);
+        refresh_candidate_keys(&key.column, contract);
+    }
+}
+
+fn eligible_unique_index_tuple(
+    columns: &[crate::model::ir::IndexElement],
+    unique: Option<bool>,
+    using: Option<crate::model::ir::IndexMethod>,
+    predicate: Option<&crate::model::expr::Expr>,
+    only: Option<bool>,
+) -> Option<Vec<String>> {
+    use crate::model::ir::{IndexElement, IndexMethod};
+
+    if unique != Some(true)
+        || predicate.is_some()
+        || only == Some(true)
+        || !matches!(using, None | Some(IndexMethod::Btree))
+    {
+        return None;
+    }
+    columns
+        .iter()
+        .map(|element| match element {
+            IndexElement::Column {
+                name,
+                opclass: None,
+                collation: None,
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|tuple| !tuple.is_empty())
+}
+
+fn reset_create_table_candidate_keys(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    columns: &[crate::model::ir::IrColumn],
+    primary_key: Option<&[String]>,
+    constraints: &[crate::model::ir::IrConstraint],
+    indexes: &[crate::model::ir::IrIndex],
+) {
+    let sources =
+        create_table_candidate_key_sources(table, columns, primary_key, constraints, indexes);
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |candidate_sources| {
+        candidate_sources.clone_from(&sources);
+    });
+}
+
+fn add_index_candidate_key(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    columns: &[crate::model::ir::IndexElement],
+    name: Option<&str>,
+    unique: Option<bool>,
+    using: Option<crate::model::ir::IndexMethod>,
+    predicate: Option<&crate::model::expr::Expr>,
+    only: Option<bool>,
+) {
+    let Some(tuple) = eligible_unique_index_tuple(columns, unique, using, predicate, only) else {
+        return;
+    };
+    let name = name.map_or_else(
+        || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", tuple.join("_"))),
+        str::to_string,
+    );
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
+        sources.indexes.insert(name.clone(), tuple.clone());
+    });
+}
+
+fn drop_index_candidate_key(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+) {
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
+        sources.indexes.remove(name);
+    });
+}
+
+fn add_unique_constraint_candidate_key(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    constraint: &crate::model::ir::IrConstraint,
+) {
+    let crate::model::ir::IrConstraintKind::Unique { columns } = &constraint.kind else {
+        return;
+    };
+    if columns.is_empty() {
+        return;
+    }
+    let name = constraint.name.clone().unwrap_or_else(|| {
+        crate::plan::author::cap_ident_name(&format!("{table}_{}_key", columns.join("_")))
+    });
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
+        sources.constraints.insert(name.clone(), columns.clone());
+    });
+}
+
+fn drop_constraint_candidate_key(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+) {
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
+        // PRIMARY KEY sources are intrinsic and deliberately cannot be removed by
+        // this lifecycle slice.
+        sources.constraints.remove(name);
+    });
 }
 
 fn remove_declared_per_row_table(
@@ -555,7 +754,8 @@ fn validate_per_row_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
-            let reference_keys = create_table_single_column_reference_keys(
+            let reference_keys = create_table_candidate_key_sources(
+                name,
                 columns,
                 primary_key.as_deref(),
                 constraints,
@@ -571,7 +771,7 @@ fn validate_per_row_op(
                     column.ty.clone(),
                     column.value_format.clone(),
                     column.case_sensitive,
-                    reference_keys.contains(&column.name),
+                    reference_keys.clone(),
                 );
             }
         }
@@ -594,7 +794,7 @@ fn validate_per_row_op(
                 ty.clone(),
                 value_format.clone(),
                 *case_sensitive,
-                false,
+                CandidateKeySources::default(),
             );
         }
         Op::SetColumnType {
@@ -605,7 +805,7 @@ fn validate_per_row_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let reference_key = existing_single_column_reference_key(
+            let reference_keys = existing_candidate_key_sources(
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -621,7 +821,7 @@ fn validate_per_row_op(
                 to_type.clone(),
                 None,
                 None,
-                reference_key,
+                reference_keys,
             );
         }
         Op::DropColumn {
@@ -711,9 +911,67 @@ fn validate_per_row_op(
                     ty.clone(),
                     None,
                     None,
-                    false,
+                    CandidateKeySources::default(),
                 );
             }
+        }
+        Op::CreateIndex {
+            table,
+            columns,
+            name,
+            unique,
+            using,
+            r#where,
+            only,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            add_index_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                columns,
+                name.as_deref(),
+                *unique,
+                *using,
+                r#where.as_ref(),
+                *only,
+            );
+        }
+        Op::DropIndex {
+            table: Some(table),
+            name,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            drop_index_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
+        }
+        Op::AddConstraint {
+            table,
+            constraint,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            add_unique_constraint_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                constraint,
+            );
+        }
+        Op::DropConstraint {
+            table,
+            name,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            drop_constraint_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
         }
         Op::Backfill {
             table,
@@ -846,7 +1104,8 @@ fn collect_logical_declarations_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
-            let reference_keys = create_table_single_column_reference_keys(
+            let reference_keys = create_table_candidate_key_sources(
+                name,
                 columns,
                 primary_key.as_deref(),
                 constraints,
@@ -862,7 +1121,7 @@ fn collect_logical_declarations_op(
                     column.ty.clone(),
                     column.value_format.clone(),
                     column.case_sensitive,
-                    reference_keys.contains(&column.name),
+                    reference_keys.clone(),
                 );
             }
         }
@@ -885,7 +1144,7 @@ fn collect_logical_declarations_op(
                 ty.clone(),
                 value_format.clone(),
                 *case_sensitive,
-                false,
+                CandidateKeySources::default(),
             );
         }
         Op::SetColumnType {
@@ -896,7 +1155,7 @@ fn collect_logical_declarations_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let reference_key = existing_single_column_reference_key(
+            let reference_keys = existing_candidate_key_sources(
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -912,7 +1171,7 @@ fn collect_logical_declarations_op(
                 to_type.clone(),
                 None,
                 None,
-                reference_key,
+                reference_keys,
             );
         }
         Op::DropColumn {
@@ -1002,7 +1261,7 @@ fn collect_logical_declarations_op(
                     ty.clone(),
                     None,
                     None,
-                    false,
+                    CandidateKeySources::default(),
                 );
             }
         }
@@ -1394,6 +1653,8 @@ fn validate_column_references_op(
                     value_format: column.value_format.clone(),
                     case_sensitive: column.case_sensitive,
                     single_column_reference_key: false,
+                    candidate_keys: BTreeSet::new(),
+                    candidate_key_sources: CandidateKeySources::default(),
                 };
                 validate_one_column_reference(
                     &local,
@@ -1477,6 +1738,489 @@ pub(crate) fn validate_column_references_for_lower(
             op_index,
             ts_locations,
             &declared,
+            schema_mode,
+            MissingLogicalDeclaration::Reject,
+        )?;
+    }
+    Ok(())
+}
+
+fn table_foreign_key_error(
+    table: &str,
+    constraint_name: Option<&str>,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    reason: String,
+    suggested_fix: String,
+) -> AuthoringError {
+    let name = constraint_name.unwrap_or("<derived>");
+    AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason: format!("table-level foreign key {table}.{name} is invalid: {reason}"),
+        suggested_fix: Some(suggested_fix),
+    }
+}
+
+fn logical_column_matches<'a>(
+    declared: &'a LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> Vec<&'a LogicalColumnContract> {
+    declared
+        .iter()
+        .filter(|(candidate, _)| {
+            candidate.table == table
+                && candidate.column == column
+                && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
+        })
+        .map(|(_, contract)| contract)
+        .collect()
+}
+
+fn logical_table_is_declared(
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+) -> bool {
+    declared.keys().any(|candidate| {
+        candidate.table == table
+            && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_table_foreign_key_constraint(
+    local_schema: Option<&str>,
+    local_table: &str,
+    constraint: &crate::model::ir::IrConstraint,
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    missing: MissingLogicalDeclaration,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::IrConstraintKind;
+
+    let IrConstraintKind::Fk {
+        columns,
+        references_table,
+        references_columns,
+        deferrable,
+        initially_deferred,
+        ..
+    } = &constraint.kind
+    else {
+        return Ok(());
+    };
+
+    let error = |reason: String, fix: &str| {
+        table_foreign_key_error(
+            local_table,
+            constraint.name.as_deref(),
+            target_dialect,
+            op_index,
+            ts_locations,
+            reason,
+            fix.to_string(),
+        )
+    };
+
+    if columns.is_empty() || references_columns.is_empty() {
+        return Err(error(
+            format!(
+                "local and referenced column lists must both be nonempty (got {} local and {} referenced)",
+                columns.len(),
+                references_columns.len()
+            ),
+            "name one or more ordered local columns and the same number of ordered referenced columns",
+        ));
+    }
+    if columns.len() != references_columns.len() {
+        return Err(error(
+            format!(
+                "local/referenced arity differs ({} local columns vs {} referenced columns)",
+                columns.len(),
+                references_columns.len()
+            ),
+            "make columns and references.columns equal-length ordered tuples",
+        ));
+    }
+    for (label, names) in [
+        ("local", columns.as_slice()),
+        ("referenced", references_columns.as_slice()),
+    ] {
+        let mut seen = BTreeSet::new();
+        if let Some(duplicate) = names.iter().find(|name| !seen.insert(name.as_str())) {
+            return Err(error(
+                format!("{label} column {duplicate:?} appears more than once"),
+                "remove duplicate columns while preserving the intended positional order",
+            ));
+        }
+    }
+    if target_dialect == Dialect::Mysql
+        && (deferrable == &Some(true) || initially_deferred == &Some(true))
+    {
+        return Err(error(
+            "MySQL does not support deferrable foreign-key constraints".to_string(),
+            "omit deferrable/initiallyDeferred for MySQL, or use a dialectal PostgreSQL/SQLite leg",
+        ));
+    }
+
+    let local_table_declared =
+        logical_table_is_declared(declared, schema_mode, local_schema, local_table);
+    let target_table_declared =
+        logical_table_is_declared(declared, schema_mode, local_schema, references_table);
+    let mut target_contracts = Vec::with_capacity(references_columns.len());
+
+    for (position, (local_column, target_column)) in
+        columns.iter().zip(references_columns).enumerate()
+    {
+        let local_matches = logical_column_matches(
+            declared,
+            schema_mode,
+            local_schema,
+            local_table,
+            local_column,
+        );
+        let target_matches = logical_column_matches(
+            declared,
+            schema_mode,
+            local_schema,
+            references_table,
+            target_column,
+        );
+
+        let local = match local_matches.as_slice() {
+            [contract] => Some(*contract),
+            [] if !local_table_declared => None,
+            [] => {
+                return Err(error(
+                    format!("local column {local_column:?} is missing from the declared table"),
+                    "name only columns present on the local table",
+                ));
+            }
+            _ => {
+                return Err(error(
+                    format!("local column {local_column:?} resolves ambiguously"),
+                    "qualify the table schema so each local column has one deterministic declaration",
+                ));
+            }
+        };
+        let target = match target_matches.as_slice() {
+            [contract] => Some(*contract),
+            [] if !target_table_declared => None,
+            [] => {
+                return Err(error(
+                    format!(
+                        "referenced column {references_table}.{target_column} is missing from the declared target table"
+                    ),
+                    "name only columns present on the referenced table",
+                ));
+            }
+            _ => {
+                return Err(error(
+                    format!(
+                        "referenced column {references_table}.{target_column} resolves ambiguously"
+                    ),
+                    "qualify the table schema so each referenced column has one deterministic declaration",
+                ));
+            }
+        };
+
+        if let (Some(local), None) = (local, target) {
+            if missing == MissingLogicalDeclaration::Reject && reference_is_format_bearing(local) {
+                return Err(error(
+                    format!(
+                        "position {} local column {local_column:?} carries {}, but the referenced target has no authored value-format metadata",
+                        position + 1,
+                        reference_format_description(local)
+                    ),
+                    "declare or import the referenced candidate key with the exact same value format",
+                ));
+            }
+        }
+
+        if let (Some(local), Some(target)) = (local, target) {
+            if let (Some(local_width), Some(target_width)) =
+                (integer_width(&local.ty), integer_width(&target.ty))
+            {
+                if local_width != target_width {
+                    return Err(error(
+                        format!(
+                            "position {} integer width differs ({local_width}-bit local {local_column:?} vs {target_width}-bit referenced {target_column:?})",
+                            position + 1
+                        ),
+                        "use the same explicit integer builder at each corresponding tuple position",
+                    ));
+                }
+            }
+            let local_storage = lowered_reference_storage(&local.ty, target_dialect);
+            let target_storage = lowered_reference_storage(&target.ty, target_dialect);
+            if !logical_reference_types_match(&local.ty, &target.ty)
+                || local_storage != target_storage
+            {
+                return Err(error(
+                    format!(
+                        "position {} logical/storage type differs ({:?}/{local_storage} local {local_column:?} vs {:?}/{target_storage} referenced {target_column:?})",
+                        position + 1,
+                        local.ty,
+                        target.ty
+                    ),
+                    "declare positionally corresponding columns with the same logical storage type",
+                ));
+            }
+            if local.value_format != target.value_format {
+                return Err(error(
+                    format!(
+                        "position {} value format differs ({} local vs {} referenced)",
+                        position + 1,
+                        reference_format_description(local),
+                        reference_format_description(target)
+                    ),
+                    "use the exact same ValueFormat, TypeID prefix, or ULID declaration at each tuple position",
+                ));
+            }
+            let local_case_sensitive = local.case_sensitive.unwrap_or(true);
+            let target_case_sensitive = target.case_sensitive.unwrap_or(true);
+            if local_case_sensitive != target_case_sensitive {
+                return Err(error(
+                    format!(
+                        "position {} collation intent differs (caseSensitive={local_case_sensitive} local vs caseSensitive={target_case_sensitive} referenced)",
+                        position + 1
+                    ),
+                    "use matching collation/caseSensitive intent at each tuple position",
+                ));
+            }
+        }
+        target_contracts.push(target);
+    }
+
+    if target_table_declared {
+        let Some(target) = target_contracts.first().copied().flatten() else {
+            return Err(error(
+                "the referenced tuple could not be resolved".to_string(),
+                "declare every referenced tuple column",
+            ));
+        };
+        if !target.candidate_keys.contains(references_columns) {
+            return Err(error(
+                format!(
+                    "referenced ordered tuple {references_table}({}) is not backed by an exact PRIMARY KEY or UNIQUE candidate key",
+                    references_columns.join(", ")
+                ),
+                "reference an exact ordered primary/unique candidate key; a reordered, partial, or wider key is not equivalent",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_table_foreign_keys_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    missing: MissingLogicalDeclaration,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_table_foreign_keys_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                        declared,
+                        schema_mode,
+                        missing,
+                    )?;
+                }
+            }
+        }
+        Op::CreateTable {
+            name,
+            columns,
+            primary_key,
+            constraints,
+            indexes,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            reset_create_table_candidate_keys(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                name,
+                columns,
+                primary_key.as_deref(),
+                constraints,
+                indexes,
+            );
+            for constraint in constraints {
+                validate_table_foreign_key_constraint(
+                    schema.as_deref(),
+                    name,
+                    constraint,
+                    declared,
+                    schema_mode,
+                    missing,
+                    target_dialect,
+                    op_index,
+                    ts_locations,
+                )?;
+            }
+        }
+        Op::AddConstraint {
+            table,
+            constraint,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            add_unique_constraint_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                constraint,
+            );
+            validate_table_foreign_key_constraint(
+                schema.as_deref(),
+                table,
+                constraint,
+                declared,
+                schema_mode,
+                missing,
+                target_dialect,
+                op_index,
+                ts_locations,
+            )?;
+        }
+        Op::CreateIndex {
+            table,
+            columns,
+            name,
+            unique,
+            using,
+            r#where,
+            only,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            add_index_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                columns,
+                name.as_deref(),
+                *unique,
+                *using,
+                r#where.as_ref(),
+                *only,
+            );
+        }
+        Op::DropIndex {
+            table: Some(table),
+            name,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            drop_index_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
+        }
+        Op::DropConstraint {
+            table,
+            name,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            drop_constraint_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_table_foreign_keys(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let schema_mode = LogicalSchemaMode::Authored;
+    let mut declared = LogicalColumnContracts::new();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_table_foreign_keys_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &mut declared,
+            schema_mode,
+            MissingLogicalDeclaration::DeferToLower,
+        )?;
+    }
+    Ok(())
+}
+
+/// Strict ordered-tuple validation for table-level foreign keys. The authored
+/// declaration graph is authoritative for logical types and value formats; an
+/// unmanaged primitive target may still be proved from the live catalog by the
+/// lowerer.
+pub(crate) fn validate_table_foreign_keys_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let schema_mode = LogicalSchemaMode::Effective {
+        project_schema,
+        default_schema,
+    };
+    let mut declared = seed.clone();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_table_foreign_keys_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &mut declared,
             schema_mode,
             MissingLogicalDeclaration::Reject,
         )?;

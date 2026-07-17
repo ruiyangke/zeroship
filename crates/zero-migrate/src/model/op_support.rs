@@ -216,9 +216,9 @@ fn unsupported_reason(
                 "pk" => "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
                 "fkNoLocalColumn" => "addConstraint(fk) with no local column is unsupported",
                 "exclusion" => "exclusion constraints are PostgreSQL-only in the current engine",
-                "fkComposite" => "multi-column foreign keys are PostgreSQL-only in the current engine",
+                "fkComposite" => "multi-column foreign keys are unsupported on this target",
                 "fkNonId" => {
-                    "foreign keys referencing non-id columns are PostgreSQL-only in the current engine"
+                    "foreign keys referencing non-id columns are unsupported on this target"
                 }
                 "fkNotValid" => {
                     "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine"

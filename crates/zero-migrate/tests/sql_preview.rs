@@ -245,18 +245,24 @@ fn mysql_feature_preview_renders_mysql8_sql() {
     let ir = resolve_envelope_json(MYSQL_FEATURE_IR);
     let out = render_ir_envelope_sql(&ir, SqlDialect::Mysql, &opts())
         .expect("MySQL feature fixture renders offline");
+    assert!(
+        !out.contains(RUNTIME_RESOLVED),
+        "an FK to an earlier table in the same envelope is fully previewable: {out}"
+    );
     assert!(out.contains("CREATE TABLE `public`.`teams`"), "{out}");
     assert!(out.contains("`id` INT AUTO_INCREMENT PRIMARY KEY"), "{out}");
     assert!(
         out.contains("GENERATED ALWAYS AS (lower(`name`)) STORED"),
         "{out}"
     );
-    assert!(out.contains("CREATE INDEX `members_team_id_idx`"), "{out}");
+    assert!(
+        out.contains("KEY `members_team_id_idx` (`team_id`)"),
+        "the MySQL supporting index must be visible inline in the CREATE preview: {out}"
+    );
     assert!(
         out.contains(
-            "ALTER TABLE `public`.`members` ADD CONSTRAINT `members_team_fk` \
-             FOREIGN KEY (`team_id`) REFERENCES `public`.`teams` (`id`) \
-             ON DELETE CASCADE"
+            "CONSTRAINT `members_team_fk` FOREIGN KEY (`team_id`) \
+             REFERENCES `public`.`teams` (`id`) ON DELETE CASCADE"
         ),
         "{out}"
     );

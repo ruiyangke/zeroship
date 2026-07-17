@@ -34,8 +34,9 @@
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
 //!   the engine never emits.
-//! - **stand-alone SQLite `alterColumn*` / `addConstraint` / `dropConstraint`** —
-//!   reconciled by the live 12-step rebuild; do not lower offline
+//! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** — require
+//!   live structure; named FK add/drop changes lower to the live 12-step rebuild
+//!   and are not flattened into ordinary offline SQL
 //!   ([`IrLowerError::SqliteRebuildOnly`](crate::render::lower::IrLowerError)).
 //!
 //! The preview is HONEST that it shows the offline-renderable subset and labels the
@@ -339,7 +340,7 @@ fn render_ir_envelope_rendered(
     let author = IrAuthor::new(opts.default_schema.clone(), opts.owner_app.clone(), dialect);
 
     let live = LiveSchema::default();
-    let rendered = render_ir_ops(&author, &ir, &live);
+    let rendered = render_ir_ops(&author, &ir, &live, dialect, &opts.default_schema);
     Ok((ir.name, rendered))
 }
 
@@ -347,8 +348,15 @@ fn render_ir_envelope_rendered(
 /// DB-state-dependent op (SQLite rename / rebuild-only) degrades to a label instead
 /// of aborting the whole preview. Mirrors the per-op iteration `lower_steps` does,
 /// but tolerant: a `lower_plan` error on a one-op IR ⇒ a runtime-resolved label.
-fn render_ir_ops(author: &IrAuthor, ir: &MigrationIr, live: &LiveSchema) -> Vec<Rendered> {
+fn render_ir_ops(
+    author: &IrAuthor,
+    ir: &MigrationIr,
+    live: &LiveSchema,
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Vec<Rendered> {
     let mut out = Vec::new();
+    let mut working_live = live.clone();
     for op in &ir.ops {
         // A guard-carrying op lowers FINE offline (the probe is stamped, not an
         // error) — but its apply is a runtime catalog-probe decision, so it MUST be
@@ -357,7 +365,7 @@ fn render_ir_ops(author: &IrAuthor, ir: &MigrationIr, live: &LiveSchema) -> Vec<
         let guard = op.existence_guard();
         // Lower JUST this op via a one-op IR clone so an un-lowerable op is local.
         let one = single_op_ir(ir, op.clone());
-        match author.lower_plan(&one, live) {
+        match author.lower_plan(&one, &working_live) {
             Ok(plan) => {
                 for step in &plan.steps {
                     render_step(op, guard, step, &mut out);
@@ -369,8 +377,48 @@ fn render_ir_ops(author: &IrAuthor, ir: &MigrationIr, live: &LiveSchema) -> Vec<
                 out.push(Rendered::label(runtime_resolved_for_lower_error(op, &e)));
             }
         }
+
+        // Per-op tolerance must not erase deterministic state established by an
+        // earlier declaration in the same envelope. In particular, a createTable
+        // FK to an earlier table is an inline create-time constraint, not an
+        // unresolved forward edge. Carry the authored logical contracts and table
+        // presence forward without inventing catalog snapshots; truly live-state-
+        // dependent operations still degrade to a labeled preview line.
+        let _ = working_live.advance_logical_columns(&one, dialect, project_schema, None);
+        advance_preview_table_presence(op, dialect, &mut working_live.tables);
     }
     out
+}
+
+fn advance_preview_table_presence(
+    op: &Op,
+    dialect: SqlDialect,
+    tables: &mut std::collections::BTreeSet<String>,
+) {
+    match op {
+        Op::CreateTable { name, .. } => {
+            tables.insert(name.clone());
+        }
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let selected = match dialect {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            }
+            .or(default.as_deref());
+            if let Some(selected) = selected {
+                for nested in selected {
+                    advance_preview_table_presence(nested, dialect, tables);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Build a one-op `MigrationIr` carrying `op`, sharing the parent's identity so the
