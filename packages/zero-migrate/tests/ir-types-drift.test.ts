@@ -396,6 +396,43 @@ test("TypeID and ULID ValueFormat shapes and column placements match the hand-au
   );
 });
 
+test("per-row generators are represented only in backfill set values", () => {
+  const generator = schema.$defs.PerRowGenerator;
+  assert.ok(generator, "schema must define PerRowGenerator");
+  assert.deepEqual(enumTokens(generator), ["ulid", "uuidV4", "uuidV7"]);
+  const typeId = generator.oneOf.find((branch: any) => branch.required?.includes("typeId"));
+  assert.ok(typeId, "PerRowGenerator must include a TypeID prefix arm");
+  assert.deepEqual(typeId.required, ["typeId"]);
+  assert.deepEqual(typeId.properties.typeId.required, ["prefix"]);
+  assert.deepEqual(Object.keys(typeId.properties.typeId.properties), ["prefix"]);
+
+  const backfillSetValue = schema.$defs.BackfillSetValue;
+  assert.ok(backfillSetValue, "schema must define BackfillSetValue");
+  const perRowArm = backfillSetValue.anyOf.find(
+    (branch: any) => branch.properties?.perRow !== undefined,
+  );
+  assert.ok(perRowArm, "BackfillSetValue must carry an explicit perRow wrapper");
+  assert.deepEqual(perRowArm.required, ["perRow"]);
+  assert.equal(perRowArm.additionalProperties, false);
+  assert.match(JSON.stringify(perRowArm.properties.perRow), /#\/\$defs\/PerRowGenerator/);
+
+  const backfill = schema.$defs.Op.oneOf.find(
+    (branch: any) => branch.properties?.op?.const === "backfill",
+  );
+  const update = schema.$defs.Op.oneOf.find(
+    (branch: any) => branch.properties?.op?.const === "update",
+  );
+  assert.ok(backfill && update, "schema must define backfill and update ops");
+  assert.match(JSON.stringify(backfill.properties.set), /#\/\$defs\/BackfillSetValue/);
+  assert.match(JSON.stringify(update.properties.set), /#\/\$defs\/IrValue/);
+  assert.doesNotMatch(JSON.stringify(update.properties.set), /BackfillSetValue/);
+
+  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+  assert.match(irTs, /export type PerRowGenerator\s*=/);
+  assert.match(irTs, /export type BackfillSetValue\s*=\s*IrValue\s*\|\s*\{\s*perRow:\s*PerRowGenerator\s*\}/);
+  assert.match(irTs, /op:\s*"backfill"[\s\S]*?set:\s*\{\s*\[column:\s*string\]:\s*BackfillSetValue\s*\}/);
+});
+
 // Explicit assertion that the removed native `ifExists` is GONE from
 // the schema (the intentional wire break), so a future re-introduction is caught.
 test("legacy guardable Op variants do not carry the removed native ifExists field", () => {

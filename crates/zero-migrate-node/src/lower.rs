@@ -27,6 +27,8 @@ use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::migration::Migration;
 use zero_migrate::model::table_shape::confined_no_inject_policy;
 use zero_migrate::ops::status::PlanStatusManifest;
+#[cfg(any(feature = "napi", test))]
+use zero_migrate::ops::status::{AppliedPlanStatus, ReconciledPlanState};
 use zero_migrate::{
     effective_policy_from_ceiling_toml, fold_ops_onto, resolve_create_table_policy, FoldError,
     GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
@@ -42,6 +44,69 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
             "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
         )),
     }
+}
+
+/// Require every authored prefix plan to be fully, exactly applied before its IR
+/// may contribute logical column contracts to the current migration. The status
+/// fold is authoritative for net rollbacks, inflight/partial work, checksum drift,
+/// dependencies, and terminal online-contract resolutions.
+#[cfg(any(feature = "napi", test))]
+pub(crate) fn require_applied_prefix(
+    manifests: &[PlanStatusManifest],
+    prior_count: usize,
+    status: &AppliedPlanStatus,
+) -> Result<(), String> {
+    let prefix = manifests.get(..prior_count).ok_or_else(|| {
+        format!(
+            "authored migration prefix has {prior_count} entries but lowering returned only {} plans",
+            manifests.len()
+        )
+    })?;
+    let current = manifests.get(prior_count).ok_or_else(|| {
+        "authored migration set did not include a current migration plan".to_string()
+    })?;
+    let current_state = status
+        .plans
+        .iter()
+        .find(|plan| plan.version == current.version)
+        .map(|plan| plan.state)
+        .ok_or_else(|| {
+            format!(
+                "current migration {:?} ({}) is absent from journal reconciliation",
+                current.name,
+                current.version.as_str()
+            )
+        })?;
+    if current_state != ReconciledPlanState::Applied {
+        if let Some(unexpected) = status.unexpected_journal.first() {
+            return Err(format!(
+                "authored migration prefix is incomplete: net-applied journal step {} was not supplied",
+                unexpected.version
+            ));
+        }
+    }
+    for manifest in prefix {
+        let reconciled = status
+            .plans
+            .iter()
+            .find(|plan| plan.version == manifest.version)
+            .ok_or_else(|| {
+                format!(
+                    "authored prior migration {:?} ({}) is absent from journal reconciliation",
+                    manifest.name,
+                    manifest.version.as_str()
+                )
+            })?;
+        if reconciled.state != ReconciledPlanState::Applied {
+            return Err(format!(
+                "authored prior migration {:?} ({}) is not fully applied (state: {})",
+                manifest.name,
+                manifest.version.as_str(),
+                reconciled.state.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Run the fail-closed IR envelope LOAD GATE + LOWER over an envelope, returning the
@@ -188,6 +253,66 @@ pub fn lower_ordered_envelopes_to_plans(
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<Vec<LoweredArtifact>, String> {
+    lower_ordered_envelopes_to_plans_inner(
+        envelope_json,
+        owner_app,
+        project_schema,
+        dialect,
+        registry_json,
+        policy_ceiling_toml,
+        snapshot,
+        journal_entries,
+        resolved_contracts,
+        false,
+    )
+}
+
+/// Apply-strict peer of [`lower_ordered_envelopes_to_plans`].
+///
+/// Status may reconstruct an historical PostgreSQL online rename from related
+/// journal evidence. Apply must additionally prove that every reconstructed
+/// rename has the complete exact resumable or terminal evidence before accepting
+/// its plan. Ordered apply lowering uses this entrypoint so adding authored prefix
+/// envelopes cannot weaken the existing single-envelope replay gate.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_ordered_envelopes_to_plans_for_apply(
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    policy_ceiling_toml: Option<&str>,
+    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    journal_entries: &[AppliedEntry],
+    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+) -> Result<Vec<LoweredArtifact>, String> {
+    lower_ordered_envelopes_to_plans_inner(
+        envelope_json,
+        owner_app,
+        project_schema,
+        dialect,
+        registry_json,
+        policy_ceiling_toml,
+        snapshot,
+        journal_entries,
+        resolved_contracts,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_ordered_envelopes_to_plans_inner(
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    policy_ceiling_toml: Option<&str>,
+    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    journal_entries: &[AppliedEntry],
+    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    strict_historical_apply: bool,
+) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
     let mut registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
         .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
@@ -259,6 +384,17 @@ pub fn lower_ordered_envelopes_to_plans(
                     policy_ceiling_toml,
                     &historical_live,
                 )?;
+                if strict_historical_apply {
+                    validate_historical_apply_evidence(
+                        &lowered.0,
+                        &live,
+                        journal_entries,
+                        resolved_contracts,
+                    )
+                    .map_err(|evidence_error| {
+                        format!("{original_error}; historical replay refused: {evidence_error}")
+                    })?;
+                }
                 if plan_has_no_journal_evidence(&lowered.0, journal_entries)? {
                     return Err(original_error);
                 }
@@ -309,8 +445,17 @@ pub fn lower_ordered_envelopes_to_plans(
                         resolved.name
                     )
                 })?;
+            let logical_columns = live.logical_columns.clone();
             live = live_schema_with_ownership(projected, owner_app, &registry);
+            live.logical_columns = logical_columns;
         }
+        live.advance_logical_columns(&resolved, dialect, project_schema, None)
+            .map_err(|error| {
+                format!(
+                    "failed to advance logical project schema after envelope {:?}: {error}",
+                    resolved.name
+                )
+            })?;
         artifacts.push(artifact);
     }
 
@@ -1965,6 +2110,120 @@ mod tests {
     }
 
     #[test]
+    fn ordered_lowering_carries_logical_id_contracts_across_artifacts() {
+        let owner = "app_cross_artifact_ids";
+        let declaration = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "declare_cross_artifact_ids",
+            "ops": [{
+                "op": "createTable",
+                "name": "cross_artifact_ids",
+                "columns": [
+                    { "name": "cursor", "type": "int", "nullable": false },
+                    { "name": "uuid_id", "type": "uuid" },
+                    {
+                        "name": "type_id",
+                        "type": "text",
+                        "valueFormat": { "typeId": { "prefix": "order" } }
+                    },
+                    { "name": "ulid_id", "type": "text", "valueFormat": "ulid" }
+                ],
+                "primaryKey": ["cursor"],
+                "constraints": [],
+                "indexes": []
+            }]
+        })
+        .to_string();
+        let backfill = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "backfill_cross_artifact_ids",
+            "ops": [{
+                "op": "backfill",
+                "table": "cross_artifact_ids",
+                "cursorColumn": "cursor",
+                "batchSize": 10,
+                "set": {
+                    "uuid_id": { "perRow": "uuidV7" },
+                    "type_id": { "perRow": { "typeId": { "prefix": "order" } } },
+                    "ulid_id": { "perRow": "ulid" }
+                },
+                "name": "fill_cross_artifact_ids"
+            }]
+        })
+        .to_string();
+
+        let plans = lower_ordered_envelopes_to_plans(
+            &[declaration.clone(), backfill.clone()],
+            owner,
+            owner,
+            "postgres",
+            "{}",
+            None,
+            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            &[],
+            &[],
+        )
+        .expect("the backfill resolves all logical families from the prior artifact");
+        assert_eq!(plans.len(), 2);
+        assert!(matches!(
+            plans[1].plan.steps.as_slice(),
+            [zero_migrate::PlanStep::Backfill { .. }]
+        ));
+
+        let declaration_artifact =
+            lower_envelope_to_plan(&declaration, owner, owner, "postgres", "{}", None)
+                .expect("the declaration plan lowers independently");
+        let declaration_manifest =
+            PlanStatusManifest::from_applied_plan(&declaration_artifact.plan, &[])
+                .expect("the declaration manifest projects");
+        let completed_declaration = declaration_manifest
+            .steps
+            .iter()
+            .map(|step| AppliedEntry {
+                version: step.version.as_str().to_string(),
+                checksum: step.checksum.as_str().to_string(),
+                phase: Phase::Completed,
+                kind: None,
+            })
+            .collect::<Vec<_>>();
+        let declaration_ir: MigrationIr =
+            serde_json::from_str(&declaration).expect("the declaration IR parses");
+        let live_snapshot =
+            zero_migrate::fold_ops(&declaration_ir.ops, SqlDialect::Postgres, owner)
+                .expect("the applied declaration is reflected in the catalog");
+        let applied_prefix_plans = lower_ordered_envelopes_to_plans(
+            &[declaration, backfill.clone()],
+            owner,
+            owner,
+            "postgres",
+            &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
+            None,
+            live_snapshot,
+            &completed_declaration,
+            &[],
+        )
+        .expect("an applied declaration still advances logical metadata for the backfill");
+        assert!(matches!(
+            applied_prefix_plans[1].plan.steps.as_slice(),
+            [zero_migrate::PlanStep::Backfill { .. }]
+        ));
+
+        let error = lower_envelope_to_plan(
+            &backfill,
+            owner,
+            owner,
+            "postgres",
+            &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
+            None,
+        )
+        .expect_err("a backfill-only lower without the declaration map must fail closed");
+        assert!(
+            error.contains("no logical column declaration"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
     fn ordered_status_lowering_projects_an_inflight_create_that_has_not_landed() {
         use zero_migrate::apply::journal::Phase;
 
@@ -2198,5 +2457,115 @@ mod tests {
         .expect("the follow-up lowers against the mixed envelope's pending addColumn tail");
 
         assert_eq!(plans.len(), 2);
+    }
+
+    fn prefix_gate_manifests() -> Vec<PlanStatusManifest> {
+        [
+            ("declare_prefix", "prefix_table"),
+            ("current_change", "current_table"),
+        ]
+        .into_iter()
+        .map(|(name, table)| {
+            let envelope = serde_json::json!({
+                "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+                "name": name,
+                "ops": [{
+                    "op": "createTable",
+                    "name": table,
+                    "columns": [{ "name": "id", "type": "int" }],
+                    "primaryKey": null,
+                    "constraints": [],
+                    "indexes": []
+                }]
+            })
+            .to_string();
+            let artifact = lower_envelope_to_plan(
+                &envelope,
+                "app_prefix_gate",
+                "app_prefix_gate",
+                "postgres",
+                "{}",
+                None,
+            )
+            .expect("test envelope lowers");
+            PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                .expect("test manifest projects")
+        })
+        .collect()
+    }
+
+    fn prefix_gate_entries(manifest: &PlanStatusManifest, phase: Phase) -> Vec<AppliedEntry> {
+        manifest
+            .steps
+            .iter()
+            .map(|step| AppliedEntry {
+                version: step.version.as_str().to_string(),
+                checksum: step.checksum.as_str().to_string(),
+                phase,
+                kind: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn authored_prefix_requires_exact_net_applied_plans() {
+        use zero_migrate::ops::status::reconcile_applied_plans;
+
+        let manifests = prefix_gate_manifests();
+        let completed = prefix_gate_entries(&manifests[0], Phase::Completed);
+        let applied =
+            reconcile_applied_plans(&manifests, &completed, &[]).expect("prefix reconciles");
+        require_applied_prefix(&manifests, 1, &applied)
+            .expect("an exact completed prefix is trusted");
+
+        let pending =
+            reconcile_applied_plans(&manifests, &[], &[]).expect("missing prefix reconciles");
+        let error = require_applied_prefix(&manifests, 1, &pending)
+            .expect_err("a missing prefix must not seed declarations");
+        assert!(error.contains("not fully applied"), "got: {error}");
+
+        let inflight_entries = prefix_gate_entries(&manifests[0], Phase::Started);
+        let inflight = reconcile_applied_plans(&manifests, &inflight_entries, &[])
+            .expect("inflight prefix reconciles");
+        let error = require_applied_prefix(&manifests, 1, &inflight)
+            .expect_err("an inflight prefix must not seed declarations");
+        assert!(error.contains("not fully applied"), "got: {error}");
+
+        let mut drifted_entries = completed;
+        drifted_entries[0].checksum = "0".repeat(64);
+        let drifted = reconcile_applied_plans(&manifests, &drifted_entries, &[])
+            .expect("drifted prefix reconciles");
+        let error = require_applied_prefix(&manifests, 1, &drifted)
+            .expect_err("a drifted prefix must not seed declarations");
+        assert!(error.contains("not fully applied"), "got: {error}");
+    }
+
+    #[test]
+    fn incomplete_authored_history_only_allows_an_applied_current_replay() {
+        use zero_migrate::model::migration::MigrationId;
+        use zero_migrate::ops::status::reconcile_applied_plans;
+
+        let manifests = prefix_gate_manifests();
+        let mut prior_only = prefix_gate_entries(&manifests[0], Phase::Completed);
+        prior_only.push(AppliedEntry {
+            version: MigrationId::derive("omitted_artifact", b"step")
+                .as_str()
+                .to_string(),
+            checksum: "1".repeat(64),
+            phase: Phase::Completed,
+            kind: None,
+        });
+        let pending_current = reconcile_applied_plans(&manifests, &prior_only, &[])
+            .expect("incomplete history reconciles");
+        let error = require_applied_prefix(&manifests, 1, &pending_current)
+            .expect_err("a pending current cannot apply from incomplete history");
+        assert!(error.contains("prefix is incomplete"), "got: {error}");
+
+        let mut replay_entries = prior_only;
+        replay_entries.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
+        let applied_current = reconcile_applied_plans(&manifests, &replay_entries, &[])
+            .expect("applied replay reconciles");
+        require_applied_prefix(&manifests, 1, &applied_current)
+            .expect("an applied current remains a safe no-op during a directory rerun");
     }
 }

@@ -491,9 +491,12 @@ async function runApply(args: Args): Promise<number> {
   await ensureTsLoader(files);
   const migrations = await importMigrations(files);
   assertUniqueMigrationNames(migrations);
-  for (const { file, migration } of migrations) {
+  for (const [index, { file, migration }] of migrations.entries()) {
+    const prior = migrations.slice(0, index);
     const outcome = await apply({
       migration,
+      priorMigrations: prior.map((entry) => entry.migration),
+      priorNameFallbacks: prior.map((entry) => entry.file.label),
       ownerApp: args.ownerApp,
       projectSchema: args.projectSchema,
       driver,

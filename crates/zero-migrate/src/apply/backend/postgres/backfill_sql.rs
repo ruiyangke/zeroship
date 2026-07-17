@@ -13,6 +13,8 @@ use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, SqlSession};
 use crate::guard::SqlGuard;
+use crate::model::backfill::generate_per_row_value;
+use crate::model::ir::PerRowGenerator;
 use crate::model::migration::{Checksum, MigrationId};
 
 use super::session::AUTHOR_SQL_LITERAL_MODE;
@@ -75,6 +77,86 @@ fn build_batch_sql(
                   ORDER BY _bf_key DESC LIMIT 1) AS _bf_cursor",
         batch_size = spec.batch_size,
         set_clause = spec.set_clause,
+    ))
+}
+
+fn validate_per_row_spec(spec: &BackfillSpec) -> Result<(), ApplyError> {
+    if spec.set_clause.trim().is_empty() && spec.per_row.is_empty() {
+        return Err(backend_error("backfill set must not be empty"));
+    }
+    for (column, assignment) in &spec.per_row {
+        let generator = assignment.generator();
+        validate_ident("per-row destination column", column)?;
+        if column.eq_ignore_ascii_case(&spec.cursor_column) {
+            return Err(backend_error(format!(
+                "per-row generator assigns cursor column {:?}; page on an immutable key",
+                spec.cursor_column
+            )));
+        }
+        if !assignment.matches_target(&spec.schema, &spec.table, column) {
+            return Err(backend_error(format!(
+                "per-row assignment for destination {column:?} was validated for a different target; regenerate the plan from the declared schema"
+            )));
+        }
+        if let PerRowGenerator::TypeId { prefix } = generator {
+            crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
+                backend_error(format!(
+                    "invalid TypeID prefix for per-row destination {column:?}: {error}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn build_per_row_window_sql(
+    spec: &BackfillSpec,
+    cursor_type: &str,
+    have_cursor: bool,
+) -> Result<String, ApplyError> {
+    let schema = quote_ident(&spec.schema)?;
+    let table = quote_ident(&spec.table)?;
+    let cursor = quote_ident(&spec.cursor_column)?;
+    let (cursor_predicate, end_cursor_param) = if have_cursor {
+        (format!("{cursor} > ($1::text)::{cursor_type}"), "$2")
+    } else {
+        ("TRUE".to_string(), "$1")
+    };
+    let filter = spec
+        .filter
+        .as_deref()
+        .map(|value| format!(" AND ({value})"))
+        .unwrap_or_default();
+
+    Ok(format!(
+        "SELECT {cursor}::text AS _bf_cursor FROM {schema}.{table} \
+         WHERE {cursor_predicate} \
+           AND {cursor} <= ({end_cursor_param}::text)::{cursor_type}{filter} \
+         ORDER BY {cursor} ASC LIMIT {batch_size} FOR UPDATE",
+        batch_size = spec.batch_size,
+    ))
+}
+
+fn build_per_row_update_sql(spec: &BackfillSpec, cursor_type: &str) -> Result<String, ApplyError> {
+    let schema = quote_ident(&spec.schema)?;
+    let table = quote_ident(&spec.table)?;
+    let cursor = quote_ident(&spec.cursor_column)?;
+    let mut assignments = Vec::with_capacity(spec.per_row.len() + 1);
+    if !spec.set_clause.trim().is_empty() {
+        assignments.push(spec.set_clause.clone());
+    }
+    for (index, column) in spec.per_row.keys().enumerate() {
+        assignments.push(format!("{} = ${}", quote_ident(column)?, index + 1));
+    }
+    let cursor_param = spec
+        .per_row
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| backend_error("per-row parameter count overflow"))?;
+    Ok(format!(
+        "UPDATE {schema}.{table} AS _bf SET {} \
+         WHERE _bf.{cursor} = (${cursor_param}::text)::{cursor_type}",
+        assignments.join(", ")
     ))
 }
 
@@ -743,29 +825,71 @@ async fn run_batch<D: SqlSession>(
                 .await?;
         }
 
-        let sql = build_batch_sql(spec, cursor_type, last_cursor.is_some())?;
         let binds = batch_binds(last_cursor, end_cursor);
-        let row = conn.query_one(&sql, &binds).await.map_err(|error| {
-            backend_error(format!(
-                "batch failed after cursor {last_cursor:?}: {error}"
-            ))
-        })?;
+        let (selected, rows, cursor) = if spec.per_row.is_empty() {
+            let sql = build_batch_sql(spec, cursor_type, last_cursor.is_some())?;
+            let row = conn.query_one(&sql, &binds).await.map_err(|error| {
+                backend_error(format!(
+                    "batch failed after cursor {last_cursor:?}: {error}"
+                ))
+            })?;
+
+            let selected_i64: i64 = row.try_get("_bf_selected")?;
+            let selected = u64::try_from(selected_i64).map_err(|_| {
+                backend_error(format!(
+                    "database returned invalid selected-row count {selected_i64}"
+                ))
+            })?;
+            let rows_i64: i64 = row.try_get("_bf_rows")?;
+            let rows = u64::try_from(rows_i64).map_err(|_| {
+                backend_error(format!("database returned invalid row count {rows_i64}"))
+            })?;
+            let cursor: Option<String> = row.try_get("_bf_cursor")?;
+            (selected, rows, cursor)
+        } else {
+            let window_sql =
+                build_per_row_window_sql(spec, cursor_type, last_cursor.is_some())?;
+            let selected_rows = conn.query(&window_sql, &binds).await.map_err(|error| {
+                backend_error(format!(
+                    "batch window failed after cursor {last_cursor:?}: {error}"
+                ))
+            })?;
+            let selected_cursors = selected_rows
+                .iter()
+                .map(|row| row.try_get::<_, String>("_bf_cursor"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let update_sql = build_per_row_update_sql(spec, cursor_type)?;
+            let mut updated = 0_u64;
+            for selected_cursor in &selected_cursors {
+                let mut params = spec
+                    .per_row
+                    .values()
+                    .map(|assignment| generate_per_row_value(assignment.generator()))
+                    .map(Some)
+                    .collect::<Vec<_>>();
+                params.push(Some(selected_cursor.clone()));
+                let affected = conn
+                    .exec_text(&update_sql, &params)
+                    .await
+                    .map_err(|error| backend_error(format!(
+                        "per-row update failed at cursor {selected_cursor:?}: {error}"
+                    )))?;
+                if affected != 1 {
+                    return Err(backend_error(format!(
+                        "per-row update at cursor {selected_cursor:?} affected {affected} rows; expected exactly one"
+                    )));
+                }
+                updated = updated.saturating_add(affected);
+            }
+            let selected = u64::try_from(selected_cursors.len())
+                .map_err(|_| backend_error("selected-row count exceeds u64"))?;
+            let cursor = selected_cursors.last().cloned();
+            (selected, updated, cursor)
+        };
 
         if cfg.pg.migrator_role.is_some() {
             conn.batch("RESET ROLE").await?;
         }
-
-        let selected_i64: i64 = row.try_get("_bf_selected")?;
-        let selected = u64::try_from(selected_i64).map_err(|_| {
-            backend_error(format!(
-                "database returned invalid selected-row count {selected_i64}"
-            ))
-        })?;
-        let rows_i64: i64 = row.try_get("_bf_rows")?;
-        let rows = u64::try_from(rows_i64).map_err(|_| {
-            backend_error(format!("database returned invalid row count {rows_i64}"))
-        })?;
-        let cursor: Option<String> = row.try_get("_bf_cursor")?;
 
         if rows != selected {
             return Err(backend_error(format!(
@@ -841,6 +965,7 @@ pub(super) async fn run_backfill<D: SqlSession>(
     if spec.batch_size == 0 {
         return Err(backend_error("batch size must be greater than zero"));
     }
+    validate_per_row_spec(spec)?;
 
     ensure_progress(conn, cfg).await?;
     let backfill_id = version.as_str().to_string();
@@ -895,15 +1020,24 @@ pub(super) async fn run_backfill<D: SqlSession>(
         .check(&build_end_cursor_sql(spec)?)
         .map_err(|error| backend_error(format!("assembled SQL was denied: {error}")))?;
     for have_cursor in [false, true] {
-        let sql = build_batch_sql(spec, &cursor_type, have_cursor)?;
+        let sql = if spec.per_row.is_empty() {
+            build_batch_sql(spec, &cursor_type, have_cursor)?
+        } else {
+            build_per_row_window_sql(spec, &cursor_type, have_cursor)?
+        };
         guard
             .check(&sql)
             .map_err(|error| backend_error(format!("assembled SQL was denied: {error}")))?;
     }
-    assert_cursor_not_mutated(
-        &build_batch_sql(spec, &cursor_type, true)?,
-        &spec.cursor_column,
-    )?;
+    let update_sql = if spec.per_row.is_empty() {
+        build_batch_sql(spec, &cursor_type, true)?
+    } else {
+        build_per_row_update_sql(spec, &cursor_type)?
+    };
+    guard
+        .check(&update_sql)
+        .map_err(|error| backend_error(format!("assembled SQL was denied: {error}")))?;
+    assert_cursor_not_mutated(&update_sql, &spec.cursor_column)?;
 
     let (mut cursor, end_cursor) = match progress {
         Some(progress) => (progress.last_cursor, progress.end_cursor),
@@ -969,6 +1103,7 @@ mod tests {
 
     struct RecordingSession {
         log: RefCell<Vec<String>>,
+        text_params: RefCell<Vec<Vec<Option<String>>>>,
         selected: i64,
         updated: i64,
         cursor: Option<String>,
@@ -979,6 +1114,7 @@ mod tests {
         fn batch_result(selected: i64, updated: i64, cursor: Option<&str>) -> Self {
             Self {
                 log: RefCell::new(Vec::new()),
+                text_params: RefCell::new(Vec::new()),
                 selected,
                 updated,
                 cursor: cursor.map(str::to_string),
@@ -1003,9 +1139,10 @@ mod tests {
             Ok(self.checkpoint_rows)
         }
 
-        async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
+        async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
             self.log.borrow_mut().push(format!("exec_text: {sql}"));
-            Ok(0)
+            self.text_params.borrow_mut().push(params.to_vec());
+            Ok(1)
         }
 
         async fn query(&self, sql: &str, _binds: &[Bind]) -> Result<Vec<Row>, DbError> {
@@ -1030,6 +1167,16 @@ mod tests {
                     vec!["has_enabled_user_trigger".into()],
                     vec![crate::driver::Value::Bool(false)],
                 )]);
+            }
+            if sql.contains("AS _bf_cursor") && sql.contains("FOR UPDATE") {
+                return Ok((1..=self.selected)
+                    .map(|cursor| {
+                        Row::new(
+                            vec!["_bf_cursor".into()],
+                            vec![crate::driver::Value::Text(cursor.to_string())],
+                        )
+                    })
+                    .collect());
             }
             if sql.contains("schema_backfills") && sql.contains("FOR UPDATE") {
                 return Ok(vec![Row::new(
@@ -1089,6 +1236,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 250,
             set_clause: "\"display_name\" = \"name\"".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: Some("\"display_name\" IS NULL".into()),
             name: "fill_display_name".into(),
         }
@@ -1129,6 +1277,46 @@ mod tests {
             batch_binds(Some("42"), "99"),
             [Bind::Text("42".into()), Bind::Text("99".into())]
         );
+    }
+
+    #[test]
+    fn per_row_update_contains_placeholders_not_sampled_values() {
+        let mut value = spec();
+        value.set_clause.clear();
+        value.per_row.insert(
+            "external_id".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "users",
+                "external_id",
+                PerRowGenerator::UuidV4,
+            ),
+        );
+        let sql = build_per_row_update_sql(&value, "bigint").unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"app\".\"users\" AS _bf SET \"external_id\" = $1 WHERE _bf.\"id\" = ($2::text)::bigint"
+        );
+        assert!(!sql.contains("00000000-"), "no sampled UUID belongs in SQL");
+    }
+
+    #[test]
+    fn per_row_assignment_cannot_be_retargeted() {
+        let mut value = spec();
+        value.set_clause.clear();
+        value.per_row.insert(
+            "external_id".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "other_users",
+                "external_id",
+                PerRowGenerator::UuidV4,
+            ),
+        );
+        let error = validate_per_row_spec(&value).expect_err("retargeted token must fail");
+        assert!(error
+            .to_string()
+            .contains("validated for a different target"));
     }
 
     #[test]
@@ -1316,5 +1504,44 @@ mod tests {
             }),
             "the checkpoint must be checksum-bound: {log:?}"
         );
+    }
+
+    #[compio::test]
+    async fn per_row_batch_binds_a_fresh_value_for_each_selected_key() {
+        let conn = RecordingSession::batch_result(3, 0, Some("3"));
+        let cfg = ExecutorConfig::new("prj_x", "app");
+        let checksum = test_checksum();
+        let mut value = spec();
+        value.set_clause.clear();
+        value.per_row.insert(
+            "external_id".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "users",
+                "external_id",
+                PerRowGenerator::UuidV4,
+            ),
+        );
+
+        let (selected, updated, cursor) = run_batch(
+            &conn, &cfg, &value, "bigint", None, "3", "bf_1", &checksum, None,
+        )
+        .await
+        .expect("per-row batch applies");
+        assert_eq!((selected, updated, cursor.as_deref()), (3, 3, Some("3")));
+
+        let params = conn.text_params.borrow();
+        assert_eq!(params.len(), 3, "one bound UPDATE per selected row");
+        let generated = params
+            .iter()
+            .map(|row| row[0].as_deref().expect("generated UUID"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(generated.len(), 3, "one literal must never be reused");
+        assert!(generated.iter().all(|value| {
+            uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.get_version_num() == 4)
+        }));
+        assert_eq!(params[0][1].as_deref(), Some("1"));
+        assert_eq!(params[1][1].as_deref(), Some("2"));
+        assert_eq!(params[2][1].as_deref(), Some("3"));
     }
 }

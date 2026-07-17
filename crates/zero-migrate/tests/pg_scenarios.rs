@@ -27,15 +27,19 @@
 
 mod support;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use support::PgDevSession;
 
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
-    apply, check_checksum_drift, ensure_journal, history, snapshot_schema, status, ApplyError,
-    Approval, ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError, EngineError,
-    ExecutorConfig, ExpandContractAuthor, LockMode, Migration, MigrationEngine, MigrationFlags,
-    MigrationId, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution,
+    apply, check_checksum_drift, ensure_journal, history, resolve_create_table_policy,
+    snapshot_schema, status, zeroship_no_inject_ceiling, ApplyError, Approval, ApprovalScope,
+    BackfillSpec, BindValue, DeclarativeApplyError, EngineError, ExecutorConfig,
+    ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine,
+    MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep,
+    Resolution, SqlDialect,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,6 +190,70 @@ fn legacy_abort_resolution_version(pending_version: &str, ordinal: usize) -> Mig
     MigrationId::derive("resolve_pending_abort", &seed)
 }
 
+fn assert_per_row_uuid(value: &str, version: u8) {
+    let bytes = value.as_bytes();
+    assert_eq!(bytes.len(), 36, "canonical UUID length: {value}");
+    for separator in [8, 13, 18, 23] {
+        assert_eq!(bytes[separator], b'-', "canonical UUID separators: {value}");
+    }
+    assert_eq!(bytes[14], b'0' + version, "UUID version {version}: {value}");
+    assert!(
+        matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+        "RFC UUID variant: {value}"
+    );
+    assert_eq!(value, value.to_ascii_lowercase(), "UUID must be lowercase");
+    assert!(
+        bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                || byte.is_ascii_digit()
+                || matches!(byte, b'a'..=b'f')
+        }),
+        "UUID must contain canonical lowercase hexadecimal: {value}"
+    );
+}
+
+fn decode_per_row_crockford(value: &str, uppercase: bool) -> u128 {
+    let alphabet = if uppercase {
+        b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".as_slice()
+    } else {
+        b"0123456789abcdefghjkmnpqrstvwxyz".as_slice()
+    };
+    let bytes = value.as_bytes();
+    assert_eq!(bytes.len(), 26, "canonical Crockford length: {value}");
+    let decode = |byte: u8| {
+        alphabet
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .map(|index| index as u8)
+            .unwrap_or_else(|| panic!("invalid Crockford character in {value}"))
+    };
+    let first = decode(bytes[0]);
+    assert!(
+        first <= 7,
+        "128-bit Crockford value must begin at most 7: {value}"
+    );
+    bytes[1..].iter().fold(first as u128, |decoded, byte| {
+        (decoded << 5) | u128::from(decode(*byte))
+    })
+}
+
+fn assert_per_row_type_id(value: &str, prefix: &str) {
+    let suffix = value
+        .strip_prefix(&format!("{prefix}_"))
+        .unwrap_or_else(|| panic!("TypeID must preserve prefix {prefix:?}: {value}"));
+    let decoded = decode_per_row_crockford(suffix, false).to_be_bytes();
+    assert_eq!(
+        decoded[6] >> 4,
+        7,
+        "TypeID suffix must encode UUIDv7: {value}"
+    );
+    assert_eq!(decoded[8] & 0xc0, 0x80, "TypeID UUID variant: {value}");
+}
+
+fn assert_per_row_ulid(value: &str) {
+    let _ = decode_per_row_crockford(value, true);
+}
+
 async fn standard_conforming_strings(session: &PgDevSession) -> String {
     use zero_migrate::driver::SqlSession;
     session
@@ -278,6 +346,7 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
         cursor_column: "id".into(),
         batch_size: 10,
         set_clause: r#""value" = '\t'"#.into(),
+        per_row: BTreeMap::new(),
         filter: Some(r#""id" = 2"#.into()),
         name: "backfill literal safety".into(),
     };
@@ -311,6 +380,149 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
         standard_conforming_strings(&session).await,
         "off",
         "backfill commit must restore the inherited session value"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    let authored: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"pg_per_row_generators","ops":[
+          {"op":"createTable","name":"samples","columns":[
+            {"name":"id","type":"bigInt","nullable":false},
+            {"name":"uuid4","type":"uuid"},
+            {"name":"uuid7","type":"uuid"},
+            {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
+            {"name":"ulid","type":"text","valueFormat":"ulid"},
+            {"name":"plain_text","type":"text"}
+          ],"primaryKey":["id"]},
+          {"op":"insert","table":"samples","columns":["id"],
+           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
+          {"op":"backfill","table":"samples","name":"fill_per_row_ids",
+           "cursorColumn":"id","batchSize":2,"set":{
+             "uuid4":{"perRow":"uuidV4"},
+             "uuid7":{"perRow":"uuidV7"},
+             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
+             "ulid":{"perRow":"ulid"}
+           }}
+        ]}"#,
+    )
+    .expect("parse per-row IR fixture");
+    let resolved = resolve_create_table_policy(&authored, &zeroship_no_inject_ceiling())
+        .expect("resolve no-inject table policy");
+    let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
+    let author = IrAuthor::new(&cfg.project_schema, "app_test", SqlDialect::Postgres);
+    let artifact = author
+        .load_and_lower_guarded(
+            &ir,
+            "app_test",
+            &BTreeMap::new(),
+            &LiveSchema::default(),
+            &GuardConfig::confined(cfg.project_schema.clone()),
+        )
+        .expect("declared perRow destination formats must lower on PostgreSQL");
+    MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "postgres-per-row-generator-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("per-row generators apply on live PostgreSQL through the IR plan");
+
+    let rows = session
+        .query(
+            &format!(
+                "SELECT uuid4::text AS uuid4, uuid7::text AS uuid7, type_id, ulid \
+                 FROM \"{}\".samples ORDER BY id",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read generated values");
+    assert_eq!(rows.len(), 8);
+    let mut distinct = [
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    ];
+    for row in &rows {
+        let uuid4: String = row.try_get("uuid4").expect("decode UUIDv4");
+        let uuid7: String = row.try_get("uuid7").expect("decode UUIDv7");
+        let type_id: String = row.try_get("type_id").expect("decode TypeID");
+        let ulid: String = row.try_get("ulid").expect("decode ULID");
+        assert_per_row_uuid(&uuid4, 4);
+        assert_per_row_uuid(&uuid7, 7);
+        assert_per_row_type_id(&type_id, "order");
+        assert_per_row_ulid(&ulid);
+        distinct[0].insert(uuid4);
+        distinct[1].insert(uuid7);
+        distinct[2].insert(type_id);
+        distinct[3].insert(ulid);
+    }
+    for values in distinct {
+        assert_eq!(
+            values.len(),
+            rows.len(),
+            "an apply-engine generator must never reuse one build-time or batch literal"
+        );
+    }
+
+    let mut logical_live = LiveSchema::default();
+    logical_live.tables.insert("samples".into());
+    logical_live
+        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .expect("the applied artifact seeds its declared logical column contracts");
+    let invalid_backfill: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"reject_generic_text_per_row","ops":[
+          {"op":"backfill","table":"samples","name":"reject_plain_text_type_id",
+           "cursorColumn":"id","batchSize":2,"set":{
+             "plain_text":{"perRow":{"typeId":{"prefix":"order"}}}
+           }}
+        ]}"#,
+    )
+    .expect("parse generic-text rejection fixture");
+    let error = author
+        .lower_steps(&invalid_backfill, &logical_live)
+        .expect_err("generic text must not acquire a TypeID contract by inference");
+    assert!(
+        error
+            .to_string()
+            .contains("generic text with no value-format contract"),
+        "unexpected generic-text validation error: {error}"
+    );
+    let changed_plain_text: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*) AS changed FROM \"{}\".samples WHERE plain_text IS NOT NULL",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("verify rejected generator changed no rows")
+        .try_get("changed")
+        .expect("decode unchanged-row count");
+    assert_eq!(
+        changed_plain_text, 0,
+        "destination-family rejection must happen before the first row change"
     );
 
     drop_schemas(&session, &cfg).await;
@@ -359,6 +571,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
         cursor_column: "id".into(),
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
         filter: None,
         name: "trigger rewrite backfill".into(),
     };
@@ -465,6 +678,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
         cursor_column: "id".into(),
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
         filter: None,
         name: "row policy suppression backfill".into(),
     };

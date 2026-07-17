@@ -3270,6 +3270,7 @@ mod render_tests {
             cursor_column: "id".into(),
             batch_size: 100,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };

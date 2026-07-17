@@ -652,6 +652,7 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
+    prior_envelope_json: &[String],
     envelope_json: &str,
     owner_app: &str,
     project_schema: &str,
@@ -687,42 +688,64 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             None => Vec::new(),
         };
         let live = LiveSchema::from_catalog_snapshot(snapshot.clone(), owner_app);
-        let artifact = match crate::lower::lower_envelope_to_plan_with_live(
-            envelope_json,
-            owner_app,
-            project_schema,
-            dialect,
-            registry_json,
-            policy_ceiling,
-            &live,
-        ) {
-            Ok(artifact) => artifact,
-            Err(original_error) => {
-                let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans(
-                    &[envelope_json.to_string()],
-                    owner_app,
-                    project_schema,
-                    dialect,
-                    registry_json,
-                    policy_ceiling,
-                    snapshot,
-                    &journal_entries,
-                    &resolved_contracts,
-                )?;
-                let artifact = artifacts.pop().ok_or_else(|| {
-                    "lowering returned no plan for the migration envelope".to_string()
-                })?;
-                crate::lower::validate_historical_apply_evidence(
-                    &artifact,
-                    &live,
-                    &journal_entries,
-                    &resolved_contracts,
-                )
-                .map_err(|evidence_error| {
-                    format!("{original_error}; historical replay refused: {evidence_error}")
-                })?;
-                artifact
+        let artifact = if prior_envelope_json.is_empty() {
+            match crate::lower::lower_envelope_to_plan_with_live(
+                envelope_json,
+                owner_app,
+                project_schema,
+                dialect,
+                registry_json,
+                policy_ceiling,
+                &live,
+            ) {
+                Ok(artifact) => artifact,
+                Err(_) => {
+                    let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
+                        &[envelope_json.to_string()],
+                        owner_app,
+                        project_schema,
+                        dialect,
+                        registry_json,
+                        policy_ceiling,
+                        snapshot,
+                        &journal_entries,
+                        &resolved_contracts,
+                    )?;
+                    artifacts.pop().ok_or_else(|| {
+                        "lowering returned no plan for the migration envelope".to_string()
+                    })?
+                }
             }
+        } else {
+            let mut ordered_envelopes = prior_envelope_json.to_vec();
+            ordered_envelopes.push(envelope_json.to_string());
+            let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
+                &ordered_envelopes,
+                owner_app,
+                project_schema,
+                dialect,
+                registry_json,
+                policy_ceiling,
+                snapshot,
+                &journal_entries,
+                &resolved_contracts,
+            )?;
+            let manifests = artifacts
+                .iter()
+                .map(|artifact| {
+                    PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let status = zero_migrate::ops::status::status_plans_via_backend_locked(
+                backend, cfg, &manifests,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            crate::lower::require_applied_prefix(&manifests, prior_envelope_json.len(), &status)?;
+            artifacts.pop().ok_or_else(|| {
+                "lowering returned no plan for the current migration envelope".to_string()
+            })?
         };
         let outcome = MigrationEngine::new()
             .apply_applied_plan_with_touched_and_depends(
@@ -959,6 +982,16 @@ pub fn apply_ir(
     // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
     let envelope_json = serde_json::to_string(&req.envelope)
         .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
+    let prior_envelope_json = req
+        .prior_envelopes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|envelope| {
+            serde_json::to_string(envelope)
+                .map_err(|e| Error::from_reason(format!("prior envelope is not serializable: {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let registry_json = serde_json::to_string(&req.registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
     // Dialect selects the backend: Postgres and MySQL ride the
@@ -997,6 +1030,7 @@ pub fn apply_ir(
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
+                    &prior_envelope_json,
                     &envelope_json,
                     &owner_app,
                     &project_schema,
@@ -1013,6 +1047,7 @@ pub fn apply_ir(
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
+                    &prior_envelope_json,
                     &envelope_json,
                     &owner_app,
                     &project_schema,

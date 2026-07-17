@@ -66,7 +66,15 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   ];
   assert.equal(coreExports.has("table"), true, "table must be exported from zero-migrate root declarations");
   assert.equal(coreExports.has("ids"), true, "ids must be exported from zero-migrate root declarations");
-  for (const name of ["IdFormats", "TypeIdOptions", "ValueFormat"]) {
+  for (const name of [
+    "BackfillSetValue",
+    "IdFormats",
+    "PerRowGenerator",
+    "PerRowGeneratorValue",
+    "PerRowGenerators",
+    "TypeIdOptions",
+    "ValueFormat",
+  ]) {
     assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
   }
   for (const name of rootedVendorExports) {
@@ -98,6 +106,11 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
   assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");
   assert.equal(typeof runtimeRoot.ids.ulid, "function", "ids.ulid must be a root runtime builder");
+  assert.equal(typeof runtimeRoot.perRow, "object", "perRow must be a root runtime namespace");
+  assert.equal(typeof runtimeRoot.perRow.uuidV4, "function", "perRow.uuidV4 must be exported");
+  assert.equal(typeof runtimeRoot.perRow.uuidV7, "function", "perRow.uuidV7 must be exported");
+  assert.equal(typeof runtimeRoot.perRow.typeId, "function", "perRow.typeId must be exported");
+  assert.equal(typeof runtimeRoot.perRow.ulid, "function", "perRow.ulid must be exported");
   for (const name of rootedVendorExports) {
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }

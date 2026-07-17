@@ -857,6 +857,7 @@ mod recording_session_genericity {
                     cursor_column: "id".into(),
                     batch_size: 100,
                     set_clause: "ready = TRUE".into(),
+                    per_row: std::collections::BTreeMap::new(),
                     filter: None,
                     name: "backfill users".into(),
                 },

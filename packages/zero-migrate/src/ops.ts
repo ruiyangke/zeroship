@@ -25,6 +25,7 @@
 
 import type {
   BackfillArgs,
+  BackfillSetValue,
   CheckBuilder,
   CheckDef,
   CheckExprFn,
@@ -102,6 +103,8 @@ import type {
   PartitionBoundInput,
   PartitionBoundSentinel,
   PartitionByInput,
+  PerRowGeneratorValue,
+  PerRowGenerators,
   IndexAddArgs,
   IndexDropArgs,
   RoleCreateArgs,
@@ -147,6 +150,7 @@ import type {
   FuncVolatility,
   GrantTarget,
   MaskKind,
+  PerRowGenerator,
   Privilege,
   ValueFormat,
   VectorMetric,
@@ -238,6 +242,7 @@ const NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
 const INT64_VALUE_BRAND = Symbol.for("zero-migrate.int64/v1");
 const DECIMAL_VALUE_BRAND = Symbol.for("zero-migrate.decimal/v1");
 const BYTES_VALUE_BRAND = Symbol.for("zero-migrate.bytes/v1");
+const PER_ROW_GENERATOR_BRAND = Symbol.for("zero-migrate.perRowGenerator/v1");
 const INT64_STRING_RE = /^(?:0|-?[1-9][0-9]*)$/;
 const INT64_MIN = -(1n << 63n);
 const INT64_MAX = (1n << 63n) - 1n;
@@ -592,12 +597,12 @@ function requirePlainObject(v: unknown, what: string): asserts v is Record<strin
 
 /** Validate the persisted TypeID 0.3 prefix at the authoring boundary. The
  * Rust validator repeats this check for hand-authored IR envelopes. */
-function requireTypeIdPrefix(v: unknown): asserts v is string {
-  requireString(v, "ids.typeId({ prefix })");
+function requireTypeIdPrefix(v: unknown, what = "ids.typeId({ prefix })"): asserts v is string {
+  requireString(v, what);
   if (v.length > 63 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
     throw structuredError(
       "OP_INVALID",
-      "ids.typeId({ prefix }): prefix must be empty or at most 63 lowercase ASCII " +
+      `${what}: prefix must be empty or at most 63 lowercase ASCII ` +
         "letters/underscores beginning and ending with a letter",
       { prefix: v },
     );
@@ -1010,6 +1015,68 @@ function isBytesValue(value: unknown): value is BytesValue {
   );
 }
 
+function isPerRowGenerator(generator: unknown): generator is PerRowGenerator {
+  if (generator === "uuidV4" || generator === "uuidV7" || generator === "ulid") {
+    return true;
+  }
+  if (!isPlainObject(generator)) return false;
+  const keys = Object.keys(generator);
+  if (keys.length !== 1 || keys[0] !== "typeId" || !isPlainObject(generator.typeId)) {
+    return false;
+  }
+  const typeIdKeys = Object.keys(generator.typeId);
+  return typeIdKeys.length === 1 &&
+    typeIdKeys[0] === "prefix" &&
+    typeof generator.typeId.prefix === "string";
+}
+
+function perRowGeneratorOf(value: unknown): PerRowGenerator | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const generator = (value as Record<PropertyKey, unknown>)[PER_ROW_GENERATOR_BRAND];
+  return isPerRowGenerator(generator) ? generator : undefined;
+}
+
+function perRowGeneratorValue(generator: PerRowGenerator): PerRowGeneratorValue {
+  return Object.freeze({
+    [PER_ROW_GENERATOR_BRAND]: generator,
+  }) as unknown as PerRowGeneratorValue;
+}
+
+function rejectPerRowGeneratorValue(value: unknown): void {
+  if (perRowGeneratorOf(value) !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      "perRow.* values are valid only inside backfill({ set }); they are not scalar values, SQL expressions, or column defaults",
+    );
+  }
+}
+
+/** Reject a branded per-row descriptor anywhere inside a caller-supplied value.
+ *
+ * Raw closed-expression nodes are a supported escape hatch for generated
+ * authoring code. Their literal/argument fields therefore need the same
+ * backfill-only boundary as ordinary scalar/default positions: otherwise a
+ * descriptor nested below `{ node: ... }` would survive recording and collapse
+ * to `{}` only when JSON serialization drops its symbol brand. Walk only own
+ * data properties (never invoke accessors), and tolerate shared/cyclic objects
+ * so the rejection itself stays deterministic.
+ */
+function rejectNestedPerRowGeneratorValues(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): void {
+  rejectPerRowGeneratorValue(value);
+  if (value === null || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor !== undefined && "value" in descriptor) {
+      rejectNestedPerRowGeneratorValues(descriptor.value, seen);
+    }
+  }
+}
+
 function isRemovedDecimalCarrier(value: unknown): boolean {
   if (!isPlainObject(value) || isDecimalValue(value)) return false;
   const keys = Object.keys(value);
@@ -1029,6 +1096,7 @@ function isRemovedBytesCarrier(value: unknown): boolean {
 }
 
 function rejectNestedFunctionValues(value: unknown): void {
+  rejectPerRowGeneratorValue(value);
   rejectFunctionValue(value);
   if (Array.isArray(value)) {
     for (const item of value) rejectNestedFunctionValues(item);
@@ -1133,6 +1201,7 @@ function toIrScalar(value: unknown): unknown {
 }
 
 function toIrValue(value: unknown): unknown {
+  rejectNestedPerRowGeneratorValues(value);
   const synth = nativeDbExprNode(value);
   if (synth !== undefined) return synth;
   rejectFunctionValue(value);
@@ -1147,6 +1216,7 @@ const JSON_DEFAULT_VALUE_ERROR =
   "json default values must be JSON values (null, boolean, integer, string, array, or object)";
 
 function toIrJsonValue(value: unknown): unknown {
+  rejectPerRowGeneratorValue(value);
   rejectFunctionValue(value);
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -1252,6 +1322,7 @@ function resolveDefaultExpr(slot: DefaultExprFn | ExprChainType | Node): Node {
 }
 
 function validateDefaultExpr(expr: Node): void {
+  rejectNestedPerRowGeneratorValues(expr);
   const walk = (node: unknown): void => {
     if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
       throw structuredError("OP_INVALID", "default expression must be a closed Expr node");
@@ -1357,6 +1428,9 @@ function defaultExprIr(slot: DefaultExprFn | ExprChainType | Node): Node {
 }
 
 function toIrDefault(value: DefaultValue | DefaultExprFn | ExprChainType | Node): Node {
+  // A branded per-row value has no string-keyed properties. Reject it before the
+  // empty-object default branch can mistake the intent descriptor for `{}`.
+  rejectPerRowGeneratorValue(value);
   if (typeof value === "function" || value instanceof ExprChainImpl || isExprNode(value)) {
     return defaultExprIr(value as DefaultExprFn | ExprChainType | Node);
   }
@@ -1465,6 +1539,23 @@ export const ids: IdFormats = {
   },
   ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" }),
 };
+
+/** Apply-engine generator intents. These functions deliberately sample no
+ * randomness: the recorder preserves only the requested generator, and the
+ * backfill executor evaluates it independently for every affected row. */
+export const perRow: PerRowGenerators = Object.freeze({
+  uuidV4: () => perRowGeneratorValue("uuidV4"),
+  uuidV7: () => perRowGeneratorValue("uuidV7"),
+  typeId: (opts: TypeIdOptions) => {
+    requirePlainObject(opts, "perRow.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix, "perRow.typeId({ prefix })");
+    const generator: PerRowGenerator = Object.freeze({
+      typeId: Object.freeze({ prefix: opts.prefix }),
+    });
+    return perRowGeneratorValue(generator);
+  },
+  ulid: () => perRowGeneratorValue("ulid"),
+});
 
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {
@@ -1821,6 +1912,7 @@ function chain(node: Node): ExprChainImpl {
 }
 
 function exprArg(x: unknown): Node {
+  rejectNestedPerRowGeneratorValues(x);
   const synth = nativeDbExprNode(x);
   if (synth !== undefined) return synth;
   rejectFunctionValue(x);
@@ -2361,6 +2453,7 @@ export const cCase = caseExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
+  rejectNestedPerRowGeneratorValues(slot);
   if (typeof slot === "function") return exprArg(slot(makeBuilder()));
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
@@ -2460,6 +2553,7 @@ function rejectImmutableExpr(position: string, reason: string): never {
 }
 
 function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmutable?: boolean } = {}): void {
+  rejectNestedPerRowGeneratorValues(expr);
   const rejectPgNode = (nodeName: string): void => {
     rejectImmutableExpr(position, `${nodeName} is PG-vendor and non-portable`);
   };
@@ -2611,6 +2705,21 @@ function resolveSet(set: Record<string, DmlSetValue>): Record<string, unknown> {
   }
   const out: Record<string, unknown> = {};
   for (const col of Object.keys(set)) setOwn(out, col, resolveSetValue(set[col]));
+  return out;
+}
+
+function resolveBackfillSetValue(value: BackfillSetValue): unknown {
+  const generator = perRowGeneratorOf(value);
+  if (generator !== undefined) return { perRow: generator };
+  return resolveSetValue(value as DmlSetValue);
+}
+
+function resolveBackfillSet(set: Record<string, BackfillSetValue>): Record<string, unknown> {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column → backfill value");
+  }
+  const out: Record<string, unknown> = {};
+  for (const col of Object.keys(set)) setOwn(out, col, resolveBackfillSetValue(set[col]));
   return out;
 }
 
@@ -3719,7 +3828,7 @@ function recordBackfill(table: string, args: BackfillArgs): void {
     table,
     cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
     batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
-    set: resolveSet(args.set),
+    set: resolveBackfillSet(args.set),
     filter: resolveExpr(args.where),
     name: args.name || `backfill_${table}`,
     schema: args.schema,

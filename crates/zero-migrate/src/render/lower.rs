@@ -243,6 +243,13 @@ pub struct LiveSchema {
     /// drops need the child bound even when the drop is authored in a later
     /// migration than the createPartition op that established it.
     pub partitions: std::collections::BTreeMap<String, PartitionSnapshot>,
+    /// Logical column declarations accumulated from ordered migration artifacts.
+    ///
+    /// This semantic map is intentionally never inferred from the physical
+    /// catalog: a text column cannot reveal whether the project declared generic
+    /// text, a TypeID (and which prefix), or a ULID. The ordered-envelope lowerer
+    /// advances it from each resolved IR artifact before lowering the next one.
+    pub logical_columns: crate::model::validate::LogicalColumnContracts,
 }
 
 impl LiveSchema {
@@ -273,6 +280,7 @@ impl LiveSchema {
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership,
             partitions: live.partitions,
+            logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
 
@@ -289,6 +297,7 @@ impl LiveSchema {
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership: std::collections::BTreeMap::new(),
             partitions: std::collections::BTreeMap::new(),
+            logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
 
@@ -359,6 +368,7 @@ impl LiveSchema {
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
             partitions: desired.snapshot.partitions,
+            logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
 
@@ -437,7 +447,40 @@ impl LiveSchema {
             sqlite_schemas,
             table_ownership,
             partitions: live.partitions,
+            logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
+    }
+
+    /// Advance the cumulative logical project schema through one resolved
+    /// migration artifact. The same strict walk validates any per-row generator
+    /// in the artifact before publishing its declarations for the next artifact.
+    /// `project_schema` and `default_schema` must be the same effective-schema
+    /// inputs the artifact's [`IrAuthor`] uses for lowering.
+    ///
+    /// # Errors
+    /// Returns an [`crate::model::validate::AuthoringError`] when a per-row
+    /// destination is missing, ambiguous, or mismatched.
+    pub fn advance_logical_columns(
+        &mut self,
+        ir: &MigrationIr,
+        dialect: SqlDialect,
+        project_schema: &str,
+        default_schema: Option<&str>,
+    ) -> Result<(), crate::model::validate::AuthoringError> {
+        let target = match dialect {
+            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+        };
+        self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
+            ir,
+            target,
+            &[],
+            &self.logical_columns,
+            project_schema,
+            default_schema,
+        )?;
+        Ok(())
     }
 
     /// The per-table live column set for the DML apply/render-seam ColRef
@@ -1545,7 +1588,9 @@ fn collect_op_database_requirements(
         }
         Op::Backfill { set, filter, .. } => {
             for value in set.values() {
-                collect_value_database_requirements(value, dialect, requirements);
+                if let crate::model::ir::BackfillSetValue::Value(value) = value {
+                    collect_value_database_requirements(value, dialect, requirements);
+                }
             }
             if let Some(predicate) = filter {
                 collect_expr_database_requirements(predicate, dialect, requirements);
@@ -2314,6 +2359,15 @@ impl IrAuthor {
         ir: &MigrationIr,
         live: &LiveSchema,
     ) -> Result<Vec<PlanStep>, IrLowerError> {
+        crate::model::validate::validate_per_row_destinations_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
@@ -2333,6 +2387,14 @@ impl IrAuthor {
         validate_repeatable_ir_steps(ir, &out)?;
         stamp_ir_plan_steps(ir, &mut out);
         Ok(out)
+    }
+
+    const fn validation_dialect(&self) -> crate::model::validate::Dialect {
+        match self.dialect {
+            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+        }
     }
 
     fn selected_dialectal_leg<'a>(
@@ -3959,7 +4021,7 @@ impl IrAuthor {
         table: &str,
         cursor_column: &str,
         batch_size: u64,
-        set: &std::collections::BTreeMap<String, crate::model::ir::IrValue>,
+        set: &std::collections::BTreeMap<String, crate::model::ir::BackfillSetValue>,
         filter: Option<&crate::model::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
@@ -3973,9 +4035,37 @@ impl IrAuthor {
         // search_path on it and guards via its profile-derived `guard_config`).
         // There is NO lower-time refusal here anymore — confinement is enforced by
         // the scope gate, not by pinning the backfill to the project schema.
-        let clauses =
-            crate::render::dml::assemble_backfill_clauses(self.dialect, table, set, filter)
-                .map_err(IrLowerError::DmlAssemble)?;
+        let mut ordinary = std::collections::BTreeMap::new();
+        let mut per_row = std::collections::BTreeMap::new();
+        for (column, value) in set {
+            match value {
+                crate::model::ir::BackfillSetValue::Value(value) => {
+                    ordinary.insert(column.clone(), value.clone());
+                }
+                crate::model::ir::BackfillSetValue::PerRow { per_row: generator } => {
+                    per_row.insert(
+                        column.clone(),
+                        crate::model::backfill::PerRowAssignment::validated(
+                            eff_schema,
+                            table,
+                            column,
+                            generator.clone(),
+                        ),
+                    );
+                }
+            }
+        }
+        let clauses = if per_row.is_empty() {
+            crate::render::dml::assemble_backfill_clauses(self.dialect, table, &ordinary, filter)
+        } else {
+            crate::render::dml::assemble_backfill_clauses_allow_empty(
+                self.dialect,
+                table,
+                &ordinary,
+                filter,
+            )
+        }
+        .map_err(IrLowerError::DmlAssemble)?;
         let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX).max(1);
         let spec = crate::model::backfill::BackfillSpec {
             schema: eff_schema.to_string(),
@@ -3983,6 +4073,7 @@ impl IrAuthor {
             cursor_column: cursor_column.to_string(),
             batch_size,
             set_clause: clauses.set_clause,
+            per_row,
             filter: clauses.filter,
             name: name.to_string(),
         };
@@ -4042,6 +4133,15 @@ impl IrAuthor {
         guard_cfg: &GuardConfig,
         live: &LiveSchema,
     ) -> Result<GuardedLowerParts, IrGuardedLowerError> {
+        crate::model::validate::validate_per_row_destinations_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
         let guard_scope = guard_cfg.schema_scope();
@@ -7305,6 +7405,199 @@ mod tests {
             generated: None,
             identity: None,
         }
+    }
+
+    #[test]
+    fn backfill_only_lower_requires_and_accepts_seeded_logical_column_contracts() {
+        let declaration: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "declare_ids",
+            "ops": [{
+                "op": "createTable",
+                "name": "orders",
+                "columns": [
+                    { "name": "cursor", "type": "int", "nullable": false },
+                    {
+                        "name": "public_id",
+                        "type": "text",
+                        "valueFormat": { "typeId": { "prefix": "order" } }
+                    }
+                ],
+                "primaryKey": ["cursor"],
+                "constraints": [],
+                "indexes": []
+            }]
+        }))
+        .expect("logical declaration IR parses");
+        let backfill: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "backfill_ids",
+            "ops": [{
+                "op": "backfill",
+                "table": "orders",
+                "cursorColumn": "cursor",
+                "batchSize": 10,
+                "set": {
+                    "public_id": { "perRow": { "typeId": { "prefix": "order" } } }
+                },
+                "name": "orders_public_id"
+            }]
+        }))
+        .expect("backfill-only IR parses");
+
+        crate::model::validate::validate_ir(
+            &backfill,
+            crate::model::validate::Dialect::Postgres,
+            &[],
+        )
+        .expect("load-time validation defers a declaration from an earlier artifact");
+
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let error = author
+            .lower_steps(&backfill, &LiveSchema::default())
+            .expect_err("strict lower must reject missing logical metadata");
+        assert!(
+            error.to_string().contains("no logical column declaration"),
+            "got: {error}"
+        );
+
+        let mut live = LiveSchema::default();
+        live.tables.insert("orders".into());
+        live.advance_logical_columns(&declaration, SqlDialect::Postgres, "app", None)
+            .expect("the prior artifact advances the logical project schema");
+        let steps = author
+            .lower_steps(&backfill, &live)
+            .expect("the same backfill lowers with its declared TypeID contract");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(steps[0], PlanStep::Backfill { .. }));
+    }
+
+    fn logical_type_id_declaration(schema: Option<&str>) -> MigrationIr {
+        let mut create = serde_json::json!({
+            "op": "createTable",
+            "name": "orders",
+            "columns": [
+                { "name": "cursor", "type": "int", "nullable": false },
+                {
+                    "name": "public_id",
+                    "type": "text",
+                    "valueFormat": { "typeId": { "prefix": "order" } }
+                }
+            ],
+            "primaryKey": ["cursor"],
+            "constraints": [],
+            "indexes": []
+        });
+        if let Some(schema) = schema {
+            create["schema"] = serde_json::json!(schema);
+        }
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "declare_schema_bound_type_id",
+            "ops": [create]
+        }))
+        .expect("logical declaration IR parses")
+    }
+
+    fn logical_type_id_backfill(schema: Option<&str>) -> MigrationIr {
+        let mut backfill = serde_json::json!({
+            "op": "backfill",
+            "table": "orders",
+            "cursorColumn": "cursor",
+            "batchSize": 10,
+            "set": {
+                "public_id": { "perRow": { "typeId": { "prefix": "order" } } }
+            },
+            "name": "orders_public_id"
+        });
+        if let Some(schema) = schema {
+            backfill["schema"] = serde_json::json!(schema);
+        }
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "backfill_schema_bound_type_id",
+            "ops": [backfill]
+        }))
+        .expect("logical backfill IR parses")
+    }
+
+    #[test]
+    fn strict_per_row_resolution_never_wildcards_an_unqualified_schema() {
+        for (label, scope) in [
+            (
+                "platform",
+                crate::model::policy::SchemaScope::Allowlist(vec!["app".into(), "foreign".into()]),
+            ),
+            ("trusted", crate::model::policy::SchemaScope::Unconfined),
+        ] {
+            let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+                .with_schema_scope(scope.clone());
+
+            let mut foreign_declared = LiveSchema::default();
+            foreign_declared.tables.insert("orders".into());
+            foreign_declared
+                .advance_logical_columns(
+                    &logical_type_id_declaration(Some("foreign")),
+                    SqlDialect::Postgres,
+                    "app",
+                    None,
+                )
+                .expect("foreign declaration advances");
+            let error = author
+                .lower_steps(&logical_type_id_backfill(None), &foreign_declared)
+                .expect_err("an unqualified project backfill must not borrow a foreign contract");
+            assert!(
+                error.to_string().contains("no logical column declaration"),
+                "{label} foreign declaration -> project backfill: {error}"
+            );
+
+            let mut project_declared = LiveSchema::default();
+            project_declared.tables.insert("orders".into());
+            project_declared
+                .advance_logical_columns(
+                    &logical_type_id_declaration(None),
+                    SqlDialect::Postgres,
+                    "app",
+                    None,
+                )
+                .expect("project declaration advances");
+            let error = author
+                .lower_steps(
+                    &logical_type_id_backfill(Some("foreign")),
+                    &project_declared,
+                )
+                .expect_err("a foreign backfill must not borrow the project contract");
+            assert!(
+                error.to_string().contains("no logical column declaration"),
+                "{label} project declaration -> foreign backfill: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_per_row_resolution_honors_the_effective_default_schema() {
+        let mut live = LiveSchema::default();
+        live.tables.insert("orders".into());
+        live.advance_logical_columns(
+            &logical_type_id_declaration(None),
+            SqlDialect::Postgres,
+            "app",
+            Some("foreign"),
+        )
+        .expect("unqualified declaration resolves through the foreign default");
+
+        let steps = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
+                "app".into(),
+                "foreign".into(),
+            ]))
+            .with_default_schema(Some("foreign".into()))
+            .lower_steps(&logical_type_id_backfill(None), &live)
+            .expect("the same effective foreign schema resolves exactly");
+        let [PlanStep::Backfill { spec, .. }] = steps.as_slice() else {
+            panic!("expected one backfill step, got: {steps:?}");
+        };
+        assert_eq!(spec.schema, "foreign");
     }
 
     fn ulid_column(name: &str) -> TIrColumn {

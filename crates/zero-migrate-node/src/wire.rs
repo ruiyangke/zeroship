@@ -155,6 +155,11 @@ pub struct ApplyRequest {
     pub registry: std::collections::HashMap<String, String>,
     /// The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value.
     pub envelope: JsonValue,
+    /// Ordered authored envelopes that precede `envelope` in the project migration
+    /// set. Apply uses them only to reconstruct declared logical column contracts,
+    /// and accepts that metadata only after the corresponding plans are proven
+    /// fully applied in the journal.
+    pub prior_envelopes: Option<Vec<JsonValue>>,
     /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
     /// table-shape injection. The engine constructs NO default ceiling — `None`
     /// injects nothing (the author-owned shape passes through); the monorepo caller

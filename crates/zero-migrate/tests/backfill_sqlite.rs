@@ -111,6 +111,7 @@ fn spec(batch: u32) -> BackfillSpec {
         // (a row would land at val = id + 2). Filter to rows not yet done so the
         // exactly-once property is checkable.
         set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
+        per_row: Default::default(),
         filter: Some("\"done\" = 0".to_string()),
         name: "increment_val".to_string(),
     }
@@ -205,6 +206,7 @@ async fn sqlite_backfill_rolls_back_when_conflict_ignore_suppresses_a_selected_r
         cursor_column: "id".to_string(),
         batch_size: 2,
         set_clause: "\"unique_value\" = 0, \"done\" = 1".to_string(),
+        per_row: Default::default(),
         filter: Some("\"done\" = 0".to_string()),
         name: "conflict_ignore_must_not_skip_rows".to_string(),
     };
@@ -440,6 +442,7 @@ fn real_spec(batch: u32) -> BackfillSpec {
         cursor_column: "rk".to_string(),
         batch_size: batch,
         set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
+        per_row: Default::default(),
         filter: Some("\"done\" = 0".to_string()),
         name: "increment_real".to_string(),
     }
@@ -525,6 +528,7 @@ async fn sqlite_backfill_rejects_non_utf8_text_keys_before_mutation() {
         cursor_column: "k".into(),
         batch_size: 1,
         set_clause: "\"done\" = 1".into(),
+        per_row: Default::default(),
         filter: Some("\"done\" = 0".into()),
         name: "invalid_utf8".into(),
     };
@@ -562,6 +566,7 @@ async fn sqlite_backfill_text_key_with_nul_is_checkpointed_with_binds() {
         cursor_column: "k".into(),
         batch_size: 1,
         set_clause: "\"done\" = 1".into(),
+        per_row: Default::default(),
         filter: Some("\"done\" = 0".into()),
         name: "nul_text".into(),
     };
@@ -633,6 +638,7 @@ async fn sqlite_backfill_nocase_cursor_exactly_once() {
         cursor_column: "k".to_string(),
         batch_size: 2,
         set_clause: "\"val\" = (\"val\" + 1)".to_string(),
+        per_row: Default::default(),
         filter: None,
         name: "inc_nocase".to_string(),
     };

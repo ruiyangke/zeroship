@@ -61,6 +61,8 @@ export {
   t,
   // validated textual ID formats (storage + validation only)
   ids,
+  // apply-engine ID generators evaluated once for every backfilled row
+  perRow,
   // the shared `db` lexicon bridge: lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
@@ -96,6 +98,8 @@ export type {
   ColumnDef,
   TypeLexicon,
   IdFormats,
+  PerRowGeneratorValue,
+  PerRowGenerators,
   ExprBuilder,
   ExprChain,
   ExprFn,
@@ -182,6 +186,7 @@ export type {
   UpdateArgs,
   DelArgs,
   BackfillArgs,
+  BackfillSetValue,
   CreateViewArgs,
   DropViewArgs,
   ViewQueryBuilder,
@@ -213,6 +218,7 @@ export type {
   Classification,
   VectorMetric,
   ValueFormat,
+  PerRowGenerator,
   IdOptions,
   TypeIdOptions,
   TextOptions,

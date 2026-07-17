@@ -58,7 +58,8 @@
 //! against an incompatible cursor.
 
 use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry};
-use crate::model::backfill::BackfillSpec;
+use crate::model::backfill::{generate_per_row_value, BackfillSpec};
+use crate::model::ir::PerRowGenerator;
 use crate::model::migration::{Checksum, MigrationId};
 use crate::render::dml::sqlite_placeholder;
 
@@ -93,6 +94,36 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 /// already passed [`validate_ident`] so it has no `"`).
 fn quote_ident(ident: &str) -> String {
     crate::render::dml::escape_quote_ident(ident)
+}
+
+fn validate_per_row_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), BackfillError> {
+    if set_clause.trim().is_empty() && spec.per_row.is_empty() {
+        return Err(BackfillError::InvalidSpec(
+            "backfill set must not be empty".to_string(),
+        ));
+    }
+    for (column, assignment) in &spec.per_row {
+        let generator = assignment.generator();
+        validate_ident("per-row destination column", column)?;
+        if column.eq_ignore_ascii_case(&spec.cursor_column) {
+            return Err(BackfillError::CursorColumnMutated {
+                cursor_column: spec.cursor_column.clone(),
+            });
+        }
+        if !assignment.matches_target(&spec.schema, &spec.table, column) {
+            return Err(BackfillError::InvalidSpec(format!(
+                "per-row assignment for destination {column:?} was validated for a different target; regenerate the plan from the declared schema"
+            )));
+        }
+        if let PerRowGenerator::TypeId { prefix } = generator {
+            crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
+                BackfillError::InvalidSpec(format!(
+                    "invalid TypeID prefix for per-row destination {column:?}: {error}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// The two SQLite cursor domains whose values can be checkpointed and rebound
@@ -490,6 +521,50 @@ fn build_batch_sql(
     )
 }
 
+fn build_per_row_window_sql(
+    table_q: &str,
+    cursor_q: &str,
+    filter: Option<&str>,
+    have_cursor: bool,
+) -> String {
+    let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
+    let limit_ph = if have_cursor {
+        sqlite_placeholder(3)
+    } else {
+        sqlite_placeholder(2)
+    };
+    let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
+    format!(
+        "SELECT {cursor_q}, typeof({cursor_q}) FROM {table_q} \
+         WHERE {pred} ORDER BY {cursor_q} ASC LIMIT {limit_ph}"
+    )
+}
+
+fn build_per_row_update_sql(
+    table_q: &str,
+    cursor_q: &str,
+    set_clause: &str,
+    spec: &BackfillSpec,
+) -> String {
+    let mut assignments = Vec::with_capacity(spec.per_row.len() + 1);
+    if !set_clause.trim().is_empty() {
+        assignments.push(set_clause.to_string());
+    }
+    for (index, column) in spec.per_row.keys().enumerate() {
+        assignments.push(format!(
+            "{} = {}",
+            quote_ident(column),
+            sqlite_placeholder(index + 1)
+        ));
+    }
+    let cursor_placeholder = sqlite_placeholder(spec.per_row.len() + 1);
+    format!(
+        "UPDATE {table_q} SET {} WHERE {cursor_q} = {cursor_placeholder} \
+         RETURNING {cursor_q}",
+        assignments.join(", ")
+    )
+}
+
 /// Build the high-water-mark statement: `SELECT max(<cursor>), min(typeof(...)),
 /// max(typeof(...)), count(*) FROM (<the SAME window the UPDATE pages>)`. This is the
 /// SQLite analog of the PG executor's
@@ -565,6 +640,7 @@ pub(crate) async fn run_backfill_bounded(
     if spec.batch_size == 0 {
         return Err(BackfillError::InvalidBatchSize);
     }
+    validate_per_row_spec(spec, set_clause)?;
 
     // Gate 2: resolve the cursor column. It MUST exist, be the table's
     // single-column PRIMARY KEY, and be NOT NULL. SQLite UNIQUE indexes are not a
@@ -1145,6 +1221,8 @@ async fn run_one_batch(
     let have_cursor = last_cursor.is_some();
     let batch_sql = build_batch_sql(table_q, cursor_q, set_clause, filter, have_cursor);
     let window_max_sql = build_window_max_sql(table_q, cursor_q, filter, have_cursor);
+    let per_row_window_sql = build_per_row_window_sql(table_q, cursor_q, filter, have_cursor);
+    let per_row_update_sql = build_per_row_update_sql(table_q, cursor_q, set_clause, spec);
 
     // Rebind the committed cursor in the exact validated storage domain so
     // `cursor > ?` keeps the same comparison semantics across a resume.
@@ -1204,52 +1282,101 @@ async fn run_one_batch(
         // collation-consistent with the `ORDER BY <cursor>` / `<cursor> > ?1` paging
         // (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
         actor.set_mode(Mode::CreatorUp).await?;
-        let max_rows = actor.query_params(&window_max_sql, &binds).await?;
-        let max_row = max_rows.first().ok_or_else(|| {
-            SqliteActorError::Exec("backfill window aggregate returned no row".to_string())
-        })?;
-        let max_cursor = max_row
-            .first()
-            .and_then(|c| c.clone());
-        let min_class = max_row.get(1).and_then(|cell| cell.as_deref());
-        let max_class = max_row.get(2).and_then(|cell| cell.as_deref());
-        let selected_count = max_row
-            .get(3)
-            .and_then(|cell| cell.as_deref())
-            .ok_or_else(|| {
-                SqliteActorError::Exec(
-                    "backfill window aggregate returned no selected row count".to_string(),
-                )
-            })?
-            .parse::<u64>()
-            .map_err(|_| {
-                SqliteActorError::Exec(
-                    "backfill window aggregate returned an invalid selected row count".to_string(),
-                )
+        let (n, max_cursor) = if spec.per_row.is_empty() {
+            let max_rows = actor.query_params(&window_max_sql, &binds).await?;
+            let max_row = max_rows.first().ok_or_else(|| {
+                SqliteActorError::Exec("backfill window aggregate returned no row".to_string())
             })?;
-        let expected_class = cursor_kind.storage_class();
-        if (min_class.is_some() || max_class.is_some())
-            && (min_class != Some(expected_class) || max_class != Some(expected_class))
-        {
-            return Err(SqliteActorError::Exec(format!(
-                "backfill window contains cursor storage classes outside {expected_class:?}: min={min_class:?}, max={max_class:?}"
-            )));
-        }
+            let max_cursor = max_row.first().and_then(Clone::clone);
+            let min_class = max_row.get(1).and_then(|cell| cell.as_deref());
+            let max_class = max_row.get(2).and_then(|cell| cell.as_deref());
+            let selected_count = max_row
+                .get(3)
+                .and_then(|cell| cell.as_deref())
+                .ok_or_else(|| {
+                    SqliteActorError::Exec(
+                        "backfill window aggregate returned no selected row count".to_string(),
+                    )
+                })?
+                .parse::<u64>()
+                .map_err(|_| {
+                    SqliteActorError::Exec(
+                        "backfill window aggregate returned an invalid selected row count"
+                            .to_string(),
+                    )
+                })?;
+            let expected_class = cursor_kind.storage_class();
+            if (min_class.is_some() || max_class.is_some())
+                && (min_class != Some(expected_class) || max_class != Some(expected_class))
+            {
+                return Err(SqliteActorError::Exec(format!(
+                    "backfill window contains cursor storage classes outside {expected_class:?}: min={min_class:?}, max={max_class:?}"
+                )));
+            }
 
-        // 3. Run the batch UPDATE … RETURNING under the confined CreatorUp mode
-        // (denied from `_mig`, PRAGMA, txn boundaries, vtables). The cursor +
-        // limit are positional `?n` binds; the authored set/filter are inline.
-        // RETURNING the cursor yields the touched-row count (the loop's non-empty /
-        // tail signal); the resume cursor came from the SQL max above. SQLite can
-        // silently suppress an UPDATE for `ON CONFLICT IGNORE`, so the returned
-        // count must equal the pre-mutation selected count before progress advances.
-        let returned = actor.query_params(&batch_sql, &binds).await?;
-        let n = returned.len() as u64;
-        if n != selected_count {
-            return Err(SqliteActorError::Exec(format!(
-                "backfill window selected {selected_count} rows but updated {n}; a constraint conflict may have suppressed rows"
-            )));
-        }
+            // Keep the existing set-based statement as the fast path when no
+            // apply-engine generator is present.
+            let returned = actor.query_params(&batch_sql, &binds).await?;
+            let n = returned.len() as u64;
+            if n != selected_count {
+                return Err(SqliteActorError::Exec(format!(
+                    "backfill window selected {selected_count} rows but updated {n}; a constraint conflict may have suppressed rows"
+                )));
+            }
+            (n, max_cursor)
+        } else {
+            // Freeze the ordered key window before evaluating any generator. Each
+            // key is then updated independently, and every generator call happens
+            // inside this batch transaction immediately before its bound UPDATE.
+            let selected_rows = actor.query_params(&per_row_window_sql, &binds).await?;
+            let expected_class = cursor_kind.storage_class();
+            let mut selected = Vec::with_capacity(selected_rows.len());
+            for row in &selected_rows {
+                let cursor = row.first().and_then(Clone::clone).ok_or_else(|| {
+                    SqliteActorError::Exec(
+                        "per-row backfill window returned a null cursor".to_string(),
+                    )
+                })?;
+                let storage_class = row.get(1).and_then(|cell| cell.as_deref());
+                if storage_class != Some(expected_class) {
+                    return Err(SqliteActorError::Exec(format!(
+                        "per-row backfill window contains cursor storage class {storage_class:?}; expected {expected_class:?}"
+                    )));
+                }
+                selected.push(cursor);
+            }
+            let max_cursor = selected.last().cloned();
+            for selected_cursor in &selected {
+                let mut row_binds = spec
+                    .per_row
+                    .values()
+                    .map(|assignment| generate_per_row_value(assignment.generator()))
+                    .map(SqliteBind::Text)
+                    .collect::<Vec<_>>();
+                let selected_cursor_bind = match cursor_kind {
+                    CursorKind::Integer => selected_cursor
+                        .parse::<i64>()
+                        .map(SqliteBind::Int)
+                        .map_err(|_| {
+                            SqliteActorError::Exec(format!(
+                                "selected INTEGER cursor {selected_cursor:?} is not an exact i64"
+                            ))
+                        })?,
+                    CursorKind::Text => SqliteBind::Text(selected_cursor.clone()),
+                };
+                row_binds.push(selected_cursor_bind);
+                let returned = actor
+                    .query_params(&per_row_update_sql, &row_binds)
+                    .await?;
+                if returned.len() != 1 {
+                    return Err(SqliteActorError::Exec(format!(
+                        "per-row update at cursor {selected_cursor:?} affected {} rows; expected exactly one",
+                        returned.len()
+                    )));
+                }
+            }
+            (selected.len() as u64, max_cursor)
+        };
 
         if n > 0 {
             // 4. Advance progress IN THE SAME TRANSACTION (both-or-neither),
@@ -1412,6 +1539,47 @@ mod tests {
         assert!(resume.contains("LIMIT ?3"), "{resume}");
     }
 
+    #[test]
+    fn per_row_sql_has_only_bound_generator_and_cursor_values() {
+        let mut spec = test_spec("items", "id");
+        spec.set_clause.clear();
+        spec.per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "main",
+                "items",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+
+        let sql = build_per_row_update_sql("\"items\"", "\"id\"", "", &spec);
+        assert_eq!(
+            sql,
+            "UPDATE \"items\" SET \"generated\" = ?1 WHERE \"id\" = ?2 RETURNING \"id\""
+        );
+        assert!(!sql.contains("01J"), "no sampled literal belongs in SQL");
+    }
+
+    #[test]
+    fn per_row_assignment_cannot_be_retargeted() {
+        let mut spec = test_spec("items", "id");
+        spec.set_clause.clear();
+        spec.per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "main",
+                "other_items",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+        let error = validate_per_row_spec(&spec, "").expect_err("retargeted token must fail");
+        assert!(
+            matches!(error, BackfillError::InvalidSpec(message) if message.contains("validated for a different target"))
+        );
+    }
+
     fn test_spec(table: &str, cursor: &str) -> BackfillSpec {
         BackfillSpec {
             schema: "main".to_string(),
@@ -1419,6 +1587,7 @@ mod tests {
             cursor_column: cursor.to_string(),
             batch_size: 2,
             set_clause: "\"value\" = (\"value\" + 1)".to_string(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: format!("fill_{table}"),
         }
@@ -1666,6 +1835,61 @@ mod tests {
             .await
             .expect("verify rows");
         assert_eq!(rows[0][0].as_deref(), Some("3"));
+    }
+
+    #[compio::test]
+    async fn per_row_generator_is_evaluated_for_every_selected_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let actor = MigrationActor::open(
+            &dir.path().join("app.sqlite"),
+            &dir.path().join("journal.sqlite"),
+        )
+        .expect("open actor");
+        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+        actor
+            .exec(
+                "CREATE TABLE generated_items (\
+                    id INTEGER PRIMARY KEY, generated TEXT\
+                 ); \
+                 INSERT INTO generated_items (id) VALUES (1), (2), (3), (4), (5)",
+            )
+            .await
+            .expect("seed target rows");
+
+        let mut spec = test_spec("generated_items", "id");
+        spec.batch_size = 2;
+        spec.set_clause.clear();
+        spec.per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "main",
+                "generated_items",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+        let outcome = run_backfill_bounded(&actor, &spec, "", None, "tester", None, None)
+            .await
+            .expect("per-row backfill");
+        assert_eq!(outcome.rows_updated, 5);
+        assert_eq!(outcome.batches, 3);
+
+        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+        let rows = actor
+            .query("SELECT generated FROM generated_items ORDER BY id")
+            .await
+            .expect("read generated values");
+        let values = rows
+            .iter()
+            .map(|row| row[0].clone().expect("generated value"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(values.len(), 5, "one literal must never be reused");
+        assert!(values.iter().all(|value| {
+            value.len() == 26
+                && value
+                    .bytes()
+                    .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
+        }));
     }
 
     #[compio::test]

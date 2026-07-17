@@ -34,6 +34,7 @@ import type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PerRowGenerator,
   PgExtractField,
   PolicyCmd,
   RaiseLevel,
@@ -72,6 +73,7 @@ export type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PerRowGenerator,
   PgExtractField,
   Classification,
   RaiseLevel,
@@ -117,6 +119,24 @@ export interface TypeIdOptions {
 export interface IdFormats {
   typeId(options: TypeIdOptions): ColumnDef;
   ulid(): ColumnDef;
+}
+
+declare const perRowGeneratorBrand: unique symbol;
+
+/** An apply-engine generator intent. It is accepted only as a value in
+ * `backfill({ set })`; it is not a scalar, SQL expression, column default, or
+ * application-runtime ID generator. */
+export interface PerRowGeneratorValue {
+  readonly [perRowGeneratorBrand]: "perRowGenerator";
+}
+
+/** Apply-engine generators evaluated independently for every affected row of a
+ * migration backfill. */
+export interface PerRowGenerators {
+  uuidV4(): PerRowGeneratorValue;
+  uuidV7(): PerRowGeneratorValue;
+  typeId(options: TypeIdOptions): PerRowGeneratorValue;
+  ulid(): PerRowGeneratorValue;
 }
 
 /** Options for `t.text({ caseSensitive })`. `false` records the portable
@@ -512,6 +532,11 @@ export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
  *  plus the `(col) => Expr` callback shorthand. */
 export type DmlSetValue = DmlValue | ExprFn;
 
+/** A backfill assignment additionally admits an apply-engine per-row generator.
+ * Ordinary insert/update/default positions intentionally keep their narrower
+ * value types. */
+export type BackfillSetValue = DmlSetValue | PerRowGeneratorValue;
+
 /** Expression-position dialect legs. Missing own leg with no default is refused
  *  by the engine for that target. */
 export type DialectExprLegs = {
@@ -827,7 +852,7 @@ export interface DelArgs {
 }
 
 export interface BackfillArgs {
-  set: Record<string, DmlSetValue>;
+  set: Record<string, BackfillSetValue>;
   where?: ExprFn | ExprChain | Expr;
   /** Defaults to the single-column PK (`"id"`). */
   cursorColumn?: string;

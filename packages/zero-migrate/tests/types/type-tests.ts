@@ -27,6 +27,7 @@ import {
   dbType as dbT,
   fromDb,
   ids,
+  perRow,
   t,
   table,
   view,
@@ -48,7 +49,11 @@ import {
   type CheckDef,
   type DbFieldType,
   type Int64Value,
+  type BackfillSetValue,
   type IdFormats,
+  type PerRowGenerator,
+  type PerRowGeneratorValue,
+  type PerRowGenerators,
   type TypeIdOptions,
   type ValueFormat,
   type DecimalValue,
@@ -689,6 +694,50 @@ export function insertValueShapes(): void {
 
   // @ts-expect-error — column defaults reject clearly wrong function return shapes.
   table("users").create({ columns: { bad: t.json().default(() => ({ nope: true })) } });
+}
+
+export function perRowGeneratorShapes(): void {
+  const generators: PerRowGenerators = perRow;
+  const intent: PerRowGeneratorValue = generators.uuidV7();
+  const setValue: BackfillSetValue = intent;
+  const wireGenerator: PerRowGenerator = { typeId: { prefix: "order" } };
+
+  table("orders").backfill({
+    set: {
+      uuid_v4: generators.uuidV4(),
+      uuid_v7: intent,
+      type_id: generators.typeId({ prefix: "order" }),
+      ulid: generators.ulid(),
+      database_uuid: uuidV4(),
+    },
+  });
+  void setValue;
+  void wireGenerator;
+
+  // @ts-expect-error — perRow values are apply-engine intents, not insert values.
+  table("orders").insert({ rows: { public_id: intent } });
+
+  // @ts-expect-error — perRow values are valid only in backfill({ set }).
+  table("orders").update({ set: { public_id: intent } });
+
+  // @ts-expect-error — perRow values are not column defaults.
+  table("orders").create({ columns: { public_id: t.uuid().default(intent) } });
+
+  // @ts-expect-error — perRow values are not column definitions.
+  table("orders").create({ columns: { public_id: intent } });
+
+  // @ts-expect-error — perRow does not expose an application-runtime UUID string.
+  const generatedUuid: string = generators.uuidV4();
+  void generatedUuid;
+
+  // @ts-expect-error — TypeID options are required.
+  generators.typeId();
+
+  // @ts-expect-error — a TypeID prefix is text.
+  generators.typeId({ prefix: 42 });
+
+  // @ts-expect-error — perRow.ulid takes no options.
+  generators.ulid({});
 }
 
 export function int64ValueShapes(): void {

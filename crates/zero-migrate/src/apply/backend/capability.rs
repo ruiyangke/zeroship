@@ -58,6 +58,9 @@ pub enum BackfillError {
         /// The offending value.
         value: String,
     },
+    /// A structured backfill specification is internally inconsistent.
+    #[error("invalid backfill specification: {0}")]
+    InvalidSpec(String),
     /// [`BackfillSpec::batch_size`] was zero.
     #[error("batch_size must be non-zero")]
     InvalidBatchSize,

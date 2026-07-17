@@ -214,9 +214,24 @@ export type Expr =
   // is skipped on the wire. Scope math is validated per-target by the engine.
   | { node: "dialect"; default?: Expr | null; pg?: Expr | null; sqlite?: Expr | null; mysql?: Expr | null };
 
-/** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
- *  literal or a closed expression AST such as `fnSynth(now)`. */
+/** A DML cell in an insert row, ordinary update, trigger update, or
+ *  `onConflict.doUpdate`: either a typed scalar literal or a closed expression
+ *  AST such as `fnSynth(now)`. */
 export type IrValue = IrScalar | Expr;
+
+/** An apply-engine generator evaluated independently for every affected row of
+ *  a migration backfill. Unit variants use their canonical camelCase strings;
+ *  TypeID carries its exact stored prefix. */
+export type PerRowGenerator =
+  | "uuidV4"
+  | "uuidV7"
+  | { typeId: { prefix: string } }
+  | "ulid";
+
+/** A backfill assignment is either an ordinary DML value or an explicitly
+ *  wrapped apply-engine generator. The wrapper keeps per-row authority distinct
+ *  from database SQL expressions such as `{ node: "uuidV4" }`. */
+export type BackfillSetValue = IrValue | { perRow: PerRowGenerator };
 
 /** One `(when, then)` branch of an `Expr` `case`. */
 export interface CaseBranch {
@@ -525,7 +540,7 @@ export type Op =
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: IrValue }; filter?: Expr | null; name: string; schema?: string | null }
+  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: BackfillSetValue }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "dialectal"; default?: Op[] | null; pg?: Op[] | null; sqlite?: Op[] | null; mysql?: Op[] | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }

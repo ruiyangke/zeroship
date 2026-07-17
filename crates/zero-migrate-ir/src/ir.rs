@@ -507,6 +507,28 @@ pub enum ValueFormat {
     Ulid,
 }
 
+/// Apply-engine value generation evaluated independently for every row selected
+/// by a batched backfill.
+///
+/// This vocabulary is deliberately separate from [`Expr`]'s database-side UUID
+/// expression variants. It is accepted only through [`BackfillSetValue`], never
+/// as an insert/update value or column default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum PerRowGenerator {
+    /// Generate an RFC 9562 UUID version 4 in the apply engine.
+    UuidV4,
+    /// Generate an RFC 9562 UUID version 7 in the apply engine.
+    UuidV7,
+    /// Generate a canonical TypeID whose suffix encodes a UUID version 7.
+    TypeId {
+        /// Stored TypeID prefix, without the separator underscore.
+        prefix: String,
+    },
+    /// Generate a canonical uppercase ULID.
+    Ulid,
+}
+
 /// Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema
 /// enumerates exactly the supported types and the lowering is a total
 /// match. Camel-cased on the wire (`"int"`, `"bigInt"`, `"geoPoint"`, …).
@@ -3050,8 +3072,8 @@ pub enum Op {
         cursor_column: String,
         /// Rows per batch (JS-safe-integer bounded).
         batch_size: SafeU64,
-        /// Column → typed scalar or closed-AST assignment.
-        set: BTreeMap<String, IrValue>,
+        /// Column → ordinary DML value or apply-engine per-row generator.
+        set: BTreeMap<String, BackfillSetValue>,
         /// Optional row filter (closed AST).
         #[serde(skip_serializing_if = "Option::is_none")]
         filter: Option<Expr>,
@@ -4277,6 +4299,37 @@ pub enum IrValue {
     /// A closed expression AST. This admits DB-evaluated synth scalars without
     /// opening a raw SQL path.
     Expr(Expr),
+}
+
+/// A value accepted specifically by `backfill.set`.
+///
+/// Ordinary DML values preserve their existing scalar/expression wire image.
+/// The apply-engine generator arm is an explicit `{ "perRow": ... }` wrapper,
+/// which prevents it from being confused with either a literal or a database
+/// UUID expression.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum BackfillSetValue {
+    /// An ordinary typed scalar or closed database expression.
+    Value(IrValue),
+    /// An apply-engine generator evaluated once for each affected row.
+    PerRow {
+        /// The exact generator contract.
+        #[serde(rename = "perRow")]
+        per_row: PerRowGenerator,
+    },
+}
+
+impl From<IrValue> for BackfillSetValue {
+    fn from(value: IrValue) -> Self {
+        Self::Value(value)
+    }
+}
+
+impl From<PerRowGenerator> for BackfillSetValue {
+    fn from(per_row: PerRowGenerator) -> Self {
+        Self::PerRow { per_row }
+    }
 }
 
 impl From<IrScalar> for IrValue {

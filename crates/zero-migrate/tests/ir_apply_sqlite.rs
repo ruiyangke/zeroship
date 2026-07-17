@@ -68,6 +68,86 @@ fn no_inject_envelope_json(raw: &str) -> String {
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
+fn assert_exact_uuid(value: &str, version: u8) {
+    let bytes = value.as_bytes();
+    assert_eq!(bytes.len(), 36, "canonical UUID length: {value}");
+    for separator in [8, 13, 18, 23] {
+        assert_eq!(bytes[separator], b'-', "canonical UUID separators: {value}");
+    }
+    assert_eq!(
+        bytes[14],
+        b'0' + version,
+        "UUID version bits must identify version {version}: {value}"
+    );
+    assert!(
+        matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+        "UUID variant bits must be RFC 9562: {value}"
+    );
+    assert_eq!(value, value.to_ascii_lowercase(), "UUID must be lowercase");
+    assert!(
+        bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                || byte.is_ascii_digit()
+                || matches!(byte, b'a'..=b'f')
+        }),
+        "UUID must contain only lowercase hexadecimal digits and separators: {value}"
+    );
+}
+
+fn crockford_value(byte: u8, uppercase: bool) -> Option<u8> {
+    let alphabet = if uppercase {
+        b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".as_slice()
+    } else {
+        b"0123456789abcdefghjkmnpqrstvwxyz".as_slice()
+    };
+    alphabet
+        .iter()
+        .position(|candidate| *candidate == byte)
+        .map(|index| index as u8)
+}
+
+fn assert_canonical_crockford(value: &str, uppercase: bool) -> u128 {
+    let bytes = value.as_bytes();
+    assert_eq!(bytes.len(), 26, "canonical Crockford length: {value}");
+    let first = crockford_value(bytes[0], uppercase)
+        .unwrap_or_else(|| panic!("invalid Crockford character in {value}"));
+    assert!(
+        first <= 7,
+        "128-bit Crockford value must begin at most 7: {value}"
+    );
+
+    bytes[1..].iter().fold(first as u128, |decoded, byte| {
+        let digit = crockford_value(*byte, uppercase)
+            .unwrap_or_else(|| panic!("invalid Crockford character in {value}"));
+        (decoded << 5) | u128::from(digit)
+    })
+}
+
+fn assert_exact_type_id(value: &str, prefix: &str) {
+    let suffix = if prefix.is_empty() {
+        value
+    } else {
+        value
+            .strip_prefix(&format!("{prefix}_"))
+            .unwrap_or_else(|| panic!("TypeID must preserve prefix {prefix:?}: {value}"))
+    };
+    let decoded = assert_canonical_crockford(suffix, false).to_be_bytes();
+    assert_eq!(
+        decoded[6] >> 4,
+        7,
+        "TypeID suffix must encode UUIDv7: {value}"
+    );
+    assert_eq!(
+        decoded[8] & 0xc0,
+        0x80,
+        "TypeID suffix must encode the RFC UUID variant: {value}"
+    );
+}
+
+fn assert_exact_ulid(value: &str) {
+    let _ = assert_canonical_crockford(value, true);
+}
+
 // Happy path: a valid IR envelope createTable is gated (SQLite dialect), lowered,
 // and APPLIED on a real SQLite backend — the table exists + journals.
 #[compio::test]
@@ -116,6 +196,196 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
         rows.len(),
         1,
         "the IR-created 'notes' table must exist on SQLite"
+    );
+}
+
+#[compio::test]
+async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
+    let p = paths("per_row_generators");
+    let be = backend(&p);
+    let ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_per_row_generators","ops":[
+          {"op":"createTable","name":"samples","columns":[
+            {"name":"id","type":"bigInt","nullable":false},
+            {"name":"uuid4","type":"uuid"},
+            {"name":"uuid7","type":"uuid"},
+            {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
+            {"name":"ulid","type":"text","valueFormat":"ulid"}
+          ],"primaryKey":["id"]},
+          {"op":"insert","table":"samples","columns":["id"],
+           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
+          {"op":"backfill","table":"samples","name":"fill_per_row_ids",
+           "cursorColumn":"id","batchSize":2,"set":{
+             "uuid4":{"perRow":"uuidV4"},
+             "uuid7":{"perRow":"uuidV7"},
+             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
+             "ulid":{"perRow":"ulid"}
+           }}
+        ]}"#,
+    );
+    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[]),
+            &LiveSchema::default(),
+            &GuardConfig::confined_sqlite(PROJECT.to_string()),
+        )
+        .expect("declared perRow destination formats must lower on SQLite");
+
+    MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "sqlite-per-row-generator-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("perRow generators apply on SQLite");
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter read mode");
+    let rows = be
+        .actor()
+        .query("SELECT uuid4, uuid7, type_id, ulid FROM samples ORDER BY id")
+        .await
+        .expect("read generated values");
+    assert_eq!(rows.len(), 8);
+
+    let mut distinct = [
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    ];
+    for row in &rows {
+        let uuid4 = row[0].as_deref().expect("uuid4 is populated");
+        let uuid7 = row[1].as_deref().expect("uuid7 is populated");
+        let type_id = row[2].as_deref().expect("TypeID is populated");
+        let ulid = row[3].as_deref().expect("ULID is populated");
+        assert_exact_uuid(uuid4, 4);
+        assert_exact_uuid(uuid7, 7);
+        assert_exact_type_id(type_id, "order");
+        assert_exact_ulid(ulid);
+        distinct[0].insert(uuid4.to_string());
+        distinct[1].insert(uuid7.to_string());
+        distinct[2].insert(type_id.to_string());
+        distinct[3].insert(ulid.to_string());
+    }
+    for values in distinct {
+        assert_eq!(
+            values.len(),
+            rows.len(),
+            "an apply-engine generator must never reuse one build-time or batch literal"
+        );
+    }
+}
+
+#[compio::test]
+async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
+    let p = paths("per_row_destination_validation");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec(
+            "CREATE TABLE guarded_items (id INTEGER PRIMARY KEY, generated TEXT); \
+             INSERT INTO guarded_items (id, generated) VALUES (1, 'unchanged')",
+        )
+        .await
+        .expect("seed validation sentinel");
+
+    let cases = [
+        (
+            "TypeID prefix mismatch",
+            serde_json::json!({
+                "name": "generated",
+                "type": "text",
+                "valueFormat": { "typeId": { "prefix": "declared" } }
+            }),
+            serde_json::json!({ "perRow": { "typeId": { "prefix": "requested" } } }),
+            "stored prefix \"declared\"",
+            "declared stored prefix is exactly \"requested\"",
+        ),
+        (
+            "TypeID on generic text",
+            serde_json::json!({ "name": "generated", "type": "text" }),
+            serde_json::json!({ "perRow": { "typeId": { "prefix": "order" } } }),
+            "perRow.typeId",
+            "generic text with no value-format contract",
+        ),
+        (
+            "ULID on generic text",
+            serde_json::json!({ "name": "generated", "type": "text" }),
+            serde_json::json!({ "perRow": "ulid" }),
+            "perRow.ulid",
+            "generic text with no value-format contract",
+        ),
+        (
+            "UUIDv4 on generic text",
+            serde_json::json!({ "name": "generated", "type": "text" }),
+            serde_json::json!({ "perRow": "uuidV4" }),
+            "perRow.uuidV4",
+            "logical UUID column",
+        ),
+    ];
+
+    for (label, generated_column, generator, expected_a, expected_b) in cases {
+        let raw = serde_json::json!({
+            "ir_version": 1,
+            "name": format!("reject_{}", label.replace(' ', "_")),
+            "ops": [
+                {
+                    "op": "createTable",
+                    "name": "guarded_items",
+                    "columns": [
+                        { "name": "id", "type": "bigInt", "nullable": false },
+                        generated_column
+                    ],
+                    "primaryKey": ["id"]
+                },
+                {
+                    "op": "backfill",
+                    "table": "guarded_items",
+                    "name": "invalid_per_row_destination",
+                    "cursorColumn": "id",
+                    "batchSize": 1,
+                    "set": { "generated": generator }
+                }
+            ]
+        });
+        let ir = no_inject_envelope_json(&raw.to_string());
+        let error = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+            .load_and_lower_guarded(
+                &ir,
+                APP,
+                &registry(&[]),
+                &LiveSchema::default(),
+                &GuardConfig::confined_sqlite(PROJECT.to_string()),
+            )
+            .expect_err(label);
+        let message = error.to_string();
+        assert!(
+            message.contains(expected_a) && message.contains(expected_b),
+            "{label} must fail with the declared destination contract, got: {message}"
+        );
+    }
+
+    let rows = be
+        .actor()
+        .query("SELECT id, generated FROM guarded_items")
+        .await
+        .expect("read validation sentinel");
+    assert_eq!(
+        rows,
+        vec![vec![Some("1".into()), Some("unchanged".into())]],
+        "destination validation must finish before a first batch can mutate any row"
     );
 }
 

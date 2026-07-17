@@ -12,6 +12,8 @@ use crate::apply::executor::ApplyError;
 use crate::apply::journal::{CompletedRecord, EventKind, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, Row, SqlSession};
+use crate::model::backfill::generate_per_row_value;
+use crate::model::ir::PerRowGenerator;
 use crate::model::migration::{Checksum, MigrationId};
 
 use super::{journal_sql, session};
@@ -167,12 +169,36 @@ fn validate_spec(spec: &BackfillSpec) -> Result<(), ApplyError> {
             "mysql backfill: batch_size must be non-zero".to_string(),
         ));
     }
-    if spec.set_clause.trim().is_empty() {
+    if spec.set_clause.trim().is_empty() && spec.per_row.is_empty() {
         return Err(ApplyError::Backend(
-            "mysql backfill: set clause must not be empty".to_string(),
+            "mysql backfill: backfill set must not be empty".to_string(),
         ));
     }
-    assert_cursor_not_mutated(&spec.set_clause, &spec.cursor_column)?;
+    if !spec.set_clause.trim().is_empty() {
+        assert_cursor_not_mutated(&spec.set_clause, &spec.cursor_column)?;
+    }
+    for (column, assignment) in &spec.per_row {
+        let generator = assignment.generator();
+        quote_bare("per-row destination column", column)?;
+        if column.eq_ignore_ascii_case(&spec.cursor_column) {
+            return Err(ApplyError::Backend(format!(
+                "mysql backfill: per-row generator assigns cursor column {:?}; page on an immutable key",
+                spec.cursor_column
+            )));
+        }
+        if !assignment.matches_target(&spec.schema, &spec.table, column) {
+            return Err(ApplyError::Backend(format!(
+                "mysql backfill: per-row assignment for destination {column:?} was validated for a different target; regenerate the plan from the declared schema"
+            )));
+        }
+        if let PerRowGenerator::TypeId { prefix } = generator {
+            crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
+                ApplyError::Backend(format!(
+                    "mysql backfill: invalid TypeID prefix for per-row destination {column:?}: {error}"
+                ))
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -940,6 +966,29 @@ fn window_binds(last_cursor: Option<&str>, end_cursor: &str, batch_size: u32) ->
     binds
 }
 
+fn build_per_row_update_sql(
+    qualified_table: &str,
+    cursor_q: &str,
+    cursor_type: &CursorType,
+    spec: &BackfillSpec,
+) -> Result<String, ApplyError> {
+    let mut assignments = Vec::with_capacity(spec.per_row.len() + 1);
+    if !spec.set_clause.trim().is_empty() {
+        assignments.push(spec.set_clause.clone());
+    }
+    for column in spec.per_row.keys() {
+        assignments.push(format!(
+            "{} = ?",
+            quote_bare("per-row destination column", column)?
+        ));
+    }
+    Ok(format!(
+        "UPDATE {qualified_table} SET {} WHERE {cursor_q} = {}",
+        assignments.join(", "),
+        cursor_type.bind_expression
+    ))
+}
+
 /// Open the target table and validate every catalog fact the backfill relies on
 /// while the transaction retains that table's metadata lock. Each batch calls
 /// this independently because MySQL releases metadata locks at batch COMMIT.
@@ -1044,18 +1093,42 @@ async fn run_one_batch_inner<D: SqlSession>(
         return Ok(selected);
     }
 
-    let placeholders = vec![cursor_type.bind_expression.as_str(); selected.len()].join(", ");
-    let update_sql = format!(
-        "UPDATE {qualified_table} SET {} WHERE {cursor_q} IN ({placeholders})",
-        spec.set_clause
-    );
-    let selected_binds = selected.iter().cloned().map(Bind::Text).collect::<Vec<_>>();
-    conn.exec(&update_sql, &selected_binds)
-        .await
-        .map_err(|error| ApplyError::MigrationFailed {
-            version: spec.name.clone(),
-            source: error.into(),
-        })?;
+    if spec.per_row.is_empty() {
+        let placeholders = vec![cursor_type.bind_expression.as_str(); selected.len()].join(", ");
+        let update_sql = format!(
+            "UPDATE {qualified_table} SET {} WHERE {cursor_q} IN ({placeholders})",
+            spec.set_clause
+        );
+        let selected_binds = selected.iter().cloned().map(Bind::Text).collect::<Vec<_>>();
+        conn.exec(&update_sql, &selected_binds)
+            .await
+            .map_err(|error| ApplyError::MigrationFailed {
+                version: spec.name.clone(),
+                source: error.into(),
+            })?;
+    } else {
+        let update_sql = build_per_row_update_sql(qualified_table, cursor_q, cursor_type, spec)?;
+        for selected_cursor in &selected {
+            let mut row_binds = spec
+                .per_row
+                .values()
+                .map(|assignment| generate_per_row_value(assignment.generator()))
+                .map(Bind::Text)
+                .collect::<Vec<_>>();
+            row_binds.push(Bind::Text(selected_cursor.clone()));
+            let affected = conn.exec(&update_sql, &row_binds).await.map_err(|error| {
+                ApplyError::MigrationFailed {
+                    version: spec.name.clone(),
+                    source: error.into(),
+                }
+            })?;
+            if affected != 1 {
+                return Err(ApplyError::Backend(format!(
+                    "mysql backfill: per-row update at cursor {selected_cursor:?} affected {affected} rows; expected exactly one"
+                )));
+            }
+        }
+    }
 
     let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
     let last = selected
@@ -1420,6 +1493,67 @@ mod tests {
     }
 
     #[test]
+    fn per_row_update_contains_placeholders_not_sampled_values() {
+        let mut per_row = std::collections::BTreeMap::new();
+        per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "users",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+        let spec = BackfillSpec {
+            schema: "app".into(),
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: 3,
+            set_clause: String::new(),
+            per_row,
+            filter: None,
+            name: "generate ids".into(),
+        };
+        let cursor_type = CursorType {
+            bind_expression: "CAST(? AS SIGNED)".into(),
+        };
+        let sql = build_per_row_update_sql("`app`.`users`", "`id`", &cursor_type, &spec).unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE `app`.`users` SET `generated` = ? WHERE `id` = CAST(? AS SIGNED)"
+        );
+        assert!(!sql.contains("01J"), "no sampled ULID belongs in SQL");
+    }
+
+    #[test]
+    fn per_row_assignment_cannot_be_retargeted() {
+        let mut per_row = std::collections::BTreeMap::new();
+        per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "other_users",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+        let spec = BackfillSpec {
+            schema: "app".into(),
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: 3,
+            set_clause: String::new(),
+            per_row,
+            filter: None,
+            name: "generate ids".into(),
+        };
+        let error = validate_spec(&spec).expect_err("retargeted token must fail");
+        assert!(error
+            .to_string()
+            .contains("validated for a different target"));
+    }
+
+    #[test]
     fn unsafe_cursor_types_fail_closed() {
         for ty in ["float", "double", "json", "blob", "geometry", "enum"] {
             assert!(!cursor_type_is_orderable(ty), "{ty} must be rejected");
@@ -1441,6 +1575,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: Some("`done` = FALSE".into()),
             name: "finish users".into(),
         };
@@ -1593,6 +1728,68 @@ mod tests {
     }
 
     #[compio::test]
+    async fn per_row_batch_binds_a_fresh_value_for_each_selected_key() {
+        let rec = RecordingSession::new();
+        let cfg = ExecutorConfig::new("prj_x", "app");
+        let version = MigrationId::derive("mysql-backfill-test", b"per-row-users");
+        let checksum = checksum("per-row backfill artifact");
+        let mut per_row = std::collections::BTreeMap::new();
+        per_row.insert(
+            "generated".into(),
+            crate::model::backfill::PerRowAssignment::validated(
+                "app",
+                "users",
+                "generated",
+                PerRowGenerator::Ulid,
+            ),
+        );
+        let spec = BackfillSpec {
+            schema: "app".into(),
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: 3,
+            set_clause: String::new(),
+            per_row,
+            filter: None,
+            name: "generate ids".into(),
+        };
+
+        let outcome = run_backfill(&rec, &cfg, &version, &checksum, &spec, "tester")
+            .await
+            .expect("per-row backfill runs");
+        assert_eq!(outcome.rows_updated, 2);
+
+        let generated = rec
+            .binds
+            .borrow()
+            .iter()
+            .filter_map(|params| match params.as_slice() {
+                [Bind::Text(value), Bind::Text(cursor)]
+                    if value.len() == 26 && (cursor == "1" || cursor == "2") =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(generated.len(), 2, "one literal must never be reused");
+        assert!(generated.iter().all(|value| value
+            .bytes()
+            .all(|byte| { b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte) })));
+        assert_eq!(
+            rec.log
+                .borrow()
+                .iter()
+                .filter(|entry| {
+                    entry.starts_with("exec: UPDATE `app`.`users` SET `generated` = ?")
+                })
+                .count(),
+            2,
+            "one bound UPDATE per selected row"
+        );
+    }
+
+    #[compio::test]
     async fn progress_checksum_mismatch_aborts_before_cursor_or_target_io() {
         let version = MigrationId::derive("mysql-backfill-test", b"stable-step");
         let recorded = checksum("old backfill artifact");
@@ -1605,6 +1802,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };
@@ -1643,6 +1841,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };
@@ -1674,6 +1873,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };
@@ -1709,6 +1909,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: Some("`done` = FALSE".into()),
             name: "finish users".into(),
         };
@@ -1744,6 +1945,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };
@@ -1785,6 +1987,7 @@ mod tests {
             cursor_column: "id".into(),
             batch_size: 3,
             set_clause: "`done` = TRUE".into(),
+            per_row: std::collections::BTreeMap::new(),
             filter: None,
             name: "finish users".into(),
         };

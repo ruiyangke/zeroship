@@ -26,6 +26,7 @@ var NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
 var INT64_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.int64/v1");
 var DECIMAL_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.decimal/v1");
 var BYTES_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.bytes/v1");
+var PER_ROW_GENERATOR_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.perRowGenerator/v1");
 var INT64_STRING_RE = /^(?:0|-?[1-9][0-9]*)$/;
 var INT64_MIN = -(1n << 63n);
 var INT64_MAX = (1n << 63n) - 1n;
@@ -276,12 +277,12 @@ function requirePlainObject(v, what) {
     throw structuredError("OP_INVALID", `${what} must be an object`);
   }
 }
-function requireTypeIdPrefix(v) {
-  requireString(v, "ids.typeId({ prefix })");
+function requireTypeIdPrefix(v, what = "ids.typeId({ prefix })") {
+  requireString(v, what);
   if (v.length > 63 || v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v)) {
     throw structuredError(
       "OP_INVALID",
-      "ids.typeId({ prefix }): prefix must be empty or at most 63 lowercase ASCII letters/underscores beginning and ending with a letter",
+      `${what}: prefix must be empty or at most 63 lowercase ASCII letters/underscores beginning and ending with a letter`,
       { prefix: v }
     );
   }
@@ -592,6 +593,48 @@ function isDecimalValue(value) {
 function isBytesValue(value) {
   return value !== null && typeof value === "object" && value[BYTES_VALUE_BRAND] === true && typeof value.bytes === "string";
 }
+function isPerRowGenerator(generator) {
+  if (generator === "uuidV4" || generator === "uuidV7" || generator === "ulid") {
+    return true;
+  }
+  if (!isPlainObject(generator)) return false;
+  const keys = Object.keys(generator);
+  if (keys.length !== 1 || keys[0] !== "typeId" || !isPlainObject(generator.typeId)) {
+    return false;
+  }
+  const typeIdKeys = Object.keys(generator.typeId);
+  return typeIdKeys.length === 1 && typeIdKeys[0] === "prefix" && typeof generator.typeId.prefix === "string";
+}
+function perRowGeneratorOf(value) {
+  if (value === null || typeof value !== "object") return void 0;
+  const generator = value[PER_ROW_GENERATOR_BRAND];
+  return isPerRowGenerator(generator) ? generator : void 0;
+}
+function perRowGeneratorValue(generator) {
+  return Object.freeze({
+    [PER_ROW_GENERATOR_BRAND]: generator
+  });
+}
+function rejectPerRowGeneratorValue(value) {
+  if (perRowGeneratorOf(value) !== void 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "perRow.* values are valid only inside backfill({ set }); they are not scalar values, SQL expressions, or column defaults"
+    );
+  }
+}
+function rejectNestedPerRowGeneratorValues(value, seen = /* @__PURE__ */ new WeakSet()) {
+  rejectPerRowGeneratorValue(value);
+  if (value === null || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor !== void 0 && "value" in descriptor) {
+      rejectNestedPerRowGeneratorValues(descriptor.value, seen);
+    }
+  }
+}
 function isRemovedDecimalCarrier(value) {
   if (!isPlainObject(value) || isDecimalValue(value)) return false;
   const keys = Object.keys(value);
@@ -608,6 +651,7 @@ function isRemovedBytesCarrier(value) {
   return keys.length === 1 && keys[0] === "bytes" && typeof value.bytes === "string";
 }
 function rejectNestedFunctionValues(value) {
+  rejectPerRowGeneratorValue(value);
   rejectFunctionValue(value);
   if (Array.isArray(value)) {
     for (const item of value) rejectNestedFunctionValues(item);
@@ -689,6 +733,7 @@ function toIrScalar(value) {
   );
 }
 function toIrValue(value) {
+  rejectNestedPerRowGeneratorValues(value);
   const synth = nativeDbExprNode(value);
   if (synth !== void 0) return synth;
   rejectFunctionValue(value);
@@ -699,6 +744,7 @@ function toIrValue(value) {
 var JSON_DEFAULT_INTEGER_ERROR = "json default values support integers only (floats not yet supported)";
 var JSON_DEFAULT_VALUE_ERROR = "json default values must be JSON values (null, boolean, integer, string, array, or object)";
 function toIrJsonValue(value) {
+  rejectPerRowGeneratorValue(value);
   rejectFunctionValue(value);
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -783,6 +829,7 @@ function resolveDefaultExpr(slot) {
   return exprArg(resolved);
 }
 function validateDefaultExpr(expr) {
+  rejectNestedPerRowGeneratorValues(expr);
   const walk = (node) => {
     if (!node || typeof node !== "object" || typeof node.node !== "string") {
       throw structuredError("OP_INVALID", "default expression must be a closed Expr node");
@@ -886,6 +933,7 @@ function defaultExprIr(slot) {
   return { expr };
 }
 function toIrDefault(value) {
+  rejectPerRowGeneratorValue(value);
   if (typeof value === "function" || value instanceof ExprChainImpl || isExprNode(value)) {
     return defaultExprIr(value);
   }
@@ -971,6 +1019,19 @@ var ids = {
   },
   ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" })
 };
+var perRow = Object.freeze({
+  uuidV4: () => perRowGeneratorValue("uuidV4"),
+  uuidV7: () => perRowGeneratorValue("uuidV7"),
+  typeId: (opts) => {
+    requirePlainObject(opts, "perRow.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix, "perRow.typeId({ prefix })");
+    const generator = Object.freeze({
+      typeId: Object.freeze({ prefix: opts.prefix })
+    });
+    return perRowGeneratorValue(generator);
+  },
+  ulid: () => perRowGeneratorValue("ulid")
+});
 var t = {
   id: (opts) => {
     let col = new ColumnDefImpl("uuid").primaryKey().default(genRandomUuid());
@@ -1279,6 +1340,7 @@ function chain(node) {
   return new ExprChainImpl(node);
 }
 function exprArg(x) {
+  rejectNestedPerRowGeneratorValues(x);
   const synth = nativeDbExprNode(x);
   if (synth !== void 0) return synth;
   rejectFunctionValue(x);
@@ -1746,6 +1808,7 @@ function makeBuilder() {
 var cCase = caseExpr;
 function resolveExpr(slot) {
   if (slot === void 0 || slot === null) return void 0;
+  rejectNestedPerRowGeneratorValues(slot);
   if (typeof slot === "function") return exprArg(slot(makeBuilder()));
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof slot.node === "string") return slot;
@@ -1825,6 +1888,7 @@ function rejectImmutableExpr(position, reason) {
   );
 }
 function validateImmutableExpr(expr, position, opts = {}) {
+  rejectNestedPerRowGeneratorValues(expr);
   const rejectPgNode = (nodeName) => {
     rejectImmutableExpr(position, `${nodeName} is PG-vendor and non-portable`);
   };
@@ -1969,6 +2033,19 @@ function resolveSet(set) {
   }
   const out = {};
   for (const col of Object.keys(set)) setOwn(out, col, resolveSetValue(set[col]));
+  return out;
+}
+function resolveBackfillSetValue(value) {
+  const generator = perRowGeneratorOf(value);
+  if (generator !== void 0) return { perRow: generator };
+  return resolveSetValue(value);
+}
+function resolveBackfillSet(set) {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column \u2192 backfill value");
+  }
+  const out = {};
+  for (const col of Object.keys(set)) setOwn(out, col, resolveBackfillSetValue(set[col]));
   return out;
 }
 function ifNotExistsGuard(v) {
@@ -2855,7 +2932,7 @@ function recordBackfill(table2, args) {
     table: table2,
     cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
     batchSize: args.batchSize !== void 0 ? args.batchSize : DEFAULT_BACKFILL_BATCH,
-    set: resolveSet(args.set),
+    set: resolveBackfillSet(args.set),
     filter: resolveExpr(args.where),
     name: args.name || `backfill_${table2}`,
     schema: args.schema
@@ -3579,6 +3656,6 @@ function splitPartGrammarLint(delim, n) {
   if (n < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }
 
-export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, ids, int64, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
+export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, ids, int64, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, perRow, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
 //# sourceMappingURL=embedded-recorder.js.map
 //# sourceMappingURL=embedded-recorder.js.map

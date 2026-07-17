@@ -543,6 +543,7 @@ impl ExpandContractAuthor {
             cursor_column: "id".to_string(),
             batch_size: 1000,
             set_clause: format!("{to_q} = {from_q}"),
+            per_row: std::collections::BTreeMap::new(),
             filter: Some(format!("{to_q} IS NULL")),
             name: format!("backfill_{table}_{from}_to_{to}"),
         };

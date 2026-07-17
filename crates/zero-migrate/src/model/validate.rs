@@ -56,6 +56,7 @@
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 use pg_query::protobuf::node::Node as NodeEnum;
+use std::collections::BTreeMap;
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)
@@ -135,6 +136,7 @@ pub fn validate_ir_scoped(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
+    validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
@@ -156,6 +158,549 @@ fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool 
         // online-rename safety gate fails closed.
         _ => true,
     }
+}
+
+/// Stable logical identity of one project-schema column.
+///
+/// This key deliberately records only declarations authored by migration IR.
+/// Catalog introspection cannot reconstruct semantic value-format contracts such
+/// as TypeID prefixes or ULID casing, so it must never populate this map.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogicalColumnKey {
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+}
+
+/// Logical destination contract retained across ordered migration artifacts.
+#[derive(Debug, Clone)]
+pub struct LogicalColumnContract {
+    pub ty: crate::model::ir::ColType,
+    pub value_format: Option<crate::model::ir::ValueFormat>,
+}
+
+/// Cumulative logical project-schema declarations used by strict per-row
+/// backfill validation at lowering time.
+pub type LogicalColumnContracts = BTreeMap<LogicalColumnKey, LogicalColumnContract>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingLogicalDeclaration {
+    DeferToLower,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LogicalSchemaMode<'a> {
+    Authored,
+    Effective {
+        project_schema: &'a str,
+        default_schema: Option<&'a str>,
+    },
+}
+
+impl LogicalSchemaMode<'_> {
+    fn resolve(self, schema: Option<&str>) -> Option<String> {
+        match self {
+            Self::Authored => schema.map(str::to_string),
+            Self::Effective {
+                project_schema,
+                default_schema,
+            } => {
+                let resolved = schema.or(default_schema).unwrap_or(project_schema);
+                Some(
+                    if resolved.eq_ignore_ascii_case(project_schema) {
+                        project_schema
+                    } else {
+                        resolved
+                    }
+                    .to_string(),
+                )
+            }
+        }
+    }
+
+    fn declarations_match(self, left: Option<&str>, right: Option<&str>) -> bool {
+        match self {
+            Self::Authored => schemas_name_same_declared_table(left, right),
+            Self::Effective { .. } => left == right,
+        }
+    }
+
+    fn destination_matches(self, left: Option<&str>, right: Option<&str>) -> bool {
+        match self {
+            Self::Authored => schemas_may_name_same_table(left, right),
+            Self::Effective { .. } => left == right,
+        }
+    }
+}
+
+fn schemas_name_same_declared_table(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn declare_per_row_column(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+    ty: crate::model::ir::ColType,
+    value_format: Option<crate::model::ir::ValueFormat>,
+) {
+    declared.retain(|candidate, _| {
+        candidate.table != table
+            || candidate.column != column
+            || !schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+    });
+    declared.insert(
+        LogicalColumnKey {
+            schema: schema.map(str::to_string),
+            table: table.to_string(),
+            column: column.to_string(),
+        },
+        LogicalColumnContract { ty, value_format },
+    );
+}
+
+fn remove_declared_per_row_table(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+) {
+    declared.retain(|candidate, _| {
+        candidate.table != table
+            || !schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+    });
+}
+
+fn per_row_validation_error(
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    reason: String,
+    suggested_fix: String,
+) -> AuthoringError {
+    AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(suggested_fix),
+    }
+}
+
+fn validate_per_row_destination(
+    table: &str,
+    schema: Option<&str>,
+    cursor_column: &str,
+    column: &str,
+    generator: &crate::model::ir::PerRowGenerator,
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    missing: MissingLogicalDeclaration,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{ColType, PerRowGenerator, ValueFormat};
+
+    if let PerRowGenerator::TypeId { prefix } = generator {
+        if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
+            return Err(AuthoringError {
+                code: CODE_INVALID_TYPE_ID_PREFIX.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_locations.get(op_index).cloned().flatten(),
+                dialect: target_dialect,
+                reason: format!(
+                    "backfill perRow.typeId({{ prefix: {prefix:?} }}) carries an invalid TypeID prefix: {error}"
+                ),
+                suggested_fix: Some(
+                    "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    if column == cursor_column {
+        return Err(per_row_validation_error(
+            target_dialect,
+            op_index,
+            ts_locations,
+            format!(
+                "backfill per-row generation targets cursor column {column:?}; changing the cursor while paging would make row selection unstable"
+            ),
+            "choose a destination column other than cursorColumn".to_string(),
+        ));
+    }
+
+    let matches: Vec<&LogicalColumnContract> = declared
+        .iter()
+        .filter(|(candidate, _)| {
+            candidate.table == table
+                && candidate.column == column
+                && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
+        })
+        .map(|(_, contract)| contract)
+        .collect();
+    let qualified_table =
+        schema.map_or_else(|| table.to_string(), |schema| format!("{schema}.{table}"));
+    let destination = match matches.as_slice() {
+        [] => {
+            if missing == MissingLogicalDeclaration::DeferToLower {
+                return Ok(());
+            }
+            return Err(per_row_validation_error(
+                target_dialect,
+                op_index,
+                ts_locations,
+                format!(
+                    "backfill per-row destination {qualified_table}.{column} has no logical column declaration in the project schema available to this migration"
+                ),
+                "declare the destination in createTable/addColumn before this backfill and use a matching logical UUID, TypeID, or ULID column"
+                    .to_string(),
+            ));
+        }
+        [destination] => *destination,
+        _ => {
+            return Err(per_row_validation_error(
+                target_dialect,
+                op_index,
+                ts_locations,
+                format!(
+                    "backfill per-row destination {qualified_table}.{column} is ambiguous across {} project-schema declarations",
+                    matches.len()
+                ),
+                "qualify the declarations and backfill with one exact schema so the logical destination contract is unambiguous"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let valid = match generator {
+        PerRowGenerator::UuidV4 | PerRowGenerator::UuidV7 => {
+            matches!(destination.ty, ColType::Uuid)
+        }
+        PerRowGenerator::TypeId { prefix } => matches!(
+            (&destination.ty, &destination.value_format),
+            (ColType::Text, Some(ValueFormat::TypeId { prefix: declared_prefix }))
+                if declared_prefix == prefix
+        ),
+        PerRowGenerator::Ulid => matches!(
+            (&destination.ty, &destination.value_format),
+            (ColType::Text, Some(ValueFormat::Ulid))
+        ),
+    };
+    if valid {
+        return Ok(());
+    }
+
+    let expected = match generator {
+        PerRowGenerator::UuidV4 => "a logical UUID column for perRow.uuidV4()".to_string(),
+        PerRowGenerator::UuidV7 => "a logical UUID column for perRow.uuidV7()".to_string(),
+        PerRowGenerator::TypeId { prefix } => format!(
+            "a TypeID column whose declared stored prefix is exactly {prefix:?} for perRow.typeId(...)"
+        ),
+        PerRowGenerator::Ulid => "a declared ULID column for perRow.ulid()".to_string(),
+    };
+    let actual = match (&destination.ty, &destination.value_format) {
+        (ColType::Text, Some(ValueFormat::TypeId { prefix })) => {
+            format!("a TypeID column with stored prefix {prefix:?}")
+        }
+        (ColType::Text, Some(ValueFormat::Ulid)) => "a ULID column".to_string(),
+        (ColType::Text, None) => "generic text with no value-format contract".to_string(),
+        (ty, Some(format)) => format!("logical type {ty:?} with value format {format:?}"),
+        (ty, None) => format!("logical type {ty:?}"),
+    };
+    Err(per_row_validation_error(
+        target_dialect,
+        op_index,
+        ts_locations,
+        format!(
+            "backfill per-row destination {qualified_table}.{column} is {actual}; this generator requires {expected}"
+        ),
+        "use the generator matching the destination's declared logical value format; generic text is not inferred as TypeID or ULID"
+            .to_string(),
+    ))
+}
+
+fn validate_per_row_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    declared: &mut LogicalColumnContracts,
+    missing: MissingLogicalDeclaration,
+    schema_mode: LogicalSchemaMode<'_>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{BackfillSetValue, Op};
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_per_row_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                        declared,
+                        missing,
+                        schema_mode,
+                    )?;
+                }
+            }
+        }
+        Op::CreateTable {
+            name,
+            columns,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
+            for column in columns {
+                declare_per_row_column(
+                    declared,
+                    schema_mode,
+                    schema.as_deref(),
+                    name,
+                    &column.name,
+                    column.ty.clone(),
+                    column.value_format.clone(),
+                );
+            }
+        }
+        Op::AddColumn {
+            table,
+            column,
+            ty,
+            value_format,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            declare_per_row_column(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+                ty.clone(),
+                value_format.clone(),
+            );
+        }
+        Op::SetColumnType {
+            table,
+            column,
+            to_type,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            declare_per_row_column(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+                to_type.clone(),
+                None,
+            );
+        }
+        Op::DropColumn {
+            table,
+            column,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            declared.retain(|candidate, _| {
+                candidate.table != *table
+                    || candidate.column != *column
+                    || !schema_mode
+                        .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+            });
+        }
+        Op::DropTable { table, schema, .. } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), table);
+        }
+        Op::RenameTable {
+            table, to, schema, ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            let renamed = declared
+                .keys()
+                .filter(|candidate| {
+                    candidate.table == *table
+                        && schema_mode
+                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for from in renamed {
+                if let Some(contract) = declared.remove(&from) {
+                    declared.insert(
+                        LogicalColumnKey {
+                            schema: from.schema,
+                            table: to.clone(),
+                            column: from.column,
+                        },
+                        contract,
+                    );
+                }
+            }
+        }
+        Op::RenameColumn {
+            table,
+            from,
+            to,
+            ty,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            let renamed = declared
+                .keys()
+                .filter(|candidate| {
+                    candidate.table == *table
+                        && candidate.column == *from
+                        && schema_mode
+                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let found = !renamed.is_empty();
+            for old_key in renamed {
+                if let Some(mut contract) = declared.remove(&old_key) {
+                    contract.ty = ty.clone();
+                    declared.insert(
+                        LogicalColumnKey {
+                            schema: old_key.schema,
+                            table: old_key.table,
+                            column: to.clone(),
+                        },
+                        contract,
+                    );
+                }
+            }
+            if !found {
+                declare_per_row_column(
+                    declared,
+                    schema_mode,
+                    schema.as_deref(),
+                    table,
+                    to,
+                    ty.clone(),
+                    None,
+                );
+            }
+        }
+        Op::Backfill {
+            table,
+            cursor_column,
+            set,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            for (column, value) in set {
+                if let BackfillSetValue::PerRow { per_row } = value {
+                    validate_per_row_destination(
+                        table,
+                        schema.as_deref(),
+                        cursor_column,
+                        column,
+                        per_row,
+                        declared,
+                        schema_mode,
+                        missing,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                    )?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Load-time validation of apply-engine per-row generators. Exact declarations
+/// available earlier in this artifact are enforced immediately, including
+/// mismatch and ambiguity failures. A genuinely missing declaration is deferred
+/// because it may live in an earlier ordered artifact; strict lowering resolves
+/// it from [`LogicalColumnContracts`] before an executable backfill exists.
+pub(crate) fn validate_per_row_destinations(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let mut declared = LogicalColumnContracts::new();
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_per_row_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &mut declared,
+            MissingLogicalDeclaration::DeferToLower,
+            LogicalSchemaMode::Authored,
+        )?;
+    }
+    Ok(())
+}
+
+/// Strict lower-time validation seeded by logical declarations accumulated from
+/// earlier ordered artifacts. Returns the declarations after this artifact so a
+/// caller can carry the semantic project schema forward without catalog inference.
+/// Unqualified declarations and destinations are normalized through the same
+/// project/default-schema rule as SQL lowering; strict matching is then exact.
+pub(crate) fn validate_per_row_destinations_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+) -> Result<LogicalColumnContracts, AuthoringError> {
+    let mut declared = seed.clone();
+    let schema_mode = LogicalSchemaMode::Effective {
+        project_schema,
+        default_schema,
+    };
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_per_row_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &mut declared,
+            MissingLogicalDeclaration::Reject,
+            schema_mode,
+        )?;
+    }
+    Ok(declared)
 }
 
 fn validate_online_rename_isolation_op<'a>(
@@ -1345,7 +1890,10 @@ pub fn validate_op_scoped(
         Op::Backfill { table, set, filter, .. } => {
             let scope = TargetScope::structural_only(table);
             for value in set.values() {
-                if let crate::model::ir::IrValue::Expr(expr) = value {
+                if let crate::model::ir::BackfillSetValue::Value(
+                    crate::model::ir::IrValue::Expr(expr),
+                ) = value
+                {
                     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
                 }
             }
@@ -3627,6 +4175,7 @@ pub fn validate_ir_resolved(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_resolved(op, target_dialect, live_columns, op_index, ts)?;
     }
+    validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
@@ -3702,7 +4251,10 @@ pub fn validate_op_resolved(
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
                 for value in set.values() {
-                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                    if let crate::model::ir::BackfillSetValue::Value(
+                        crate::model::ir::IrValue::Expr(expr),
+                    ) = value
+                    {
                         validate_expr(expr, target_dialect, &scope, op_index, ts)?;
                     }
                 }
@@ -4990,8 +5542,8 @@ mod tests {
     // over every embedded Expr slot of every Op.
 
     use crate::model::ir::{
-        ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
-        PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
+        BackfillSetValue, ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr,
+        Op, PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator, SafeI64,
     };
     use std::collections::BTreeMap;
 
@@ -6601,7 +7153,10 @@ mod tests {
     #[test]
     fn validate_ir_walks_backfill_filter_and_set() {
         let mut set = BTreeMap::new();
-        set.insert("name".to_string(), IrValue::Expr(Expr::col("first"))); // fine structurally
+        set.insert(
+            "name".to_string(),
+            BackfillSetValue::from(IrValue::Expr(Expr::col("first"))),
+        ); // fine structurally
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
             cursor_column: "id".into(),
@@ -6621,9 +7176,12 @@ mod tests {
             table: "users".into(),
             cursor_column: "id".into(),
             batch_size: serde_json::from_str("100").unwrap(),
-            set: [("name".to_string(), IrValue::Expr(Expr::col("first")))]
-                .into_iter()
-                .collect(),
+            set: [(
+                "name".to_string(),
+                BackfillSetValue::from(IrValue::Expr(Expr::col("first"))),
+            )]
+            .into_iter()
+            .collect(),
             filter: Some(Expr::FnSynth {
                 r#fn: SynthFn::Now,
                 args: vec![],
@@ -6644,9 +7202,12 @@ mod tests {
             table: "users".into(),
             cursor_column: "id".into(),
             batch_size: serde_json::from_str("100").unwrap(),
-            set: [("name".to_string(), IrValue::Expr(Expr::col("first")))]
-                .into_iter()
-                .collect(),
+            set: [(
+                "name".to_string(),
+                BackfillSetValue::from(IrValue::Expr(Expr::col("first"))),
+            )]
+            .into_iter()
+            .collect(),
             filter: Some(Expr::Agg {
                 func: AggFunc::Count,
                 arg: None,
@@ -7276,6 +7837,229 @@ mod tests {
         assert!(
             validate_ir_platform(&ir, Dialect::Postgres).is_ok(),
             "a metric on a t.vector(n) column is the legitimate co-occurrence"
+        );
+    }
+
+    fn per_row_create_op(ty: ColType, value_format: Option<ValueFormat>) -> Op {
+        let columns = vec![
+            part_col("cursor", ColType::Int, true),
+            IrColumn {
+                name: "generated".into(),
+                ty,
+                nullable: Some(true),
+                default: None,
+                unique: None,
+                value_format,
+                id_prefix: None,
+                vector_metric: None,
+                case_sensitive: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+        ];
+        Op::CreateTable {
+            name: "per_row_values".into(),
+            columns,
+            primary_key: Some(vec!["cursor".into()]),
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn per_row_backfill_op(generator: PerRowGenerator) -> Op {
+        Op::Backfill {
+            table: "per_row_values".into(),
+            cursor_column: "cursor".into(),
+            batch_size: serde_json::from_str("10").unwrap(),
+            set: [("generated".to_string(), BackfillSetValue::from(generator))]
+                .into_iter()
+                .collect(),
+            filter: None,
+            name: "generate_values".into(),
+            schema: None,
+        }
+    }
+
+    fn per_row_validation_ir(
+        ty: ColType,
+        value_format: Option<ValueFormat>,
+        generator: PerRowGenerator,
+    ) -> MigrationIr {
+        ir_with(vec![
+            per_row_create_op(ty, value_format),
+            per_row_backfill_op(generator),
+        ])
+    }
+
+    #[test]
+    fn per_row_destination_validation_accepts_exact_logical_families() {
+        for (ty, format, generator) in [
+            (ColType::Uuid, None, PerRowGenerator::UuidV4),
+            (ColType::Uuid, None, PerRowGenerator::UuidV7),
+            (
+                ColType::Text,
+                Some(ValueFormat::TypeId {
+                    prefix: "order".into(),
+                }),
+                PerRowGenerator::TypeId {
+                    prefix: "order".into(),
+                },
+            ),
+            (
+                ColType::Text,
+                Some(ValueFormat::Ulid),
+                PerRowGenerator::Ulid,
+            ),
+        ] {
+            let ir = per_row_validation_ir(ty, format, generator);
+            validate_ir_platform(&ir, Dialect::Sqlite)
+                .expect("an exact declared per-row destination family must validate");
+        }
+    }
+
+    #[test]
+    fn per_row_type_id_requires_the_exact_declared_prefix() {
+        let ir = per_row_validation_ir(
+            ColType::Text,
+            Some(ValueFormat::TypeId {
+                prefix: "invoice".into(),
+            }),
+            PerRowGenerator::TypeId {
+                prefix: "order".into(),
+            },
+        );
+        let error = validate_ir_platform(&ir, Dialect::Sqlite)
+            .expect_err("a mismatched TypeID prefix must fail before lowering");
+        assert_eq!(error.code, CODE_OP_INVALID);
+        assert!(
+            error.reason.contains("stored prefix \"invoice\"")
+                && error.reason.contains("exactly \"order\""),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn per_row_type_id_and_ulid_never_infer_generic_text() {
+        for generator in [
+            PerRowGenerator::TypeId {
+                prefix: "order".into(),
+            },
+            PerRowGenerator::Ulid,
+        ] {
+            let ir = per_row_validation_ir(ColType::Text, None, generator);
+            let error = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("generic text must not infer a TypeID or ULID contract");
+            assert_eq!(error.code, CODE_OP_INVALID);
+            assert!(
+                error
+                    .reason
+                    .contains("generic text with no value-format contract"),
+                "got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn per_row_uuid_rejects_text_even_without_a_value_format() {
+        let ir = per_row_validation_ir(ColType::Text, None, PerRowGenerator::UuidV7);
+        let error = validate_ir_platform(&ir, Dialect::Sqlite)
+            .expect_err("a UUID generator requires logical UUID, not text storage");
+        assert_eq!(error.code, CODE_OP_INVALID);
+        assert!(
+            error.reason.contains("logical UUID column")
+                && error
+                    .reason
+                    .contains("generic text with no value-format contract"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn per_row_load_defers_a_missing_cross_artifact_declaration_but_lower_rejects_it() {
+        let ir = ir_with(vec![per_row_backfill_op(PerRowGenerator::UuidV4)]);
+        validate_ir_platform(&ir, Dialect::Postgres)
+            .expect("load cannot know whether an earlier ordered artifact declared the column");
+        let error = validate_per_row_destinations_for_lower(
+            &ir,
+            Dialect::Postgres,
+            &[],
+            &LogicalColumnContracts::new(),
+            "app",
+            None,
+        )
+        .expect_err(
+            "strict lower must not replace missing logical metadata with catalog inference",
+        );
+        assert_eq!(error.code, CODE_OP_INVALID);
+        assert!(
+            error.reason.contains("no logical column declaration"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn per_row_load_rejects_a_malformed_generator_even_when_its_destination_is_missing() {
+        let ir = ir_with(vec![per_row_backfill_op(PerRowGenerator::TypeId {
+            prefix: "Not_Canonical".into(),
+        })]);
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("missing destination metadata must not defer generator validation");
+        assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX);
+        assert!(
+            error.reason.contains("invalid TypeID prefix"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn per_row_destination_rejects_an_ambiguous_unqualified_declaration() {
+        let mut schema_a = per_row_create_op(ColType::Uuid, None);
+        let mut schema_b = per_row_create_op(ColType::Uuid, None);
+        if let Op::CreateTable { schema, .. } = &mut schema_a {
+            *schema = Some("schema_a".into());
+        }
+        if let Op::CreateTable { schema, .. } = &mut schema_b {
+            *schema = Some("schema_b".into());
+        }
+        let ir = ir_with(vec![
+            schema_a,
+            schema_b,
+            per_row_backfill_op(PerRowGenerator::UuidV4),
+        ]);
+
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("an unqualified target must not guess between declarations");
+        assert_eq!(error.code, CODE_OP_INVALID);
+        assert!(error.reason.contains("is ambiguous"), "got: {error}");
+    }
+
+    #[test]
+    fn per_row_destination_tracking_uses_only_the_selected_dialectal_leg() {
+        let dialectal_declaration = Op::Dialectal {
+            default: Some(vec![per_row_create_op(ColType::Text, None)]),
+            pg: Some(vec![per_row_create_op(ColType::Uuid, None)]),
+            sqlite: None,
+            mysql: None,
+        };
+        let ir = ir_with(vec![
+            dialectal_declaration,
+            per_row_backfill_op(PerRowGenerator::UuidV4),
+        ]);
+
+        validate_ir_platform(&ir, Dialect::Postgres)
+            .expect("the selected PG declaration is logical UUID");
+        let error = validate_ir_platform(&ir, Dialect::Sqlite)
+            .expect_err("SQLite must use the generic-text default leg, not the PG leg");
+        assert!(
+            error
+                .reason
+                .contains("generic text with no value-format contract"),
+            "got: {error}"
         );
     }
 }

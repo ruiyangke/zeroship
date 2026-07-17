@@ -85,6 +85,13 @@ export interface HostApplyOptions {
   /** The migration module (an imported `.ts`/`.js` exporting `up()` or
    *  `default.up`). Resolved to an envelope by the recorder. */
   migration: MigrationModule;
+  /** Ordered authored migrations that precede `migration`. Their declarations
+   *  may seed logical schema contracts only when the addon proves every plan is
+   *  already fully applied with its exact journal checksum. */
+  priorMigrations?: readonly MigrationModule[];
+  /** Optional recorder name fallbacks aligned one-for-one with
+   *  `priorMigrations`. */
+  priorNameFallbacks?: readonly (string | undefined)[];
   /** The deploying app id (`app_…`) — stamped as `owner_app` + folded into the
    *  checksum by the addon. */
   ownerApp: string;
@@ -117,6 +124,18 @@ export type ApplyOutcome = ApplyReply;
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   const addon = loadAddon();
+  const priorMigrations = opts.priorMigrations ?? [];
+  if (
+    opts.priorNameFallbacks !== undefined &&
+    opts.priorNameFallbacks.length !== priorMigrations.length
+  ) {
+    throw new Error(
+      "zero-migrate-cli: apply priorNameFallbacks must match priorMigrations length",
+    );
+  }
+  const priorEnvelopes = priorMigrations.map((migration, index) =>
+    authorEnvelope(addon, migration, opts.priorNameFallbacks?.[index]),
+  );
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
   const { hostDriver, close } = await openSession(opts.driver);
   try {
@@ -128,6 +147,7 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       migratorRole: opts.migratorRole,
       dialect: dialectOf(opts.driver),
       registry: opts.registry ?? {},
+      priorEnvelopes,
       envelope,
       policyCeiling: opts.policyCeiling,
       approved: opts.approved ?? false,

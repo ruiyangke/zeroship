@@ -1396,10 +1396,10 @@
               "$ref": "#/$defs/SafeU64"
             },
             "set": {
-              "description": "Column → typed scalar or closed-AST assignment.",
+              "description": "Column → ordinary DML value or apply-engine per-row generator.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/IrValue"
+                "$ref": "#/$defs/BackfillSetValue"
               }
             },
             "filter": {
@@ -5770,6 +5770,72 @@
       "format": "uint64",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "BackfillSetValue": {
+      "description": "A value accepted specifically by `backfill.set`.\n\nOrdinary DML values preserve their existing scalar/expression wire image.\nThe apply-engine generator arm is an explicit `{ \"perRow\": ... }` wrapper,\nwhich prevents it from being confused with either a literal or a database\nUUID expression.",
+      "anyOf": [
+        {
+          "description": "An ordinary typed scalar or closed database expression.",
+          "$ref": "#/$defs/IrValue"
+        },
+        {
+          "description": "An apply-engine generator evaluated once for each affected row.",
+          "type": "object",
+          "properties": {
+            "perRow": {
+              "description": "The exact generator contract.",
+              "$ref": "#/$defs/PerRowGenerator"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "perRow"
+          ]
+        }
+      ]
+    },
+    "PerRowGenerator": {
+      "description": "Apply-engine value generation evaluated independently for every row selected\nby a batched backfill.\n\nThis vocabulary is deliberately separate from [`Expr`]'s database-side UUID\nexpression variants. It is accepted only through [`BackfillSetValue`], never\nas an insert/update value or column default.",
+      "oneOf": [
+        {
+          "description": "Generate an RFC 9562 UUID version 4 in the apply engine.",
+          "type": "string",
+          "const": "uuidV4"
+        },
+        {
+          "description": "Generate an RFC 9562 UUID version 7 in the apply engine.",
+          "type": "string",
+          "const": "uuidV7"
+        },
+        {
+          "description": "Generate a canonical TypeID whose suffix encodes a UUID version 7.",
+          "type": "object",
+          "properties": {
+            "typeId": {
+              "type": "object",
+              "properties": {
+                "prefix": {
+                  "description": "Stored TypeID prefix, without the separator underscore.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "prefix"
+              ]
+            }
+          },
+          "required": [
+            "typeId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Generate a canonical uppercase ULID.",
+          "type": "string",
+          "const": "ulid"
+        }
+      ]
     },
     "ViewQuery": {
       "description": "The closed view-body query model: either the cross-dialect structured SELECT\nsubset or the operator-gated raw SELECT escape.",

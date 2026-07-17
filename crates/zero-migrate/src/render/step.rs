@@ -197,6 +197,7 @@ mod touched_table_tests {
             cursor_column: "id".into(),
             batch_size: 100,
             set_clause: "x = 1".into(),
+            per_row: Default::default(),
             filter: None,
             name: "bf".into(),
         };

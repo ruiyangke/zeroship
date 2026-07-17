@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   ids,
+  perRow,
   t,
   table,
   view,
@@ -59,6 +60,7 @@ import {
   uuidV4 as engUuidV4,
   uuidV7 as engUuidV7,
   genRandomUuid as engGenRandomUuid,
+  perRow as engPerRow,
 } from "../dist/embedded-recorder.js";
 
 /** Record one phase's ops via the ambient recorder. */
@@ -86,6 +88,7 @@ function recordEngine(up: (api: {
   uuidV4: any;
   uuidV7: any;
   genRandomUuid: any;
+  perRow: any;
 }) => void): any[] {
   engBegin();
   up({
@@ -98,6 +101,7 @@ function recordEngine(up: (api: {
     uuidV4: engUuidV4,
     uuidV7: engUuidV7,
     genRandomUuid: engGenRandomUuid,
+    perRow: engPerRow,
   });
   return engDrain();
 }
@@ -1558,6 +1562,145 @@ test("backfill remains the batched-write spelling", () => {
   assert.equal(ops[0].op, "backfill");
   assert.equal(ops[0].cursorColumn, "id");
   assert.equal(ops[0].batchSize, 500);
+});
+
+test("perRow generators record backfill-only intent and stay distinct from database UUID expressions", () => {
+  const author = (tableApi: any, perRowApi: any, databaseUuidV4: any) => {
+    // Reusing this value reuses only the generator intent. No UUID is sampled by
+    // the recorder for the executor to repeat across rows.
+    const reused = perRowApi.uuidV7();
+    tableApi("orders").backfill({
+      set: {
+        uuid_v4: perRowApi.uuidV4(),
+        uuid_v7: reused,
+        uuid_v7_again: reused,
+        type_id: perRowApi.typeId({ prefix: "order" }),
+        bare_type_id: perRowApi.typeId({ prefix: "" }),
+        ulid: perRowApi.ulid(),
+        database_uuid_v4: databaseUuidV4(),
+      },
+      cursorColumn: "id",
+    });
+  };
+
+  const publicOps = record(() => author(table, perRow, uuidV4));
+  const engineOps = recordEngine(({ table, perRow, uuidV4 }) =>
+    author(table, perRow, uuidV4)
+  );
+  assert.deepEqual(publicOps, engineOps, "source and embedded recorders must agree");
+  assert.deepEqual(publicOps[0].set, {
+    uuid_v4: { perRow: "uuidV4" },
+    uuid_v7: { perRow: "uuidV7" },
+    uuid_v7_again: { perRow: "uuidV7" },
+    type_id: { perRow: { typeId: { prefix: "order" } } },
+    bare_type_id: { perRow: { typeId: { prefix: "" } } },
+    ulid: { perRow: "ulid" },
+    database_uuid_v4: { node: "uuidV4" },
+  });
+  assert.doesNotMatch(
+    JSON.stringify(publicOps[0].set),
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    "the recorder must never sample and persist one UUID literal",
+  );
+});
+
+test("perRow values are rejected from defaults and ordinary DML at record time", () => {
+  const value = perRow.uuidV7();
+  const rawLiteral = { node: "literal", value } as any;
+  const isBackfillOnlyError = (error: any) =>
+    error.code === "OP_INVALID" && /only inside backfill\(\{ set \}\)/.test(error.message);
+
+  assert.throws(
+    () => record(() => table("orders").insert({ rows: { public_id: value } as any })),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () => record(() => table("orders").update({ set: { public_id: value } as any })),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("orders").insert({
+          rows: { id: 1 },
+          onConflict: {
+            columns: ["id"],
+            doUpdate: { public_id: value } as any,
+          },
+        }),
+      ),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("orders").delete({
+          where: (col) => col("public_id").eq(value as any),
+        }),
+      ),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("orders").backfill({
+          set: { ready: true },
+          where: (col) => col("public_id").eq(value as any),
+        }),
+      ),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () => record(() => table("orders").create({ columns: { public_id: t.uuid().default(value as any) } })),
+    isBackfillOnlyError,
+  );
+  assert.throws(
+    () => record(() => table("orders").create({ columns: { doc: t.json().default({ value } as any) } })),
+    isBackfillOnlyError,
+    "nested JSON defaults must not hide a per-row descriptor",
+  );
+  assert.throws(
+    () => record(() => table("orders").update({ set: { public_id: rawLiteral } as any })),
+    isBackfillOnlyError,
+    "a raw literal expression must not hide a per-row descriptor in ordinary DML",
+  );
+  assert.throws(
+    () => record(() => table("orders").backfill({ set: { public_id: rawLiteral } as any })),
+    isBackfillOnlyError,
+    "only the top-level backfill set value may be a per-row descriptor",
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("orders").create({
+          columns: { public_id: t.uuid().default(rawLiteral) },
+        }),
+      ),
+    isBackfillOnlyError,
+    "a raw default expression must not hide a per-row descriptor",
+  );
+  assert.throws(
+    () => record(() => table("orders").check("no_per_row").add({ expr: rawLiteral })),
+    isBackfillOnlyError,
+    "a raw check expression must not hide a per-row descriptor",
+  );
+});
+
+test("perRow.typeId validates the TypeID prefix without generating a value", () => {
+  for (const prefix of ["", "a", "order_item", "a".repeat(63)]) {
+    assert.doesNotThrow(() => perRow.typeId({ prefix }), JSON.stringify(prefix));
+  }
+  for (const prefix of ["Order", "order-", "a".repeat(64)]) {
+    assert.throws(
+      () => perRow.typeId({ prefix }),
+      (error: any) => error.code === "OP_INVALID" && /perRow\.typeId/.test(error.message),
+      JSON.stringify(prefix),
+    );
+  }
+  assert.throws(
+    () => (perRow.typeId as any)(),
+    (error: any) => error.code === "OP_INVALID" && /perRow\.typeId/.test(error.message),
+  );
 });
 
 test("del records the 'delete' wire tag and requires where", () => {

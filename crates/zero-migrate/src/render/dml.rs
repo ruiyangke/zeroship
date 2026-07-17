@@ -1969,7 +1969,29 @@ pub fn assemble_backfill_clauses(
     set: &BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
-    if set.is_empty() {
+    assemble_backfill_clauses_inner(dialect, table, set, filter, false)
+}
+
+/// Assemble the ordinary portion of a backfill that also carries apply-engine
+/// per-row assignments. The ordinary map may be empty because the executor will
+/// append the separately carried generator assignments at batch time.
+pub(crate) fn assemble_backfill_clauses_allow_empty(
+    dialect: SqlDialect,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    filter: Option<&Expr>,
+) -> Result<BackfillClauses, DmlError> {
+    assemble_backfill_clauses_inner(dialect, table, set, filter, true)
+}
+
+fn assemble_backfill_clauses_inner(
+    dialect: SqlDialect,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    filter: Option<&Expr>,
+    allow_empty: bool,
+) -> Result<BackfillClauses, DmlError> {
+    if set.is_empty() && !allow_empty {
         return Err(DmlError::EmptySet {
             op: "backfill",
             table: table.to_string(),

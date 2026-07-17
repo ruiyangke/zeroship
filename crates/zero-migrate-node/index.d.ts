@@ -8,7 +8,7 @@
  * drive the complete ordered plan over the host driver. The envelope must NOT carry
  * `owner_app`; it is stamped from `req.owner_app` (provenance).
  *
- * This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
+ * This is the entry the `zero-migrate-cli` facade's `apply` calls: the pure-JS
  * recorder produces the envelope, this addon owns the checksum.
  * Resolves to a typed [`ApplyReply`].
  */
@@ -69,6 +69,13 @@ export interface ApplyRequest {
   registry: Record<string, string>
   /** The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value. */
   envelope: JsonValue
+  /**
+   * Ordered authored envelopes that precede `envelope` in the project migration
+   * set. Apply uses them only to reconstruct declared logical column contracts,
+   * and accepts that metadata only after the corresponding plans are proven
+   * fully applied in the journal.
+   */
+  priorEnvelopes?: Array<JsonValue>
   /**
    * The **policy input**: the host's `RootCeiling` document (TOML) that drives
    * table-shape injection. The engine constructs NO default ceiling — `None`

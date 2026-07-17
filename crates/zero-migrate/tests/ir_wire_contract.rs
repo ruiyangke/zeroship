@@ -121,6 +121,77 @@ fn backfill_fields_are_camel_case() {
 }
 
 #[test]
+fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
+    use zero_migrate::model::ir::{BackfillSetValue, PerRowGenerator};
+
+    let json = r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":10,
+        "set":{
+            "uuid4":{"perRow":"uuidV4"},
+            "uuid7":{"perRow":"uuidV7"},
+            "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
+            "ulid":{"perRow":"ulid"}
+        },"name":"generated_ids"}"#;
+    let op: Op = serde_json::from_str(json).expect("all perRow generator arms deserialize");
+    let Op::Backfill { set, .. } = &op else {
+        panic!("expected Backfill");
+    };
+    assert!(matches!(
+        set.get("uuid4"),
+        Some(BackfillSetValue::PerRow {
+            per_row: PerRowGenerator::UuidV4
+        })
+    ));
+    assert!(matches!(
+        set.get("uuid7"),
+        Some(BackfillSetValue::PerRow {
+            per_row: PerRowGenerator::UuidV7
+        })
+    ));
+    assert!(matches!(
+        set.get("type_id"),
+        Some(BackfillSetValue::PerRow {
+            per_row: PerRowGenerator::TypeId { prefix }
+        }) if prefix == "order"
+    ));
+    assert!(matches!(
+        set.get("ulid"),
+        Some(BackfillSetValue::PerRow {
+            per_row: PerRowGenerator::Ulid
+        })
+    ));
+
+    let wire = serde_json::to_value(&op).expect("perRow op serializes");
+    assert_eq!(
+        wire["set"]["uuid4"],
+        serde_json::json!({ "perRow": "uuidV4" })
+    );
+    assert_eq!(
+        wire["set"]["type_id"],
+        serde_json::json!({ "perRow": { "typeId": { "prefix": "order" } } })
+    );
+    assert!(
+        !wire.to_string().contains("00000000-0000"),
+        "the IR must retain generator intent instead of recording a sampled literal: {wire}"
+    );
+
+    assert!(
+        serde_json::from_str::<Op>(
+            r#"{"op":"update","table":"t","set":{"x":{"perRow":"uuidV4"}}}"#,
+        )
+        .is_err(),
+        "perRow intent must not deserialize as an ordinary update value"
+    );
+    assert!(
+        serde_json::from_str::<Op>(
+            r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":1,
+                "set":{"x":{"perRow":"uuidV4","extra":true}},"name":"bad"}"#,
+        )
+        .is_err(),
+        "the explicit perRow wrapper must reject unknown fields"
+    );
+}
+
+#[test]
 fn fk_constraint_fields_are_camel_case_and_nested() {
     // FK constraint via addConstraint — references_table -> referencesTable, and
     // the kind is a NESTED object (un-flattened), not a flattened sibling.

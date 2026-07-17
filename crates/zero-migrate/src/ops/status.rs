@@ -2195,6 +2195,7 @@ mod plan_status_tests {
                         cursor_column: "id".to_string(),
                         batch_size: 100,
                         set_clause: "ready = true".to_string(),
+                        per_row: Default::default(),
                         filter: None,
                         name: "backfill widgets".to_string(),
                     },
