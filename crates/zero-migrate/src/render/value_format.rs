@@ -1,4 +1,5 @@
-//! Dialect-specific physical metadata for validated textual value formats.
+//! Dialect-specific physical metadata for validated textual value formats and
+//! portable logical UUID storage.
 //!
 //! A [`ValueFormat`] is logical schema metadata carried separately from the
 //! physical [`ColType`](crate::model::ir::ColType). This module is the one seam
@@ -15,6 +16,7 @@ const TYPE_ID_SUFFIX_LEN: usize = 26;
 const TYPE_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
 const ULID_LEN: usize = 26;
 const ULID_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const UUID_TEXT_LEN: usize = 36;
 
 /// The physical column details implied by one logical value format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +25,45 @@ pub(crate) struct ValueFormatColumnMetadata {
     pub ddl_type: String,
     /// Null-tolerant canonical spelling check, including its `CHECK` wrapper.
     pub inline_check: String,
+}
+
+/// Lower a logical UUID column to the portable textual contract used on MySQL
+/// and SQLite. PostgreSQL's native `uuid` type enforces the representation, so
+/// it needs neither an override nor a duplicate `CHECK`.
+pub(crate) fn uuid_column_metadata(
+    column: &str,
+    dialect: SqlDialect,
+) -> Result<Option<ValueFormatColumnMetadata>, String> {
+    let quoted = quote_ident_for_dialect("UUID column", column, dialect)
+        .map_err(|error| error.to_string())?;
+    let metadata = match dialect {
+        SqlDialect::Postgres => return Ok(None),
+        SqlDialect::Mysql => {
+            let regex = mysql_grammar_string_literal(
+                "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            );
+            ValueFormatColumnMetadata {
+                ddl_type: "VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
+                inline_check: format!(
+                    "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {UUID_TEXT_LEN} AND \
+                     REGEXP_LIKE({quoted}, {regex}, 'c')))"
+                ),
+            }
+        }
+        SqlDialect::Sqlite => ValueFormatColumnMetadata {
+            ddl_type: "TEXT COLLATE BINARY".to_string(),
+            inline_check: format!(
+                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
+                 length({quoted}) = {UUID_TEXT_LEN} AND \
+                 length(CAST({quoted} AS BLOB)) = {UUID_TEXT_LEN} AND \
+                 substr({quoted}, 9, 1) = '-' AND substr({quoted}, 14, 1) = '-' AND \
+                 substr({quoted}, 19, 1) = '-' AND substr({quoted}, 24, 1) = '-' AND \
+                 length({quoted}) - length(replace({quoted}, '-', '')) = 4 AND \
+                 replace({quoted}, '-', '') NOT GLOB '*[^0-9a-f]*'))"
+            ),
+        },
+    };
+    Ok(Some(metadata))
 }
 
 /// Lower one logical value format to its dialect-specific text representation.

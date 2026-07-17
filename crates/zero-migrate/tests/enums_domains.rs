@@ -17,6 +17,7 @@ fn col(name: &str, ty: ColType) -> IrColumn {
         default: None,
         unique: None,
         value_format: None,
+        references: None,
         id_prefix: None,
         case_sensitive: None,
         vector_metric: None,

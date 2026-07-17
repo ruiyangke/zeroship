@@ -1193,11 +1193,11 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 ));
             }
 
-            // Append FOREIGN KEY clause when this is a ref. Inline
-            // FK clauses live in the same CREATE TABLE statement as the
-            // column, after the column definition.
-            if def.get("type").and_then(|t| t.as_str()) == Some("ref") {
-                let target = def.get("refTarget").and_then(|v| v.as_str()).unwrap_or("");
+            // Append a FOREIGN KEY clause whenever the column carries reference
+            // metadata. The local `type` is independent: legacy declarative refs
+            // use `type: "ref"`, while migration references retain their explicit
+            // UUID/integer/text storage.
+            if let Some(target) = def.get("refTarget").and_then(|v| v.as_str()) {
                 if !target.is_empty() {
                     let should_inline = match fk_emit {
                         FkEmission::Inline => true,
@@ -1499,6 +1499,16 @@ fn build_fk_clause(
         .unwrap_or(false);
 
     let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
+    let target_column = def
+        .get("refColumn")
+        .and_then(|value| value.as_str())
+        .unwrap_or("id");
+    validate_field_name(target_column)?;
+    let rendered_target_column = if target_column == "id" {
+        "id".to_string()
+    } else {
+        quote_ident_for_dialect(target_column, dialect)
+    };
     let deferrable_clause = if deferrable && !matches!(dialect, SqlDialect::Mysql) {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
@@ -1506,10 +1516,11 @@ fn build_fk_clause(
     };
 
     let mut clause = format!(
-        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id)",
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         quote_ident_for_dialect(&constraint_name, dialect),
         quote_ident_for_dialect(field, dialect),
         target_qualified,
+        rendered_target_column,
     );
     if on_delete != "NO ACTION" {
         clause.push_str(" ON DELETE ");

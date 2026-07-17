@@ -232,6 +232,7 @@ fn field_dto_to_engine(
         required: dto.required.unwrap_or(false),
         unique: dto.unique.unwrap_or(false),
         references: dto.references,
+        reference_column: None,
         on_delete: dto.on_delete,
         on_update: dto.on_update,
         deferrable: dto.deferrable,

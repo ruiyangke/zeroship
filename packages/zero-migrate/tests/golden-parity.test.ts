@@ -119,7 +119,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
-        owner: t.ref("users"),
+        owner: t.text().references("users", "id"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         // re-blessed string → text (t.string alias removed).

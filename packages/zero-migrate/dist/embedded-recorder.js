@@ -391,12 +391,30 @@ var MASK_CLASSIFICATIONS = [
   "pci",
   "internal"
 ];
+var REF_ACTIONS = [
+  "cascade",
+  "restrict",
+  "setNull",
+  "setDefault",
+  "noAction"
+];
+function requireReferenceAction(v, what) {
+  if (v === void 0) return void 0;
+  if (typeof v !== "string" || !REF_ACTIONS.includes(v)) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be one of ${REF_ACTIONS.join(" | ")}; got ${JSON.stringify(v)}`
+    );
+  }
+  return v;
+}
 var ColumnDefImpl = class _ColumnDefImpl {
   _type;
   _nullable;
   _default;
   _primaryKey;
   _unique;
+  _reference;
   // Semantic facets carried on the IrColumn: canonical value format
   // (`ids.typeId({prefix})`), pgvector distance metric, and the remaining
   // standalone column facets.
@@ -413,6 +431,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
     this._default = fields?.default;
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
+    this._reference = fields?.reference;
     this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
@@ -427,6 +446,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
+      reference: "reference" in over ? over.reference : this._reference,
       valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
@@ -450,6 +470,36 @@ var ColumnDefImpl = class _ColumnDefImpl {
   }
   unique() {
     return this.with({ unique: true });
+  }
+  references(table2, column, options = {}) {
+    requireString(table2, "t.*.references(table, column, options): table");
+    if (table2.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): table must be a non-empty string"
+      );
+    }
+    requireString(column, "t.*.references(table, column, options): column");
+    if (column.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): column must be a non-empty string"
+      );
+    }
+    requirePlainObject(options, "t.*.references(table, column, options): options");
+    const reference = compact({
+      table: table2,
+      column,
+      onDelete: requireReferenceAction(
+        options.onDelete,
+        "t.*.references(table, column, { onDelete })"
+      ),
+      onUpdate: requireReferenceAction(
+        options.onUpdate,
+        "t.*.references(table, column, { onUpdate })"
+      )
+    });
+    return this.with({ reference: Object.freeze(reference) });
   }
   /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
    *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
@@ -519,9 +569,10 @@ var ColumnDefImpl = class _ColumnDefImpl {
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : void 0,
       // Carry the semantic facets onto the wire IrColumn (camelCase keys
-      // `valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
+      // `valueFormat`/`references`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
       // plain column is byte-identical to the pre-facet image (checksum-neutral).
       valueFormat: this._valueFormat,
+      references: this._reference,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
       mask: this._mask,
@@ -530,6 +581,10 @@ var ColumnDefImpl = class _ColumnDefImpl {
     });
   }
   __toAddColumnTail() {
+    rejectColumnReferenceFacet(
+      this,
+      ".column(name).add({ type }): typed references are not a lifecycle operation"
+    );
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : void 0,
@@ -547,6 +602,14 @@ var ColumnDefImpl = class _ColumnDefImpl {
 };
 function isColumnDef(x) {
   return x instanceof ColumnDefImpl;
+}
+function rejectColumnReferenceFacet(def, where) {
+  if (def._reference !== void 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a .references() ColumnDef; typed references are supported only in table(...).create({ columns })`
+    );
+  }
 }
 function textColumn(opts) {
   if (opts !== void 0 && (opts === null || typeof opts !== "object")) {
@@ -1040,10 +1103,6 @@ var t = {
   bytes: () => new ColumnDefImpl("bytes"),
   boolean: () => new ColumnDefImpl("boolean"),
   json: () => new ColumnDefImpl("json"),
-  ref: (targetTable) => {
-    requireString(targetTable, "t.ref(target)");
-    return new ColumnDefImpl({ ref: { references: targetTable } });
-  },
   vector: (opts) => {
     requirePlainObject(opts, "t.vector(opts)");
     const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
@@ -1083,6 +1142,9 @@ var t = {
   },
   encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? arg.of : arg;
+    if (isColumnDef(inner)) {
+      rejectColumnReferenceFacet(inner, "t.encrypted({ of })");
+    }
     const innerType = isColumnDef(inner) ? inner._type : inner;
     if (innerType === void 0) {
       throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
@@ -1091,7 +1153,10 @@ var t = {
   }
 };
 function colTypeOf(typeArg) {
-  if (isColumnDef(typeArg)) return typeArg._type;
+  if (isColumnDef(typeArg)) {
+    rejectColumnReferenceFacet(typeArg, "this lifecycle or nested type position");
+    return typeArg._type;
+  }
   return typeArg;
 }
 function enumType(name) {

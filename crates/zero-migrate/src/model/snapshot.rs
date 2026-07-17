@@ -58,9 +58,17 @@ pub struct ColumnSnapshot {
     pub identity: Option<IdentityCol>,
     /// `Some(false)` means this logical text column is case-insensitive. It is a
     /// drift-comparable catalog attribute on engines where the intent is
-    /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`). `None` is the
+    /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
+    /// `information_schema.COLUMNS.COLLATION_NAME`). `None` is the
     /// byte-identical default case-sensitive text behavior.
     pub case_sensitive: Option<bool>,
+    /// Exact MySQL character storage recovered from
+    /// `information_schema.COLUMNS`. This is introspection-only metadata used
+    /// to validate character foreign-key compatibility; author-built desired
+    /// snapshots leave it `None`. It is deliberately excluded from structural
+    /// drift equality and hashing because the portable schema surface records
+    /// collation intent, not a server-default MySQL collation name.
+    pub mysql_text_storage: Option<MysqlTextStorageSnapshot>,
     /// The inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
     /// `/* zero-migrate:enc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
@@ -118,12 +126,28 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         s.field("generated", &self.generated)
             .field("identity", &self.identity)
-            .field("case_sensitive", &self.case_sensitive)
-            .field("encryption_sentinel", &self.encryption_sentinel)
+            .field("case_sensitive", &self.case_sensitive);
+        if self.mysql_text_storage.is_some() {
+            s.field("mysql_text_storage", &self.mysql_text_storage);
+        }
+        s.field("encryption_sentinel", &self.encryption_sentinel)
             .field("comment_sentinel", &self.comment_sentinel)
             .field("comment", &self.comment)
             .finish()
     }
+}
+
+/// Exact MySQL character-set and collation metadata for one catalog column.
+///
+/// MySQL requires both sides of a character foreign key to use compatible
+/// character storage. A portable `caseSensitive` Boolean is insufficient to
+/// distinguish, for example, `ascii_bin` from `utf8mb4_bin`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MysqlTextStorageSnapshot {
+    /// `information_schema.COLUMNS.CHARACTER_SET_NAME`.
+    pub character_set: String,
+    /// `information_schema.COLUMNS.COLLATION_NAME`.
+    pub collation: String,
 }
 
 impl PartialEq for ColumnSnapshot {

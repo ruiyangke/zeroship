@@ -257,9 +257,9 @@ pub use model::migration::{
 };
 pub use model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, GeneratedColumnSnapshot,
-    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, ViewSnapshot,
+    IndexElementSnapshot, IndexSnapshot, MysqlTextStorageSnapshot, NamedTypeSnapshot,
+    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,

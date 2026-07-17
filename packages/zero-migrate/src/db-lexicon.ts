@@ -1,11 +1,11 @@
 // `zero-migrate` — the SHARED column-type lexicon bridge from the db type-builder
 // surface (`./db-types.js`).
 //
-// The migration DSL and the runtime schema share ONE type lexicon.
-// A `t.text()` written in a migration is the same dialect-neutral `ColType` the
-// db schema reduces to, so a `t.ref("users")` FK declared in a live db schema
-// lowers to the IDENTICAL `{ ref: { references: "users" } }` `ColType` an
-// `addColumn("…", "…", t.ref("users"))` migration column produces.
+// The migration DSL and the runtime schema share the same primitive type
+// lexicon. A `t.text()` written in a migration is the same dialect-neutral
+// `ColType` the db schema reduces to. References are intentionally asymmetric:
+// the runtime schema retains its legacy `dbType.ref("users")` FieldDef, while a
+// migration records an explicit primitive type plus `IrColumn.references`.
 //
 // We REUSE the db type machinery rather than duplicate the lexicon: the db `t.*`
 // factories return a `TypeBuilder` whose `.toFieldDef()` yields a `FieldDef`
@@ -21,14 +21,14 @@
 // token set from the db `FieldDef` discriminants this bridge consumes (the db
 // `FieldDef` union emits `"number"`/`"id"`/… and never emits `"int"`). The two
 // are NOT round-trip inverses; the only invariant they share is that migrate
-// `ColType` is generated from the engine IR schema, so a db `t.ref("users")` and
-// a migrate `t.ref("users")` reduce to the byte-identical
-// `{ ref: { references: "users" } }` ColType.
+// `ColType` is generated from the engine IR schema. Its legacy `ref` arm remains
+// the bridge carrier for runtime db schemas; the public migration `t.ref()`
+// factory is removed and typed migration references do not use this arm.
 //
 // BINDING: this bridge converts a column's TYPE only. It never binds
-// table/column NAMES to the live schema — a `t.ref(target)` carries the target
-// table as a plain string (existence validated at apply time), exactly as the
-// migration DSL's own `t.ref` does.
+// table/column NAMES to the live schema — a runtime `dbType.ref(target)` carries
+// the target table as a plain string. Migration `.references(table, column)` is
+// recorded separately on `IrColumn` and validated by the migration planner.
 
 import { TypeBuilder, type FieldDef } from "./db-types.js";
 
@@ -54,7 +54,8 @@ export class UnsupportedColTypeError extends Error {
   constructor(dbType: string) {
     super(
       `db field type "${dbType}" has no dialect-neutral migration ColType; ` +
-        `model it explicitly (e.g. a json column or a separate collection + t.ref)`,
+        `model it explicitly (e.g. a migration json column or a separate table ` +
+        `plus an explicitly typed .references())`,
     );
     this.dbType = dbType;
   }
@@ -77,10 +78,10 @@ function toFieldDef(field: DbSchemaField): FieldDef {
  *
  * This is the ONE place the db `FieldDef.type` (`TypeName`) space is bridged into
  * the migration `ColType` space. It is the proof the two surfaces share one
- * lexicon: a `t.ref("users")` from the db type builder yields
- * `{ ref: { references: "users" } }`, byte-identical to the migration DSL's own
- * `t.ref("users")._type` (verified by test). (This is a one-way bridge over the
- * db type space, NOT the inverse of the engine's `col_type_to_token`, whose
+ * lexicon: a `dbType.ref("users")` from the db type builder yields the legacy
+ * `{ ref: { references: "users" } }` bridge carrier. Typed migration references
+ * instead retain an explicit local `ColType` and add `IrColumn.references`.
+ * (This is a one-way bridge over the db type space, NOT the inverse of the engine's `col_type_to_token`, whose
  * `"int"`/`"number"` outputs are engine-internal descriptors — see the module
  * header.)
  *
@@ -123,7 +124,7 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "uuid";
     // A foreign-key column: the neutral `ref` arm carries the target table as a
     // PLAIN STRING (never live-schema-bound). `refTarget` is required on a
-    // well-formed `t.ref(...)` FieldDef.
+    // well-formed `dbType.ref(...)` FieldDef.
     case "ref": {
       const references = def.refTarget;
       if (typeof references !== "string" || references.length === 0) {

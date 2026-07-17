@@ -101,10 +101,10 @@
         },
         {
           "name": "owner",
-          "type": {
-            "ref": {
-              "references": "users"
-            }
+          "type": "text",
+          "references": {
+            "table": "users",
+            "column": "id"
           }
         },
         {

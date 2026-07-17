@@ -261,7 +261,16 @@ export interface IdentityCol {
   always: boolean;
 }
 
-/** A column definition inside `createTable` / `addColumn`. */
+/** Target and referential actions for a typed single-column reference. */
+export interface ColumnReference {
+  table: string;
+  column: string;
+  onDelete?: RefAction | null;
+  onUpdate?: RefAction | null;
+}
+
+/** A column definition inside `createTable`. Lifecycle operations use their own
+ *  explicit fields and cannot carry a reference facet. */
 export interface IrColumn {
   name: string;
   type: ColType;
@@ -271,6 +280,9 @@ export interface IrColumn {
   /** Canonical value-format semantics. `ids.typeId()` and `ids.ulid()` store
    *  text while this facet carries the exact persisted format. Default-absent. */
   valueFormat?: ValueFormat | null;
+  /** Typed single-column foreign-key reference. The local `type` remains
+   *  explicit and is never selected from the referenced target or catalog. */
+  references?: ColumnReference | null;
   /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix, retained
    *  for old internal descriptors. It is not TypeID or public authoring.
    *  Camel-cased on the wire and default-absent. */

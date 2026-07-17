@@ -9,7 +9,7 @@
 // fixture intentionally omits `id`; policy injects the internal platform key:
 //   t.text().notNull(), t.numeric(),
 //   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
-//   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
+//   t.json(), t.text().references(target, column), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
@@ -28,7 +28,7 @@ export default {
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
-        owner: t.ref("users"),
+        owner: t.text().references("users", "id"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         label: t.text(), // was t.string() — the alias is removed

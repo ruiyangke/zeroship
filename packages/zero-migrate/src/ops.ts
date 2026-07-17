@@ -742,12 +742,39 @@ export const MASK_CLASSIFICATIONS: readonly Classification[] = [
   "internal",
 ];
 
+const REF_ACTIONS: readonly RefAction[] = [
+  "cascade",
+  "restrict",
+  "setNull",
+  "setDefault",
+  "noAction",
+];
+
+type ColumnReferenceFacet = Readonly<{
+  table: string;
+  column: string;
+  onDelete?: RefAction;
+  onUpdate?: RefAction;
+}>;
+
+function requireReferenceAction(v: unknown, what: string): RefAction | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || !REF_ACTIONS.includes(v as RefAction)) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be one of ${REF_ACTIONS.join(" | ")}; got ${JSON.stringify(v)}`,
+    );
+  }
+  return v as RefAction;
+}
+
 class ColumnDefImpl implements ColumnDefType {
   readonly _type: ColType;
   readonly _nullable: boolean;
   readonly _default: unknown;
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
+  readonly _reference: ColumnReferenceFacet | undefined;
   // Semantic facets carried on the IrColumn: canonical value format
   // (`ids.typeId({prefix})`), pgvector distance metric, and the remaining
   // standalone column facets.
@@ -766,6 +793,7 @@ class ColumnDefImpl implements ColumnDefType {
       default?: unknown;
       primaryKey?: boolean;
       unique?: boolean;
+      reference?: ColumnReferenceFacet;
       valueFormat?: ValueFormat;
       vectorMetric?: string;
       caseSensitive?: boolean;
@@ -779,6 +807,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._default = fields?.default;
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
+    this._reference = fields?.reference;
     this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
@@ -794,6 +823,7 @@ class ColumnDefImpl implements ColumnDefType {
     default?: unknown;
     primaryKey?: boolean;
     unique?: boolean;
+    reference?: ColumnReferenceFacet;
     valueFormat?: ValueFormat;
     vectorMetric?: string;
     caseSensitive?: boolean;
@@ -806,6 +836,7 @@ class ColumnDefImpl implements ColumnDefType {
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
+      reference: "reference" in over ? over.reference : this._reference,
       valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
@@ -831,6 +862,40 @@ class ColumnDefImpl implements ColumnDefType {
   }
   unique(): ColumnDefImpl {
     return this.with({ unique: true });
+  }
+  references(
+    table: string,
+    column: string,
+    options: { onDelete?: RefAction; onUpdate?: RefAction } = {},
+  ): ColumnDefImpl {
+    requireString(table, "t.*.references(table, column, options): table");
+    if (table.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): table must be a non-empty string",
+      );
+    }
+    requireString(column, "t.*.references(table, column, options): column");
+    if (column.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): column must be a non-empty string",
+      );
+    }
+    requirePlainObject(options, "t.*.references(table, column, options): options");
+    const reference = compact({
+      table,
+      column,
+      onDelete: requireReferenceAction(
+        options.onDelete,
+        "t.*.references(table, column, { onDelete })",
+      ),
+      onUpdate: requireReferenceAction(
+        options.onUpdate,
+        "t.*.references(table, column, { onUpdate })",
+      ),
+    }) as ColumnReferenceFacet;
+    return this.with({ reference: Object.freeze(reference) });
   }
 
   /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
@@ -907,9 +972,10 @@ class ColumnDefImpl implements ColumnDefType {
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
       // Carry the semantic facets onto the wire IrColumn (camelCase keys
-      // `valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
+      // `valueFormat`/`references`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
       // plain column is byte-identical to the pre-facet image (checksum-neutral).
       valueFormat: this._valueFormat,
+      references: this._reference,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
@@ -918,6 +984,10 @@ class ColumnDefImpl implements ColumnDefType {
     });
   }
   __toAddColumnTail(): Node {
+    rejectColumnReferenceFacet(
+      this,
+      ".column(name).add({ type }): typed references are not a lifecycle operation",
+    );
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
@@ -936,6 +1006,15 @@ class ColumnDefImpl implements ColumnDefType {
 
 function isColumnDef(x: unknown): x is ColumnDefImpl {
   return x instanceof ColumnDefImpl;
+}
+
+function rejectColumnReferenceFacet(def: ColumnDefImpl, where: string): void {
+  if (def._reference !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a .references() ColumnDef; typed references are supported only in table(...).create({ columns })`,
+    );
+  }
 }
 
 function textColumn(opts?: TextOptions): ColumnDefImpl {
@@ -1557,10 +1636,6 @@ export const t: TypeLexicon = {
   bytes: () => new ColumnDefImpl("bytes"),
   boolean: () => new ColumnDefImpl("boolean"),
   json: () => new ColumnDefImpl("json"),
-  ref: (targetTable) => {
-    requireString(targetTable, "t.ref(target)");
-    return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
-  },
   vector: (opts: VectorOptions) => {
     requirePlainObject(opts, "t.vector(opts)");
     const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
@@ -1604,6 +1679,9 @@ export const t: TypeLexicon = {
   },
   encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
+    if (isColumnDef(inner)) {
+      rejectColumnReferenceFacet(inner, "t.encrypted({ of })");
+    }
     const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
     if (innerType === undefined) {
       throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
@@ -1613,7 +1691,10 @@ export const t: TypeLexicon = {
 };
 
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
-  if (isColumnDef(typeArg)) return typeArg._type;
+  if (isColumnDef(typeArg)) {
+    rejectColumnReferenceFacet(typeArg, "this lifecycle or nested type position");
+    return typeArg._type;
+  }
   return typeArg as ColType;
 }
 

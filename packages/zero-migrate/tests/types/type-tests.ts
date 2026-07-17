@@ -70,6 +70,8 @@ import type { Classification, MaskKind, VectorMetric } from "../../src/generated
 // The removed universal ID shortcut must stay absent from the migration lexicon.
 const migrationIdShortcutIsAbsent: "id" extends keyof TypeLexicon ? never : true = true;
 void migrationIdShortcutIsAbsent;
+const migrationRefShortcutIsAbsent: "ref" extends keyof TypeLexicon ? never : true = true;
+void migrationRefShortcutIsAbsent;
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee.
@@ -81,7 +83,7 @@ export function antiRotMigration(): void {
   table("nonexistent_table").create({
     columns: {
       legacy_col: t.text(),
-      author_id: t.ref("a_table_that_does_not_exist"),
+      author_id: t.text().references("a_table_that_does_not_exist", "id"),
     },
   });
   table("nonexistent_table").column("column_that_was_dropped").add({ type: t.text() });
@@ -415,8 +417,23 @@ export function badColTypes(): void {
   // @ts-expect-error — `.notNull()` takes no argument.
   t.text().notNull("yes");
 
-  // @ts-expect-error — `.ref(target)` is not a ColumnDef facet; use `t.ref(target)` from the start.
+  // @ts-expect-error — the old untyped migration reference factory is removed.
+  t.ref("users");
+
+  // @ts-expect-error — `.ref(target)` is not a ColumnDef facet; use `.references(table, column)`.
   t.text().ref("users");
+
+  t.text().references("users", "id");
+  t.uuid().references("users", "public_id", {
+    onDelete: "cascade",
+    onUpdate: "setNull",
+  });
+
+  // @ts-expect-error — the referenced column is required.
+  t.text().references("users");
+
+  // @ts-expect-error — referential actions use the closed RefAction tokens.
+  t.text().references("users", "id", { onDelete: "deleteEverything" });
 
   // @ts-expect-error — there is no `.frobnicate()` chain modifier.
   t.text().frobnicate();

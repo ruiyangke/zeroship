@@ -758,10 +758,16 @@ pub struct FieldDescriptor {
     /// `UNIQUE`.)
     #[serde(default)]
     pub unique: bool,
-    /// For a `ref` field, the referenced collection (FK target table). `None`
-    /// for non-`ref` fields.
+    /// Referenced collection (FK target table). Legacy declarative `ref` fields
+    /// and explicitly typed migration references both use this slot; the field's
+    /// own `ty` remains the authoritative local storage type.
     #[serde(rename = "ref", default)]
     pub references: Option<String>,
+    /// Referenced target column. Legacy declarative `ref` fields omit this and
+    /// retain their historical `id` target; typed migration references always
+    /// record the explicit target column.
+    #[serde(rename = "refColumn", default)]
+    pub reference_column: Option<String>,
     /// `ref` ON DELETE policy (`restrict` | `cascade` | `set null` | `no action`).
     /// `None` ⇒ the SQL/Postgres default `NO ACTION`, which renders as no clause.
     #[serde(rename = "onDelete", default)]
@@ -1033,6 +1039,33 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     if matches!(f.case_sensitive, Some(false)) {
         def.insert("caseSensitive".into(), serde_json::Value::Bool(false));
     }
+    if let Some(target) = &f.references {
+        def.insert(
+            "refTarget".into(),
+            serde_json::Value::String(target.clone()),
+        );
+        if let Some(column) = &f.reference_column {
+            def.insert(
+                "refColumn".into(),
+                serde_json::Value::String(column.clone()),
+            );
+        }
+        if let Some(on_delete) = &f.on_delete {
+            def.insert(
+                "onDelete".into(),
+                serde_json::Value::String(on_delete.clone()),
+            );
+        }
+        if let Some(on_update) = &f.on_update {
+            def.insert(
+                "onUpdate".into(),
+                serde_json::Value::String(on_update.clone()),
+            );
+        }
+        if let Some(deferrable) = f.deferrable {
+            def.insert("deferrable".into(), serde_json::Value::Bool(deferrable));
+        }
+    }
     if let Some(enc) = &f.encrypted {
         def.insert("encrypted".into(), enc.clone());
     }
@@ -1169,24 +1202,10 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
         if f.unique {
             def.insert("unique".into(), serde_json::Value::Bool(true));
         }
-        // FK: the emitter keys on `refTarget` (+ policy), NOT the engine's `ref`.
-        if f.ty == "ref" {
-            if let Some(target) = &f.references {
-                def.insert(
-                    "refTarget".into(),
-                    serde_json::Value::String(target.clone()),
-                );
-            }
-            if let Some(od) = &f.on_delete {
-                def.insert("onDelete".into(), serde_json::Value::String(od.clone()));
-            }
-            if let Some(ou) = &f.on_update {
-                def.insert("onUpdate".into(), serde_json::Value::String(ou.clone()));
-            }
-            if let Some(dfr) = f.deferrable {
-                def.insert("deferrable".into(), serde_json::Value::Bool(dfr));
-            }
-        }
+        // FK metadata is already carried by `field_to_sdk_def`, independently
+        // from the local storage type. Legacy `type: "ref"` fields omit
+        // `refColumn` and retain the historical `id` target; typed migration
+        // references always carry it explicitly.
         if let Some(def_val) = &f.default {
             def.insert("default".into(), def_val.clone());
         }
@@ -2345,44 +2364,47 @@ fn build_table_snapshot_impl(
                 indexes.push(spec);
             }
         }
-        // A `ref` field declares a FOREIGN KEY constraint.
-        if f.ty == "ref" {
-            if let Some(target) = &f.references {
-                // cross-app: a `<otherApp>.<table>` schema-qualified
-                // target is REJECTED here, fail-closed (mirrors
-                // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
-                // inside the project schema. Surfaced as a dedicated, clearer
-                // error for that shape before the generic bare-ident check.
-                reject_cross_app_ref(&d.name, target)?;
-                // the FK target table is interpolated into
-                // `REFERENCES <schema>.<target>(id)`; validate it as a bare
-                // identifier at the author boundary (mirroring how table /
-                // column names are checked) so a malformed / injecting ref
-                // target (`control.users`, `x"; DROP …`, `;`) is rejected
-                // up-front rather than relying on downstream quoting alone.
-                validate_ident("ref target", target)?;
-                constraints.push(ConstraintSnapshot {
-                    name: fk_constraint_name(&f.name),
-                    kind: "FOREIGN KEY".into(),
-                    // EXACT canonical catalog spelling: the target is
-                    // schema-qualified, NO space before `(id)`, policy clauses
-                    // render in catalog order (`ON UPDATE` then `ON DELETE`),
-                    // and default actions are omitted per dialect. Built to
-                    // match live byte-for-byte so a policy FK re-diffs clean.
-                    definition: fk_definition_for_dialect(
-                        std::slice::from_ref(&f.name),
-                        project_schema,
-                        target,
-                        &["id".to_string()],
-                        f.on_delete.as_deref(),
-                        f.on_update.as_deref(),
-                        f.deferrable.unwrap_or(false),
-                        true,
-                        dialect,
-                    ),
-                    comment: None,
-                });
-            }
+        // A reference facet declares a FOREIGN KEY constraint independently of
+        // the local storage type. Legacy declarative `ref` fields still default
+        // to the target's `id` column; typed migration references carry an exact
+        // target column.
+        if let Some(target) = &f.references {
+            let target_column = f.reference_column.as_deref().unwrap_or("id");
+            // cross-app: a `<otherApp>.<table>` schema-qualified
+            // target is REJECTED here, fail-closed (mirrors
+            // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
+            // inside the project schema. Surfaced as a dedicated, clearer
+            // error for that shape before the generic bare-ident check.
+            reject_cross_app_ref(&d.name, target)?;
+            // the FK target table is interpolated into
+            // `REFERENCES <schema>.<target>(id)`; validate it as a bare
+            // identifier at the author boundary (mirroring how table /
+            // column names are checked) so a malformed / injecting ref
+            // target (`control.users`, `x"; DROP …`, `;`) is rejected
+            // up-front rather than relying on downstream quoting alone.
+            validate_ident("ref target", target)?;
+            validate_ident("ref target column", target_column)?;
+            constraints.push(ConstraintSnapshot {
+                name: fk_constraint_name(&f.name),
+                kind: "FOREIGN KEY".into(),
+                // EXACT canonical catalog spelling: the target is
+                // schema-qualified, NO space before `(id)`, policy clauses
+                // render in catalog order (`ON UPDATE` then `ON DELETE`),
+                // and default actions are omitted per dialect. Built to
+                // match live byte-for-byte so a policy FK re-diffs clean.
+                definition: fk_definition_for_dialect(
+                    std::slice::from_ref(&f.name),
+                    project_schema,
+                    target,
+                    &[target_column.to_string()],
+                    f.on_delete.as_deref(),
+                    f.on_update.as_deref(),
+                    f.deferrable.unwrap_or(false),
+                    true,
+                    dialect,
+                ),
+                comment: None,
+            });
         }
     }
 
@@ -2782,6 +2804,7 @@ fn fts_objects_pg(
         generated: None,
         identity: None,
         case_sensitive: None,
+        mysql_text_storage: None,
         encryption_sentinel: None,
         comment_sentinel: None,
         comment: None,
@@ -2926,11 +2949,22 @@ fn fk_definition_for_dialect(
     } else {
         references_columns.to_vec()
     };
+    let target_name = if matches!(dialect, SqlDialect::Sqlite) {
+        // SQLite foreign keys may not qualify the parent table with a schema
+        // name, even for the implicit `main` database. Both sides of an inline
+        // reference necessarily live in the same attached database.
+        quote_ident_if_needed(target)
+    } else {
+        format!(
+            "{}.{}",
+            quote_ident_if_needed(project_schema),
+            quote_ident_if_needed(target)
+        )
+    };
     let mut def = format!(
-        "FOREIGN KEY ({}) REFERENCES {}.{}({})",
+        "FOREIGN KEY ({}) REFERENCES {}({})",
         constraintdef_cols(local_columns),
-        quote_ident_if_needed(project_schema),
-        quote_ident_if_needed(target),
+        target_name,
         constraintdef_cols(&ref_cols),
     );
     let on_update = normalize_fk_action_for_dialect(on_update, dialect);
@@ -5423,13 +5457,21 @@ impl DeclarativeAuthor {
     }
 
     fn mysql_fk_clause(&self, fk: &ConstraintSnapshot) -> String {
-        let col = fk_local_column(&fk.definition).unwrap_or_default();
+        let columns = fk_local_columns(&fk.definition)
+            .iter()
+            .map(|column| mysql_quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
         let target = fk_target_table(&fk.definition).unwrap_or_default();
+        let referenced_columns = fk_referenced_columns(&fk.definition)
+            .iter()
+            .map(|column| mysql_quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
         let policy = mysql_fk_policy_tail(&fk.definition);
         format!(
-            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (`id`){policy}",
+            "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns}){policy}",
             mysql_quote_ident(&fk.name),
-            mysql_quote_ident(&col),
             mysql_qualified(&self.project_schema, &target),
         )
     }
@@ -5840,10 +5882,13 @@ impl DeclarativeAuthor {
 
     /// render a single-table CREATE the SAME way the declarative `diff`
     /// pass does (the snapshot comes from the shared [`build_table_snapshot`]).
-    /// FKs are inlined iff their target table is already live (`live_tables`);
-    /// on PG a non-live target is DEFERRED to an `ALTER TABLE ADD CONSTRAINT`
-    /// (returned in `deferred`), on SQLite it is a hard error (no late ADD
-    /// CONSTRAINT) — mirroring `diff`'s per-table logic byte-for-byte.
+    /// FKs are inlined iff their target table is already live (`live_tables`).
+    /// PostgreSQL/MySQL defer a non-live target to an `ALTER TABLE ADD CONSTRAINT`
+    /// (returned in `deferred`). SQLite instead inlines every create-time FK:
+    /// SQLite permits `CREATE TABLE child ... REFERENCES parent(...)` before the
+    /// parent's `CREATE TABLE`, and the IR logical-graph pass has already proved a
+    /// typed declared target. This keeps a self-contained child-first artifact
+    /// renderable without inventing an unsupported late `ADD CONSTRAINT`.
     pub(crate) fn lower_create_table(
         &self,
         table: &str,
@@ -5860,11 +5905,13 @@ impl DeclarativeAuthor {
                 continue;
             }
             let target = fk_target_table(&c.definition);
-            // A self-FK (target == this table) or a live target inlines; anything
-            // else defers (PG) / errors (SQLite), matching `diff`.
+            // A self-FK or live target inlines on every dialect. SQLite also
+            // accepts a forward target in an inline CREATE TABLE constraint; the
+            // target need not physically exist until rows exercise the FK.
             let inlinable = target
                 .as_deref()
-                .is_some_and(|tt| tt == table || live_tables.contains(tt));
+                .is_some_and(|tt| tt == table || live_tables.contains(tt))
+                || is_sqlite;
             if inlinable {
                 inline_fks.push(c);
             } else if !self.dialect.supports(Capability::AlterTableAddConstraint) {
@@ -7067,11 +7114,6 @@ fn fk_policy_tail(definition: &str) -> String {
     fk_definition_column_group(definition, offset)
         .map(|(_, end)| definition[end..].to_string())
         .unwrap_or_default()
-}
-
-/// Extract the local column from an FK definition `FOREIGN KEY (<col>) …`.
-fn fk_local_column(definition: &str) -> Option<String> {
-    fk_local_columns(definition).into_iter().next()
 }
 
 fn fk_local_columns(definition: &str) -> Vec<String> {

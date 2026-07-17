@@ -92,6 +92,26 @@ test("IMMUTABLE: each modifier returns a fresh ColumnDef (no receiver mutation)"
   assert.deepEqual(c.default, { literal: { value: 0 } });
 });
 
+test("IMMUTABLE: references() returns a fresh def and leaves the explicit base type unchanged", () => {
+  const ops = record(() => {
+    const base = t.uuid().notNull();
+    const referenced = base.references("accounts", "id", { onDelete: "cascade" });
+    table("orders").create({ columns: { base, account_id: referenced } });
+  });
+
+  const [base, accountId] = ops[0].columns;
+  assert.equal(base.type, "uuid");
+  assert.equal(base.nullable, false);
+  assert.ok(!("references" in base), "references() did not mutate the base def");
+  assert.equal(accountId.type, "uuid");
+  assert.equal(accountId.nullable, false);
+  assert.deepEqual(accountId.references, {
+    table: "accounts",
+    column: "id",
+    onDelete: "cascade",
+  });
+});
+
 // ── the SELECTOR_NOT_TERMINATED guard ──
 
 test("SELECTOR: a forgotten terminal throws SELECTOR_NOT_TERMINATED at drain", () => {

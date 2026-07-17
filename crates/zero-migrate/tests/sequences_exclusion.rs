@@ -81,6 +81,7 @@ fn nextval_col(name: &str, schema: Option<&str>) -> IrColumn {
         }),
         unique: None,
         value_format: None,
+        references: None,
         id_prefix: None,
         case_sensitive: None,
         vector_metric: None,

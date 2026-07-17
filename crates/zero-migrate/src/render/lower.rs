@@ -43,8 +43,8 @@ use crate::model::ir::{
 use crate::model::load::op_created_table;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
-    TableSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
+    MysqlTextStorageSnapshot, PartitionSnapshot, TableSnapshot,
 };
 use crate::render::declarative::{
     build_resolved_table_snapshot, build_table_snapshot, json_value_default_expr_for_col_type,
@@ -54,7 +54,9 @@ use crate::render::declarative::{
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::step::{BindValue, PlanStep, RenameStep};
-use crate::render::value_format::column_metadata as value_format_column_metadata;
+use crate::render::value_format::{
+    column_metadata as value_format_column_metadata, uuid_column_metadata,
+};
 use crate::schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op. A DDL op lowers to a list of
@@ -472,6 +474,14 @@ impl LiveSchema {
             SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
             SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
         };
+        crate::model::validate::validate_column_references_for_lower(
+            ir,
+            target,
+            &[],
+            &self.logical_columns,
+            project_schema,
+            default_schema,
+        )?;
         self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             target,
@@ -510,6 +520,104 @@ impl From<&BTreeSet<String>> for LiveSchema {
     /// bundled facts (no known unique indexes — the hint-only fallback).
     fn from(tables: &BTreeSet<String>) -> Self {
         Self::from_tables(tables.clone())
+    }
+}
+
+/// One create-time typed reference in the selected dialect leg. Nested
+/// `dialectal(...)` ops keep the outer op index for structured-error attribution,
+/// matching the model validator.
+struct TypedReferenceSite<'a> {
+    op: &'a Op,
+    table: &'a str,
+    column: &'a IrColumn,
+    op_index: usize,
+}
+
+fn collect_typed_reference_sites<'a>(
+    op: &'a Op,
+    dialect: SqlDialect,
+    op_index: usize,
+    out: &mut Vec<TypedReferenceSite<'a>>,
+) {
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let selected = match dialect {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            }
+            .or(default.as_deref());
+            if let Some(ops) = selected {
+                for inner in ops {
+                    collect_typed_reference_sites(inner, dialect, op_index, out);
+                }
+            }
+        }
+        Op::CreateTable { name, columns, .. } => {
+            out.extend(
+                columns
+                    .iter()
+                    .filter(|column| column.references.is_some())
+                    .map(|column| TypedReferenceSite {
+                        op,
+                        table: name,
+                        column,
+                        op_index,
+                    }),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn canonical_reference_catalog_type(dialect: SqlDialect, data_type: &str) -> String {
+    match dialect {
+        SqlDialect::Postgres => data_type.trim().to_ascii_lowercase(),
+        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(data_type),
+        SqlDialect::Sqlite => {
+            // Reference compatibility must retain the authored integer width.
+            // SQLite gives all three spellings INTEGER affinity, but PRAGMA
+            // `table_info` preserves an unmanaged target's declared type. Do
+            // not let the general drift-affinity canonicalizer make `int` and
+            // `bigInt` look interchangeable here.
+            let normalized = data_type.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "smallint" | "int2" => "smallint".to_string(),
+                "integer" | "int" | "int4" => "int".to_string(),
+                "bigint" | "int8" => "bigint".to_string(),
+                _ => crate::schema::query::sqlite_canonical_type(data_type).to_string(),
+            }
+        }
+    }
+}
+
+/// Recover explicit MySQL character storage from a DDL type authored by this
+/// crate. Generic text has no explicit pair and deliberately returns `None`: its
+/// effective storage comes from the database default, which is not inferred from
+/// the referenced target. UUID, TypeID, and ULID DDL carries both clauses and is
+/// therefore deterministic enough to validate exactly.
+fn mysql_explicit_text_storage(ddl_type: &str) -> Option<MysqlTextStorageSnapshot> {
+    let tokens = ddl_type
+        .split_ascii_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let character_set = tokens.windows(3).find_map(|window| {
+        (window[0] == "character" && window[1] == "set").then(|| window[2].clone())
+    });
+    let collation = tokens
+        .windows(2)
+        .find_map(|window| (window[0] == "collate").then(|| window[1].clone()));
+    match (character_set, collation) {
+        (Some(character_set), Some(collation)) => Some(MysqlTextStorageSnapshot {
+            character_set,
+            collation,
+        }),
+        _ => None,
     }
 }
 
@@ -573,6 +681,46 @@ fn sqlite_identity_columns_are_safe(snapshot: &TableSnapshot, columns: &[String]
                 .columns
                 .iter()
                 .any(|column| column.name == *name && !column.nullable)
+    })
+}
+
+/// Return whether a live catalog snapshot proves that `column` is independently
+/// referenceable by a single-column foreign key. Components of composite keys,
+/// partial/expression indexes, and non-B-tree indexes are deliberately not
+/// accepted: physical catalog validation must be at least as strict as the
+/// authored-graph key contract.
+fn snapshot_has_single_column_reference_key(snapshot: &TableSnapshot, column: &str) -> bool {
+    let constraint_key = ["PRIMARY KEY", "UNIQUE"].into_iter().any(|kind| {
+        snapshot
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.kind.eq_ignore_ascii_case(kind))
+            .any(|constraint| {
+                matches!(
+                    parse_constraint_identity_columns(&constraint.definition, kind).as_deref(),
+                    Some([candidate]) if candidate == column
+                )
+            })
+    });
+    if constraint_key {
+        return true;
+    }
+
+    snapshot.indexes.iter().any(|index| {
+        index.unique
+            && index.predicate.is_none()
+            && !index.only
+            && index.access_method.eq_ignore_ascii_case("btree")
+            && matches!(index.columns.as_slice(), [candidate] if candidate == column)
+            && matches!(
+                index.elements.as_slice(),
+                [IndexElementSnapshot::Column {
+                    name,
+                    opclass: None,
+                    collation: None,
+                    ..
+                }] if name == column
+            )
     })
 }
 
@@ -1522,11 +1670,13 @@ fn collect_op_database_requirements(
             }
         }
         Op::AddColumn {
+            ty,
             default,
             value_format,
             generated,
             ..
         } => {
+            collect_uuid_database_requirement(ty, false, dialect, requirements);
             if let Some(value_format) = value_format {
                 collect_value_format_database_requirement(value_format, dialect, requirements);
             }
@@ -1695,14 +1845,33 @@ fn collect_column_database_requirements(
     dialect: SqlDialect,
     requirements: &mut DatabaseRequirements,
 ) {
-    if let Some(value_format) = &column.value_format {
-        collect_value_format_database_requirement(value_format, dialect, requirements);
+    collect_uuid_database_requirement(
+        &column.ty,
+        column.references.is_some(),
+        dialect,
+        requirements,
+    );
+    if column.references.is_none() {
+        if let Some(value_format) = &column.value_format {
+            collect_value_format_database_requirement(value_format, dialect, requirements);
+        }
     }
     if let Some(default) = &column.default {
         collect_default_database_requirements(default, dialect, requirements);
     }
     if let Some(generated) = &column.generated {
         collect_expr_database_requirements(&generated.expr, dialect, requirements);
+    }
+}
+
+fn collect_uuid_database_requirement(
+    ty: &ColType,
+    is_reference: bool,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if dialect == SqlDialect::Mysql && !is_reference && matches!(ty, ColType::Uuid) {
+        requirements.require(DatabaseFeature::UuidValidation);
     }
 }
 
@@ -2359,7 +2528,7 @@ impl IrAuthor {
         ir: &MigrationIr,
         live: &LiveSchema,
     ) -> Result<Vec<PlanStep>, IrLowerError> {
-        crate::model::validate::validate_per_row_destinations_for_lower(
+        let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),
             &[],
@@ -2368,6 +2537,16 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_column_references_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
@@ -2395,6 +2574,196 @@ impl IrAuthor {
             SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
             SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
         }
+    }
+
+    /// Validate the physical half of each typed reference without ever deriving
+    /// the authored local type from catalog state. Declared logical contracts are
+    /// authoritative; a live target, when present, is only a consistency check.
+    /// An unmanaged primitive target must be present in the catalog because no
+    /// deterministic project declaration exists to prove its physical shape.
+    fn validate_typed_reference_catalogs(
+        &self,
+        ir: &MigrationIr,
+        live: &LiveSchema,
+        logical_columns: &crate::model::validate::LogicalColumnContracts,
+    ) -> Result<(), IrLowerError> {
+        let mut sites = Vec::new();
+        for (op_index, op) in ir.ops.iter().enumerate() {
+            collect_typed_reference_sites(op, self.dialect, op_index, &mut sites);
+        }
+
+        for site in sites {
+            let reference = site
+                .column
+                .references
+                .as_ref()
+                .expect("typed-reference collector filters absent facets");
+            let schema = self.effective_schema(site.op);
+            let target_key = crate::model::validate::LogicalColumnKey {
+                schema: Some(schema.to_string()),
+                table: reference.table.clone(),
+                column: reference.column.clone(),
+            };
+            let target_is_declared = logical_columns.contains_key(&target_key);
+            let target_snapshot = live.table_snapshots.get(&reference.table);
+
+            if target_snapshot.is_none() && target_is_declared {
+                // A target created in this artifact (or otherwise retained in the
+                // authored project graph) is fully proved by the logical pass.
+                continue;
+            }
+            let Some(target_snapshot) = target_snapshot else {
+                return Err(self.typed_reference_catalog_error(
+                    &site,
+                    format!(
+                        "unmanaged target {:?}.{:?} has no live catalog snapshot",
+                        reference.table, reference.column
+                    ),
+                    "introspect the unmanaged target or import its declaration into the project graph",
+                ));
+            };
+            let Some(target_column) = target_snapshot
+                .columns
+                .iter()
+                .find(|column| column.name == reference.column)
+            else {
+                return Err(self.typed_reference_catalog_error(
+                    &site,
+                    format!(
+                        "live target {:?} has no column {:?}",
+                        reference.table, reference.column
+                    ),
+                    "reference an existing target column or import the correct target declaration",
+                ));
+            };
+            if !target_is_declared
+                && !snapshot_has_single_column_reference_key(target_snapshot, &reference.column)
+            {
+                return Err(self.typed_reference_catalog_error(
+                    &site,
+                    format!(
+                        "live unmanaged target {:?}.{:?} is not an eligible single-column primary or unique key",
+                        reference.table, reference.column
+                    ),
+                    "reference a full single-column PRIMARY KEY or UNIQUE key, or import the target declaration into the project graph; a component of a composite key is not independently referenceable",
+                ));
+            }
+
+            let mut local_column = self.add_column_snapshot(
+                site.table,
+                &site.column.name,
+                &site.column.ty,
+                site.column.nullable,
+                None,
+                site.column.vector_metric,
+                site.column.case_sensitive,
+                None,
+                None,
+                None,
+            )?;
+            apply_author_type_override_to_column(
+                site.table,
+                &site.column.name,
+                &site.column.ty,
+                &mut local_column,
+                self.dialect,
+            )?;
+            self.apply_uuid_column_metadata(site.column, &mut local_column)?;
+            self.apply_value_format_column_metadata(site.column, &mut local_column)?;
+            // PostgreSQL's catalog exposes the base storage family separately
+            // from a column's COLLATE clause. TypeID and ULID intentionally use
+            // `text COLLATE "C"`, but information_schema reports that target as
+            // `text`; compare the base family here and keep collation intent in
+            // the independent check below. MySQL and SQLite need the override:
+            // it carries their actual VARCHAR/TEXT storage spelling.
+            let local_catalog_type = match self.dialect {
+                SqlDialect::Postgres => &local_column.data_type,
+                SqlDialect::Mysql | SqlDialect::Sqlite => local_column
+                    .ddl_type_override
+                    .as_deref()
+                    .unwrap_or(&local_column.data_type),
+            };
+            let local_type = canonical_reference_catalog_type(self.dialect, local_catalog_type);
+            let target_type =
+                canonical_reference_catalog_type(self.dialect, &target_column.data_type);
+            if local_type != target_type {
+                return Err(self.typed_reference_catalog_error(
+                    &site,
+                    format!(
+                        "recorded local type {:?} lowers to {local_type:?}, but the live target type {:?} canonicalizes to {target_type:?}",
+                        site.column.ty, target_column.data_type
+                    ),
+                    "use the same explicit local type as the referenced key; catalog state may validate but never select the local type",
+                ));
+            }
+
+            if self.dialect == SqlDialect::Mysql {
+                if let Some(local_storage) = mysql_explicit_text_storage(local_catalog_type) {
+                    let Some(target_storage) = target_column.mysql_text_storage.as_ref() else {
+                        return Err(self.typed_reference_catalog_error(
+                            &site,
+                            format!(
+                                "recorded local character storage is explicitly {} / {}, but the live target catalog has no exact MySQL character-set/collation metadata",
+                                local_storage.character_set, local_storage.collation
+                            ),
+                            "introspect CHARACTER_SET_NAME and COLLATION_NAME for the target; catalog state may validate but never select local character storage",
+                        ));
+                    };
+                    if local_storage != *target_storage {
+                        return Err(self.typed_reference_catalog_error(
+                            &site,
+                            format!(
+                                "recorded local character storage {} / {} does not match the live target storage {} / {}",
+                                local_storage.character_set,
+                                local_storage.collation,
+                                target_storage.character_set,
+                                target_storage.collation
+                            ),
+                            "use the same exact MySQL character set and collation on both sides; catalog state may validate but never select local character storage",
+                        ));
+                    }
+                }
+            }
+
+            let local_case_sensitive = site.column.case_sensitive.unwrap_or(true);
+            let target_case_sensitive = target_column.case_sensitive.unwrap_or(true);
+            if local_case_sensitive != target_case_sensitive {
+                return Err(self.typed_reference_catalog_error(
+                    &site,
+                    format!(
+                        "recorded local collation intent caseSensitive={local_case_sensitive} does not match the live target intent caseSensitive={target_case_sensitive}"
+                    ),
+                    "use matching collation/caseSensitive intent on both sides or import exact target metadata into the project graph",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn typed_reference_catalog_error(
+        &self,
+        site: &TypedReferenceSite<'_>,
+        reason: String,
+        suggested_fix: &str,
+    ) -> IrLowerError {
+        let reference = site
+            .column
+            .references
+            .as_ref()
+            .expect("typed-reference collector filters absent facets");
+        IrLowerError::DmlValidate(Box::new(crate::model::validate::AuthoringError {
+            code: crate::model::validate::CODE_OP_INVALID.to_string(),
+            kind: Some(crate::model::validate::UnsupportedKind::Op),
+            op_index: site.op_index,
+            ts_location: None,
+            dialect: self.validation_dialect(),
+            reason: format!(
+                "typed reference {}.{} -> {}.{} is incompatible with the live catalog: {reason}",
+                site.table, site.column.name, reference.table, reference.column
+            ),
+            suggested_fix: Some(suggested_fix.to_string()),
+        }))
     }
 
     fn selected_dialectal_leg<'a>(
@@ -2713,6 +3082,7 @@ impl IrAuthor {
                 apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 apply_structured_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
+                self.apply_uuid_metadata(columns, &mut snap)?;
                 self.apply_value_format_metadata(columns, &mut snap)?;
                 // keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
@@ -2821,6 +3191,7 @@ impl IrAuthor {
                     default: default.clone(),
                     unique: None,
                     value_format: value_format.clone(),
+                    references: None,
                     id_prefix: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
@@ -2835,6 +3206,7 @@ impl IrAuthor {
                     &mut col,
                     named_types,
                 )?;
+                self.apply_uuid_column_metadata(&source_col, &mut col)?;
                 self.apply_value_format_column_metadata(&source_col, &mut col)?;
                 // addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
@@ -3162,6 +3534,7 @@ impl IrAuthor {
                                 default: None,
                                 unique: None,
                                 value_format: None,
+                                references: None,
                                 id_prefix: None,
                                 case_sensitive: None,
                                 vector_metric: None,
@@ -4133,7 +4506,7 @@ impl IrAuthor {
         guard_cfg: &GuardConfig,
         live: &LiveSchema,
     ) -> Result<GuardedLowerParts, IrGuardedLowerError> {
-        crate::model::validate::validate_per_row_destinations_for_lower(
+        let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),
             &[],
@@ -4142,6 +4515,16 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_column_references_for_lower(
+            ir,
+            self.validation_dialect(),
+            &[],
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
         let guard_scope = guard_cfg.schema_scope();
@@ -4691,6 +5074,7 @@ impl IrAuthor {
             // renders the metric opclass / `zero-migrate:mask` sentinel.
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             vector_metric,
             case_sensitive,
@@ -4760,6 +5144,43 @@ impl IrAuthor {
         Ok(())
     }
 
+    fn apply_uuid_metadata(
+        &self,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        for source in columns {
+            if !matches!(source.ty, ColType::Uuid) {
+                continue;
+            }
+            let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
+                return Err(IrLowerError::UnsupportedOp("UUID column folded away"));
+            };
+            self.apply_uuid_column_metadata(source, col)?;
+        }
+        Ok(())
+    }
+
+    fn apply_uuid_column_metadata(
+        &self,
+        source: &IrColumn,
+        col: &mut ColumnSnapshot,
+    ) -> Result<(), IrLowerError> {
+        if !matches!(source.ty, ColType::Uuid) {
+            return Ok(());
+        }
+        let Some(metadata) =
+            uuid_column_metadata(&source.name, self.dialect).map_err(DeclarativeError::Invalid)?
+        else {
+            return Ok(());
+        };
+        col.ddl_type_override = Some(metadata.ddl_type);
+        if source.references.is_none() {
+            col.inline_checks.push(metadata.inline_check);
+        }
+        Ok(())
+    }
+
     fn apply_value_format_column_metadata(
         &self,
         source: &IrColumn,
@@ -4771,7 +5192,9 @@ impl IrAuthor {
         let metadata = value_format_column_metadata(&source.name, value_format, self.dialect)
             .map_err(DeclarativeError::Invalid)?;
         col.ddl_type_override = Some(metadata.ddl_type);
-        col.inline_checks.push(metadata.inline_check);
+        if source.references.is_none() {
+            col.inline_checks.push(metadata.inline_check);
+        }
         Ok(())
     }
 
@@ -6650,7 +7073,16 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // `nullable` defaults to TRUE (the `t.*` lexicon — the lexicon default); `required` is the
     // inverse the descriptor models. An explicit `nullable: false` ⇒ required.
     let required = !c.nullable.unwrap_or(true);
-    let (mut ty, references) = col_type_to_token(&c.ty);
+    let (mut ty, legacy_references) = col_type_to_token(&c.ty);
+    let references = c
+        .references
+        .as_ref()
+        .map(|reference| reference.table.clone())
+        .or(legacy_references);
+    let reference_column = c
+        .references
+        .as_ref()
+        .map(|reference| reference.column.clone());
     // A legacy internal platform-ID descriptor records the `id` column as a
     // `uuid` carrier with `id_prefix`. The shared descriptor kernel
     // expects an `id`-named field to declare type `"id"` (so it FOLDS into the
@@ -6720,6 +7152,17 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         required,
         unique: c.unique.unwrap_or(false),
         references,
+        reference_column,
+        on_delete: c
+            .references
+            .as_ref()
+            .and_then(|reference| reference.on_delete)
+            .map(|action| action.as_token().to_string()),
+        on_update: c
+            .references
+            .as_ref()
+            .and_then(|reference| reference.on_update)
+            .map(|action| action.as_token().to_string()),
         default: c.default.as_ref().and_then(ir_default_to_value),
         encrypted,
         // Precedence: an EXPLICIT standalone `.mask()` carried on the IrColumn WINS;
@@ -6743,9 +7186,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
 pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescriptor {
     let mut field = ir_column_to_field(c);
     if c.name == "id" && matches!(c.ty, ColType::Uuid) {
-        let (ty, references) = col_type_to_token(&c.ty);
+        let (ty, _) = col_type_to_token(&c.ty);
         field.ty = ty;
-        field.references = references;
     }
     field
 }
@@ -7379,6 +7821,7 @@ mod tests {
             default: Some(IrDefault::Expr { expr }),
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -7398,6 +7841,7 @@ mod tests {
             value_format: Some(crate::model::ir::ValueFormat::TypeId {
                 prefix: prefix.into(),
             }),
+            references: None,
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -7608,6 +8052,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: Some(crate::model::ir::ValueFormat::Ulid),
+            references: None,
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -7692,7 +8137,10 @@ mod tests {
             .expect("MySQL UUIDv4 defaults lower");
         assert_eq!(
             mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
-            vec![DatabaseFeature::UuidV4Generation]
+            vec![
+                DatabaseFeature::UuidV4Generation,
+                DatabaseFeature::UuidValidation,
+            ]
         );
 
         let sqlite_plan = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
@@ -7898,6 +8346,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7940,6 +8389,7 @@ mod tests {
                 }),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7991,6 +8441,7 @@ mod tests {
                 }),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8039,6 +8490,7 @@ mod tests {
                 }),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8148,6 +8600,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8197,6 +8650,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8211,6 +8665,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8235,13 +8690,16 @@ mod tests {
             (
                 SqlDialect::Sqlite,
                 crate::model::validate::Dialect::Sqlite,
-                [r#""account_id" TEXT NOT NULL"#, r#""team" TEXT NOT NULL"#],
+                [
+                    r#""account_id" TEXT COLLATE BINARY NOT NULL"#,
+                    r#""team" TEXT NOT NULL"#,
+                ],
             ),
             (
                 SqlDialect::Mysql,
                 crate::model::validate::Dialect::Mysql,
                 [
-                    r#"`account_id` VARCHAR(191) NOT NULL"#,
+                    r#"`account_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL"#,
                     r#"`team` VARCHAR(191) NOT NULL"#,
                 ],
             ),
@@ -8283,6 +8741,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8347,6 +8806,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8361,6 +8821,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8400,6 +8861,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8469,6 +8931,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8522,6 +8985,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8581,6 +9045,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8597,6 +9062,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8615,6 +9081,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8631,6 +9098,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8647,6 +9115,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8663,6 +9132,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8726,6 +9196,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8772,6 +9243,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8816,6 +9288,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8860,6 +9333,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8904,6 +9378,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8948,6 +9423,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9102,6 +9578,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9161,6 +9638,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9222,6 +9700,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9260,6 +9739,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9313,6 +9793,7 @@ mod tests {
                 }),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9555,6 +10036,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9633,6 +10115,7 @@ mod tests {
                         }),
                         unique: None,
                         value_format: None,
+                        references: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9649,6 +10132,7 @@ mod tests {
                         }),
                         unique: None,
                         value_format: None,
+                        references: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9665,6 +10149,7 @@ mod tests {
                         }),
                         unique: None,
                         value_format: None,
+                        references: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9733,6 +10218,7 @@ mod tests {
                     default: Some(IrDefault::Json { value }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -9805,6 +10291,7 @@ mod tests {
                     default: Some(IrDefault::Json { value }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -9870,6 +10357,7 @@ mod tests {
                     default: Some(synth_default(crate::model::expr::SynthFn::Now)),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -10565,6 +11053,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10640,6 +11129,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10689,6 +11179,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10706,6 +11197,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -11205,6 +11697,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,

@@ -49,8 +49,9 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, CommentTarget, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
-    IrIndex, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    ColType, ColumnReference, CommentTarget, IndexElement, IrColumn, IrConstraint,
+    IrConstraintKind, IrDefault, IrIndex, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy,
+    TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
@@ -72,7 +73,9 @@ use crate::render::lower::{
     render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
 };
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::render::value_format::column_metadata as value_format_column_metadata;
+use crate::render::value_format::{
+    column_metadata as value_format_column_metadata, uuid_column_metadata,
+};
 use crate::schema::query::SqlDialect;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
@@ -614,6 +617,7 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
+                apply_fold_uuid_metadata(columns, &mut snap, dialect)?;
                 apply_fold_value_format_metadata(columns, &mut snap, dialect)?;
                 fold_create_table_specs(
                     name,
@@ -809,6 +813,7 @@ pub fn fold_ops_onto(
                     default: default.clone(),
                     unique: None,
                     value_format: value_format.clone(),
+                    references: None,
                     id_prefix: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
@@ -825,6 +830,7 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
+                apply_fold_uuid_column_metadata(&source_col, &mut col, dialect)?;
                 apply_fold_value_format_column_metadata(&source_col, &mut col, dialect)?;
                 snap.columns.push(col);
                 if let Some(sibling) = masked_sibling {
@@ -1000,6 +1006,7 @@ pub fn fold_ops_onto(
                                 default: None,
                                 unique: None,
                                 value_format: None,
+                                references: None,
                                 id_prefix: None,
                                 case_sensitive: None,
                                 vector_metric: None,
@@ -1506,6 +1513,7 @@ fn add_column_snapshot(
         // the vector metric + standalone mask ARE threaded so the snapshot renders them.
         unique: None,
         value_format: None,
+        references: None,
         id_prefix: None,
         vector_metric,
         case_sensitive,
@@ -1702,6 +1710,45 @@ fn apply_fold_value_format_metadata(
     Ok(())
 }
 
+fn apply_fold_uuid_metadata(
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    for source in columns {
+        if !matches!(source.ty, ColType::Uuid) {
+            continue;
+        }
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|col| col.name == source.name)
+            .ok_or(FoldError::Unsupported("UUID column folded away"))?;
+        apply_fold_uuid_column_metadata(source, col, dialect)?;
+    }
+    Ok(())
+}
+
+fn apply_fold_uuid_column_metadata(
+    source: &IrColumn,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    if !matches!(source.ty, ColType::Uuid) {
+        return Ok(());
+    }
+    let Some(metadata) = uuid_column_metadata(&source.name, dialect)
+        .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?
+    else {
+        return Ok(());
+    };
+    col.ddl_type_override = Some(metadata.ddl_type);
+    if source.references.is_none() {
+        col.inline_checks.push(metadata.inline_check);
+    }
+    Ok(())
+}
+
 fn apply_fold_value_format_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
@@ -1713,7 +1760,9 @@ fn apply_fold_value_format_column_metadata(
     let metadata = value_format_column_metadata(&source.name, value_format, dialect)
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
     col.ddl_type_override = Some(metadata.ddl_type);
-    col.inline_checks.push(metadata.inline_check);
+    if source.references.is_none() {
+        col.inline_checks.push(metadata.inline_check);
+    }
     Ok(())
 }
 
@@ -2594,7 +2643,7 @@ pub fn fold_to_field_defs(
                 // in the renamed table pointing at itself) is re-targeted too.
                 for cols in tables.values_mut() {
                     for f in cols.values_mut() {
-                        if f.ty == "ref" && f.references.as_deref() == Some(table.as_str()) {
+                        if f.references.as_deref() == Some(table.as_str()) {
                             f.references = Some(to.clone());
                         }
                     }
@@ -2627,6 +2676,7 @@ pub fn fold_to_field_defs(
                         default: default.clone(),
                         unique: None,
                         value_format: value_format.clone(),
+                        references: None,
                         id_prefix: None,
                         case_sensitive: *case_sensitive,
                         vector_metric: *vector_metric,
@@ -2791,6 +2841,7 @@ fn resolved_system_column_matches(actual: &IrColumn, expected: &(&str, &str, boo
         && actual.nullable == Some(nullable)
         && actual.default.is_none()
         && actual.unique.is_none()
+        && actual.references.is_none()
         && actual.case_sensitive.is_none()
         && actual.vector_metric.is_none()
         && actual.mask.is_none()
@@ -3145,6 +3196,19 @@ pub fn descriptors_to_create_ops(
             // encrypted column is therefore dropped here (recovered downstream); a
             // standalone/non-default mask is carried.
             let mask = standalone_mask_facet(f);
+            let references = if f.ty == "ref" {
+                None
+            } else {
+                f.references.as_ref().map(|table| ColumnReference {
+                    table: table.clone(),
+                    column: f
+                        .reference_column
+                        .clone()
+                        .unwrap_or_else(|| "id".to_string()),
+                    on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
+                    on_update: f.on_update.as_deref().and_then(parse_ref_action),
+                })
+            };
             columns.push(IrColumn {
                 name: f.name.clone(),
                 ty,
@@ -3152,6 +3216,7 @@ pub fn descriptors_to_create_ops(
                 default,
                 unique: if f.unique { Some(true) } else { None },
                 value_format: None,
+                references,
                 id_prefix: f.id_prefix.clone(),
                 vector_metric,
                 case_sensitive: f.case_sensitive,
@@ -3170,7 +3235,10 @@ pub fn descriptors_to_create_ops(
                         kind: IrConstraintKind::Fk {
                             columns: vec![f.name.clone()],
                             references_table: target.clone(),
-                            references_columns: vec!["id".to_string()],
+                            references_columns: vec![f
+                                .reference_column
+                                .clone()
+                                .unwrap_or_else(|| "id".to_string())],
                             on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
                             on_update: f.on_update.as_deref().and_then(parse_ref_action),
                             deferrable: None,
@@ -3416,6 +3484,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -4255,6 +4324,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5141,6 +5211,7 @@ mod tests {
             default,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5184,6 +5255,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -5204,6 +5276,7 @@ mod tests {
                     }),
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -5403,6 +5476,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: Some("post".into()),
             case_sensitive: None,
             vector_metric: None,
@@ -5430,6 +5504,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: Some(crate::model::ir::VectorMetric::InnerProduct),
@@ -5463,6 +5538,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5500,6 +5576,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5575,6 +5652,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5757,6 +5835,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,

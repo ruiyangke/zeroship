@@ -1178,6 +1178,12 @@ pub struct IrColumn {
         skip_serializing_if = "Option::is_none"
     )]
     pub value_format: Option<ValueFormat>,
+    /// A typed single-column foreign-key reference. The local column's storage
+    /// type remains fully specified by [`Self::ty`]; this facet adds only the
+    /// target identity and referential actions. In particular, it never infers
+    /// or replaces the local type from a live catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<ColumnReference>,
     /// Legacy internal platform-ID prefix for the
     /// `<prefix>_<22 base62 UUIDv7>` format. This is a DECLARED-ONLY hint DB
     /// introspection cannot recover (the minted value is opaque text in the
@@ -1285,6 +1291,25 @@ impl RefAction {
             Self::NoAction => "noAction",
         }
     }
+}
+
+/// Target and behavior for a typed single-column foreign-key reference.
+///
+/// Composite foreign keys deliberately do not use this shape; they remain
+/// table-level constraints with ordered local and referenced column lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColumnReference {
+    /// Referenced table in the local column's schema.
+    pub table: String,
+    /// Referenced column.
+    pub column: String,
+    /// Optional `ON DELETE` behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<RefAction>,
+    /// Optional `ON UPDATE` behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<RefAction>,
 }
 
 /// The CLOSED target shape for an exclusion-constraint element. A target is
@@ -4705,6 +4730,7 @@ mod tests {
                 default: Some(IrDefault::Json { value }),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -4805,6 +4831,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5254,6 +5281,7 @@ mod tests {
                 unique: None,
                 // The new facets, all ABSENT (a plain `t.text()` column).
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -5595,6 +5623,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: Some(false),
             vector_metric: None,
@@ -5613,6 +5642,40 @@ mod tests {
     }
 
     #[test]
+    fn typed_column_reference_round_trips_without_changing_the_local_type() {
+        let col = IrColumn {
+            name: "account_id".into(),
+            ty: ColType::Uuid,
+            nullable: None,
+            default: None,
+            unique: None,
+            value_format: None,
+            references: Some(ColumnReference {
+                table: "accounts".into(),
+                column: "id".into(),
+                on_delete: Some(RefAction::Cascade),
+                on_update: Some(RefAction::SetNull),
+            }),
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+        let json = serde_json::to_string(&col).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"account_id","type":"uuid","references":{"table":"accounts","column":"id","onDelete":"cascade","onUpdate":"setNull"}}"#
+        );
+        let back: IrColumn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ty, ColType::Uuid);
+        assert_eq!(back.references, col.references);
+        assert!(back.default.is_none());
+        assert!(back.unique.is_none());
+    }
+
+    #[test]
     fn column_without_container_default_omits_default_key() {
         let col = IrColumn {
             name: "body".into(),
@@ -5621,6 +5684,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5648,6 +5712,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,

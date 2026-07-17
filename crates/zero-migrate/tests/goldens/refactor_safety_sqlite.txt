@@ -343,7 +343,7 @@ TableSnapshot {
         ConstraintSnapshot {
             name: "author_fkey",
             kind: "FOREIGN KEY",
-            definition: "FOREIGN KEY (author) REFERENCES app.authors(id)",
+            definition: "FOREIGN KEY (author) REFERENCES authors(id)",
             comment: None,
         },
     ],

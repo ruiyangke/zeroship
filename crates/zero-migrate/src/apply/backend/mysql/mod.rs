@@ -546,6 +546,9 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         let needs_uuid_v4 = requirements
             .iter()
             .any(|feature| feature == DatabaseFeature::UuidV4Generation);
+        let needs_uuid_validation = requirements
+            .iter()
+            .any(|feature| feature == DatabaseFeature::UuidValidation);
         let needs_type_id = requirements
             .iter()
             .any(|feature| feature == DatabaseFeature::TypeIdValidation);
@@ -554,12 +557,18 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
             .any(|feature| feature == DatabaseFeature::UlidValidation);
 
         let capabilities = session::database_capabilities(self.conn).await?;
-        let (minimum, requirement) = if needs_type_id && needs_ulid {
-            ([8, 0, 16], "canonical TypeID and ULID format validation")
-        } else if needs_type_id {
-            ([8, 0, 16], "canonical TypeID format validation")
-        } else if needs_ulid {
-            ([8, 0, 16], "canonical ULID format validation")
+        let (minimum, requirement) = if needs_uuid_validation || needs_type_id || needs_ulid {
+            let requirement = match (needs_uuid_validation, needs_type_id, needs_ulid) {
+                (true, false, false) => "canonical UUID format validation",
+                (false, true, false) => "canonical TypeID format validation",
+                (false, false, true) => "canonical ULID format validation",
+                (false, true, true) => "canonical TypeID and ULID format validation",
+                (true, true, false) => "canonical UUID and TypeID format validation",
+                (true, false, true) => "canonical UUID and ULID format validation",
+                (true, true, true) => "canonical UUID, TypeID, and ULID format validation",
+                (false, false, false) => unreachable!("format-validation branch is guarded"),
+            };
+            ([8, 0, 16], requirement)
         } else {
             ([8, 0, 13], "exact RFC 9562 UUIDv4 database generation")
         };
@@ -1291,8 +1300,8 @@ mod render_tests {
                 && sql.contains("ORDINAL_POSITION AS ordinal_position")
             {
                 self.catalog_columns.borrow().clone()
-            } else if sql.contains("INDEX_NAME <> 'PRIMARY'")
-                && sql.contains("EXPRESSION AS expression")
+            } else if sql.contains("EXPRESSION AS expression")
+                && sql.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
             {
                 self.catalog_indexes.borrow().clone()
             } else if sql.contains("COLLATION_NAME AS collation_name")
@@ -1463,6 +1472,8 @@ mod render_tests {
         table: &str,
         column: &str,
         column_type: &str,
+        character_set: Option<&str>,
+        collation: Option<&str>,
         nullable: bool,
         ordinal: i64,
     ) -> Row {
@@ -1471,6 +1482,8 @@ mod render_tests {
                 "table_name".into(),
                 "column_name".into(),
                 "column_type".into(),
+                "character_set_name".into(),
+                "collation_name".into(),
                 "is_nullable".into(),
                 "ordinal_position".into(),
             ],
@@ -1478,6 +1491,8 @@ mod render_tests {
                 Value::Text(table.into()),
                 Value::Text(column.into()),
                 Value::Text(column_type.into()),
+                character_set.map_or(Value::Null, |value| Value::Text(value.into())),
+                collation.map_or(Value::Null, |value| Value::Text(value.into())),
                 Value::Text(if nullable { "YES" } else { "NO" }.into()),
                 Value::Int(ordinal),
             ],
@@ -1844,12 +1859,29 @@ mod render_tests {
                 vec![Value::Text("users".into())],
             )],
             vec![
-                catalog_column("users", "id", "bigint(20)", false, 1),
-                catalog_column("users", "tenant_id", "bigint", false, 2),
-                catalog_column("users", "email", "varchar(191)", false, 3),
-                catalog_column("users", "nickname", "varchar(40)", true, 4),
+                catalog_column("users", "id", "bigint(20)", None, None, false, 1),
+                catalog_column("users", "tenant_id", "bigint", None, None, false, 2),
+                catalog_column(
+                    "users",
+                    "email",
+                    "varchar(191)",
+                    Some("utf8mb4"),
+                    Some("utf8mb4_0900_ai_ci"),
+                    false,
+                    3,
+                ),
+                catalog_column(
+                    "users",
+                    "nickname",
+                    "varchar(40)",
+                    Some("utf8mb4"),
+                    Some("utf8mb4_bin"),
+                    true,
+                    4,
+                ),
             ],
             vec![
+                catalog_index_part("users", "PRIMARY", 0, 1, Some("id"), None, Some("A"), None),
                 catalog_index_part(
                     "users",
                     "idx_nickname_prefix",
@@ -1898,14 +1930,31 @@ mod render_tests {
                 .map(|column| (
                     column.name.as_str(),
                     column.data_type.as_str(),
-                    column.nullable
+                    column.nullable,
+                    column.case_sensitive,
+                    column.mysql_text_storage.as_ref().map(|storage| (
+                        storage.character_set.as_str(),
+                        storage.collation.as_str(),
+                    )),
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                ("email", "text", false),
-                ("id", "bigint", false),
-                ("nickname", "text", true),
-                ("tenant_id", "bigint", false),
+                (
+                    "email",
+                    "text",
+                    false,
+                    Some(false),
+                    Some(("utf8mb4", "utf8mb4_0900_ai_ci")),
+                ),
+                ("id", "bigint", false, None, None),
+                (
+                    "nickname",
+                    "text",
+                    true,
+                    None,
+                    Some(("utf8mb4", "utf8mb4_bin")),
+                ),
+                ("tenant_id", "bigint", false, None, None),
             ]
         );
         assert_eq!(
@@ -1914,17 +1963,25 @@ mod render_tests {
                 .iter()
                 .map(|index| index.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["idx_nickname_prefix", "uq_users_tenant_email"]
+            vec!["idx_nickname_prefix", "uq_users_tenant_email", "users_pkey"]
         );
         assert!(users.indexes[0].columns.is_empty());
         assert!(users.indexes[1].unique);
         assert_eq!(users.indexes[1].columns, ["tenant_id", "email"]);
+        assert!(users.indexes[2].unique);
+        assert_eq!(users.indexes[2].columns, ["id"]);
+        assert_eq!(users.constraints.len(), 1);
+        assert_eq!(users.constraints[0].name, "users_pkey");
+        assert_eq!(users.constraints[0].kind, "PRIMARY KEY");
+        assert_eq!(users.constraints[0].definition, "PRIMARY KEY (id)");
         let all = rec.log.borrow().join("\n");
         assert!(
             all.contains("TABLE_TYPE = 'BASE TABLE'")
                 && all.contains("COLUMN_TYPE AS column_type")
+                && all.contains("CHARACTER_SET_NAME AS character_set_name")
+                && all.contains("COLLATION_NAME AS collation_name")
                 && all.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
-                && all.contains("INDEX_NAME <> 'PRIMARY'"),
+                && !all.contains("INDEX_NAME <> 'PRIMARY'"),
             "snapshot must use schema-scoped authoritative catalog reads: {all}"
         );
         assert_eq!(

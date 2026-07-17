@@ -68,6 +68,7 @@ function interfaceMemberNamesFromDts(fileName: string, interfaceName: string): S
 test("public root .d.ts exposes vendor DDL and omits recorder internals", async () => {
   const coreExports = exportedNamesFromDts("index.d.ts");
   const migrationTypeMembers = interfaceMemberNamesFromDts("index.d.ts", "TypeLexicon");
+  const columnDefMembers = interfaceMemberNamesFromDts("index.d.ts", "ColumnDef");
 
   const rootedVendorExports = [
     "createFunction",
@@ -86,6 +87,8 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   assert.equal(coreExports.has("ids"), true, "ids must be exported from zero-migrate root declarations");
   assert.equal(coreExports.has("IdOptions"), false, "the removed migration id options must not be exported");
   assert.equal(migrationTypeMembers.has("id"), false, "the migration t declaration must not expose id");
+  assert.equal(migrationTypeMembers.has("ref"), false, "the migration t declaration must not expose ref");
+  assert.equal(columnDefMembers.has("references"), true, "ColumnDef must expose typed references");
   for (const name of [
     "BackfillSetValue",
     "IdFormats",
@@ -127,6 +130,16 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     (runtimeRoot.t as unknown as Record<string, unknown>).id,
     undefined,
     "the migration t runtime must not expose id",
+  );
+  assert.equal(
+    (runtimeRoot.t as unknown as Record<string, unknown>).ref,
+    undefined,
+    "the migration t runtime must not expose ref",
+  );
+  assert.equal(
+    typeof runtimeRoot.t.text().references,
+    "function",
+    "runtime ColumnDef must expose typed references",
   );
   assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
   assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");

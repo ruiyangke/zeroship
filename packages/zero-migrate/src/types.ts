@@ -230,6 +230,21 @@ export interface ColumnDef {
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
   unique(): ColumnDef;
   /**
+   * Declare a typed single-column foreign-key reference. The local physical
+   * type and value-format facets remain exactly those selected by this builder;
+   * the reference adds only the target and referential actions. Returns a fresh
+   * def. References are currently create-table-only; add/rename/set-type and
+   * nested type positions reject this facet instead of dropping it.
+   */
+  references(
+    table: string,
+    column: string,
+    options?: {
+      onDelete?: RefAction;
+      onUpdate?: RefAction;
+    },
+  ): ColumnDef;
+  /**
    * Declare a STANDALONE column mask (#174) — the field reads back as
    * `MaskedValue<T>` and the op lower emits the `zero-migrate:mask` sentinel + `_masked`
    * sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is REQUIRED
@@ -251,8 +266,8 @@ export interface ColumnDef {
 }
 
 /** The fluent migration `t.*` physical column-type lexicon. Canonical names only
- * — the universal ID shortcut, the `string`/`integer` aliases, and the
- * `{notNull,default}` options-bag overload are removed. */
+ * — the universal ID shortcut, untyped reference factory, `string`/`integer`
+ * aliases, and the `{notNull,default}` options-bag overload are removed. */
 export interface TypeLexicon {
   text(opts?: TextOptions): ColumnDef;
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
@@ -268,8 +283,6 @@ export interface TypeLexicon {
   bytes(): ColumnDef;
   boolean(): ColumnDef;
   json(): ColumnDef;
-  /** A foreign-key reference column (plain-string target — NOT live-schema-bound). */
-  ref(targetTable: string): ColumnDef;
   /** A pgvector embedding column. `t.vector({ dimensions, metric })` records the
    *  declared distance metric on `IrColumn.vectorMetric` (the closed
    *  {@link VectorMetric} set), so the ivfflat/hnsw opclass renders the declared

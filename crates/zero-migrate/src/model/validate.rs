@@ -56,7 +56,7 @@
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 use pg_query::protobuf::node::Node as NodeEnum;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)
@@ -136,6 +136,7 @@ pub fn validate_ir_scoped(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
+    validate_column_references(ir, target_dialect, ts_locations)?;
     validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
@@ -172,15 +173,23 @@ pub struct LogicalColumnKey {
     pub column: String,
 }
 
-/// Logical destination contract retained across ordered migration artifacts.
+/// Logical column contract retained across ordered migration artifacts.
 #[derive(Debug, Clone)]
 pub struct LogicalColumnContract {
     pub ty: crate::model::ir::ColType,
     pub value_format: Option<crate::model::ir::ValueFormat>,
+    /// Authored collation intent. `None` and `Some(true)` both mean the
+    /// bytewise/default comparison behavior; `Some(false)` requests the
+    /// portable case-insensitive text shape.
+    pub case_sensitive: Option<bool>,
+    /// Whether this authored column is independently eligible as the target of
+    /// a single-column foreign key: a one-column primary key or UNIQUE key.
+    /// Composite keys deliberately do not set this bit for their components.
+    pub single_column_reference_key: bool,
 }
 
-/// Cumulative logical project-schema declarations used by strict per-row
-/// backfill validation at lowering time.
+/// Cumulative logical project-schema declarations used by strict per-row and
+/// typed-reference validation at lowering time.
 pub type LogicalColumnContracts = BTreeMap<LogicalColumnKey, LogicalColumnContract>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +251,7 @@ fn schemas_name_same_declared_table(left: Option<&str>, right: Option<&str>) -> 
     }
 }
 
-fn declare_per_row_column(
+fn declare_logical_column(
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
@@ -250,6 +259,8 @@ fn declare_per_row_column(
     column: &str,
     ty: crate::model::ir::ColType,
     value_format: Option<crate::model::ir::ValueFormat>,
+    case_sensitive: Option<bool>,
+    single_column_reference_key: bool,
 ) {
     declared.retain(|candidate, _| {
         candidate.table != table
@@ -262,8 +273,72 @@ fn declare_per_row_column(
             table: table.to_string(),
             column: column.to_string(),
         },
-        LogicalColumnContract { ty, value_format },
+        LogicalColumnContract {
+            ty,
+            value_format,
+            case_sensitive,
+            single_column_reference_key,
+        },
     );
+}
+
+fn create_table_single_column_reference_keys(
+    columns: &[crate::model::ir::IrColumn],
+    primary_key: Option<&[String]>,
+    constraints: &[crate::model::ir::IrConstraint],
+    indexes: &[crate::model::ir::IrIndex],
+) -> BTreeSet<String> {
+    use crate::model::ir::{IndexElement, IndexMethod, IrConstraintKind};
+
+    let mut keys = columns
+        .iter()
+        .filter(|column| column.unique == Some(true))
+        .map(|column| column.name.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some([column]) = primary_key {
+        keys.insert(column.clone());
+    }
+    for constraint in constraints {
+        if let IrConstraintKind::Unique { columns } = &constraint.kind {
+            if let [column] = columns.as_slice() {
+                keys.insert(column.clone());
+            }
+        }
+    }
+    for index in indexes {
+        if index.unique != Some(true)
+            || index.r#where.is_some()
+            || index.only == Some(true)
+            || !matches!(index.using, None | Some(IndexMethod::Btree))
+        {
+            continue;
+        }
+        if let [IndexElement::Column {
+            name,
+            opclass: None,
+            collation: None,
+            ..
+        }] = index.columns.as_slice()
+        {
+            keys.insert(name.clone());
+        }
+    }
+    keys
+}
+
+fn existing_single_column_reference_key(
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> bool {
+    declared.iter().any(|(candidate, contract)| {
+        candidate.table == table
+            && candidate.column == column
+            && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+            && contract.single_column_reference_key
+    })
 }
 
 fn remove_declared_per_row_table(
@@ -472,13 +547,22 @@ fn validate_per_row_op(
         Op::CreateTable {
             name,
             columns,
+            primary_key,
+            constraints,
+            indexes,
             schema,
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
+            let reference_keys = create_table_single_column_reference_keys(
+                columns,
+                primary_key.as_deref(),
+                constraints,
+                indexes,
+            );
             for column in columns {
-                declare_per_row_column(
+                declare_logical_column(
                     declared,
                     schema_mode,
                     schema.as_deref(),
@@ -486,6 +570,8 @@ fn validate_per_row_op(
                     &column.name,
                     column.ty.clone(),
                     column.value_format.clone(),
+                    column.case_sensitive,
+                    reference_keys.contains(&column.name),
                 );
             }
         }
@@ -494,11 +580,12 @@ fn validate_per_row_op(
             column,
             ty,
             value_format,
+            case_sensitive,
             schema,
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            declare_per_row_column(
+            declare_logical_column(
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -506,6 +593,8 @@ fn validate_per_row_op(
                 column,
                 ty.clone(),
                 value_format.clone(),
+                *case_sensitive,
+                false,
             );
         }
         Op::SetColumnType {
@@ -516,7 +605,14 @@ fn validate_per_row_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            declare_per_row_column(
+            let reference_key = existing_single_column_reference_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+            );
+            declare_logical_column(
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -524,6 +620,8 @@ fn validate_per_row_op(
                 column,
                 to_type.clone(),
                 None,
+                None,
+                reference_key,
             );
         }
         Op::DropColumn {
@@ -604,7 +702,7 @@ fn validate_per_row_op(
                 }
             }
             if !found {
-                declare_per_row_column(
+                declare_logical_column(
                     declared,
                     schema_mode,
                     schema.as_deref(),
@@ -612,6 +710,8 @@ fn validate_per_row_op(
                     to,
                     ty.clone(),
                     None,
+                    None,
+                    false,
                 );
             }
         }
@@ -701,6 +801,687 @@ pub(crate) fn validate_per_row_destinations_for_lower(
         )?;
     }
     Ok(declared)
+}
+
+/// Replay only the operations that change authored logical column contracts.
+///
+/// Reference validation uses this as its first pass so a reference may target a
+/// table declared later in the same artifact. The selected dialectal leg is the
+/// only leg that contributes declarations. Catalog state is intentionally absent:
+/// this graph is deterministic authored metadata.
+fn collect_logical_declarations_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+) {
+    use crate::model::ir::Op;
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    collect_logical_declarations_op(inner, target_dialect, declared, schema_mode);
+                }
+            }
+        }
+        Op::CreateTable {
+            name,
+            columns,
+            primary_key,
+            constraints,
+            indexes,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
+            let reference_keys = create_table_single_column_reference_keys(
+                columns,
+                primary_key.as_deref(),
+                constraints,
+                indexes,
+            );
+            for column in columns {
+                declare_logical_column(
+                    declared,
+                    schema_mode,
+                    schema.as_deref(),
+                    name,
+                    &column.name,
+                    column.ty.clone(),
+                    column.value_format.clone(),
+                    column.case_sensitive,
+                    reference_keys.contains(&column.name),
+                );
+            }
+        }
+        Op::AddColumn {
+            table,
+            column,
+            ty,
+            value_format,
+            case_sensitive,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            declare_logical_column(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+                ty.clone(),
+                value_format.clone(),
+                *case_sensitive,
+                false,
+            );
+        }
+        Op::SetColumnType {
+            table,
+            column,
+            to_type,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            let reference_key = existing_single_column_reference_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+            );
+            declare_logical_column(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                column,
+                to_type.clone(),
+                None,
+                None,
+                reference_key,
+            );
+        }
+        Op::DropColumn {
+            table,
+            column,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            declared.retain(|candidate, _| {
+                candidate.table != *table
+                    || candidate.column != *column
+                    || !schema_mode
+                        .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+            });
+        }
+        Op::DropTable { table, schema, .. } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), table);
+        }
+        Op::RenameTable {
+            table, to, schema, ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            let renamed = declared
+                .keys()
+                .filter(|candidate| {
+                    candidate.table == *table
+                        && schema_mode
+                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for from in renamed {
+                if let Some(contract) = declared.remove(&from) {
+                    declared.insert(
+                        LogicalColumnKey {
+                            schema: from.schema,
+                            table: to.clone(),
+                            column: from.column,
+                        },
+                        contract,
+                    );
+                }
+            }
+        }
+        Op::RenameColumn {
+            table,
+            from,
+            to,
+            ty,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            let renamed = declared
+                .keys()
+                .filter(|candidate| {
+                    candidate.table == *table
+                        && candidate.column == *from
+                        && schema_mode
+                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let found = !renamed.is_empty();
+            for old_key in renamed {
+                if let Some(mut contract) = declared.remove(&old_key) {
+                    contract.ty = ty.clone();
+                    declared.insert(
+                        LogicalColumnKey {
+                            schema: old_key.schema,
+                            table: old_key.table,
+                            column: to.clone(),
+                        },
+                        contract,
+                    );
+                }
+            }
+            if !found {
+                declare_logical_column(
+                    declared,
+                    schema_mode,
+                    schema.as_deref(),
+                    table,
+                    to,
+                    ty.clone(),
+                    None,
+                    None,
+                    false,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn logical_reference_types_match(
+    local: &crate::model::ir::ColType,
+    target: &crate::model::ir::ColType,
+) -> bool {
+    use crate::model::ir::ColType;
+
+    match (local, target) {
+        // These two legacy neutral variants share one unformatted text storage
+        // contract. Public `t.text()` records `Text`.
+        (ColType::String | ColType::Text, ColType::String | ColType::Text) => true,
+        _ => local == target,
+    }
+}
+
+fn integer_width(ty: &crate::model::ir::ColType) -> Option<u8> {
+    use crate::model::ir::ColType;
+
+    match ty {
+        ColType::SmallInt => Some(16),
+        ColType::Int => Some(32),
+        ColType::BigInt => Some(64),
+        _ => None,
+    }
+}
+
+/// Canonical physical storage spelling used only for deterministic authored-side
+/// compatibility. Exact logical matching still runs first, so SQLite's broad
+/// `INTEGER` and `TEXT` storage classes can never erase UUID semantics, integer
+/// width, char length, decimal precision, or named-type identity.
+fn lowered_reference_storage(ty: &crate::model::ir::ColType, dialect: Dialect) -> String {
+    use crate::model::ir::ColType;
+
+    match ty {
+        ColType::String | ColType::Text | ColType::Ref { .. } => "text".to_string(),
+        ColType::SmallInt => match dialect {
+            Dialect::Sqlite => "integer".to_string(),
+            _ => "smallint".to_string(),
+        },
+        ColType::Int => "integer".to_string(),
+        ColType::BigInt => match dialect {
+            Dialect::Sqlite => "integer".to_string(),
+            _ => "bigint".to_string(),
+        },
+        ColType::Double => match dialect {
+            Dialect::Mysql => "double".to_string(),
+            Dialect::Sqlite => "real".to_string(),
+            Dialect::Postgres => "double precision".to_string(),
+        },
+        ColType::Real => "real".to_string(),
+        ColType::Boolean => match dialect {
+            Dialect::Sqlite => "integer".to_string(),
+            _ => "boolean".to_string(),
+        },
+        ColType::Json => match dialect {
+            Dialect::Postgres => "jsonb".to_string(),
+            Dialect::Mysql => "json".to_string(),
+            Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Timestamp => match dialect {
+            Dialect::Postgres => "timestamp with time zone".to_string(),
+            Dialect::Mysql => "datetime".to_string(),
+            Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Date => match dialect {
+            Dialect::Sqlite => "text".to_string(),
+            _ => "date".to_string(),
+        },
+        ColType::Uuid => match dialect {
+            Dialect::Postgres => "uuid".to_string(),
+            Dialect::Mysql | Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Inet => match dialect {
+            Dialect::Postgres => "inet".to_string(),
+            Dialect::Mysql | Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::TextArray => match dialect {
+            Dialect::Postgres => "text[]".to_string(),
+            Dialect::Mysql | Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Bytes | ColType::Encrypted { .. } => match dialect {
+            Dialect::Postgres => "bytea".to_string(),
+            Dialect::Mysql | Dialect::Sqlite => "blob".to_string(),
+        },
+        ColType::Char { length } => match dialect {
+            Dialect::Sqlite => "text".to_string(),
+            _ => format!("char({length})"),
+        },
+        ColType::Vector { vector } => format!("vector({vector})"),
+        ColType::GeoPoint => match dialect {
+            Dialect::Postgres => "geography(point,4326)".to_string(),
+            Dialect::Mysql | Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Decimal { precision, scale } => match dialect {
+            Dialect::Postgres => format!("numeric({precision},{scale})"),
+            Dialect::Mysql => format!("decimal({precision},{scale})"),
+            Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Enum { name, schema } => match dialect {
+            Dialect::Postgres => schema
+                .as_deref()
+                .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}")),
+            Dialect::Mysql => format!("enum:{name}"),
+            Dialect::Sqlite => "text".to_string(),
+        },
+        ColType::Domain { name, schema } => match dialect {
+            Dialect::Postgres => schema
+                .as_deref()
+                .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}")),
+            Dialect::Mysql | Dialect::Sqlite => format!("domain:{name}"),
+        },
+    }
+}
+
+fn reference_is_format_bearing(contract: &LogicalColumnContract) -> bool {
+    contract.value_format.is_some() || matches!(contract.ty, crate::model::ir::ColType::Uuid)
+}
+
+fn reference_format_description(contract: &LogicalColumnContract) -> String {
+    match &contract.value_format {
+        Some(crate::model::ir::ValueFormat::TypeId { prefix }) => {
+            format!("TypeID(prefix={prefix:?})")
+        }
+        Some(crate::model::ir::ValueFormat::Ulid) => "ULID".to_string(),
+        None if matches!(contract.ty, crate::model::ir::ColType::Uuid) => {
+            "canonical UUID".to_string()
+        }
+        None => "no value format".to_string(),
+    }
+}
+
+fn reference_validation_error(
+    local: &LogicalColumnKey,
+    reference: &crate::model::ir::ColumnReference,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    reason: String,
+    suggested_fix: String,
+) -> AuthoringError {
+    let local_table = local.schema.as_deref().map_or_else(
+        || local.table.clone(),
+        |schema| format!("{schema}.{}", local.table),
+    );
+    let target_table = local.schema.as_deref().map_or_else(
+        || reference.table.clone(),
+        |schema| format!("{schema}.{}", reference.table),
+    );
+    AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason: format!(
+            "typed reference {local_table}.{} -> {target_table}.{} is incompatible: {reason}",
+            local.column, reference.column
+        ),
+        suggested_fix: Some(suggested_fix),
+    }
+}
+
+fn validate_one_column_reference(
+    local: &LogicalColumnKey,
+    local_contract: &LogicalColumnContract,
+    reference: &crate::model::ir::ColumnReference,
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    missing: MissingLogicalDeclaration,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let matches = declared
+        .iter()
+        .filter(|(candidate, _)| {
+            candidate.table == reference.table
+                && candidate.column == reference.column
+                && schema_mode
+                    .destination_matches(candidate.schema.as_deref(), local.schema.as_deref())
+        })
+        .map(|(_, contract)| contract)
+        .collect::<Vec<_>>();
+
+    let target = match matches.as_slice() {
+        [] => {
+            if missing == MissingLogicalDeclaration::Reject
+                && reference_is_format_bearing(local_contract)
+            {
+                return Err(reference_validation_error(
+                    local,
+                    reference,
+                    target_dialect,
+                    op_index,
+                    ts_locations,
+                    format!(
+                        "the local column carries {}, but the referenced target has no authored value-format metadata in the project graph",
+                        reference_format_description(local_contract)
+                    ),
+                    "declare or import the referenced key with the exact same value format; a live catalog may validate recorded metadata but cannot supply it"
+                        .to_string(),
+                ));
+            }
+            // Plain primitive references may be proved physically from the live
+            // catalog by lower. Load also defers any genuinely cross-artifact
+            // target until the ordered graph is available.
+            return Ok(());
+        }
+        [target] => *target,
+        _ => {
+            return Err(reference_validation_error(
+                local,
+                reference,
+                target_dialect,
+                op_index,
+                ts_locations,
+                format!(
+                    "the target resolves to {} authored column declarations",
+                    matches.len()
+                ),
+                "qualify the surrounding createTable schema so the referenced target has one deterministic authored contract"
+                    .to_string(),
+            ));
+        }
+    };
+
+    if !target.single_column_reference_key {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            ts_locations,
+            "the declared target is not an eligible single-column primary or unique key"
+                .to_string(),
+            "mark the referenced target column primaryKey()/unique(), or declare a one-column primaryKey/UNIQUE table constraint; a component of a composite key is not independently referenceable"
+                .to_string(),
+        ));
+    }
+
+    if let (Some(local_width), Some(target_width)) =
+        (integer_width(&local_contract.ty), integer_width(&target.ty))
+    {
+        if local_width != target_width {
+            return Err(reference_validation_error(
+                local,
+                reference,
+                target_dialect,
+                op_index,
+                ts_locations,
+                format!(
+                    "logical integer width differs ({local_width}-bit local vs {target_width}-bit target), even if this dialect lowers both to INTEGER"
+                ),
+                "use the same explicit integer builder on both sides (for example, t.bigInt() on both columns)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let local_storage = lowered_reference_storage(&local_contract.ty, target_dialect);
+    let target_storage = lowered_reference_storage(&target.ty, target_dialect);
+    if !logical_reference_types_match(&local_contract.ty, &target.ty) {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            ts_locations,
+            format!(
+                "logical column types differ ({:?} local vs {:?} target; lowered storage {local_storage:?} vs {target_storage:?})",
+                local_contract.ty, target.ty
+            ),
+            "declare the local reference with the same explicit logical type as the referenced key"
+                .to_string(),
+        ));
+    }
+    if local_storage != target_storage {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            ts_locations,
+            format!(
+                "lowered storage types differ ({local_storage:?} local vs {target_storage:?} target)"
+            ),
+            "choose a local type whose lowered storage exactly matches the referenced key on this dialect"
+                .to_string(),
+        ));
+    }
+
+    if local_contract.value_format != target.value_format {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            ts_locations,
+            format!(
+                "value formats differ ({} local vs {} target)",
+                reference_format_description(local_contract),
+                reference_format_description(target)
+            ),
+            "use the exact same value-format helper and TypeID prefix on both sides".to_string(),
+        ));
+    }
+
+    let local_case_sensitive = local_contract.case_sensitive.unwrap_or(true);
+    let target_case_sensitive = target.case_sensitive.unwrap_or(true);
+    if local_case_sensitive != target_case_sensitive {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            ts_locations,
+            format!(
+                "collation intent differs (caseSensitive={local_case_sensitive} local vs caseSensitive={target_case_sensitive} target)"
+            ),
+            "use the same caseSensitive/collation intent on both sides of the reference"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_column_references_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    missing: MissingLogicalDeclaration,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_column_references_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                        declared,
+                        schema_mode,
+                        missing,
+                    )?;
+                }
+            }
+        }
+        Op::CreateTable {
+            name,
+            columns,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            for column in columns {
+                let Some(reference) = &column.references else {
+                    continue;
+                };
+                let local = LogicalColumnKey {
+                    schema: schema.clone(),
+                    table: name.clone(),
+                    column: column.name.clone(),
+                };
+                let local_contract = LogicalColumnContract {
+                    ty: column.ty.clone(),
+                    value_format: column.value_format.clone(),
+                    case_sensitive: column.case_sensitive,
+                    single_column_reference_key: false,
+                };
+                validate_one_column_reference(
+                    &local,
+                    &local_contract,
+                    reference,
+                    declared,
+                    schema_mode,
+                    missing,
+                    target_dialect,
+                    op_index,
+                    ts_locations,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Load-time two-pass validation for typed single-column references.
+///
+/// Every declaration in the selected artifact leg is collected before any
+/// reference is checked, so targets declared later in the artifact are visible.
+/// A missing target is deferred because it may be declared by an earlier ordered
+/// artifact whose graph is available only at lower time.
+fn validate_column_references(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let schema_mode = LogicalSchemaMode::Authored;
+    let mut declared = LogicalColumnContracts::new();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_column_references_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &declared,
+            schema_mode,
+            MissingLogicalDeclaration::DeferToLower,
+        )?;
+    }
+    Ok(())
+}
+
+/// Strict lower-time two-pass validation for typed single-column references.
+///
+/// `seed` contains authored logical declarations retained from earlier ordered
+/// artifacts. Current declarations are overlaid before validation, so forward
+/// references within this artifact are deterministic. Missing format-bearing
+/// targets are rejected because a catalog cannot recover `ValueFormat`; missing
+/// plain primitives are left for lower's physical catalog compatibility check.
+///
+/// # Errors
+/// Returns [`CODE_OP_INVALID`] for an ambiguous target, a logical/storage/format/
+/// collation mismatch, or a formatted reference with no authored target metadata.
+pub(crate) fn validate_column_references_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let schema_mode = LogicalSchemaMode::Effective {
+        project_schema,
+        default_schema,
+    };
+    let mut declared = seed.clone();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_column_references_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &declared,
+            schema_mode,
+            MissingLogicalDeclaration::Reject,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_online_rename_isolation_op<'a>(
@@ -2008,6 +2789,7 @@ pub fn validate_op_scoped(
                 default: default.clone(),
                 unique: None,
                 value_format: value_format.clone(),
+                references: None,
                 id_prefix: None,
                 vector_metric: *vector_metric,
                 case_sensitive: *case_sensitive,
@@ -5442,6 +6224,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -5543,8 +6326,9 @@ mod tests {
     // over every embedded Expr slot of every Op.
 
     use crate::model::ir::{
-        BackfillSetValue, ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr,
-        Op, PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator, SafeI64,
+        BackfillSetValue, ColType, ColumnReference, IrColumn, IrConstraint, IrConstraintKind,
+        IrIndex, MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec,
+        PerRowGenerator, SafeI64,
     };
     use std::collections::BTreeMap;
 
@@ -5578,6 +6362,7 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -6531,6 +7316,7 @@ mod tests {
                         default: None,
                         unique: None,
                         value_format: None,
+                        references: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -6545,6 +7331,7 @@ mod tests {
                         default: None,
                         unique: None,
                         value_format: None,
+                        references: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -6843,6 +7630,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6907,6 +7695,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6952,6 +7741,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7312,6 +8102,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: Some(prefix.to_string()),
                 case_sensitive: None,
                 vector_metric: None,
@@ -7343,6 +8134,7 @@ mod tests {
                 value_format: Some(ValueFormat::TypeId {
                     prefix: prefix.to_string(),
                 }),
+                references: None,
                 id_prefix: None,
                 case_sensitive,
                 vector_metric: None,
@@ -7370,6 +8162,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: Some(ValueFormat::Ulid),
+                references: None,
                 id_prefix: None,
                 case_sensitive,
                 vector_metric: None,
@@ -7397,6 +8190,7 @@ mod tests {
                 default: Some(default),
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7680,6 +8474,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
@@ -7714,6 +8509,7 @@ mod tests {
                     default: None,
                     unique: None,
                     value_format: None,
+                    references: None,
                     id_prefix: None,
                     case_sensitive: Some(false),
                     vector_metric: None,
@@ -7818,6 +8614,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format: None,
+                references: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
@@ -7851,6 +8648,7 @@ mod tests {
                 default: None,
                 unique: None,
                 value_format,
+                references: None,
                 id_prefix: None,
                 vector_metric: None,
                 case_sensitive: None,
@@ -8062,5 +8860,244 @@ mod tests {
                 .contains("generic text with no value-format contract"),
             "got: {error}"
         );
+    }
+
+    fn typed_reference_column(
+        name: &str,
+        ty: ColType,
+        value_format: Option<ValueFormat>,
+        case_sensitive: Option<bool>,
+        target: Option<(&str, &str)>,
+    ) -> IrColumn {
+        IrColumn {
+            name: name.into(),
+            ty,
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            value_format,
+            references: target.map(|(table, column)| ColumnReference {
+                table: table.into(),
+                column: column.into(),
+                on_delete: None,
+                on_update: None,
+            }),
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
+    fn typed_reference_table(name: &str, column: IrColumn) -> Op {
+        Op::CreateTable {
+            name: name.into(),
+            columns: vec![column],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn typed_reference_key_table(name: &str, column: IrColumn) -> Op {
+        let key = column.name.clone();
+        let mut op = typed_reference_table(name, column);
+        let Op::CreateTable { primary_key, .. } = &mut op else {
+            unreachable!("typed reference test helper always creates a table");
+        };
+        *primary_key = Some(vec![key]);
+        op
+    }
+
+    #[test]
+    fn typed_reference_load_sees_a_target_declared_later_in_the_artifact() {
+        let child = typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_id",
+                ColType::Uuid,
+                None,
+                None,
+                Some(("accounts", "id")),
+            ),
+        );
+        let target = typed_reference_key_table(
+            "accounts",
+            typed_reference_column("id", ColType::Uuid, None, None, None),
+        );
+        let ir = ir_with(vec![child, target]);
+
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            validate_ir_platform(&ir, dialect).unwrap_or_else(|error| {
+                panic!("forward target must validate on {dialect:?}: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn typed_reference_rejects_logical_integer_width_mismatch_on_sqlite() {
+        let child = typed_reference_table(
+            "events",
+            typed_reference_column(
+                "account_id",
+                ColType::Int,
+                None,
+                None,
+                Some(("accounts", "id")),
+            ),
+        );
+        let target = typed_reference_key_table(
+            "accounts",
+            typed_reference_column("id", ColType::BigInt, None, None, None),
+        );
+        let error = validate_ir_platform(&ir_with(vec![child, target]), Dialect::Sqlite)
+            .expect_err("SQLite INTEGER lowering must not erase int-vs-bigInt width");
+        assert!(
+            error.reason.contains("logical integer width differs"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn typed_reference_rejects_type_id_prefix_and_ulid_format_mismatches() {
+        let type_id_child = typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_id",
+                ColType::Text,
+                Some(ValueFormat::TypeId {
+                    prefix: "account".into(),
+                }),
+                None,
+                Some(("accounts", "id")),
+            ),
+        );
+        let type_id_target = typed_reference_key_table(
+            "accounts",
+            typed_reference_column(
+                "id",
+                ColType::Text,
+                Some(ValueFormat::TypeId {
+                    prefix: "acct".into(),
+                }),
+                None,
+                None,
+            ),
+        );
+        let type_id_error = validate_ir_platform(
+            &ir_with(vec![type_id_child, type_id_target]),
+            Dialect::Postgres,
+        )
+        .expect_err("different stored TypeID prefixes must fail closed");
+        assert!(
+            type_id_error.reason.contains("value formats differ")
+                && type_id_error.reason.contains("account")
+                && type_id_error.reason.contains("acct"),
+            "got: {type_id_error}"
+        );
+
+        let ulid_child = typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_id",
+                ColType::Text,
+                Some(ValueFormat::Ulid),
+                None,
+                Some(("accounts", "id")),
+            ),
+        );
+        let plain_target = typed_reference_key_table(
+            "accounts",
+            typed_reference_column("id", ColType::Text, None, None, None),
+        );
+        let ulid_error =
+            validate_ir_platform(&ir_with(vec![ulid_child, plain_target]), Dialect::Mysql)
+                .expect_err("ULID references must target the same exact value format");
+        assert!(
+            ulid_error.reason.contains("value formats differ")
+                && ulid_error.reason.contains("ULID"),
+            "got: {ulid_error}"
+        );
+    }
+
+    #[test]
+    fn typed_reference_rejects_collation_intent_mismatch() {
+        let child = typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_name",
+                ColType::Text,
+                None,
+                Some(false),
+                Some(("accounts", "name")),
+            ),
+        );
+        let target = typed_reference_key_table(
+            "accounts",
+            typed_reference_column("name", ColType::Text, None, None, None),
+        );
+        let error = validate_ir_platform(&ir_with(vec![child, target]), Dialect::Postgres)
+            .expect_err("reference collations must match exactly");
+        assert!(
+            error.reason.contains("collation intent differs"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn strict_reference_validation_rejects_unmanaged_format_but_defers_primitive() {
+        let formatted = ir_with(vec![typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_id",
+                ColType::Text,
+                Some(ValueFormat::TypeId {
+                    prefix: "account".into(),
+                }),
+                None,
+                Some(("accounts", "id")),
+            ),
+        )]);
+        validate_ir_platform(&formatted, Dialect::Postgres)
+            .expect("load defers a target that may live in an earlier artifact");
+        let error = validate_column_references_for_lower(
+            &formatted,
+            Dialect::Postgres,
+            &[],
+            &LogicalColumnContracts::new(),
+            "app",
+            None,
+        )
+        .expect_err("a catalog cannot invent missing TypeID metadata");
+        assert!(
+            error.reason.contains("no authored value-format metadata"),
+            "got: {error}"
+        );
+
+        let primitive = ir_with(vec![typed_reference_table(
+            "memberships",
+            typed_reference_column(
+                "account_id",
+                ColType::Int,
+                None,
+                None,
+                Some(("accounts", "id")),
+            ),
+        )]);
+        validate_column_references_for_lower(
+            &primitive,
+            Dialect::Sqlite,
+            &[],
+            &LogicalColumnContracts::new(),
+            "app",
+            None,
+        )
+        .expect("a missing primitive target is left for physical catalog validation");
     }
 }

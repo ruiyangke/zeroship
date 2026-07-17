@@ -729,6 +729,7 @@ mod tests {
             generated: None,
             identity: None,
             case_sensitive: None,
+            mysql_text_storage: None,
             encryption_sentinel: None,
             comment_sentinel: None,
             comment: None,

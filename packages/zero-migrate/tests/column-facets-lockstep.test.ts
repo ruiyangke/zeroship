@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): `ids.typeId({ prefix })`, `ids.ulid()`,
+// generated/identity): typed `.references()`, `ids.typeId({ prefix })`, `ids.ulid()`,
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
@@ -11,7 +11,7 @@
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
 // two recorded op lists are byte-identical — proving the shipped engine artifact
-// records the EXACT camelCase wire form (`valueFormat` / `vectorMetric` /
+// records the EXACT camelCase wire form (`valueFormat` / `references` / `vectorMetric` /
 // `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
 // the source authors, with no compile-time drift.
 
@@ -74,6 +74,7 @@ const ENGINE: Rec = {
 function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
+  //  - t.*.references(table, column, actions) -> IrColumn.references
   //  - ids.typeId({ prefix })      → IrColumn.valueFormat.typeId
   //  - ids.ulid()                  → IrColumn.valueFormat "ulid"
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
@@ -86,6 +87,10 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
       public_id: ids.typeId({ prefix: "document" }).notNull().unique(),
       opaque_id: ids.typeId({ prefix: "" }),
       event_id: ids.ulid().notNull().unique(),
+      owner_id: t.uuid().references("accounts", "id", {
+        onDelete: "cascade",
+        onUpdate: "restrict",
+      }),
       seq: t.bigInt().identity({ always: true }),
       shard: t.smallInt(),
       qty: t.int(),
@@ -138,6 +143,13 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.deepEqual(byName("public_id").valueFormat, { typeId: { prefix: "document" } });
   assert.deepEqual(byName("opaque_id").valueFormat, { typeId: { prefix: "" } });
   assert.equal(byName("event_id").valueFormat, "ulid");
+  assert.equal(byName("owner_id").type, "uuid");
+  assert.deepEqual(byName("owner_id").references, {
+    table: "accounts",
+    column: "id",
+    onDelete: "cascade",
+    onUpdate: "restrict",
+  });
 
   // standalone .mask({ kind, classification }) → mask:{kind,classification}
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });
@@ -159,7 +171,15 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 
   // a facet-less column carries NONE of the facet keys (checksum-neutral).
   const title = byName("title");
-  assert.ok(!("idPrefix" in title) && !("valueFormat" in title) && !("vectorMetric" in title) && !("mask" in title) && !("generated" in title) && !("identity" in title));
+  assert.ok(
+    !("idPrefix" in title) &&
+      !("valueFormat" in title) &&
+      !("references" in title) &&
+      !("vectorMetric" in title) &&
+      !("mask" in title) &&
+      !("generated" in title) &&
+      !("identity" in title),
+  );
 
   // addColumn carries vectorMetric + mask + generated + identity on the op tail.
   const addVec = ops.find((o: any) => o.op === "addColumn" && o.column === "summary_vec");

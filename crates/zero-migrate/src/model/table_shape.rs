@@ -214,6 +214,11 @@ fn resolve_create_table(
                 col = author_col.clone();
             } else {
                 col.id_prefix = folded_id_prefix.clone();
+                // A primary-key column may also be a typed reference (for
+                // one-to-one inheritance). The prefix fold replaces the author's
+                // UUID carrier with the injected text ID carrier, so copy the
+                // reference facet explicitly instead of silently discarding it.
+                col.references = collision.and_then(|author_col| author_col.references.clone());
             }
         }
         resolved_columns.push(col);
@@ -292,6 +297,7 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         default: None,
         unique: None,
         value_format: None,
+        references: None,
         id_prefix: None,
         case_sensitive: None,
         vector_metric: None,
@@ -399,6 +405,19 @@ fn resolved_create_table_matches_inject(
             continue;
         }
         let expected_ir = inject_column_to_ir(expected)?;
+        // The platform prefix fold deliberately retains two authored facets on
+        // the otherwise injected `id` slot: `id_prefix` and a possible typed
+        // reference. Compare the injected base shape while allowing exactly that
+        // folded carrier. Other injected slots (and an unprefixed injected `id`)
+        // must match `references: None` below.
+        if expected.name == "id" && actual.id_prefix.is_some() {
+            let mut folded_base = actual.clone();
+            folded_base.id_prefix = None;
+            folded_base.references = None;
+            if system_columns_match(&folded_base, &expected_ir) {
+                continue;
+            }
+        }
         if !system_columns_match(actual, &expected_ir) {
             return Ok(false);
         }
@@ -447,6 +466,7 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
         && actual.nullable == expected.nullable
         && actual.default == expected.default
         && actual.unique == expected.unique
+        && actual.references == expected.references
         && actual.case_sensitive == expected.case_sensitive
         && actual.vector_metric == expected.vector_metric
         && actual.mask == expected.mask
@@ -745,7 +765,7 @@ fn effective_policy_from_grant_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ir::{CanonicalOpList, MigrationIr, CURRENT_IR_VERSION};
+    use crate::model::ir::{CanonicalOpList, ColumnReference, MigrationIr, CURRENT_IR_VERSION};
     use crate::{Checksum, MigrationFlags};
 
     fn ir(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> MigrationIr {
@@ -780,12 +800,22 @@ mod tests {
             default: None,
             unique: None,
             value_format: None,
+            references: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
             identity: None,
+        }
+    }
+
+    fn reference(table: &str) -> ColumnReference {
+        ColumnReference {
+            table: table.to_string(),
+            column: "id".to_string(),
+            on_delete: None,
+            on_update: None,
         }
     }
 
@@ -911,6 +941,55 @@ indexes = [
         };
         assert_eq!(columns.iter().filter(|c| c.name == "id").count(), 1);
         assert_eq!(columns[0].id_prefix.as_deref(), Some("post"));
+    }
+
+    #[test]
+    fn id_prefix_fold_preserves_typed_reference_and_remains_idempotent() {
+        let mut id = text_col("id");
+        id.ty = ColType::Uuid;
+        id.nullable = Some(false);
+        id.default = Some(uuid_v4_default());
+        id.id_prefix = Some("post".into());
+        id.references = Some(reference("parent_posts"));
+
+        let once = resolve_create_table_policy(
+            &ir(vec![id], Some(vec!["id".into()])),
+            &zeroship_confined_ceiling(),
+        )
+        .expect("a primary-key reference survives the platform ID prefix fold");
+        let Op::CreateTable { columns, .. } = &once.ops[0] else {
+            panic!("create op")
+        };
+        assert_eq!(columns[0].id_prefix.as_deref(), Some("post"));
+        assert_eq!(columns[0].references, Some(reference("parent_posts")));
+
+        let twice = resolve_create_table_policy(&once, &zeroship_confined_ceiling())
+            .expect("a folded ID reference is a conforming resolved shape");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn forged_reference_on_injected_system_column_is_rejected() {
+        let mut resolved = resolve_create_table_policy(
+            &ir(vec![text_col("title")], None),
+            &zeroship_confined_ceiling(),
+        )
+        .expect("initial policy resolution");
+        let Op::CreateTable { columns, .. } = &mut resolved.ops[0] else {
+            panic!("create op")
+        };
+        columns
+            .iter_mut()
+            .find(|column| column.name == "created_at")
+            .expect("injected created_at")
+            .references = Some(reference("other_rows"));
+
+        let error = resolve_create_table_policy(&resolved, &zeroship_confined_ceiling())
+            .expect_err("an injected slot cannot acquire an authored reference facet");
+        assert!(matches!(
+            error,
+            TableShapeError::SystemColumnCollision { .. }
+        ));
     }
 
     #[test]

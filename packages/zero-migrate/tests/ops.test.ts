@@ -194,6 +194,106 @@ test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
   assert.equal(ops[1].caseSensitive, false, "addColumn carries the text facet too");
 });
 
+test("typed references preserve explicit local types and record only the reference facet", () => {
+  const ops = record(() => {
+    table("children").create({
+      columns: {
+        integer_id: t.int().references("integer_parents", "id"),
+        account_id: t.uuid().references("accounts", "id", {
+          onDelete: "cascade",
+          onUpdate: "noAction",
+        }),
+        typed_id: ids.typeId({ prefix: "account" }).references("typed_accounts", "id"),
+        event_id: ids.ulid().references("events", "id"),
+      },
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createTable",
+      name: "children",
+      columns: [
+        {
+          name: "integer_id",
+          type: "int",
+          references: { table: "integer_parents", column: "id" },
+        },
+        {
+          name: "account_id",
+          type: "uuid",
+          references: {
+            table: "accounts",
+            column: "id",
+            onDelete: "cascade",
+            onUpdate: "noAction",
+          },
+        },
+        {
+          name: "typed_id",
+          type: "text",
+          references: { table: "typed_accounts", column: "id" },
+          valueFormat: { typeId: { prefix: "account" } },
+        },
+        {
+          name: "event_id",
+          type: "text",
+          references: { table: "events", column: "id" },
+          valueFormat: "ulid",
+        },
+      ],
+    },
+  ]);
+
+  for (const column of ops[0].columns) {
+    assert.ok(!("default" in column), "references() adds no default or generator");
+    assert.ok(!("unique" in column), "references() adds no unique constraint");
+    assert.notEqual(column.nullable, false, "references() adds no primary-key/nullability facet");
+  }
+  assert.equal(ops[0].constraints, undefined, "column references do not use the table-level FK API");
+});
+
+test("references() validates non-empty targets, a plain options bag, and closed actions", () => {
+  for (const action of ["cascade", "restrict", "setNull", "setDefault", "noAction"] as const) {
+    assert.doesNotThrow(() =>
+      t.text().references("parents", "id", { onDelete: action, onUpdate: action }),
+    );
+  }
+
+  for (const call of [
+    () => t.text().references("", "id"),
+    () => t.text().references("parents", ""),
+    () => t.text().references(42 as any, "id"),
+    () => t.text().references("parents", 42 as any),
+    () => t.text().references("parents", "id", null as any),
+    () => t.text().references("parents", "id", [] as any),
+    () => t.text().references("parents", "id", { onDelete: "explode" as any }),
+    () => t.text().references("parents", "id", { onUpdate: 42 as any }),
+  ]) {
+    assert.throws(call, (error: any) => error.code === "OP_INVALID");
+  }
+});
+
+test("references() fails closed outside create-table column positions", () => {
+  const reference = () => t.bigInt().references("parents", "id");
+  const unsupported = [
+    () => record(() => table("children").column("parent_id").add({ type: reference() })),
+    () => record(() => table("children").column("parent_id").rename({ to: "owner_id", type: reference() })),
+    () => record(() => table("children").column("parent_id").setType({ to: reference() })),
+    () => record(() => domain("parent_id_domain").create({ as: reference() })),
+    () => record(() => sequence("parent_ids").create({ as: reference() })),
+    () => t.encrypted({ of: reference() }),
+  ];
+
+  for (const call of unsupported) {
+    assert.throws(
+      call,
+      (error: any) =>
+        error.code === "OP_INVALID" && /supported only in table\(\.\.\.\)\.create/.test(error.message),
+    );
+  }
+});
+
 test("ids.typeId records exact text + valueFormat IR and remains constraint-neutral by default", () => {
   const ops = record(() => {
     table("public_examples").create({

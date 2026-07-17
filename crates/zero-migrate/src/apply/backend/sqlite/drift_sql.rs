@@ -340,6 +340,11 @@ async fn introspect_columns(
         if pk_ord > 0 {
             pk_members.push((pk_ord, name.clone()));
         }
+        // Keep the declared type spelling below rather than reducing it to
+        // affinity. Reference compatibility uses this catalog evidence to keep
+        // an unmanaged INTEGER key distinct from an unmanaged BIGINT key even
+        // though both have SQLite INTEGER affinity.
+        //
         // A PRIMARY KEY column is NOT NULL in the engine's model — the desired
         // snapshot stamps `id TEXT PRIMARY KEY` as `nullable: false`, and Postgres
         // makes every PK column NOT NULL. But SQLite has a long-standing quirk: a
@@ -368,6 +373,7 @@ async fn introspect_columns(
             inline_checks: Vec::new(),
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
             case_sensitive: recover_case_sensitive(stored_create_sql, &name),
+            mysql_text_storage: None,
             comment: None,
         });
     }

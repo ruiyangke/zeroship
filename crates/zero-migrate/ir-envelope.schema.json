@@ -2809,6 +2809,17 @@
             }
           ]
         },
+        "references": {
+          "description": "A typed single-column foreign-key reference. The local column's storage\ntype remains fully specified by [`Self::ty`]; this facet adds only the\ntarget identity and referential actions. In particular, it never infers\nor replaces the local type from a live catalog.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "idPrefix": {
           "description": "Legacy internal platform-ID prefix for the\n`<prefix>_<22 base62 UUIDv7>` format. This is a DECLARED-ONLY hint DB\nintrospection cannot recover (the minted value is opaque text in the\ncatalog; the prefix is a mint-time input, not a stored column attribute).\nIt is retained for internal platform descriptors and old data only; it is\nneither TypeID nor public migration authoring. Carried so gen-types — and\nthe runtime, once it deletes the declared-schema cache — keep that legacy\ninternal brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image. Bounded\nat validate-time ([`crate::validate`]) to the legacy internal prefix charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) — the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across IR↔descriptor.",
           "type": [
@@ -4408,6 +4419,77 @@
         }
       ]
     },
+    "ColumnReference": {
+      "description": "Target and behavior for a typed single-column foreign-key reference.\n\nComposite foreign keys deliberately do not use this shape; they remain\ntable-level constraints with ordered local and referenced column lists.",
+      "type": "object",
+      "properties": {
+        "table": {
+          "description": "Referenced table in the local column's schema.",
+          "type": "string"
+        },
+        "column": {
+          "description": "Referenced column.",
+          "type": "string"
+        },
+        "onDelete": {
+          "description": "Optional `ON DELETE` behavior.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "onUpdate": {
+          "description": "Optional `ON UPDATE` behavior.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "table",
+        "column"
+      ]
+    },
+    "RefAction": {
+      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause. A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n`zero_migrate::schema::query::normalize_fk_action`.",
+      "oneOf": [
+        {
+          "description": "`ON DELETE/UPDATE CASCADE`.",
+          "type": "string",
+          "const": "cascade"
+        },
+        {
+          "description": "`ON DELETE/UPDATE RESTRICT`.",
+          "type": "string",
+          "const": "restrict"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET NULL`.",
+          "type": "string",
+          "const": "setNull"
+        },
+        {
+          "description": "`ON DELETE/UPDATE SET DEFAULT`.",
+          "type": "string",
+          "const": "setDefault"
+        },
+        {
+          "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
+          "type": "string",
+          "const": "noAction"
+        }
+      ]
+    },
     "VectorMetric": {
       "description": "The CLOSED pgvector distance-metric lexicon. A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted IR envelope cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first:** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
       "oneOf": [
@@ -4761,36 +4843,6 @@
             "kind",
             "elements"
           ]
-        }
-      ]
-    },
-    "RefAction": {
-      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause. A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n`zero_migrate::schema::query::normalize_fk_action`.",
-      "oneOf": [
-        {
-          "description": "`ON DELETE/UPDATE CASCADE`.",
-          "type": "string",
-          "const": "cascade"
-        },
-        {
-          "description": "`ON DELETE/UPDATE RESTRICT`.",
-          "type": "string",
-          "const": "restrict"
-        },
-        {
-          "description": "`ON DELETE/UPDATE SET NULL`.",
-          "type": "string",
-          "const": "setNull"
-        },
-        {
-          "description": "`ON DELETE/UPDATE SET DEFAULT`.",
-          "type": "string",
-          "const": "setDefault"
-        },
-        {
-          "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
-          "type": "string",
-          "const": "noAction"
         }
       ]
     },

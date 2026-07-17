@@ -1,9 +1,8 @@
 // The migration DSL and the runtime `db` schema share
 // ONE column-type lexicon. These tests pin the single-source bridge
-// (`colTypeFromDbField` / `fromDb`): a `db` `t.*` field reduces to the
-// IDENTICAL dialect-neutral `ColType` the migration DSL's own `t.*` produces, so
-// a `t.ref("users")` FK declared in a live schema lowers the same way an `{ref}`
-// migration column does. Names stay plain strings — never live-schema-bound.
+// (`colTypeFromDbField` / `fromDb`). The legacy runtime-schema `dbType.ref`
+// carrier remains available for compatibility, while new migration references
+// use an explicit physical type plus `.references(table, column)`.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -41,11 +40,14 @@ test("ONE lexicon: a db field reduces to the same ColType the migration t.* prod
   assert.equal(colTypeFromDbField(dbT.id("post")), "uuid");
 });
 
-test("ONE lexicon: a t.ref FK in the schema lowers the same {ref} ColType as the migration DSL", () => {
+test("the legacy dbType.ref bridge remains distinct from typed migration references", () => {
   const fromSchema = colTypeFromDbField(dbT.ref("users"));
-  const fromMigration = migrateColType(t.ref("users"));
   assert.deepEqual(fromSchema, { ref: { references: "users" } });
-  assert.deepEqual(fromSchema, fromMigration, "schema FK and migration FK share one ColType");
+  assert.equal(
+    migrateColType(t.text().references("users", "id")),
+    "text",
+    "a typed migration reference preserves its explicit local storage",
+  );
 });
 
 test("ONE lexicon: a pgvector field carries its dims through the shared ColType", () => {
@@ -61,18 +63,11 @@ test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColT
   assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "string" } });
 });
 
-test("fromDb lifts a live-schema field into a migration column on the SAME ColType path", () => {
-  // A db `t.ref("users").required()` → a migration column with the {ref} ColType +
-  // notNull carried over, recorded byte-identically to a hand-written migration column.
+test("fromDb keeps the legacy dbType.ref carrier and required facet", () => {
   __begin();
   table("posts").create({ columns: { author_id: fromDb(dbT.ref("users").required()) } });
   const viaSchema = __drain();
 
-  __begin();
-  table("posts").create({ columns: { author_id: t.ref("users").notNull() } });
-  const viaMigration = __drain();
-
-  assert.deepEqual(viaSchema[0].columns, viaMigration[0].columns);
   assert.deepEqual(viaSchema[0].columns[0].type, { ref: { references: "users" } });
   assert.equal(viaSchema[0].columns[0].nullable, false, "required() → notNull carried over");
 });
