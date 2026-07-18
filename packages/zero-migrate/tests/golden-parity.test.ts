@@ -1,10 +1,11 @@
 // Byte-identity oracle: the fluent `zero-migrate` authoring surface records
 // the SAME author ops the engine's embedded recorder (`dist/embedded-recorder.js`)
-// committed before the Rust build path resolves profile-owned table shape into the
+// committed before the Rust build path resolves policy-owned table shape into the
 // golden corpus. The npm `ops.ts` and the compiled `embedded-recorder.js` are two
 // implementations of the same locked fluent surface; this test re-authors a
-// golden fixture's `up()` through `table()` and asserts the post-policy op list
-// equals the committed golden `.golden.json`'s `ops`.
+// golden fixture's `up()` through `table()` and compares the author-owned projection
+// of the committed resolved golden. The projection is selected from the recorded
+// op itself; this test owns no duplicate system-field policy.
 //
 // Re-bless note: `fluent_ddl`'s `label` column was authored via the now-removed
 // `t.string()` alias (wire `string`). The spec removes that alias (canonical
@@ -61,44 +62,39 @@ function normalizeOps(ops: any[]): any[] {
   });
 }
 
-const confinedSystemColumns = [
-  { name: "id", type: "text", nullable: false },
-  { name: "created_at", type: "timestamp", nullable: false },
-  { name: "updated_at", type: "timestamp", nullable: false },
-  { name: "created_by", type: "text", nullable: true },
-  { name: "updated_by", type: "text", nullable: true },
-  { name: "version", type: "int", nullable: false },
-  { name: "deleted_at", type: "timestamp", nullable: true },
-];
+function authorProjection(resolvedOps: any[], recordedOps: any[]): any[] {
+  assert.equal(resolvedOps.length, recordedOps.length, "resolved and recorded op counts match");
+  return resolvedOps.map((resolved, index) => {
+    const recorded = recordedOps[index];
+    if (resolved.op !== "createTable" || recorded.op !== "createTable") return resolved;
+    assert.equal(resolved.name, recorded.name, "paired createTable names match");
 
-const confinedSystemColumnNames = new Set(confinedSystemColumns.map((column) => column.name));
-const confinedSystemIndexes = [
-  { columns: [{ kind: "column", name: "deleted_at" }] },
-  { columns: [{ kind: "column", name: "updated_at" }] },
-  { columns: [{ kind: "column", name: "created_by" }] },
-];
-
-function resolveConfinedCreateTables(ops: any[]): any[] {
-  return ops.map((op) => {
-    if (op.op !== "createTable") return op;
-
-    const authorColumns = [];
-    for (const col of op.columns) {
-      if (confinedSystemColumnNames.has(col.name)) {
-        throw new Error(`unexpected confined system-column collision in JS parity fixture: ${col.name}`);
+    const authorColumns = new Set(recorded.columns.map((column: any) => column.name));
+    const selectRecordedMembers = (resolvedMembers: any[] = [], recordedMembers: any[] = []) => {
+      const wanted = new Map<string, number>();
+      for (const member of recordedMembers) {
+        const key = JSON.stringify(member);
+        wanted.set(key, (wanted.get(key) ?? 0) + 1);
       }
-      authorColumns.push(col);
-    }
-    if (op.primaryKey !== undefined && op.primaryKey !== null) {
-      throw new Error("unexpected author primaryKey in confined JS parity fixture");
-    }
-
-    return {
-      ...op,
-      columns: [...confinedSystemColumns, ...authorColumns],
-      primaryKey: ["id"],
-      indexes: [...(op.indexes ?? []), ...confinedSystemIndexes],
+      return resolvedMembers.filter((member) => {
+        const key = JSON.stringify(member);
+        const remaining = wanted.get(key) ?? 0;
+        if (remaining === 0) return false;
+        wanted.set(key, remaining - 1);
+        return true;
+      });
     };
+
+    const projected = {
+      ...resolved,
+      columns: resolved.columns.filter((column: any) => authorColumns.has(column.name)),
+      constraints: selectRecordedMembers(resolved.constraints, recorded.constraints),
+      indexes: selectRecordedMembers(resolved.indexes, recorded.indexes),
+    };
+    if (recorded.primaryKey === undefined || recorded.primaryKey === null) {
+      delete projected.primaryKey;
+    }
+    return projected;
   });
 }
 
@@ -163,7 +159,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").column("nickname").setNotNull();
   });
   const g = await golden("fluent_ddl");
-  assert.deepEqual(normalizeOps(resolveConfinedCreateTables(ops)), normalizeOps(g.ops));
+  assert.deepEqual(normalizeOps(ops), normalizeOps(authorProjection(g.ops, ops)));
 });
 
 test("fluent_dml fluent-recorded ops equal the committed golden", async () => {

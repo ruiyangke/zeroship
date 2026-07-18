@@ -121,6 +121,8 @@ interface Args {
   dialect?: "postgres" | "mysql" | "sqlite";
   /** Path to the trusted JSON table-ownership registry. */
   registryPath?: string;
+  /** Path to the required trusted table-shape policy ceiling. */
+  policyCeilingPath?: string;
   ownerApp: string;
   projectSchema: string;
   /** `--json` — machine-readable output where a verb supports it. */
@@ -188,6 +190,9 @@ function parseArgs(argv: string[]): Args {
       }
       case "registry":
         args.registryPath = takeVal();
+        break;
+      case "policy-ceiling":
+        args.policyCeilingPath = takeVal();
         break;
       case "owner-app":
         args.ownerApp = takeVal();
@@ -259,6 +264,13 @@ function parseArgs(argv: string[]): Args {
   ) {
     throw new CliError("flag --registry is only valid with plan, apply, or status");
   }
+  if (
+    args.policyCeilingPath !== undefined &&
+    args.command !== "apply" &&
+    args.command !== "status"
+  ) {
+    throw new CliError("flag --policy-ceiling is only valid with apply or status");
+  }
   // Fall back only when the flag was absent. An explicitly empty flag is an error.
   if (args.databaseUrl === undefined) {
     const env = process.env.DATABASE_URL;
@@ -311,6 +323,29 @@ async function loadRegistry(path: string | undefined): Promise<Record<string, st
     });
   }
   return registry;
+}
+
+/** Read the operator-controlled policy document required by apply and plan-aware
+ * status. The bytes are passed through unchanged for Rust to parse and compose. */
+async function loadPolicyCeiling(path: string | undefined): Promise<string> {
+  if (path === undefined) {
+    throw new CliError(
+      "missing policy ceiling (pass --policy-ceiling <file> with an injecting or explicit no-inject policy)",
+    );
+  }
+  if (path.length === 0) {
+    throw new CliError("flag --policy-ceiling needs a non-empty file path");
+  }
+  try {
+    const source = await readFile(path, "utf8");
+    if (source.length === 0) {
+      throw new CliError(`policy ceiling file ${path} is empty`);
+    }
+    return source;
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`read policy ceiling file ${path}: ${(error as Error).message}`);
+  }
 }
 
 /** Select the supported Node driver from a database URL scheme. */
@@ -485,6 +520,7 @@ async function runApply(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl);
+  const policyCeiling = await loadPolicyCeiling(args.policyCeilingPath);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
@@ -501,6 +537,7 @@ async function runApply(args: Args): Promise<number> {
       projectSchema: args.projectSchema,
       driver,
       registry,
+      policyCeiling,
       nameFallback: file.label,
       approved: args.approved,
     });
@@ -518,6 +555,7 @@ async function runStatus(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl);
+  const policyCeiling = await loadPolicyCeiling(args.policyCeilingPath);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
@@ -528,6 +566,7 @@ async function runStatus(args: Args): Promise<number> {
     projectSchema: args.projectSchema,
     driver,
     registry,
+    policyCeiling,
     migrations,
     nameFallbacks: files.map((file) => file.label),
   });
@@ -610,8 +649,8 @@ Usage:
   zero-migrate new <name> [--dir <dir>]
   zero-migrate plan    [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate preview [--dir <dir>] [--json]
-  zero-migrate apply   [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
-  zero-migrate status  [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate apply   [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+  zero-migrate status  [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate history [--database-url <url>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
   zero-migrate --version
@@ -621,6 +660,8 @@ Flags:
   --database-url <url>  postgres:// or mysql:// DSN (or the DATABASE_URL env)
   --dialect <name>      plan dialect: postgres, mysql, or sqlite (default postgres)
   --registry <file>     Trusted JSON map of table names to owner app IDs
+  --policy-ceiling <file>
+                        Required trusted TOML policy for apply/status
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
   --approve             Approve reviewed destructive changes and backfills

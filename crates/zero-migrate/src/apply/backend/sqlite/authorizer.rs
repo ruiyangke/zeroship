@@ -494,7 +494,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // `SQLITE_REINDEX` fires NOT ONLY for a standalone `REINDEX` statement but
         // also INTRINSICALLY as part of a legitimate `CREATE INDEX` (SQLite reindexes
         // the freshly-created index to populate it). The engine emits the three
-        // platform system-field indexes (`<table>_<col>_idx`) inside the creator
+        // policy-injected table indexes (`<table>_<col>_idx`) inside the creator
         // `up`'s CREATE TABLE payload, so the creator phase MUST be able to reindex
         // them. A REINDEX rebuilds an existing index B-tree: it creates no table,
         // changes no schema structure, never touches `_mig`, and so does not confound

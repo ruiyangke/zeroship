@@ -245,8 +245,13 @@ fn raw_view(sql: &str, materialized: Option<bool>) -> Op {
 }
 
 fn lower_up(dialect: SqlDialect, op: Op) -> Result<String, Box<IrLowerError>> {
-    let author = IrAuthor::new(SCHEMA, "app_a", dialect)
-        .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
+    let author = IrAuthor::new(
+        SCHEMA,
+        "app_a",
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -430,17 +435,27 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     validate_ir_scoped(&structured, Dialect::Postgres, &[], Some(&confined)).unwrap();
 
     let guard_cfg = GuardConfig::confined(SCHEMA);
-    IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
-        .lower_guarded(&structured, &guard_cfg, &LiveSchema::default())
-        .expect("plain structured view is core under confined lower_guarded");
+    IrAuthor::new(
+        SCHEMA,
+        "app_a",
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_guarded(&structured, &guard_cfg, &LiveSchema::default())
+    .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
     let err = validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&confined)).unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
-    let err = IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
-        .lower_guarded(&raw, &guard_cfg, &LiveSchema::default())
-        .unwrap_err();
+    let err = IrAuthor::new(
+        SCHEMA,
+        "app_a",
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_guarded(&raw, &guard_cfg, &LiveSchema::default())
+    .unwrap_err();
     assert!(matches!(
         err,
         IrGuardedLowerError::Lower(IrLowerError::VendorCapabilityDenied {
@@ -451,10 +466,15 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&operator)).unwrap();
-    IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
-        .with_schema_scope(operator)
-        .lower(&raw, &LiveSchema::default())
-        .expect("operator-capable lower admits raw view body");
+    IrAuthor::new(
+        SCHEMA,
+        "app_a",
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .with_schema_scope(operator)
+    .lower(&raw, &LiveSchema::default())
+    .expect("operator-capable lower admits raw view body");
 }
 
 #[test]
@@ -538,7 +558,13 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
 #[test]
 fn fold_records_views_and_drop_removes_them() {
     let create = create_structured_view(None, None);
-    let folded = fold_ops(std::slice::from_ref(&create), SqlDialect::Postgres, SCHEMA).unwrap();
+    let folded = fold_ops(
+        std::slice::from_ref(&create),
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .unwrap();
     let mut expected_views = BTreeMap::new();
     expected_views.insert(
         "active_users".to_string(),
@@ -564,6 +590,12 @@ fn fold_records_views_and_drop_removes_them() {
         existence_guard: Some(zero_migrate::model::ir::ExistenceGuard::IfExists),
         materialized: None,
     };
-    let folded = fold_ops(&[create, drop], SqlDialect::Postgres, SCHEMA).unwrap();
+    let folded = fold_ops(
+        &[create, drop],
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .unwrap();
     assert!(folded.views.is_empty());
 }

@@ -138,9 +138,14 @@ async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
         "ops": []
     }))
     .expect("empty IR parses");
-    let plan = zero_migrate::IrAuthor::new("app", "app_test", zero_migrate::SqlDialect::Sqlite)
-        .lower_plan(&ir, &zero_migrate::LiveSchema::default())
-        .expect("empty IR lowers to a journal anchor");
+    let plan = zero_migrate::IrAuthor::new(
+        "app",
+        "app_test",
+        zero_migrate::SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_plan(&ir, &zero_migrate::LiveSchema::default())
+    .expect("empty IR lowers to a journal anchor");
     let anchor = match plan.steps.as_slice() {
         [zero_migrate::PlanStep::Ddl(migration)] => migration,
         other => panic!("expected one journal anchor, got {other:?}"),

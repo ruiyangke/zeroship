@@ -36,12 +36,17 @@ fn ir(op: Op) -> MigrationIr {
 }
 
 fn pg_sql(op: Op) -> Vec<String> {
-    IrAuthor::new("app", "app_nv", SqlDialect::Postgres)
-        .lower(&ir(op), &LiveSchema::default())
-        .expect("lower on Postgres")
-        .into_iter()
-        .map(|m| m.up)
-        .collect()
+    IrAuthor::new(
+        "app",
+        "app_nv",
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir(op), &LiveSchema::default())
+    .expect("lower on Postgres")
+    .into_iter()
+    .map(|m| m.up)
+    .collect()
 }
 
 fn validates(op: Op, dialect: Dialect) -> bool {

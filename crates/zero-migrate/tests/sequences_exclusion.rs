@@ -36,7 +36,12 @@ fn lower(
     dialect: SqlDialect,
     live: &BTreeSet<String>,
 ) -> Vec<zero_migrate::Migration> {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect);
+    let author = IrAuthor::new(
+        SCHEMA,
+        OWNER,
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    );
     author
         .lower(&ir(ops), &LiveSchema::from(live))
         .expect("lower")
@@ -270,8 +275,13 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
 
 #[test]
 fn fold_tracks_sequence_existence_and_drop() {
-    let created =
-        fold_ops(&[create_sequence_op()], SqlDialect::Postgres, SCHEMA).expect("fold create");
+    let created = fold_ops(
+        &[create_sequence_op()],
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("fold create");
     assert!(created.sequences.contains_key("invoice_seq"));
 
     let dropped = fold_ops(
@@ -285,6 +295,7 @@ fn fold_tracks_sequence_existence_and_drop() {
         ],
         SqlDialect::Postgres,
         SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
     )
     .expect("fold drop");
     assert!(!dropped.sequences.contains_key("invoice_seq"));
@@ -422,7 +433,13 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         comment: Some("Login email".into()),
     });
 
-    let folded = fold_ops(&set_ops, SqlDialect::Postgres, SCHEMA).expect("fold set comments");
+    let folded = fold_ops(
+        &set_ops,
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("fold set comments");
     let users = folded.tables.get("users").expect("users table");
     assert_eq!(users.comment.as_deref(), Some("User accounts"));
     assert_eq!(
@@ -450,8 +467,13 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         },
         comment: None,
     });
-    let cleared =
-        fold_ops(&cleared_ops, SqlDialect::Postgres, SCHEMA).expect("fold clear comments");
+    let cleared = fold_ops(
+        &cleared_ops,
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("fold clear comments");
     let users = cleared.tables.get("users").expect("users table");
     assert_eq!(users.comment, None);
     assert_eq!(

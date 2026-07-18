@@ -425,8 +425,13 @@ fn platform_author(guard_cfg: &GuardConfig) -> crate::render::lower::IrAuthor {
     let scope = guard_cfg
         .schema_scope()
         .expect("Platform guard carries an allowlist scope");
-    crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres)
-        .with_schema_scope(scope)
+    crate::render::lower::IrAuthor::new(
+        "zero_migrate",
+        "app_corpus",
+        SqlDialect::Postgres,
+        &crate::zeroship_no_inject_ceiling(),
+    )
+    .with_schema_scope(scope)
 }
 
 fn is_denied(g: &SqlGuard, sql: &str) -> bool {
@@ -1154,8 +1159,12 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
 #[test]
 fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let guard_cfg = GuardConfig::confined("zero_migrate");
-    let author =
-        crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres);
+    let author = crate::render::lower::IrAuthor::new(
+        "zero_migrate",
+        "app_corpus",
+        SqlDialect::Postgres,
+        &crate::zeroship_no_inject_ceiling(),
+    );
     let op = zero_migrate_ir::ir::Op::CreateRole {
         name: "zero_migrate_auth".into(),
         login: Some(true),
@@ -1192,8 +1201,12 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
 #[test]
 fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     let guard_cfg = GuardConfig::confined("zero_migrate");
-    let author =
-        crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres);
+    let author = crate::render::lower::IrAuthor::new(
+        "zero_migrate",
+        "app_corpus",
+        SqlDialect::Postgres,
+        &crate::zeroship_no_inject_ceiling(),
+    );
     let op = zero_migrate_ir::ir::Op::CreatePolicy {
         name: "tenant_isolation".into(),
         table: "app_secrets".into(),
@@ -1293,8 +1306,13 @@ fn trusted_author() -> crate::render::lower::IrAuthor {
     let scope = cfg
         .schema_scope()
         .expect("Trusted guard carries the explicit unconfined operator scope");
-    crate::render::lower::IrAuthor::new("public", "app_corpus", SqlDialect::Postgres)
-        .with_schema_scope(scope)
+    crate::render::lower::IrAuthor::new(
+        "public",
+        "app_corpus",
+        SqlDialect::Postgres,
+        &crate::confined_no_inject_policy("public").expect("test no-inject policy composes"),
+    )
+    .with_schema_scope(scope)
 }
 
 /// The Trusted early-return SKIPS the deny-list ENTIRELY: SQL the Confined

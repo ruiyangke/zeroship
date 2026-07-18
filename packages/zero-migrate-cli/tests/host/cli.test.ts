@@ -139,12 +139,52 @@ test("CLI help and SQLite errors use user-facing language", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--dialect <name>/);
   assert.match(help.stdout, /--registry <file>/);
+  assert.match(help.stdout, /--policy-ceiling <file>/);
   assert.doesNotMatch(help.stdout, /\u2014|host driver seam|addon|in-process/);
 
   const sqlite = runCli("apply", "--database-url=sqlite:///tmp/app.db");
   assert.equal(sqlite.status, 1);
   assert.match(sqlite.stderr, /SQLite is not supported by the Node CLI/);
   assert.doesNotMatch(sqlite.stderr, /\u2014|host driver seam|addon|in-process/);
+});
+
+test("CLI apply and status require an explicit policy ceiling file", () => {
+  for (const command of ["apply", "status"]) {
+    const missing = runCli(
+      command,
+      "--database-url=postgres://127.0.0.1:1/never_connect",
+    );
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /missing policy ceiling.*--policy-ceiling <file>/i);
+    assert.doesNotMatch(missing.stderr, /ECONNREFUSED|connect/i);
+
+    const empty = runCli(
+      command,
+      "--database-url=postgres://127.0.0.1:1/never_connect",
+      "--policy-ceiling=",
+    );
+    assert.equal(empty.status, 1);
+    assert.match(empty.stderr, /--policy-ceiling needs a non-empty file path/i);
+    assert.doesNotMatch(empty.stderr, /ECONNREFUSED|connect/i);
+  }
+});
+
+test("CLI rejects an empty policy document before opening a database session", () => {
+  const dir = mkdtempSync(join(HERE, ".cli-policy-"));
+  try {
+    const policyPath = join(dir, "empty-policy.toml");
+    writeFileSync(policyPath, "");
+    const result = runCli(
+      "apply",
+      "--database-url=postgres://127.0.0.1:1/never_connect",
+      `--policy-ceiling=${policyPath}`,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /policy ceiling file .* is empty/i);
+    assert.doesNotMatch(result.stderr, /ECONNREFUSED|connect/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("CLI plan validates the selected database dialect", () => {
@@ -233,6 +273,8 @@ export function up() {}
 `,
     );
     const env = { DATABASE_URL: "", ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
+    const policyPath = join(dir, "policy.toml");
+    writeFileSync(policyPath, "policy_version = 1\n");
 
     const planned = runCliWithEnv(env, "plan", `--dir=${dir}`);
     assert.equal(planned.status, 1);
@@ -247,6 +289,7 @@ export function up() {}
       "apply",
       `--dir=${dir}`,
       "--database-url=postgres://127.0.0.1:1/never_connect",
+      `--policy-ceiling=${policyPath}`,
     );
     assert.equal(applied.status, 1);
     assert.match(applied.stderr, /duplicate migration name.*shared_identity/i);

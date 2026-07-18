@@ -11,8 +11,8 @@
 //! ## What lives here (the *describe/shape* layer)
 //!
 //! - [`query`] — the DSL→SQL **DDL builders** (CREATE TABLE / index / FK /
-//!   constraints; vector / geoPoint / encrypted-column / mask-sibling; the
-//!   system-field columns; [`query::SqlDialect`]), the type map
+//!   constraints; vector / geoPoint / encrypted-column / mask-sibling;
+//!   policy-injected columns; [`query::SqlDialect`]), the type map
 //!   ([`query::def_to_column_type_for_dialect`], [`query::sqlite_canonical_type`],
 //!   [`query::mysql_canonical_type`]), the encryption + mask sentinel
 //!   builders, and the identifier/field validators. Dual-dialect (PG + SQLite,

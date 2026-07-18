@@ -46,9 +46,14 @@ fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
         }]
     }))
     .expect("synchronizeIdentity IR parses");
-    let plan = IrAuthor::new("app", "app_test", SqlDialect::Sqlite)
-        .lower_plan(&ir, &LiveSchema::default())
-        .expect("synchronizeIdentity IR lowers");
+    let plan = IrAuthor::new(
+        "app",
+        "app_test",
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_plan(&ir, &LiveSchema::default())
+    .expect("synchronizeIdentity IR lowers");
     match plan.steps.into_iter().next().expect("one step") {
         PlanStep::SynchronizeIdentity(step) => step,
         other => panic!("expected SynchronizeIdentity step, got {other:?}"),

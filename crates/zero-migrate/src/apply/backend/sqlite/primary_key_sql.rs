@@ -387,6 +387,7 @@ pub(crate) async fn resolve(
         new_table_create,
         copy_columns,
         recreate_objects: Vec::new(),
+        column_renames: Vec::new(),
         dropped_columns: Vec::new(),
         reason: "explicit primary-key lifecycle operation".to_string(),
         sequence_policy: if drop_identity_from.is_empty() {

@@ -174,8 +174,13 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
 
 fn lower_current(op: &Op, dialect: Dialect) -> bool {
     let default_schema = op.schema().unwrap_or("app");
-    let author = IrAuthor::new(default_schema, "app_corpus", sql_dialect(dialect))
-        .with_schema_scope(SchemaScope::Unconfined);
+    let author = IrAuthor::new(
+        default_schema,
+        "app_corpus",
+        sql_dialect(dialect),
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .with_schema_scope(SchemaScope::Unconfined);
     author
         .lower(&one_op_ir(op.clone()), &LiveSchema::default())
         .is_ok()

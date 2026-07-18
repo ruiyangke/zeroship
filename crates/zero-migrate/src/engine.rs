@@ -92,6 +92,11 @@ impl MigrationPlan {
 /// A failure from [`MigrationEngine::apply`].
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// The declarative plan was authored under a different composed policy than
+    /// the one supplied for apply. Refused before any DDL so snapshot shape and
+    /// execution can never observe different inject rules.
+    #[error("declarative plan was authored under a different EffectivePolicy")]
+    DeclarativePolicyMismatch,
     /// The plan contains guard denials and can never be applied. Carries the
     /// denied `(version, error)` pairs for reporting. Nothing was applied.
     #[error("plan is un-appliable: {} migration(s) denied by the guard", .0.len())]
@@ -359,8 +364,9 @@ impl MigrationEngine {
         author: &crate::render::declarative::DeclarativeAuthor,
         hints: &[crate::render::declarative::RenameHint],
         cfg: &GuardConfig,
+        effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<DeclarativeDeployPlan, crate::render::declarative::DeclarativeError> {
-        let diff = author.diff(desired, live, live_ownership, hints)?;
+        let diff = author.diff(desired, live, live_ownership, hints, effective)?;
         // CARRY `diff.rebuilds` into the plan (the fail-close is gone). The
         // SQLite 12-step table rebuilds are no longer dropped/refused: the generic
         // [`apply_declarative`](Self::apply_declarative) drives each through
@@ -370,11 +376,13 @@ impl MigrationEngine {
         // `diff.rebuilds` is ALWAYS empty on the PG path (PG uses native `ALTER` /
         // expand-contract), so the PG `DeclarativeDeployPlan` is byte-identical to
         // before; only the SQLite leg gains a non-empty `rebuilds`.
-        let plain = self.plan(&diff.migrations, cfg);
+        let policy_guard_cfg = cfg.clone().with_effective_policy(effective.clone());
+        let plain = self.plan(&diff.migrations, &policy_guard_cfg);
         Ok(DeclarativeDeployPlan {
             plain,
             renames: diff.renames,
             rebuilds: diff.rebuilds,
+            effective_policy: effective.clone(),
         })
     }
 
@@ -426,11 +434,16 @@ impl MigrationEngine {
     pub async fn apply_declarative<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
+        effective: &zero_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        plan.verify_effective_policy(effective)?;
+        let mut policy_exec_cfg = exec_cfg.clone();
+        policy_exec_cfg.effective = effective.clone();
+        let exec_cfg = &policy_exec_cfg;
         // Hold the project advisory lock for the WHOLE declarative deploy.
         //
         // A declarative deploy is several sub-batches: the plain set plus one
@@ -465,7 +478,7 @@ impl MigrationEngine {
             .map_err(EngineError::from)?;
 
         let result = self
-            .apply_declarative_locked(plan, approval, backend, exec_cfg, applied_by)
+            .apply_declarative_locked(plan, effective, approval, backend, exec_cfg, applied_by)
             .await;
 
         // Release on EVERY path. Surface the deploy error first; a release failure
@@ -539,6 +552,7 @@ impl MigrationEngine {
         &self,
         plan: &DeclarativeDeployPlan,
         expected: &ManifestHash,
+        effective: &zero_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -553,7 +567,7 @@ impl MigrationEngine {
         // database + journal untouched.
         verify_manifest(&plan.effective_set(), expected).map_err(EngineError::from)?;
         // Verified ⇒ the normal gated, lock-wrapped declarative orchestration.
-        self.apply_declarative(plan, approval, backend, exec_cfg, applied_by)
+        self.apply_declarative(plan, effective, approval, backend, exec_cfg, applied_by)
             .await
     }
 
@@ -578,11 +592,15 @@ impl MigrationEngine {
     async fn apply_declarative_locked<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
+        effective: &zero_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // Defense in depth for future internal callers that enter with the lock
+        // already held.
+        plan.verify_effective_policy(effective)?;
         // Preserve the plain-set gate exactly as `apply_inner` runs it: a denied
         // plain plan can never apply; a destructive plain plan needs approval.
         // (The executor re-runs its own destructive gate as defense in depth.)
@@ -2995,9 +3013,29 @@ pub struct DeclarativeDeployPlan {
     /// destructive/approval gate (the paired migration is `destructive +
     /// requires_approval`). ALWAYS empty on the PG dialect.
     pub rebuilds: Vec<crate::render::declarative::SqliteRebuild>,
+    /// The exact composed policy whose inject rules shaped this plan. Apply must
+    /// be given an equal policy; there is no ambient or inferred fallback.
+    effective_policy: zero_migrate_policy::EffectivePolicy,
 }
 
 impl DeclarativeDeployPlan {
+    /// The exact composed policy whose inject rules shaped this plan.
+    #[must_use]
+    pub fn effective_policy(&self) -> &zero_migrate_policy::EffectivePolicy {
+        &self.effective_policy
+    }
+
+    fn verify_effective_policy(
+        &self,
+        effective: &zero_migrate_policy::EffectivePolicy,
+    ) -> Result<(), EngineError> {
+        if &self.effective_policy == effective {
+            Ok(())
+        } else {
+            Err(EngineError::DeclarativePolicyMismatch)
+        }
+    }
+
     /// The plan's **full effective migration set** — every migration the deploy
     /// will execute (across all of its deploys), in apply order.
     ///
@@ -3155,6 +3193,28 @@ mod tests {
 
     fn guard_cfg() -> GuardConfig {
         GuardConfig::confined("proj_acme")
+    }
+
+    #[test]
+    fn declarative_plan_rejects_a_different_apply_policy() {
+        let effective = crate::zeroship_confined_ceiling();
+        let plan = DeclarativeDeployPlan {
+            plain: MigrationPlan {
+                items: Vec::new(),
+                destructive: false,
+                requires_approval: false,
+                denied: Vec::new(),
+            },
+            renames: Vec::new(),
+            rebuilds: Vec::new(),
+            effective_policy: effective.clone(),
+        };
+
+        assert!(plan.verify_effective_policy(&effective).is_ok());
+        assert!(matches!(
+            plan.verify_effective_policy(&crate::zeroship_no_inject_ceiling()),
+            Err(EngineError::DeclarativePolicyMismatch)
+        ));
     }
 
     fn det() -> DeterministicAuthor {

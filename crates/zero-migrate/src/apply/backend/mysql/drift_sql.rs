@@ -550,6 +550,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
 
         let constraint = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
             &parts.referenced_schema,
+            &table_name,
             Some(&constraint_name),
             &parts.columns,
             &parts.referenced_table,

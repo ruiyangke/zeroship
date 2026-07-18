@@ -56,9 +56,14 @@ fn assert_exact_uuid_v4(value: &str) {
 fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
     let table = "uuid_v4_samples";
     let ir = uuid_v4_ir(table);
-    let migrations = IrAuthor::new("main", "app_uuid_samples", SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("lower SQLite UUIDv4 default");
+    let migrations = IrAuthor::new(
+        "main",
+        "app_uuid_samples",
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("lower SQLite UUIDv4 default");
     assert_eq!(migrations.len(), 1);
     assert!(
         migrations[0].up.contains("randomblob"),
@@ -87,9 +92,14 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
 #[test]
 fn mysql_uuid_v4_default_uses_exact_random_bytes_expression() {
     let ir = uuid_v4_ir("uuid_v4_samples");
-    let migrations = IrAuthor::new("app", "app_uuid_samples", SqlDialect::Mysql)
-        .lower(&ir, &LiveSchema::default())
-        .expect("lower MySQL UUIDv4 default");
+    let migrations = IrAuthor::new(
+        "app",
+        "app_uuid_samples",
+        SqlDialect::Mysql,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("lower MySQL UUIDv4 default");
     assert_eq!(migrations.len(), 1);
     let sql = &migrations[0].up;
 
@@ -135,9 +145,15 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
 
     async {
         let ir = uuid_v4_ir(table);
-        let migrations = IrAuthor::new(&schema, "app_uuid_samples", SqlDialect::Postgres)
-            .lower(&ir, &LiveSchema::default())
-            .expect("lower PostgreSQL UUIDv4 default");
+        let migrations = IrAuthor::new(
+            &schema,
+            "app_uuid_samples",
+            SqlDialect::Postgres,
+            &zero_migrate::confined_no_inject_policy(&schema)
+                .expect("UUID no-inject policy composes"),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .expect("lower PostgreSQL UUIDv4 default");
         assert_eq!(migrations.len(), 1);
         assert!(
             migrations[0].up.contains("DEFAULT gen_random_uuid()"),

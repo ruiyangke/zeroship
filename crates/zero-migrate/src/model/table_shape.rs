@@ -19,9 +19,11 @@
 //! covering spec pins the PK and forbids author PKs, injected indexes appended, and
 //! an idempotent re-run over an already-resolved table.
 
-use zero_migrate_policy::{AuthorPkPolicy, EffectivePolicy, InjectColumn, InjectIndex, ObjectName};
+use zero_migrate_policy::{
+    normalize_pg_identifier, AuthorPkPolicy, EffectivePolicy, InjectColumn, InjectIndex, ObjectName,
+};
 
-use crate::model::expr::Expr;
+use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op};
 use zero_migrate_ir::policy_registry;
 
@@ -45,6 +47,22 @@ pub enum TableShapeError {
         column: String,
         /// Inject type token.
         data_type: String,
+    },
+    /// The policy injects a default token this engine cannot map into the closed IR.
+    #[error("system column {column:?} uses unsupported default {default:?}")]
+    UnsupportedSystemColumnDefault {
+        /// Column name.
+        column: String,
+        /// Opaque default token from the inject rule.
+        default: String,
+    },
+    /// A policy injection identifier is not a portable single SQL identifier.
+    #[error("injected {kind} identifier {name:?} is invalid")]
+    InvalidInjectIdentifier {
+        /// Identifier role in the injection rule.
+        kind: &'static str,
+        /// Authored identifier token.
+        name: String,
     },
     /// A policy-pinned primary key would silently discard an author PK.
     #[error(
@@ -85,53 +103,126 @@ pub enum TableShapeError {
 /// override a ceiling PK, which `admit`'s collision blame already
 /// guarantees is non-conflicting). `author_primary_key` is `Forbid` if ANY covering
 /// spec forbids (obligations union up).
-struct ResolvedInject {
-    columns: Vec<InjectColumn>,
-    indexes: Vec<InjectIndex>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedInject {
+    columns: Vec<IrColumn>,
+    indexes: Vec<IrIndex>,
     primary_key: Option<Vec<String>>,
     author_primary_key: AuthorPkPolicy,
 }
 
 impl ResolvedInject {
     /// Flatten the covering inject specs at `object` into a single ordered shape.
-    fn for_object(effective: &EffectivePolicy, object: &ObjectName) -> Self {
-        let mut columns: Vec<InjectColumn> = Vec::new();
-        let mut indexes: Vec<InjectIndex> = Vec::new();
+    pub(crate) fn for_object(
+        effective: &EffectivePolicy,
+        object: &ObjectName,
+    ) -> Result<Self, TableShapeError> {
+        let mut columns: Vec<IrColumn> = Vec::new();
+        let mut indexes: Vec<IrIndex> = Vec::new();
         let mut primary_key: Option<Vec<String>> = None;
         let mut author_primary_key = AuthorPkPolicy::Allow;
         for spec in effective.injects_for(object) {
-            columns.extend(spec.columns.iter().cloned());
-            indexes.extend(spec.indexes.iter().cloned());
+            columns.extend(
+                spec.columns
+                    .iter()
+                    .map(inject_column_to_ir)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            indexes.extend(
+                spec.indexes
+                    .iter()
+                    .map(inject_index_to_ir)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
             if primary_key.is_none() {
-                primary_key.clone_from(&spec.primary_key);
+                primary_key = spec
+                    .primary_key
+                    .as_ref()
+                    .map(|columns| {
+                        columns
+                            .iter()
+                            .map(|name| canonical_inject_identifier(name, "primary-key column"))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?;
             }
             if matches!(spec.author_primary_key, AuthorPkPolicy::Forbid) {
                 author_primary_key = AuthorPkPolicy::Forbid;
             }
         }
-        Self {
+        Ok(Self {
             columns,
             indexes,
             primary_key,
             author_primary_key,
-        }
+        })
+    }
+
+    /// Resolve the injection covering one concrete `schema.table` object.
+    ///
+    /// # Errors
+    /// Returns [`TableShapeError`] when an injected type or default token cannot
+    /// be represented by the engine's closed IR.
+    pub fn for_table(
+        effective: &EffectivePolicy,
+        schema: &str,
+        table: &str,
+    ) -> Result<Self, TableShapeError> {
+        Self::for_object(
+            effective,
+            &ObjectName::table(schema.as_bytes().to_vec(), table.as_bytes().to_vec()),
+        )
+    }
+
+    /// Canonical injected columns, in sealed policy order.
+    pub fn columns(&self) -> &[IrColumn] {
+        &self.columns
+    }
+
+    /// Canonical injected indexes, in sealed policy order.
+    pub fn indexes(&self) -> &[IrIndex] {
+        &self.indexes
+    }
+
+    /// Policy-pinned primary-key columns, when present.
+    pub fn primary_key(&self) -> Option<&[String]> {
+        self.primary_key.as_deref()
+    }
+
+    /// Whether the active injection owns a column with this name.
+    #[must_use]
+    pub fn contains_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|column| column.name == name)
+    }
+
+    /// Whether this injection owns the canonical single-column `id` primary key.
+    ///
+    /// Legacy ID-prefix and integer-identity folds are valid only for this exact
+    /// policy-declared shape. Merely injecting an ordinary column named `id` does
+    /// not activate platform-primary-key semantics.
+    #[must_use]
+    pub fn owns_id_primary_key(&self) -> bool {
+        matches!(self.primary_key.as_deref(), Some([column]) if column == "id")
+            && self.contains_column("id")
+    }
+
+    fn owns_id_primary_key_column(&self, name: &str) -> bool {
+        name == "id" && self.owns_id_primary_key()
     }
 
     /// This object carries no injection — the resolver is a no-op for it.
     fn is_empty(&self) -> bool {
-        self.columns.is_empty() && self.primary_key.is_none()
+        self.columns.is_empty() && self.indexes.is_empty() && self.primary_key.is_none()
     }
 }
 
 /// The [`ObjectName`] a `createTable` op addresses: `schema.table` when the op
-/// carries a schema qualifier, else the bare table (the confined project-schema
-/// case, where the ⊤-scope confined inject covers it regardless). Names are used
-/// verbatim; the policy's scope matcher folds them (II.2.7).
-fn object_for_create(name: &str, schema: Option<&str>) -> ObjectName {
-    match schema {
-        Some(s) => ObjectName::table(s.as_bytes().to_vec(), name.as_bytes().to_vec()),
-        None => ObjectName::table(b"public".to_vec(), name.as_bytes().to_vec()),
-    }
+/// carries a schema qualifier, otherwise `default_schema.table`. The caller must
+/// supply the same deployment schema used by snapshot construction; there is no
+/// ambient `public` fallback that could select a different scoped inject rule.
+fn object_for_create(name: &str, schema: Option<&str>, default_schema: &str) -> ObjectName {
+    let schema = schema.unwrap_or(default_schema);
+    ObjectName::table(schema.as_bytes().to_vec(), name.as_bytes().to_vec())
 }
 
 /// Apply the effective policy's table injection to every `createTable` op.
@@ -150,6 +241,7 @@ fn object_for_create(name: &str, schema: Option<&str>) -> ObjectName {
 pub fn resolve_create_table_policy(
     ir: &MigrationIr,
     effective: &EffectivePolicy,
+    default_schema: &str,
 ) -> Result<MigrationIr, TableShapeError> {
     let mut out = ir.clone();
     for op in &mut out.ops {
@@ -164,8 +256,8 @@ pub fn resolve_create_table_policy(
         else {
             continue;
         };
-        let object = object_for_create(name, schema.as_deref());
-        let resolved = ResolvedInject::for_object(effective, &object);
+        let object = object_for_create(name, schema.as_deref(), default_schema);
+        let resolved = ResolvedInject::for_object(effective, &object)?;
         resolve_create_table(name, columns, primary_key, indexes, &resolved)?;
     }
     Ok(out)
@@ -193,12 +285,13 @@ fn resolve_create_table(
     let mut resolved_columns = Vec::with_capacity(inject.columns.len() + columns.len());
     for system in &inject.columns {
         let collision = columns.iter().find(|c| c.name == system.name);
+        let is_id_primary_key = inject.owns_id_primary_key_column(&system.name);
         if let Some(author_col) = collision {
-            if is_id_prefix_declaration(author_col) {
+            if is_id_primary_key && is_id_prefix_declaration(author_col) {
                 validate_folded_id_prefix(table, author_col)?;
                 folded_id_prefix = author_col.id_prefix.clone();
                 folded_id = true;
-            } else if is_id_identity_replacement(author_col) {
+            } else if is_id_primary_key && is_id_identity_replacement(author_col) {
                 validate_folded_id_identity(table, author_col)?;
                 folded_id = true;
             } else {
@@ -208,8 +301,8 @@ fn resolve_create_table(
                 });
             }
         }
-        let mut col = inject_column_to_ir(system)?;
-        if system.name == "id" {
+        let mut col = system.clone();
+        if is_id_primary_key {
             if let Some(author_col) = collision.filter(|c| is_id_identity_replacement(c)) {
                 col = author_col.clone();
             } else {
@@ -249,28 +342,7 @@ fn resolve_create_table(
         *primary_key = Some(pk.clone());
     }
 
-    indexes.extend(inject.indexes.iter().map(|idx| {
-        IrIndex {
-            name: None,
-            columns: idx
-                .columns
-                .iter()
-                .map(|name| IndexElement::Column {
-                    name: name.clone(),
-                    order: None,
-                    opclass: None,
-                    collation: None,
-                })
-                .collect(),
-            unique: None,
-            using: None,
-            r#where: None,
-            include: Vec::new(),
-            with: None,
-            only: None,
-            nulls_not_distinct: None,
-        }
-    }));
+    indexes.extend(inject.indexes.iter().cloned());
 
     Ok(())
 }
@@ -279,22 +351,24 @@ fn resolve_create_table(
 /// spellings the engine understands mirror the retired `system_shape` mapping
 /// (`text`, `timestamptz`/`timestamp with time zone`, `integer`/`int`).
 fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeError> {
+    let name = canonical_inject_identifier(&column.name, "column")?;
     let ty = match column.ty.as_str() {
         "text" => ColType::Text,
         "timestamptz" | "timestamp with time zone" => ColType::Timestamp,
         "integer" | "int" => ColType::Int,
         other => {
             return Err(TableShapeError::UnsupportedSystemColumnType {
-                column: column.name.clone(),
+                column: name,
                 data_type: other.to_string(),
             })
         }
     };
+    let default = inject_default_to_ir(column, &ty)?;
     Ok(IrColumn {
-        name: column.name.clone(),
+        name,
         ty,
         nullable: Some(column.nullable),
-        default: None,
+        default,
         unique: None,
         value_format: None,
         references: None,
@@ -305,6 +379,107 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         generated: None,
         identity: None,
     })
+}
+
+fn inject_default_to_ir(
+    column: &InjectColumn,
+    ty: &ColType,
+) -> Result<Option<IrDefault>, TableShapeError> {
+    let Some(default) = column.default.as_deref() else {
+        return Ok(None);
+    };
+    let normalized = default.trim();
+    let mapped = match ty {
+        ColType::Timestamp
+            if matches!(
+                normalized.to_ascii_lowercase().as_str(),
+                "now" | "now()" | "current_timestamp"
+            ) =>
+        {
+            Some(IrDefault::Expr {
+                expr: Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args: Vec::new(),
+                },
+            })
+        }
+        ColType::Int => normalized
+            .parse::<i64>()
+            .ok()
+            .map(|value| IrDefault::Literal {
+                value: crate::model::ir::IrScalar::Int(value),
+            }),
+        ColType::Text
+            if normalized.len() >= 2
+                && normalized.starts_with('\'')
+                && normalized.ends_with('\'') =>
+        {
+            let value = normalized[1..normalized.len() - 1].replace("''", "'");
+            Some(IrDefault::Literal {
+                value: crate::model::ir::IrScalar::Str(value),
+            })
+        }
+        _ => None,
+    };
+    mapped
+        .map(Some)
+        .ok_or_else(|| TableShapeError::UnsupportedSystemColumnDefault {
+            column: column.name.clone(),
+            default: default.to_string(),
+        })
+}
+
+fn inject_index_to_ir(index: &InjectIndex) -> Result<IrIndex, TableShapeError> {
+    Ok(IrIndex {
+        // Inject index names have historically been logical policy labels. The
+        // physical name remains the engine's deterministic table/column name.
+        name: None,
+        columns: index
+            .columns
+            .iter()
+            .map(|name| {
+                Ok(IndexElement::Column {
+                    name: canonical_inject_identifier(name, "index column")?,
+                    order: None,
+                    opclass: None,
+                    collation: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TableShapeError>>()?,
+        unique: None,
+        using: None,
+        r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+    })
+}
+
+fn canonical_inject_identifier(raw: &str, kind: &'static str) -> Result<String, TableShapeError> {
+    let quoted = raw.starts_with('"');
+    if !quoted {
+        let mut chars = raw.chars();
+        if !chars
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(TableShapeError::InvalidInjectIdentifier {
+                kind,
+                name: raw.to_string(),
+            });
+        }
+    }
+    let normalized = normalize_pg_identifier(raw)
+        .filter(|object| object.table.is_none())
+        .and_then(|object| String::from_utf8(object.schema).ok())
+        .filter(|name| name.len() <= 63)
+        .ok_or_else(|| TableShapeError::InvalidInjectIdentifier {
+            kind,
+            name: raw.to_string(),
+        })?;
+    Ok(normalized)
 }
 
 fn is_id_prefix_declaration(column: &IrColumn) -> bool {
@@ -392,33 +567,30 @@ fn resolved_create_table_matches_inject(
     indexes: &[IrIndex],
     inject: &ResolvedInject,
 ) -> Result<bool, TableShapeError> {
-    if inject.columns.is_empty() {
-        return Ok(false);
-    }
     if columns.len() < inject.columns.len() || indexes.len() < inject.indexes.len() {
         return Ok(false);
     }
     for (actual, expected) in columns.iter().zip(&inject.columns) {
         // The `id` identity-replacement fold leaves an author identity column in the
         // `id` slot; it is a conforming resolution of the injected `id`.
-        if expected.name == "id" && is_id_identity_replacement(actual) {
+        if inject.owns_id_primary_key_column(&expected.name) && is_id_identity_replacement(actual) {
             continue;
         }
-        let expected_ir = inject_column_to_ir(expected)?;
+        let expected_ir = expected;
         // The platform prefix fold deliberately retains two authored facets on
         // the otherwise injected `id` slot: `id_prefix` and a possible typed
         // reference. Compare the injected base shape while allowing exactly that
         // folded carrier. Other injected slots (and an unprefixed injected `id`)
         // must match `references: None` below.
-        if expected.name == "id" && actual.id_prefix.is_some() {
+        if inject.owns_id_primary_key_column(&expected.name) && actual.id_prefix.is_some() {
             let mut folded_base = actual.clone();
             folded_base.id_prefix = None;
             folded_base.references = None;
-            if system_columns_match(&folded_base, &expected_ir) {
+            if system_columns_match(&folded_base, expected_ir) {
                 continue;
             }
         }
-        if !system_columns_match(actual, &expected_ir) {
+        if !system_columns_match(actual, expected_ir) {
             return Ok(false);
         }
     }
@@ -429,27 +601,7 @@ fn resolved_create_table_matches_inject(
     }
     let start = indexes.len() - inject.indexes.len();
     for (actual, expected) in indexes[start..].iter().zip(&inject.indexes) {
-        let actual_cols = actual
-            .columns
-            .iter()
-            .map(|c| match c {
-                IndexElement::Column { name, .. } => Some(name.as_str()),
-                IndexElement::Expr { .. } => None,
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(actual_cols) = actual_cols else {
-            return Ok(false);
-        };
-        let expected_cols = expected
-            .columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        if actual_cols != expected_cols
-            || actual.unique.unwrap_or(false)
-            || actual.using.is_some()
-            || actual.r#where.is_some()
-        {
+        if actual != expected {
             return Ok(false);
         }
     }
@@ -460,7 +612,7 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
     // II.2.6b conformance: an occupant of an injected column slot must match the
     // inject's name AND its type/nullability/default (the shape the InjectSpec
     // carries — `inject_column_to_ir` maps the opaque token; injected columns carry
-    // no default today, so `default` matches on `None`).
+    // the canonical default mapped from the rule, when present).
     actual.name == expected.name
         && actual.ty == expected.ty
         && actual.nullable == expected.nullable
@@ -768,6 +920,13 @@ mod tests {
     use crate::model::ir::{CanonicalOpList, ColumnReference, MigrationIr, CURRENT_IR_VERSION};
     use crate::{Checksum, MigrationFlags};
 
+    fn resolve_create_table_policy(
+        ir: &MigrationIr,
+        effective: &EffectivePolicy,
+    ) -> Result<MigrationIr, TableShapeError> {
+        super::resolve_create_table_policy(ir, effective, "app")
+    }
+
     fn ir(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> MigrationIr {
         MigrationIr {
             ir_version: CURRENT_IR_VERSION,
@@ -816,6 +975,7 @@ mod tests {
             column: "id".to_string(),
             on_delete: None,
             on_update: None,
+            name: None,
         }
     }
 
@@ -825,38 +985,107 @@ mod tests {
     /// injected columns). Used to prove checksum-invariance under equivalent-shape
     /// policies (G6).
     fn equivalent_shape_ceiling() -> EffectivePolicy {
-        let toml = r#"policy_version = 1
+        let toml = ZEROSHIP_CONFINED_CEILING_TOML
+            .replace("ix_deleted_at", "renamed_deleted_at_idx")
+            .replace("ix_updated_at", "renamed_updated_at_idx")
+            .replace("ix_created_by", "renamed_created_by_idx");
+        effective_policy_from_ceiling_toml(&toml).expect("equivalent-shape ceiling composes")
+    }
+
+    #[test]
+    fn unquoted_inject_identifiers_are_canonicalized_before_collision_checks() {
+        let effective = effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
 
 [[inject]]
 scope = "all"
 mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
+primary_key = ["UPDATED_AT"]
 columns = [
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
+  { name = "UPDATED_AT", type = "timestamptz", nullable = false },
 ]
 indexes = [
-  { name = "renamed_deleted_at_idx", columns = ["deleted_at"] },
-  { name = "renamed_updated_at_idx", columns = ["updated_at"] },
-  { name = "renamed_created_by_idx", columns = ["created_by"] },
+  { name = "ix_updated_at", columns = ["UPDATED_AT"] },
 ]
-"#;
-        effective_policy_from_ceiling_toml(toml).expect("equivalent-shape ceiling composes")
+"#,
+        )
+        .expect("uppercase-identifier policy composes");
+
+        let inject = ResolvedInject::for_table(&effective, "app", "widgets")
+            .expect("uppercase policy identifiers resolve");
+        assert_eq!(inject.columns()[0].name, "updated_at");
+        assert_eq!(inject.primary_key(), Some(&["updated_at".to_string()][..]));
+        assert!(matches!(
+            &inject.indexes()[0].columns[0],
+            IndexElement::Column { name, .. } if name == "updated_at"
+        ));
+
+        let error =
+            resolve_create_table_policy(&ir(vec![text_col("updated_at")], None), &effective)
+                .expect_err("canonical injected name must collide with the author column");
+        assert!(matches!(
+            error,
+            TableShapeError::SystemColumnCollision { column, .. } if column == "updated_at"
+        ));
     }
 
     #[test]
-    fn confined_prepends_system_shape_and_pk() {
-        let resolved = resolve_create_table_policy(
-            &ir(vec![text_col("title")], None),
-            &zeroship_confined_ceiling(),
+    fn malformed_inject_identifier_is_rejected_during_resolution() {
+        let effective = effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+columns = [
+  { name = "bad name", type = "text", nullable = false },
+]
+"#,
         )
-        .expect("resolve");
+        .expect("policy loader accepts opaque inject identifier tokens");
+
+        let error = ResolvedInject::for_table(&effective, "app", "widgets")
+            .expect_err("an inject column must be one portable SQL identifier");
+        assert!(matches!(
+            error,
+            TableShapeError::InvalidInjectIdentifier { kind: "column", name }
+                if name == "bad name"
+        ));
+    }
+
+    #[test]
+    fn short_text_defaults_return_typed_errors_without_panicking() {
+        for default in ["", "'"] {
+            let effective = effective_policy_from_ceiling_toml(&format!(
+                r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+columns = [
+  {{ name = "status", type = "text", nullable = false, default = "{default}" }},
+]
+"#
+            ))
+            .expect("short-default policy composes");
+
+            let error = ResolvedInject::for_table(&effective, "app", "widgets")
+                .expect_err("a short non-literal text default is unsupported");
+            assert!(matches!(
+                error,
+                TableShapeError::UnsupportedSystemColumnDefault { column, default: actual }
+                    if column == "status" && actual == default
+            ));
+        }
+    }
+
+    #[test]
+    fn confined_prepends_exact_resolved_inject_shape_and_pk() {
+        let effective = zeroship_confined_ceiling();
+        let inject = ResolvedInject::for_table(&effective, "public", "widgets")
+            .expect("confined injection resolves");
+        let resolved = resolve_create_table_policy(&ir(vec![text_col("title")], None), &effective)
+            .expect("resolve");
         let Op::CreateTable {
             columns,
             primary_key,
@@ -868,47 +1097,27 @@ indexes = [
         };
         let names = columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
         assert_eq!(
-            &names[..7],
-            [
-                "id",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-                "version",
-                "deleted_at"
-            ]
+            &names[..inject.columns().len()],
+            inject
+                .columns()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
         );
-        assert_eq!(names[7], "title");
-        assert_eq!(primary_key.as_deref(), Some(&["id".to_string()][..]));
-        let index_cols = indexes
-            .iter()
-            .map(|idx| {
-                idx.columns
-                    .iter()
-                    .map(|c| match c {
-                        IndexElement::Column { name, .. } => name.as_str(),
-                        IndexElement::Expr { .. } => "<expr>",
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            index_cols,
-            vec![vec!["deleted_at"], vec!["updated_at"], vec!["created_by"]]
-        );
+        assert_eq!(names[inject.columns().len()], "title");
+        assert_eq!(primary_key.as_deref(), inject.primary_key());
+        assert_eq!(indexes, inject.indexes());
     }
 
     #[test]
     fn platform_preserves_author_shape() {
-        // A ceiling that injects nothing (deny_all — no inject rules) is a no-op: the
-        // author-owned table shape passes through verbatim.
+        // The explicit no-inject ceiling is a no-op: the author-owned table shape
+        // passes through verbatim.
         let input = ir(
             vec![text_col("id"), text_col("team")],
             Some(vec!["id".into()]),
         );
-        let registry = zero_migrate_policy::PolicyRegistry::empty();
-        let no_inject = EffectivePolicy::deny_all(&registry);
+        let no_inject = zeroship_no_inject_ceiling();
         let resolved =
             resolve_create_table_policy(&input, &no_inject).expect("no-inject ceiling is a no-op");
         assert_eq!(resolved, input);
@@ -1058,9 +1267,8 @@ indexes = [
 
         // Sensitivity: a ceiling that injects nothing resolves to a DIFFERENT shape
         // (no system columns) ⇒ a different checksum.
-        let registry = zero_migrate_policy::PolicyRegistry::empty();
-        let no_inject = resolve_create_table_policy(&input, &EffectivePolicy::deny_all(&registry))
-            .expect("no-inject");
+        let no_inject =
+            resolve_create_table_policy(&input, &zeroship_no_inject_ceiling()).expect("no-inject");
         assert_ne!(confined.ops, no_inject.ops);
         assert_ne!(checksum_of(&confined), checksum_of(&no_inject));
     }

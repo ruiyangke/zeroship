@@ -113,6 +113,7 @@ fn opts() -> PreviewOpts {
     PreviewOpts {
         default_schema: "public".to_string(),
         owner_app: "app_preview".to_string(),
+        effective_policy: zeroship_confined_ceiling(),
     }
 }
 
@@ -129,7 +130,7 @@ fn render_representative(dialect: SqlDialect) -> String {
 
 fn resolve_envelope_json(ir: &str) -> String {
     let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
-    let resolved = resolve_create_table_policy(&raw, &zeroship_confined_ceiling())
+    let resolved = resolve_create_table_policy(&raw, &zeroship_confined_ceiling(), "public")
         .expect("preview fixture IR resolves");
     serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
@@ -209,7 +210,12 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
     }"#;
     let envelope_json = resolve_envelope_json(envelope_json);
     let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
-    let author = IrAuthor::new("public", "app_preview", dialect);
+    let author = IrAuthor::new(
+        "public",
+        "app_preview",
+        dialect,
+        &zeroship_confined_ceiling(),
+    );
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
         .expect("lowers offline");
@@ -448,7 +454,13 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
       ]
     }"#;
     let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
-    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        "public",
+        "app_preview",
+        SqlDialect::Postgres,
+        &zero_migrate::confined_no_inject_policy("public")
+            .expect("preview no-inject policy composes"),
+    );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
         .expect("DB-independent IR lowers offline");
@@ -512,7 +524,13 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
       ]
     }"#;
     let seed: MigrationIr = serde_json::from_str(seed_json).unwrap();
-    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        "public",
+        "app_preview",
+        SqlDialect::Postgres,
+        &zero_migrate::confined_no_inject_policy("public")
+            .expect("preview no-inject policy composes"),
+    );
     let mut plan = author
         .lower_plan(&seed, &LiveSchema::default())
         .expect("DB-independent IR lowers offline");
@@ -590,7 +608,13 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
       ]
     }"#;
     let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
-    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        "public",
+        "app_preview",
+        SqlDialect::Postgres,
+        &zero_migrate::confined_no_inject_policy("public")
+            .expect("preview no-inject policy composes"),
+    );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
         .expect("DB-independent IR lowers offline");

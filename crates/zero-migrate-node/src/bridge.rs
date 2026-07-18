@@ -134,9 +134,14 @@ pub fn load_verify(
 #[napi(js_name = "genArtifacts")]
 #[must_use]
 pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
-    let schema = source.project_schema.as_deref();
-    let ceiling = source.policy_ceiling_toml.as_deref();
-    match (source.envelopes, source.descriptors) {
+    let GenArtifactsSource {
+        envelopes,
+        descriptors,
+        project_schema,
+        policy_ceiling_toml,
+    } = source;
+    let schema = project_schema.as_deref();
+    match (envelopes, descriptors) {
         (Some(_), Some(_)) => gen_artifacts_err(
             "genArtifacts: exactly one of `envelopes` (generated source) or `descriptors` \
              (manual source) must be set — both were provided",
@@ -145,7 +150,9 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
             "genArtifacts: a source is required — set `envelopes` (generated source) or \
              `descriptors` (manual source)",
         ),
-        (Some(envelopes), None) => api::gen_artifacts_from_envelopes(&envelopes, schema, ceiling),
+        (Some(envelopes), None) => {
+            api::gen_artifacts_from_envelopes(&envelopes, schema, &policy_ceiling_toml)
+        }
         (None, Some(dtos)) => {
             let descriptors = match dtos
                 .into_iter()
@@ -155,7 +162,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
                 Ok(d) => d,
                 Err(e) => return gen_artifacts_err(e),
             };
-            api::gen_artifacts_from_descriptors(&descriptors, schema, ceiling)
+            api::gen_artifacts_from_descriptors(&descriptors, schema, &policy_ceiling_toml)
         }
     }
 }
@@ -233,6 +240,7 @@ fn field_dto_to_engine(
         unique: dto.unique.unwrap_or(false),
         references: dto.references,
         reference_column: None,
+        reference_name: None,
         on_delete: dto.on_delete,
         on_update: dto.on_update,
         deferrable: dto.deferrable,
@@ -662,7 +670,7 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling: Option<&str>,
+    policy_ceiling: &str,
     approval: Approval,
     applied_by: &str,
 ) -> std::result::Result<ApplyReply, String> {
@@ -797,7 +805,7 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling: Option<&str>,
+    policy_ceiling: &str,
 ) -> std::result::Result<StatusReply, String> {
     backend
         .ensure_journal(cfg)
@@ -1021,10 +1029,13 @@ pub fn apply_ir(
     } else {
         Approval::None
     };
+    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling)
+        .map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
         let mut cfg =
-            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
+            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone())
+                .with_effective_policy(effective);
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
@@ -1040,7 +1051,7 @@ pub fn apply_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    policy_ceiling.as_deref(),
+                    &policy_ceiling,
                     approval,
                     &applied_by,
                 )
@@ -1057,7 +1068,7 @@ pub fn apply_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    policy_ceiling.as_deref(),
+                    &policy_ceiling,
                     approval,
                     &applied_by,
                 )
@@ -1167,9 +1178,12 @@ pub fn status_ir(
         })
         .collect::<Result<Vec<_>>>()?;
     let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
+    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling)
+        .map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
+        let cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone())
+            .with_effective_policy(effective);
         match target {
             ApplyDialect::Postgres => {
                 let backend = zero_migrate::PostgresBackend::new_generic(&session);
@@ -1181,7 +1195,7 @@ pub fn status_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    policy_ceiling.as_deref(),
+                    &policy_ceiling,
                 )
                 .await
             }
@@ -1195,7 +1209,7 @@ pub fn status_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    policy_ceiling.as_deref(),
+                    &policy_ceiling,
                 )
                 .await
             }

@@ -103,9 +103,15 @@ fn lower_id_table_sql(
         }],
     }))
     .expect("ID table IR must deserialize");
-    let migrations = IrAuthor::new("main", "app_sqlite_drift", SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("ID table must lower for SQLite");
+    let migrations = IrAuthor::new(
+        "main",
+        "app_sqlite_drift",
+        SqlDialect::Sqlite,
+        &zero_migrate::confined_no_inject_policy("main")
+            .expect("SQLite drift no-inject policy composes"),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("ID table must lower for SQLite");
     let marker = format!("CREATE TABLE \"{table}\"");
     migrations
         .into_iter()
@@ -714,11 +720,22 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
         ]
     }))
     .expect("portable SQLite ID fixture must deserialize");
-    let mut expected = fold_ops(&ir.ops, SqlDialect::Sqlite, "main")
-        .expect("portable SQLite ID fixture must fold");
-    let migrations = IrAuthor::new("main", "app_sqlite_drift", SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("portable SQLite ID fixture must lower");
+    let mut expected = fold_ops(
+        &ir.ops,
+        SqlDialect::Sqlite,
+        "main",
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("portable SQLite ID fixture must fold");
+    let migrations = IrAuthor::new(
+        "main",
+        "app_sqlite_drift",
+        SqlDialect::Sqlite,
+        &zero_migrate::confined_no_inject_policy("main")
+            .expect("SQLite drift no-inject policy composes"),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("portable SQLite ID fixture must lower");
 
     let p = paths("portable_id_facets_clean");
     let be = backend(&p);
@@ -779,8 +796,14 @@ async fn catalog_seeded_fold_preserves_non_rowid_integer_primary_keys() {
             "{table} must not be classified as a rowid alias"
         );
     }
-    let projected =
-        fold_ops_onto(&live, &[], SqlDialect::Sqlite, "main").expect("empty catalog-seeded fold");
+    let projected = fold_ops_onto(
+        &live,
+        &[],
+        SqlDialect::Sqlite,
+        "main",
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("empty catalog-seeded fold");
     let drift = diff_snapshots(&live, &projected);
     assert!(
         drift.is_clean(),
@@ -834,11 +857,22 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
         ]
     }))
     .expect("typed-reference literal fixture must deserialize");
-    let mut expected = fold_ops(&ir.ops, SqlDialect::Sqlite, "main")
-        .expect("typed-reference literal fixture must fold");
-    let migrations = IrAuthor::new("main", "app_sqlite_drift", SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("typed-reference literal fixture must lower");
+    let mut expected = fold_ops(
+        &ir.ops,
+        SqlDialect::Sqlite,
+        "main",
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("typed-reference literal fixture must fold");
+    let migrations = IrAuthor::new(
+        "main",
+        "app_sqlite_drift",
+        SqlDialect::Sqlite,
+        &zero_migrate::confined_no_inject_policy("main")
+            .expect("SQLite drift no-inject policy composes"),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("typed-reference literal fixture must lower");
 
     let p = paths("typed_reference_literal_default");
     let be = backend(&p);
@@ -1192,11 +1226,22 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
         ]
     }))
     .expect("authored composite-reference fixture must deserialize");
-    let mut expected = fold_ops(&ir.ops, SqlDialect::Sqlite, "main")
-        .expect("authored composite-reference fixture must fold");
-    let migrations = IrAuthor::new("main", "app_sqlite_drift", SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("authored composite-reference fixture must lower");
+    let mut expected = fold_ops(
+        &ir.ops,
+        SqlDialect::Sqlite,
+        "main",
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("authored composite-reference fixture must fold");
+    let migrations = IrAuthor::new(
+        "main",
+        "app_sqlite_drift",
+        SqlDialect::Sqlite,
+        &zero_migrate::confined_no_inject_policy("main")
+            .expect("SQLite drift no-inject policy composes"),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("authored composite-reference fixture must lower");
     let p = paths("authored_composite_reference");
     let be = backend(&p);
     for migration in &migrations {

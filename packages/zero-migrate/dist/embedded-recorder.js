@@ -529,9 +529,13 @@ var ColumnDefImpl = class _ColumnDefImpl {
       );
     }
     requirePlainObject(options, "t.*.references(table, column, options): options");
+    if (options.name !== void 0) {
+      requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
+    }
     const reference = compact({
       table: table2,
       column,
+      name: options.name,
       onDelete: requireReferenceAction(
         options.onDelete,
         "t.*.references(table, column, { onDelete })"

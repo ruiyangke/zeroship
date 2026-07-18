@@ -23,14 +23,31 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
-    DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
-    ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint,
-    SchemaSnapshot, SqliteBackend,
+    zeroship_confined_ceiling, Approval, ApprovalScope, CollectionDescriptor,
+    DeclarativeApplyError, DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan,
+    EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend,
+    MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";
+
+fn effective_policy() -> EffectivePolicy {
+    zeroship_confined_ceiling()
+}
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        SqlDialect::Sqlite,
+        effective,
+    )
+}
 
 struct Paths {
     _dir: TempDir,
@@ -66,7 +83,7 @@ fn guard_cfg() -> GuardConfig {
 }
 
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("desired_snapshot");
+    let d = desired_snapshot(PROJECT, descs, &effective_policy()).expect("desired_snapshot");
     let ownership = d
         .ownership
         .iter()
@@ -134,9 +151,15 @@ fn assert_frozen(name: &str, body: &str) {
 
 /// First-deploy: apply each plain migration additively (the plan spine).
 async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
-    let desired = desired_snapshot(PROJECT, desc).expect("desired");
+    let desired = desired_snapshot(PROJECT, desc, &effective_policy()).expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("first-deploy diff");
     for m in &plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -220,7 +243,7 @@ fn rename_plan(
 ) -> DeclarativeDeployPlan {
     let mut v2 = people_v1();
     v2[0].fields[0].name = "handle".into();
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
         table: "people".into(),
         from: "nickname".into(),
@@ -234,6 +257,7 @@ fn rename_plan(
             &sqlite_author(),
             std::slice::from_ref(&hint),
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan rename")
 }
@@ -257,7 +281,12 @@ async fn golden_b_sqlite_rename_rebuild() {
             .await
             .expect("mode");
         be.actor()
-            .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
+            .exec(
+                "INSERT INTO main.people \
+                 (id, created_at, updated_at, version, nickname) VALUES \
+                 ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada'), \
+                 ('p2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'grace')",
+            )
             .await
             .expect("seed");
         let (live, ownership) = live_from(&people_v1());
@@ -274,7 +303,14 @@ async fn golden_b_sqlite_rename_rebuild() {
                 .expect("oracle rename");
         } else {
             engine
-                .apply_declarative(&plan, Approval::Approved, &be, cfg, "deployer")
+                .apply_declarative(
+                    &plan,
+                    &effective_policy(),
+                    Approval::Approved,
+                    &be,
+                    cfg,
+                    "deployer",
+                )
                 .await
                 .expect("live rename");
         }

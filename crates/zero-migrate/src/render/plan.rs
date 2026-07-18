@@ -141,6 +141,13 @@ pub struct SqliteRebuildSpec {
     pub copy_columns: Vec<(String, String)>,
     /// EXTRA dependent DDL to replay AFTER the rename.
     pub recreate_objects: Vec<String>,
+    /// Pure column renames to apply after the old table's captured indexes and
+    /// triggers have been replayed. The stored-DDL rebuild path creates and
+    /// copies the byte-faithful pre-rename shape first, then delegates the
+    /// identifier rewrite to SQLite's own `ALTER TABLE ... RENAME COLUMN`
+    /// parser so CHECKs, generated expressions, indexes, and triggers follow the
+    /// rename without a lossy engine-side SQL rewrite.
+    pub column_renames: Vec<(String, String)>,
     /// BARE names of columns being DROPPED by this rebuild.
     pub dropped_columns: Vec<String>,
     /// Whether the old table's `AUTOINCREMENT` high-water mark survives the

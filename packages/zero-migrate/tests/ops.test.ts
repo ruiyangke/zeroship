@@ -253,7 +253,30 @@ test("typed references preserve explicit local types and record only the referen
   assert.equal(ops[0].constraints, undefined, "column references do not use the table-level FK API");
 });
 
-test("references() validates non-empty targets, a plain options bag, and closed actions", () => {
+test("references() records an explicit constraint name and omits an absent name byte-identically", () => {
+  const ops = record(() => {
+    table("children").create({
+      columns: {
+        named_account_id: t.text().references("accounts", "id", { name: "fk_custom" }),
+        account_id: t.text().references("accounts", "id"),
+      },
+    });
+  });
+
+  assert.deepEqual(ops[0].columns[0].references, {
+    table: "accounts",
+    column: "id",
+    name: "fk_custom",
+  });
+  assert.equal(
+    JSON.stringify(ops[0].columns[1].references),
+    '{"table":"accounts","column":"id"}',
+    "omitting name preserves the pre-name reference bytes",
+  );
+  assert.ok(!("name" in ops[0].columns[1].references));
+});
+
+test("references() validates non-empty targets and names, a plain options bag, and closed actions", () => {
   for (const action of ["cascade", "restrict", "setNull", "setDefault", "noAction"] as const) {
     assert.doesNotThrow(() =>
       t.text().references("parents", "id", { onDelete: action, onUpdate: action }),
@@ -267,6 +290,8 @@ test("references() validates non-empty targets, a plain options bag, and closed 
     () => t.text().references("parents", 42 as any),
     () => t.text().references("parents", "id", null as any),
     () => t.text().references("parents", "id", [] as any),
+    () => t.text().references("parents", "id", { name: "" }),
+    () => t.text().references("parents", "id", { name: 42 as any }),
     () => t.text().references("parents", "id", { onDelete: "explode" as any }),
     () => t.text().references("parents", "id", { onUpdate: 42 as any }),
   ]) {

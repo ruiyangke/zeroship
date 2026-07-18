@@ -25,9 +25,9 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
-    IrAuthor, LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep,
-    SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec, SqliteSequencePolicy,
+    CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
+    LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
+    SqliteBackend, SqliteRebuild, SqliteRebuildSpec, SqliteSequencePolicy,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -58,10 +58,28 @@ fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
 }
 
+fn effective_policy() -> zero_migrate::EffectivePolicy {
+    zero_migrate::zeroship_confined_ceiling()
+}
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &zero_migrate::EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        SqlDialect::Sqlite,
+        effective,
+    )
+}
+
 /// First-deploy live snapshot + ownership (the same `desired_snapshot` machinery the
 /// engine uses; PG-spelled `data_type`, which the dialect-aware compare folds).
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("first-deploy desired_snapshot");
+    let d = desired_snapshot(PROJECT, descs, &effective_policy())
+        .expect("first-deploy desired_snapshot");
     let ownership: HashMap<String, String> = d
         .ownership
         .iter()
@@ -72,9 +90,15 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
 
 /// Apply every plain migration of a first-deploy plan through the real backend.
 async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
-    let desired = desired_snapshot(PROJECT, desc).expect("desired");
+    let desired = desired_snapshot(PROJECT, desc, &effective_policy()).expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("first-deploy diff");
     for m in &plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -86,9 +110,9 @@ async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
 /// The single rebuild the second-deploy diff produces (asserts exactly one).
 fn one_rebuild(v1: &[CollectionDescriptor], v2: &[CollectionDescriptor]) -> SqliteRebuild {
     let (live, ownership) = live_from(v1);
-    let desired2 = desired_snapshot(PROJECT, v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, v2, &effective_policy()).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("second-deploy diff produces a rebuild plan");
     assert_eq!(plan.rebuilds.len(), 1, "expected exactly one rebuild");
     plan.rebuilds.into_iter().next().unwrap()
@@ -166,9 +190,14 @@ fn drop_composite_fk_ir() -> MigrationIr {
 }
 
 fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> SqliteRebuild {
-    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
-        .lower_steps(ir, live)
-        .expect("SQLite composite FK lifecycle lowers");
+    let steps = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_steps(ir, live)
+    .expect("SQLite composite FK lifecycle lowers");
     assert_eq!(steps.len(), 1, "one FK change is one atomic rebuild");
     match steps.into_iter().next().expect("one step") {
         PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => rebuild,
@@ -285,6 +314,7 @@ async fn sequence_remove_policy_turns_identity_into_ordinary_integer() {
             .into(),
         copy_columns: vec![("id".into(), "id".into()), ("value".into(), "value".into())],
         recreate_objects: vec![],
+        column_renames: vec![],
         dropped_columns: vec![],
         sequence_policy: SqliteSequencePolicy::Remove,
         reason: "explicit AUTOINCREMENT removal".into(),
@@ -382,6 +412,7 @@ async fn sequence_remove_policy_rollback_restores_old_high_water() {
             ("parent_id".into(), "parent_id".into()),
         ],
         recreate_objects: vec![],
+        column_renames: vec![],
         dropped_columns: vec![],
         sequence_policy: SqliteSequencePolicy::Remove,
         reason: "identity removal rollback".into(),
@@ -767,7 +798,13 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.events (id, n) VALUES ('e1', 1), ('e2', 2), ('e3', 3)")
+        .exec(
+            "INSERT INTO main.events \
+             (id, created_at, updated_at, version, n) VALUES \
+             ('e1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1), \
+             ('e2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 2), \
+             ('e3', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 3)",
+        )
         .await
         .expect("seed rows");
 
@@ -891,7 +928,12 @@ async fn nullability_tighten_rebuild() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.notes (id, body) VALUES ('n1', 'hello'), ('n2', 'world')")
+        .exec(
+            "INSERT INTO main.notes \
+             (id, created_at, updated_at, version, body) VALUES \
+             ('n1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'hello'), \
+             ('n2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'world')",
+        )
         .await
         .expect("seed non-null rows");
 
@@ -958,20 +1000,31 @@ async fn column_rename_rebuild_carries_data() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada'), ('p2', 'grace')")
+        .exec(
+            "INSERT INTO main.people \
+             (id, created_at, updated_at, version, nickname) VALUES \
+             ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada'), \
+             ('p2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'grace')",
+        )
         .await
         .expect("seed rows");
 
     // Build the rebuild via the differ WITH the rename hint.
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
         table: "people".into(),
         from: "nickname".into(),
         to: "handle".into(),
     };
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .diff(
+            &desired2,
+            &live,
+            &ownership,
+            std::slice::from_ref(&hint),
+            &effective_policy(),
+        )
         .expect("rename diff");
     assert_eq!(
         plan.rebuilds.len(),
@@ -1192,6 +1245,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
             ("parent_id".into(), "parent_id".into()),
         ],
         recreate_objects: vec![],
+        column_renames: vec![],
         dropped_columns: vec![],
         sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "fk integrity test rebuild".into(),
@@ -1367,6 +1421,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
         copy_columns: vec![("id".into(), "id".into()), ("v".into(), "v".into())],
         // A bogus index over a column that does not exist → CREATE INDEX errors.
         recreate_objects: vec!["CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into()],
+        column_renames: vec![],
         dropped_columns: vec![],
         sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "wedge test".into(),
@@ -1474,7 +1529,11 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
 
     // Seed a baseline row (engine mode).
     be.actor()
-        .exec("INSERT INTO main.items (id, n) VALUES ('i0', 1)")
+        .exec(
+            "INSERT INTO main.items \
+             (id, created_at, updated_at, version, n) VALUES \
+             ('i0', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1)",
+        )
         .await
         .expect("seed");
 
@@ -1498,7 +1557,11 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
 
     // And it FIRES: insert a fresh row and assert the sink got the side-effect.
     be.actor()
-        .exec("INSERT INTO main.items (id, n) VALUES ('i1', 5)")
+        .exec(
+            "INSERT INTO main.items \
+             (id, created_at, updated_at, version, n) VALUES \
+             ('i1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 5)",
+        )
         .await
         .expect("insert post-rebuild");
     let sink = be
@@ -1577,6 +1640,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
             .into(),
         copy_columns: vec![("id".into(), "id".into())],
         recreate_objects: vec![],
+        column_renames: vec![],
         // EMPTY on purpose: a DIRECT-spec caller that does not declare the dropped
         // column gets the FAIL-CLOSED safety net (the captured index over `drop_me`
         // cannot replay and aborts). The declarative path, by contrast, populates
@@ -1691,6 +1755,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         // instead pre-delete the row out-of-band below and copy straight across.
         copy_columns: vec![("id".into(), "id".into()), ("label".into(), "label".into())],
         recreate_objects: vec![],
+        column_renames: vec![],
         dropped_columns: vec![],
         sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "parent rebuild dropping referenced row".into(),
@@ -1788,7 +1853,11 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.gadgets (id, n) VALUES ('g1', 1)")
+        .exec(
+            "INSERT INTO main.gadgets \
+             (id, created_at, updated_at, version, n) VALUES \
+             ('g1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1)",
+        )
         .await
         .expect("seed");
 
@@ -1922,7 +1991,12 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.events (id, n, extra) VALUES ('e1', 1, 'a'), ('e2', 2, 'b')")
+        .exec(
+            "INSERT INTO main.events \
+             (id, created_at, updated_at, version, n, extra) VALUES \
+             ('e1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1, 'a'), \
+             ('e2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 2, 'b')",
+        )
         .await
         .expect("seed rows");
 
@@ -2037,7 +2111,12 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
     );
 
     be.actor()
-        .exec("INSERT INTO main.scores (id, label, points) VALUES ('s1', 'x', 5), ('s2', 'y', 9)")
+        .exec(
+            "INSERT INTO main.scores \
+             (id, created_at, updated_at, version, label, points) VALUES \
+             ('s1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'x', 5), \
+             ('s2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'y', 9)",
+        )
         .await
         .expect("seed rows");
 
@@ -2133,7 +2212,12 @@ async fn nullability_loosen_rebuild_preserves_data() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.notes (id, body) VALUES ('n1', 'hello'), ('n2', 'world')")
+        .exec(
+            "INSERT INTO main.notes \
+             (id, created_at, updated_at, version, body) VALUES \
+             ('n1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'hello'), \
+             ('n2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'world')",
+        )
         .await
         .expect("seed rows");
 
@@ -2176,7 +2260,11 @@ async fn nullability_loosen_rebuild_preserves_data() {
     );
     // A nullable column now ACCEPTS a NULL insert (the loosen actually took effect).
     be.actor()
-        .exec("INSERT INTO main.notes (id, body) VALUES ('n3', NULL)")
+        .exec(
+            "INSERT INTO main.notes \
+             (id, created_at, updated_at, version, body) VALUES \
+             ('n3', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, NULL)",
+        )
         .await
         .expect("a NULL body is now accepted after the loosen");
     assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
@@ -2187,7 +2275,7 @@ async fn nullability_loosen_rebuild_preserves_data() {
 // GONE (`PRAGMA foreign_key_list` is empty) and integrity holds. Previously only
 // the deferred-FK-is-an-error path existed; this proves the reachable drop. v1:
 // posts(author ref→users); v2: posts(author plain string, no FK). The diff yields
-// one rebuild ("drop foreign key posts.author_fkey").
+// one rebuild ("drop foreign key posts.posts_author_fkey").
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn drop_foreign_key_via_rebuild_removes_the_fk() {
@@ -2253,11 +2341,19 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
 
     // Seed a referentially-valid pair so integrity is intact going in.
     be.actor()
-        .exec("INSERT INTO main.users (id, handle) VALUES ('u1', 'ada')")
+        .exec(
+            "INSERT INTO main.users \
+             (id, created_at, updated_at, version, handle) VALUES \
+             ('u1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada')",
+        )
         .await
         .expect("seed user");
     be.actor()
-        .exec("INSERT INTO main.posts (id, author) VALUES ('p1', 'u1')")
+        .exec(
+            "INSERT INTO main.posts \
+             (id, created_at, updated_at, version, author) VALUES \
+             ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'u1')",
+        )
         .await
         .expect("seed post");
 
@@ -2286,7 +2382,11 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
     // Integrity holds, and the (formerly FK-constrained) column is now free: a row
     // whose `author` does NOT exist in `users` is now insertable (the FK is gone).
     be.actor()
-        .exec("INSERT INTO main.posts (id, author) VALUES ('p2', 'no_such_user')")
+        .exec(
+            "INSERT INTO main.posts \
+             (id, created_at, updated_at, version, author) VALUES \
+             ('p2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'no_such_user')",
+        )
         .await
         .expect("a dangling author is now allowed (no FK)");
     // The original row survived the rebuild.
@@ -2384,7 +2484,11 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.events (id, n) VALUES ('e1', 1)")
+        .exec(
+            "INSERT INTO main.events \
+             (id, created_at, updated_at, version, n) VALUES \
+             ('e1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1)",
+        )
         .await
         .expect("seed row");
 

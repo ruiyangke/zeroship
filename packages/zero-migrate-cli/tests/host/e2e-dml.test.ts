@@ -11,6 +11,7 @@ import {
   type MigrationModule,
 } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { NO_INJECT_POLICY_CEILING } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -83,6 +84,7 @@ function applyOptions(
     projectSchema,
     driver,
     registry: {},
+    policyCeiling: NO_INJECT_POLICY_CEILING,
     approved,
     appliedBy: "dml-e2e",
     nameFallback: MIGRATION_NAME,
@@ -123,6 +125,7 @@ async function assertAppliedPlan(
     projectSchema,
     driver,
     registry: {},
+    policyCeiling: NO_INJECT_POLICY_CEILING,
     migrations: [migration],
     nameFallbacks: [MIGRATION_NAME],
   });

@@ -469,7 +469,8 @@ async fn run_rebuild_steps(
         .map_err(|e| step_err(table, e))?;
 
     // (e) Replay the VERBATIM captured dependent DDL (the table's own indexes +
-    // triggers), then any EXTRA explicit `recreate_objects` the spec carries.
+    // triggers), apply any pure stored-shape column renames, then replay any EXTRA
+    // explicit `recreate_objects` the spec carries.
     // SQLite drops a table's indexes/triggers WITH the table, so they must be
     // replayed; the captured `sql` is the EXACT stored definition (full attrs).
     // Each is a CREATE on `main` — allowed in CreatorUp. A replay that FAILS
@@ -501,6 +502,22 @@ async fn run_rebuild_steps(
                 object: obj.name.clone(),
                 source: e,
             })?;
+    }
+    // A pure-rename rebuild deliberately created the new table from the exact
+    // stored pre-rename DDL. Rename only after its captured indexes/triggers are
+    // back: SQLite's own parser then rewrites the table body and every dependent
+    // object consistently (including CHECK/generated expressions and trigger
+    // `OLD`/`NEW` references). This is safer and more complete than token-rewriting
+    // arbitrary stored SQL in the renderer.
+    for (from, to) in &spec.column_renames {
+        actor
+            .exec(&format!(
+                "ALTER TABLE {table_q} RENAME COLUMN {} TO {}",
+                quote_ident(from),
+                quote_ident(to)
+            ))
+            .await
+            .map_err(|error| step_err(table, error))?;
     }
     for obj in &spec.recreate_objects {
         actor.exec(obj).await.map_err(|e| step_err(table, e))?;

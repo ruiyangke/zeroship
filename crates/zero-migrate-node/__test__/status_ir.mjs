@@ -4,6 +4,28 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
+const NO_INJECT_CEILING_TOML = `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`;
 
 const COMPLETED = 'mig_0000000000000000000001';
 const INFLIGHT = 'mig_0000000000000000000002';
@@ -91,6 +113,7 @@ const status = await addon.statusIr(hostDriver, {
   dialect: 'postgres',
   registry: {},
   envelopes: [],
+  policyCeiling: NO_INJECT_CEILING_TOML,
 });
 
 function assert(condition, message) {
@@ -119,6 +142,7 @@ const orderedStatus = await addon.statusIr(hostDriver, {
   projectSchema: 'app_status_ordered',
   dialect: 'postgres',
   registry: {},
+  policyCeiling: NO_INJECT_CEILING_TOML,
   envelopes: [
     {
       ir_version: addon.irVersion(),

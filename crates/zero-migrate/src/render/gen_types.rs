@@ -9,10 +9,9 @@
 //!
 //! - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
 //!   `{ version: 1, collections: { [collection]: { fields, options, indexes }}}`.
-//!   The `fields` map is snake_case columns INCLUDING the seven platform system
-//!   fields (`id`/`created_at`/`updated_at`/`created_by`/`updated_by`/`version`/
-//!   `deleted_at`), exactly as the fold recovers them. The runtime validates this
-//!   shape.
+//!   The `fields` map is snake_case columns, including exactly the fields injected
+//!   by the caller's effective policy, as the fold recovers them. The runtime
+//!   validates this shape.
 //! - **`env.db.ts`** — a GENERATED, passive `CreateTableArgs` schema map using the
 //!   current `zero-migrate` authoring builders. It contains no lifecycle calls;
 //!   `satisfies Record<string, CreateTableArgs>` makes `tsc` validate every emitted
@@ -32,12 +31,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
+use zero_migrate_policy::EffectivePolicy;
 
 use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
     ColType, ColumnOrExpr, ColumnReference, EmptyContainerKind, ExclusionMethod, IndexElement,
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
-    IrScalar, Op, PartitionSpec, RefAction, ValueFormat,
+    IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
 };
 use crate::SqlDialect;
 
@@ -343,9 +343,13 @@ fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMe
 }
 
 fn render_runtime_descriptor_v1(
-    defs: &BTreeMap<String, Value>,
+    ops: &[Op],
+    project_schema: &str,
+    effective: &EffectivePolicy,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
-) -> Value {
+) -> Result<Value, GenTypesError> {
+    let defs = crate::fold_to_field_defs(ops, SqlDialect::Postgres, project_schema, effective)
+        .map_err(GenTypesError::Fold)?;
     let mut metadata = metadata.clone();
     let collections = defs
         .iter()
@@ -361,11 +365,11 @@ fn render_runtime_descriptor_v1(
             )
         })
         .collect();
-    serde_json::to_value(RuntimeSchemaDescriptorV1 {
+    Ok(serde_json::to_value(RuntimeSchemaDescriptorV1 {
         version: 1,
         collections,
     })
-    .expect("runtime descriptor v1 serializes")
+    .expect("runtime descriptor v1 serializes"))
 }
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
@@ -379,15 +383,31 @@ fn render_runtime_descriptor_v1(
 pub fn render_artifacts(
     ops: &[Op],
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
-    let defs = crate::fold_to_field_defs(ops, SqlDialect::Postgres, project_schema)
-        .map_err(GenTypesError::Fold)?;
+    let resolved = crate::resolve_create_table_policy(
+        &MigrationIr {
+            ir_version: crate::CURRENT_IR_VERSION,
+            name: "gen_types_policy_resolution".to_string(),
+            owner_app: String::new(),
+            ops: ops.to_vec(),
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        },
+        effective,
+        project_schema,
+    )
+    .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
+    let ops = resolved.ops.as_slice();
     let metadata = runtime_metadata_from_ops(ops);
     let authoring_tables = authoring_tables_from_ops(ops).map_err(GenTypesError::Fold)?;
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
-    let runtime_value = render_runtime_descriptor_v1(&defs, &metadata);
+    let runtime_value = render_runtime_descriptor_v1(ops, project_schema, effective, &metadata)?;
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -422,11 +442,11 @@ pub fn render_artifacts(
 pub fn render_artifacts_from_descriptors(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
     project_schema: &str,
-    effective: &zero_migrate_policy::EffectivePolicy,
+    effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
-    let ops =
-        crate::descriptors_to_create_ops(descriptors, effective).map_err(GenTypesError::Produce)?;
-    render_artifacts(&ops, project_schema)
+    let ops = crate::descriptors_to_create_ops(descriptors, project_schema, effective)
+        .map_err(GenTypesError::Produce)?;
+    render_artifacts(&ops, project_schema, effective)
 }
 
 #[derive(Debug, Clone)]
@@ -929,11 +949,7 @@ fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
     }
     match &constraint.kind {
         IrConstraintKind::Fk { columns, .. } => {
-            if columns.len() == 1 {
-                format!("{}_fkey", columns[0])
-            } else {
-                crate::plan::author::cap_ident_name(&format!("{}_fkey", columns.join("_")))
-            }
+            crate::render::lower::derived_fk_constraint_name(table, columns)
         }
         IrConstraintKind::Unique { columns } => {
             crate::render::lower::derived_constraint_name(table, columns, "key")
@@ -1009,7 +1025,7 @@ fn render_table(
         .filter(|columns| columns.len() == 1)
         .and_then(|columns| columns.first())
         .map(String::as_str);
-    let (references, lifted_constraints) = lifted_column_references(table);
+    let (references, lifted_constraints) = lifted_column_references(table_name, table);
 
     body.push_str("  ");
     body.push_str(&js_key(table_name));
@@ -1075,10 +1091,12 @@ fn render_runtime_options(body: &mut String, options: &crate::TableRuntimeOption
 }
 
 /// Resolve the old `ColType::Ref` carrier and eligible single-column table FKs
-/// into the current typed-reference column modifier. Composite, explicitly
-/// named, or deferrable constraints remain in `foreignKeys` so no behavior is
-/// silently discarded.
+/// into the current typed-reference column modifier. Composite, custom-named,
+/// or deferrable constraints remain in `foreignKeys` so no behavior is silently
+/// discarded. An explicit derived name is carried into the modifier so the
+/// authored IR shape round-trips exactly.
 fn lifted_column_references(
+    table_name: &str,
     table: &AuthoringTable,
 ) -> (BTreeMap<String, ColumnReference>, BTreeSet<usize>) {
     let mut references = BTreeMap::new();
@@ -1094,6 +1112,7 @@ fn lifted_column_references(
                 column: "id".to_string(),
                 on_delete: None,
                 on_update: None,
+                name: None,
             };
             if let Some((index, constraint)) = table
                 .constraints
@@ -1111,6 +1130,9 @@ fn lifted_column_references(
                     reference.column.clone_from(&references_columns[0]);
                     reference.on_delete = *on_delete;
                     reference.on_update = *on_update;
+                    if reference.name.is_none() {
+                        reference.name.clone_from(&constraint.name);
+                    }
                     lifted.insert(index);
                 }
             }
@@ -1148,12 +1170,8 @@ fn lifted_column_references(
         if references.contains_key(&columns[0]) {
             continue;
         }
-        let derived_name = format!("{}_fkey", columns[0]);
-        if constraint
-            .name
-            .as_ref()
-            .is_some_and(|name| name != &derived_name)
-        {
+        let derived_name = crate::render::lower::derived_fk_constraint_name(table_name, columns);
+        if constraint.name.as_deref() != Some(derived_name.as_str()) {
             continue;
         }
         if !table.columns.contains_key(&columns[0]) {
@@ -1166,6 +1184,7 @@ fn lifted_column_references(
                 column: references_columns[0].clone(),
                 on_delete: *on_delete,
                 on_update: *on_update,
+                name: constraint.name.clone(),
             },
         );
         lifted.insert(index);
@@ -1242,7 +1261,7 @@ fn render_column(
         chain.push_str(&js_str(&reference.table));
         chain.push_str(", ");
         chain.push_str(&js_str(&reference.column));
-        let options = render_reference_options(reference.on_delete, reference.on_update);
+        let options = render_reference_options(reference);
         if !options.is_empty() {
             chain.push_str(", { ");
             chain.push_str(&options);
@@ -1368,12 +1387,15 @@ fn render_expr(expr: &Expr) -> String {
     format!("({json} as Expr)")
 }
 
-fn render_reference_options(on_delete: Option<RefAction>, on_update: Option<RefAction>) -> String {
+fn render_reference_options(reference: &ColumnReference) -> String {
     let mut options = Vec::new();
-    if let Some(action) = on_delete {
+    if let Some(name) = &reference.name {
+        options.push(format!("name: {}", js_str(name)));
+    }
+    if let Some(action) = reference.on_delete {
         options.push(format!("onDelete: {}", js_str(action.as_token())));
     }
-    if let Some(action) = on_update {
+    if let Some(action) = reference.on_update {
         options.push(format!("onUpdate: {}", js_str(action.as_token())));
     }
     options.join(", ")
@@ -1756,7 +1778,11 @@ fn first_divergence(committed: &str, generated: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::model::ir::RefAction;
+    use crate::model::table_shape::{
+        zeroship_confined_ceiling, zeroship_no_inject_ceiling, ResolvedInject,
+    };
+    use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 
     fn column(name: &str, ty: ColType) -> IrColumn {
         IrColumn {
@@ -1854,10 +1880,27 @@ mod tests {
             column: "id".to_string(),
             on_delete: Some(RefAction::Cascade),
             on_update: Some(RefAction::Restrict),
+            name: None,
         };
         assert_eq!(
             render_column(&local, false, Some(&reference)),
             "t.uuid().references(\"accounts\", \"id\", { onDelete: \"cascade\", onUpdate: \"restrict\" })"
+        );
+    }
+
+    #[test]
+    fn renders_explicit_typed_reference_constraint_name() {
+        let local = column("account_id", ColType::Uuid);
+        let reference = ColumnReference {
+            table: "accounts".to_string(),
+            column: "id".to_string(),
+            on_delete: Some(RefAction::Cascade),
+            on_update: None,
+            name: Some("fk_custom".to_string()),
+        };
+        assert_eq!(
+            render_column(&local, false, Some(&reference)),
+            "t.uuid().references(\"accounts\", \"id\", { name: \"fk_custom\", onDelete: \"cascade\" })"
         );
     }
 
@@ -1869,6 +1912,7 @@ mod tests {
             column: "id".to_string(),
             on_delete: None,
             on_update: None,
+            name: Some("account_primary_fk".to_string()),
         });
         let table = AuthoringTable {
             columns: [(local.name.clone(), local)].into_iter().collect(),
@@ -1890,9 +1934,75 @@ mod tests {
             partition_by: None,
             schema: None,
         };
-        let (references, lifted) = lifted_column_references(&table);
+        let (references, lifted) = lifted_column_references("events", &table);
         assert_eq!(references["account_id"].table, "accounts");
+        assert_eq!(
+            references["account_id"].name.as_deref(),
+            Some("account_primary_fk"),
+            "an authored column reference name must not be overwritten"
+        );
         assert!(lifted.is_empty(), "the second FK must remain table-level");
+    }
+
+    #[test]
+    fn lifted_derived_name_round_trips_into_column_reference() {
+        let local = column("account_id", ColType::Uuid);
+        let table = AuthoringTable {
+            columns: [(local.name.clone(), local)].into_iter().collect(),
+            primary_key: None,
+            constraints: vec![IrConstraint {
+                name: Some("entries_account_id_fkey".to_string()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["account_id".to_string()],
+                    references_table: "accounts".to_string(),
+                    references_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
+                    not_valid: None,
+                },
+            }],
+            indexes: Vec::new(),
+            partition_by: None,
+            schema: None,
+        };
+
+        let (references, lifted) = lifted_column_references("entries", &table);
+        assert_eq!(
+            references["account_id"].name.as_deref(),
+            Some("entries_account_id_fkey")
+        );
+        assert_eq!(lifted, [0].into_iter().collect());
+    }
+
+    #[test]
+    fn legacy_unqualified_fk_name_remains_table_level() {
+        let local = column("account_id", ColType::Uuid);
+        let table = AuthoringTable {
+            columns: [(local.name.clone(), local)].into_iter().collect(),
+            primary_key: None,
+            constraints: vec![IrConstraint {
+                name: Some("account_id_fkey".to_string()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["account_id".to_string()],
+                    references_table: "accounts".to_string(),
+                    references_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
+                    not_valid: None,
+                },
+            }],
+            indexes: Vec::new(),
+            partition_by: None,
+            schema: None,
+        };
+
+        let (references, lifted) = lifted_column_references("entries", &table);
+        assert!(!references.contains_key("account_id"));
+        assert!(lifted.is_empty());
     }
 
     #[test]
@@ -1974,35 +2084,113 @@ mod tests {
     }
 
     #[test]
-    fn runtime_json_carries_all_seven_system_fields() {
-        let defs: BTreeMap<String, Value> = BTreeMap::from([(
-            "hits".to_string(),
-            json!({
-                "id": { "type": "string", "required": true },
-                "created_at": { "type": "date", "required": true },
-                "updated_at": { "type": "date", "required": true },
-                "created_by": { "type": "string" },
-                "updated_by": { "type": "string" },
-                "version": { "type": "int", "required": true, "default": 1 },
-                "deleted_at": { "type": "date" },
-                "path": { "type": "string", "required": true },
-            }),
-        )]);
-        let metadata = BTreeMap::new();
-        let value = render_runtime_descriptor_v1(&defs, &metadata);
+    fn runtime_json_carries_exactly_the_active_policy_injection() {
+        let effective = zeroship_confined_ceiling();
+        let descriptors = [CollectionDescriptor {
+            name: "hits".to_string(),
+            owner_app: "app_test".to_string(),
+            fields: vec![FieldDescriptor {
+                name: "path".to_string(),
+                ty: "string".to_string(),
+                required: true,
+                ..Default::default()
+            }],
+            indexes: Vec::new(),
+            runtime_options: Default::default(),
+        }];
+        let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
+            .expect("confined descriptor resolves");
+        let metadata = runtime_metadata_from_ops(&ops);
+        let value =
+            render_runtime_descriptor_v1(&ops, DEFAULT_PROJECT_SCHEMA, &effective, &metadata)
+                .expect("runtime descriptor renders");
         assert_eq!(value["version"], 1);
         let fields = &value["collections"]["hits"]["fields"];
-        for name in crate::schema::query::SYSTEM_FIELD_NAMES {
+        let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")
+            .expect("active injection resolves");
+        assert!(
+            !inject.columns().is_empty(),
+            "the confined test policy must exercise injection"
+        );
+        for column in inject.columns() {
             assert!(
-                fields.get(name).is_some(),
-                "runtime descriptor must carry system field {name}: {value}"
+                fields.get(&column.name).is_some(),
+                "runtime descriptor must carry policy-injected field {}: {value}",
+                column.name
             );
         }
+        assert_eq!(fields["path"]["type"], "string");
+        assert_eq!(fields["path"]["required"], true);
         // Options default block present.
         assert_eq!(value["collections"]["hits"]["options"]["softDelete"], false);
         assert_eq!(
             value["collections"]["hits"]["options"]["strictness"],
             "strict"
         );
+    }
+
+    #[test]
+    fn runtime_json_no_inject_preserves_author_updated_at() {
+        let effective = zeroship_no_inject_ceiling();
+        let descriptors = [CollectionDescriptor {
+            name: "events".to_string(),
+            owner_app: "app_test".to_string(),
+            fields: vec![FieldDescriptor {
+                name: "updated_at".to_string(),
+                ty: "string".to_string(),
+                ..Default::default()
+            }],
+            indexes: Vec::new(),
+            runtime_options: Default::default(),
+        }];
+        let artifacts =
+            render_artifacts_from_descriptors(&descriptors, DEFAULT_PROJECT_SCHEMA, &effective)
+                .expect("no-inject artifacts render");
+        let value: Value = serde_json::from_str(&artifacts.runtime_json)
+            .expect("runtime descriptor is valid JSON");
+        let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "events")
+            .expect("no-inject policy resolves");
+        assert!(inject.columns().is_empty());
+        assert!(inject.indexes().is_empty());
+        assert!(inject.primary_key().is_none());
+
+        let fields = value["collections"]["events"]["fields"]
+            .as_object()
+            .expect("events fields are an object");
+        assert_eq!(
+            fields.len(),
+            1,
+            "no ambient fields may be injected: {value}"
+        );
+        assert_eq!(fields["updated_at"]["type"], "string");
+        assert!(fields["updated_at"].get("required").is_none());
+    }
+
+    #[test]
+    fn runtime_json_no_inject_preserves_uuid_column_named_id() {
+        let effective = zeroship_no_inject_ceiling();
+        let ops = vec![Op::CreateTable {
+            name: "external_keys".to_string(),
+            columns: vec![column("id", ColType::Uuid)],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }];
+
+        let artifacts = render_artifacts(&ops, DEFAULT_PROJECT_SCHEMA, &effective)
+            .expect("no-inject UUID id renders");
+        let value: Value = serde_json::from_str(&artifacts.runtime_json)
+            .expect("runtime descriptor is valid JSON");
+
+        assert_eq!(
+            value["collections"]["external_keys"]["fields"]["id"]["type"], "string",
+            "runtime FieldDef has no UUID token, but the author UUID must not become legacy `id`"
+        );
+        assert!(artifacts.env_db_ts.contains("id: t.uuid()"));
+        assert!(!artifacts.env_db_ts.contains("id: t.id("));
     }
 }

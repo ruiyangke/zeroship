@@ -56,17 +56,6 @@ use crate::expr::Expr;
 use crate::migration::{Checksum, MigrationFlags, OnlinePhase};
 use crate::precondition::PreconditionCheck;
 
-/// Platform-managed system fields injected by the declarative renderer.
-pub const SYSTEM_FIELD_NAMES: [&str; 7] = [
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-];
-
 #[cfg(doc)]
 #[doc(hidden)]
 fn deny_unknown_fields() {}
@@ -1413,6 +1402,11 @@ pub struct ColumnReference {
     /// Optional `ON UPDATE` behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_update: Option<RefAction>,
+    /// Optional explicit foreign-key constraint name. Absent ⇒ the name is
+    /// derived (`<table>_<column>_fkey`). Lets authors override the portable
+    /// table-qualified default without dropping to table-level `foreignKeys`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// The CLOSED target shape for an exclusion-constraint element. A target is
@@ -5964,6 +5958,7 @@ mod tests {
                 column: "id".into(),
                 on_delete: Some(RefAction::Cascade),
                 on_update: Some(RefAction::SetNull),
+                name: None,
             }),
             id_prefix: None,
             case_sensitive: None,
@@ -5982,6 +5977,26 @@ mod tests {
         assert_eq!(back.references, col.references);
         assert!(back.default.is_none());
         assert!(back.unique.is_none());
+    }
+
+    #[test]
+    fn typed_column_reference_explicit_constraint_name_round_trips() {
+        let reference = ColumnReference {
+            table: "accounts".into(),
+            column: "id".into(),
+            on_delete: None,
+            on_update: None,
+            name: Some("fk_custom".into()),
+        };
+        let json = serde_json::to_string(&reference).unwrap();
+        assert_eq!(
+            json,
+            r#"{"table":"accounts","column":"id","name":"fk_custom"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ColumnReference>(&json).unwrap(),
+            reference
+        );
     }
 
     #[test]

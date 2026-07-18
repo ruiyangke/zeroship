@@ -29,6 +29,7 @@ import { dirname, join } from "node:path";
 import { table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { currentIrVersion, apply, plan, resolvePending, status } from "zero-migrate-cli";
+import { NO_INJECT_POLICY_CEILING } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -43,6 +44,31 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
     `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
   );
 }
+
+test("programmatic apply and plan-aware status require explicit policy bytes", async () => {
+  const driver = {
+    kind: "postgres" as const,
+    url: "postgres://127.0.0.1:1/never_connect",
+  };
+  await assert.rejects(
+    apply({
+      migration: { up() {} },
+      ownerApp: "app_policy_required",
+      projectSchema: "policy_required",
+      driver,
+    } as never),
+    /apply requires an explicit policyCeiling/,
+  );
+  await assert.rejects(
+    status({
+      ownerApp: "app_policy_required",
+      projectSchema: "policy_required",
+      driver,
+      migrations: [{ up() {} }],
+    } as never),
+    /status requires an explicit policyCeiling/,
+  );
+});
 
 const PG_URL =
   process.env.ZERO_MIGRATE_TEST_PG_URL ??
@@ -147,6 +173,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
       registry: {},
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",
@@ -160,7 +187,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
     );
     assert.equal(tbl.rows[0].ex, true, "widgets table was created");
 
-    // With no policy ceiling, the host preserves the author-owned table shape.
+    // The explicit no-inject ceiling preserves the author-owned table shape.
     const cols = await probe.query(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = 'widgets'`,
@@ -241,6 +268,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
         projectSchema: schema,
         driver,
         registry: { accounts: ownerApp, rename_items: ownerApp },
+        policyCeiling: NO_INJECT_POLICY_CEILING,
         approved: false,
         appliedBy: "test",
         nameFallback: "drop_unique_index",
@@ -259,6 +287,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: true,
       appliedBy: "test",
       nameFallback: "drop_unique_index",
@@ -274,6 +303,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: false,
       appliedBy: "test",
       nameFallback: "set_existing_default",
@@ -298,6 +328,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: true,
       appliedBy: "test",
       nameFallback: "rename_existing_column",
@@ -369,6 +400,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { rename_items: ownerApp },
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       migrations: [renameMigration],
       nameFallbacks: ["rename_existing_column"],
     });
@@ -380,6 +412,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: true,
       appliedBy: "test",
       nameFallback: "rename_existing_column",

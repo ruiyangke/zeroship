@@ -3413,8 +3413,8 @@ pub fn validate_op_scoped(
     match op {
         Op::CreateTable { name, columns, primary_key, constraints, indexes, .. } => {
             // A resolved createTable is self-contained: ColRefs resolve against
-            // the op's explicit columns. Confined record/build paths stamp the
-            // seven system fields before checksum; Platform paths do not.
+            // the op's explicit columns. Policy-resolved record/build paths stamp
+            // exactly their active injection before checksum; no-inject paths do not.
             let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             let scope = TargetScope::new(name, &cols);
             let value_format_columns = columns
@@ -5331,6 +5331,30 @@ fn is_safe_schema_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Validate an author-supplied constraint identifier carried by a column
+/// reference. Explicit names must be portable bare identifiers and must fit the
+/// strictest identifier bound used by the engine (PostgreSQL's 63-byte cap), so
+/// no target silently truncates the authored identity.
+fn validate_column_reference_constraint_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("must be non-empty".to_string());
+    }
+    if !is_safe_schema_ident(name) {
+        return Err(
+            "must start with an ASCII letter or '_' and contain only ASCII letters, digits, or '_'"
+                .to_string(),
+        );
+    }
+    if name.len() > crate::plan::author::PG_MAX_IDENT_BYTES {
+        return Err(format!(
+            "is {} bytes; the maximum is {} bytes",
+            name.len(),
+            crate::plan::author::PG_MAX_IDENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
 fn validate_default_for_type(
     position: &str,
     ty: &crate::model::ir::ColType,
@@ -5591,10 +5615,13 @@ fn validate_default_expr(
 ///    meaningless (the opclass has no vector to apply to) and is refused
 ///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
 ///    dead field in.
+/// 4. **`references.name`** — an optional explicit foreign-key constraint name
+///    must be a non-empty portable bare identifier no longer than PostgreSQL's
+///    63-byte identifier cap.
 ///
 /// # Errors
 /// [`CODE_INVALID_ID_PREFIX`] / [`CODE_INVALID_TYPE_ID_PREFIX`] /
-/// [`CODE_VECTOR_METRIC_MISPLACED`] as above.
+/// [`CODE_VECTOR_METRIC_MISPLACED`] / [`CODE_OP_INVALID`] as above.
 fn validate_column_facets(
     col: &crate::model::ir::IrColumn,
     target_dialect: Dialect,
@@ -5628,6 +5655,26 @@ fn validate_column_facets(
         reason,
         suggested_fix: Some(fix),
     };
+
+    if let Some(name) = col
+        .references
+        .as_ref()
+        .and_then(|reference| reference.name.as_deref())
+    {
+        if let Err(reason) = validate_column_reference_constraint_name(name) {
+            return Err(mk(
+                CODE_OP_INVALID,
+                format!(
+                    "column {:?} declares invalid foreign-key constraint name {name:?}: {reason}",
+                    col.name
+                ),
+                format!(
+                    "use a non-empty bare identifier of at most {} bytes, starting with an ASCII letter or '_' and containing only ASCII letters, digits, or '_'",
+                    crate::plan::author::PG_MAX_IDENT_BYTES
+                ),
+            ));
+        }
+    }
 
     if col.generated.is_some() && col.default.is_some() {
         return Err(mk(
@@ -8285,6 +8332,7 @@ mod tests {
         let err = crate::model::table_shape::resolve_create_table_policy(
             &ir,
             &crate::model::table_shape::zeroship_confined_ceiling(),
+            "app",
         )
         .expect_err("a mandatory-inject scope must refuse an author-owned createTable primaryKey");
         assert!(
@@ -8312,6 +8360,7 @@ mod tests {
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
             &crate::model::table_shape::zeroship_confined_ceiling(),
+            "app",
         )
         .expect("confined table-shape resolution succeeds");
 
@@ -8786,6 +8835,7 @@ mod tests {
         let ir = crate::model::table_shape::resolve_create_table_policy(
             &ir,
             &crate::model::table_shape::zeroship_confined_ceiling(),
+            "app",
         )
         .expect("resolve confined table shape");
         assert!(
@@ -9365,6 +9415,40 @@ mod tests {
         }
     }
 
+    fn create_with_reference_name(name: &str) -> Op {
+        Op::CreateTable {
+            name: "orders".into(),
+            columns: vec![IrColumn {
+                name: "account_id".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+                value_format: None,
+                references: Some(ColumnReference {
+                    table: "accounts".into(),
+                    column: "id".into(),
+                    on_delete: None,
+                    on_update: None,
+                    name: Some(name.to_string()),
+                }),
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
     fn create_with_type_id(prefix: &str, ty: ColType, case_sensitive: Option<bool>) -> Op {
         Op::CreateTable {
             name: "things".into(),
@@ -9467,6 +9551,50 @@ mod tests {
         assert!(
             validate_ir_platform(&ir, Dialect::Postgres).is_ok(),
             "a well-formed, unreserved, in-length id prefix must validate"
+        );
+    }
+
+    #[test]
+    fn column_reference_accepts_a_valid_explicit_constraint_name() {
+        let ir = ir_with(vec![create_with_reference_name("fk_orders_account")]);
+        assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn column_reference_rejects_an_empty_explicit_constraint_name() {
+        let ir = ir_with(vec![create_with_reference_name("")]);
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("an empty foreign-key constraint name must fail closed");
+        assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
+        assert!(error.reason.contains("non-empty"), "got: {error}");
+    }
+
+    #[test]
+    fn column_reference_rejects_an_unsafe_explicit_constraint_name() {
+        for name in ["9fk", "fk-orders", "fk orders", "fké"] {
+            let ir = ir_with(vec![create_with_reference_name(name)]);
+            let error = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("an unsafe foreign-key constraint name must fail closed");
+            assert_eq!(error.code, CODE_OP_INVALID, "{name:?}: {error}");
+            assert!(
+                error.reason.contains("ASCII"),
+                "{name:?} returned an unexpected reason: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn column_reference_rejects_an_overlong_explicit_constraint_name() {
+        let name = "f".repeat(crate::plan::author::PG_MAX_IDENT_BYTES + 1);
+        let ir = ir_with(vec![create_with_reference_name(&name)]);
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("an overlong foreign-key constraint name must fail closed");
+        assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
+        assert!(
+            error
+                .reason
+                .contains(&crate::plan::author::PG_MAX_IDENT_BYTES.to_string()),
+            "the error must name the length cap: {error}"
         );
     }
 
@@ -10125,6 +10253,7 @@ mod tests {
                 column: column.into(),
                 on_delete: None,
                 on_update: None,
+                name: None,
             }),
             id_prefix: None,
             vector_metric: None,

@@ -13,6 +13,11 @@
 //! All user values are bound as parameters (`$1`, `$2`, ...).
 //! Column and table names are quoted with double-quotes to prevent injection.
 
+use crate::model::expr::{Expr, SynthFn};
+use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
+use crate::model::table_shape::ResolvedInject;
+use zero_migrate_policy::EffectivePolicy;
+
 /// Errors from query building.
 #[derive(Debug)]
 pub enum QueryError {
@@ -24,9 +29,8 @@ pub enum QueryError {
     /// field reference). Carries a path-keyed message so the SDK can surface
     /// it back to the user without losing the offending input.
     InvalidIdent(String),
-    /// Creator declared a field whose name collides with one
-    /// of the seven platform-managed system fields (`id`, `created_at`,
-    /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
+    /// Creator declared a field whose name collides with a column injected by
+    /// the active effective policy.
     /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
     /// generic `invalid_identifier` thrown by the `_*` / `__zero_migrate_*` prefix
@@ -89,13 +93,6 @@ pub trait SchemaRenderer {
     fn dialect(&self) -> SqlDialect;
     fn encrypted_column_bind_placeholder(&self, n: usize) -> String;
     fn wrap_encrypted_param(&self, b64_value: String) -> String;
-    fn system_field_columns(&self) -> Vec<String>;
-    fn system_field_indexes(
-        &self,
-        app_id: &str,
-        collection: &str,
-        sqlite_scope: SqliteEmitScope,
-    ) -> Vec<String>;
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, def: &serde_json::Value) -> String;
     fn json_object_default(&self) -> String;
@@ -142,41 +139,6 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn wrap_encrypted_param(&self, b64_value: String) -> String {
         b64_value
-    }
-
-    fn system_field_columns(&self) -> Vec<String> {
-        let (ts_type, ts_default) = ("TIMESTAMPTZ", "NOW()");
-        vec![
-            "id TEXT PRIMARY KEY".to_string(),
-            format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "created_by TEXT NULL".to_string(),
-            "updated_by TEXT NULL".to_string(),
-            "version INTEGER NOT NULL DEFAULT 1".to_string(),
-            format!("deleted_at {ts_type} NULL"),
-        ]
-    }
-
-    fn system_field_indexes(
-        &self,
-        app_id: &str,
-        collection: &str,
-        _sqlite_scope: SqliteEmitScope,
-    ) -> Vec<String> {
-        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
-        SYSTEM_INDEXED_COLS
-            .iter()
-            .map(|col| {
-                let idx_name = index_name(collection, &[col], /* unique = */ false);
-                format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
-                    quote_ident(&idx_name),
-                    quote_ident(app_id),
-                    quote_ident(collection),
-                    quote_ident(col),
-                )
-            })
-            .collect()
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
@@ -256,50 +218,6 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn wrap_encrypted_param(&self, b64_value: String) -> String {
         format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}")
-    }
-
-    fn system_field_columns(&self) -> Vec<String> {
-        let (ts_type, ts_default) = ("TEXT", "CURRENT_TIMESTAMP");
-        vec![
-            "id TEXT PRIMARY KEY".to_string(),
-            format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "created_by TEXT NULL".to_string(),
-            "updated_by TEXT NULL".to_string(),
-            "version INTEGER NOT NULL DEFAULT 1".to_string(),
-            format!("deleted_at {ts_type} NULL"),
-        ]
-    }
-
-    fn system_field_indexes(
-        &self,
-        app_id: &str,
-        collection: &str,
-        sqlite_scope: SqliteEmitScope,
-    ) -> Vec<String> {
-        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
-        SYSTEM_INDEXED_COLS
-            .iter()
-            .map(|col| {
-                let idx_name = index_name(collection, &[col], /* unique = */ false);
-                if sqlite_scope == SqliteEmitScope::MainUnqualified {
-                    format!(
-                        "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
-                        quote_ident(&idx_name),
-                        quote_ident(collection),
-                        quote_ident(col),
-                    )
-                } else {
-                    format!(
-                        "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
-                        quote_ident(app_id),
-                        quote_ident(&idx_name),
-                        quote_ident(collection),
-                        quote_ident(col),
-                    )
-                }
-            })
-            .collect()
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
@@ -383,41 +301,6 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn wrap_encrypted_param(&self, b64_value: String) -> String {
         b64_value
-    }
-
-    fn system_field_columns(&self) -> Vec<String> {
-        let (ts_type, ts_default) = ("DATETIME(6)", "CURRENT_TIMESTAMP(6)");
-        vec![
-            "`id` VARCHAR(191) PRIMARY KEY".to_string(),
-            format!("`created_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
-            format!("`updated_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "`created_by` VARCHAR(191) NULL".to_string(),
-            "`updated_by` VARCHAR(191) NULL".to_string(),
-            "`version` INT NOT NULL DEFAULT 1".to_string(),
-            format!("`deleted_at` {ts_type} NULL"),
-        ]
-    }
-
-    fn system_field_indexes(
-        &self,
-        app_id: &str,
-        collection: &str,
-        _sqlite_scope: SqliteEmitScope,
-    ) -> Vec<String> {
-        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
-        SYSTEM_INDEXED_COLS
-            .iter()
-            .map(|col| {
-                let idx_name = index_name(collection, &[col], /* unique = */ false);
-                format!(
-                    "CREATE INDEX {} ON {}.{} ({})",
-                    mysql_quote_ident(&idx_name),
-                    mysql_quote_ident(app_id),
-                    mysql_quote_ident(collection),
-                    mysql_quote_ident(col),
-                )
-            })
-            .collect()
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
@@ -622,36 +505,6 @@ pub(crate) enum ReservedName {
     Suffix(&'static str),
 }
 
-/// The seven platform-managed system fields.
-///
-/// Every creator table receives these at CREATE TABLE time;
-/// creators cannot declare their own field with any of these
-/// names. Filter-time use is unrestricted — `db.users.find({ id: "..." })`
-/// is the canonical query shape.
-///
-/// This list is intentionally separate from [`RESERVED_NAMES`] because
-/// the two categories enforce at different call sites:
-///
-/// - [`RESERVED_NAMES`] fires at BOTH schema-declaration time AND
-///   filter time (e.g. `_masked` suffix, `_*` prefix). Synthetic /
-///   sibling columns must never appear in user input at all.
-/// - `SYSTEM_FIELD_NAMES` fires ONLY at schema-declaration time. The
-///   names themselves (`id`, `created_at`, …) are the canonical
-///   query keys creators use every day.
-///
-/// The reservation produces [`QueryError::ReservedSystemFieldName`]
-/// (distinct from [`QueryError::InvalidIdent`]) so the SDK can branch
-/// on a stable code (`reserved_system_field_name`).
-pub const SYSTEM_FIELD_NAMES: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-];
-
 /// Platform-reserved field names. Centralised list — every new
 /// reserved prefix / suffix / exact-name lands here, exercised by
 /// both the schema-registration validator and the filter-time
@@ -705,12 +558,9 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
 /// level.
 ///
-/// Note this function does NOT fence the seven
-/// system-field names (`id`, `created_at`, `updated_at`, `created_by`,
-/// `updated_by`, `version`, `deleted_at`). Those names are reserved
-/// only at SCHEMA-DECLARATION time, not at filter time —
-/// `db.users.find({ id: "..." })` is the canonical query shape and
-/// must keep working. Declaration paths must call
+/// This function intentionally has no policy context and therefore does NOT fence
+/// names injected by an active table policy. Those names are reserved only at
+/// schema-declaration time, not at filter time. Declaration paths must call
 /// [`validate_field_name_for_declaration`] instead of this function.
 pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
@@ -767,9 +617,8 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// Declaration-time wrapper around [`validate_field_name`]
-/// that additionally fences the seven platform-managed system field
-/// names ([`SYSTEM_FIELD_NAMES`]).
+/// Declaration-time wrapper around [`validate_field_name`] that additionally
+/// fences the columns injected by the active effective policy.
 ///
 /// Call this from every code path that translates a creator-declared
 /// schema field into DDL (currently `field_to_column`). Filter-time
@@ -781,16 +630,24 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
 /// On reservation hit returns [`QueryError::ReservedSystemFieldName`]
 /// — distinct from `InvalidIdent` so the SDK can branch on a stable
 /// `reserved_system_field_name` code. The message names the offending
-/// field; the hint enumerates all 7 system fields so the creator
-/// knows the full reserved set without consulting docs.
-pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
+/// field; the hint enumerates the active injected set so the creator knows which
+/// names this table's policy owns.
+pub fn validate_field_name_for_declaration(
+    name: &str,
+    inject: &ResolvedInject,
+) -> Result<(), QueryError> {
     validate_field_name(name)?;
-    if SYSTEM_FIELD_NAMES.contains(&name) {
+    if inject.contains_column(name) {
+        let active_names = inject
+            .columns()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(QueryError::ReservedSystemFieldName(format!(
-            "Field name '{name}' is reserved for platform system fields. \
-             System fields ({}) are managed by the platform and cannot be \
+            "Field name '{name}' is reserved by the active table-injection policy. \
+             Injected fields ({active_names}) are managed by the platform and cannot be \
              overridden.",
-            SYSTEM_FIELD_NAMES.join(", ")
         )));
     }
     Ok(())
@@ -974,16 +831,14 @@ pub enum SqliteEmitScope {
 
 // pub (not pub): external consumer tests/integration.rs calls this via glob import.
 //
-// PG-flavoured shim around
-// [`build_create_table_with_fks_for_dialect`]. Every existing call site
-// (orchestrator `register_model::plan`, integration tests, internal
-// query helpers) stays on this signature; the dialect-aware emitter
-// lives behind the new symbol and routes the SQLite arm independently.
+// PG-flavoured shim around [`build_create_table_with_fks_for_dialect`]. The active
+// policy is mandatory here too; no shim supplies an ambient injected shape.
 pub fn build_create_table_with_fks(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
+    effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
     build_create_table_with_fks_for_dialect(
         app_id,
@@ -991,22 +846,19 @@ pub fn build_create_table_with_fks(
         schema,
         fk_emit,
         SqlDialect::Postgres,
+        effective,
     )
 }
 
 /// Dialect-aware CREATE TABLE emitter.
 ///
-/// Prepends the seven platform-managed system fields
-/// ([`SYSTEM_FIELD_NAMES`]) before any user-declared columns and
-/// appends three implicit B-tree indexes (`deleted_at`, `updated_at`,
-/// `created_by`) as semicolon-separated `CREATE INDEX IF NOT EXISTS`
-/// statements in the same multi-statement payload.
+/// Prepends exactly the columns injected by `effective` for this table before
+/// user-declared columns, stamps its pinned primary key, and appends exactly its
+/// injected indexes in the same multi-statement payload.
 ///
 /// The dialect controls:
 ///
-/// - timestamp column type: PG `TIMESTAMPTZ` / SQLite `TEXT`.
-/// - default clause for `created_at` / `updated_at`: PG `NOW()` /
-///   SQLite `CURRENT_TIMESTAMP`.
+/// - dialect-specific type and default spelling for every injected column.
 /// - index `ON` syntax: PG `ON <schema>.<table>` /
 ///   SQLite `<schema>.<index_name> ON <table>`.
 /// - whether `COMMENT ON COLUMN` mask sentinels (PG only) are
@@ -1014,15 +866,15 @@ pub fn build_create_table_with_fks(
 ///   `/* zero-migrate:mask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
-/// The `id TEXT PRIMARY KEY` is identical on both backends. The FK
-/// column type cascades to `TEXT` so ref columns match the new
-/// PK type — see [`def_to_pg_type`].
+/// Foreign-key column types continue to come from the author schema — see
+/// [`def_to_pg_type`].
 pub fn build_create_table_with_fks_for_dialect(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
+    effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
     // The stable entry point keeps the historical data-plane namespacing: SQLite
     // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zero-migrate
@@ -1034,6 +886,7 @@ pub fn build_create_table_with_fks_for_dialect(
         fk_emit,
         dialect,
         SqliteEmitScope::AttachAlias,
+        effective,
     )
 }
 
@@ -1059,6 +912,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
+    effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
     // The canonical multi-statement payload is `;\n`-joined here; the STRUCTURAL
     // per-statement list (the migrate engine's guard-per-statement seam consumes
@@ -1072,14 +926,15 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
         fk_emit,
         dialect,
         sqlite_scope,
+        effective,
     )?
     .join(";\n"))
 }
 
 /// **Structural** peer of [`build_create_table_with_fks_for_dialect_scoped`]:
 /// returns the CREATE-TABLE payload as its individual statement list (the CREATE,
-/// the implicit system-field `CREATE INDEX`es, and — on PG — the `COMMENT ON
-/// COLUMN` mask/encryption sentinels) instead of the `;\n`-joined string.
+/// the active policy's injected indexes, and — on PG — the `COMMENT ON COLUMN`
+/// mask/encryption sentinels) instead of the `;\n`-joined string.
 ///
 /// `join(";\n")` over the returned vector is byte-identical to the joined form, so
 /// the two entry points never diverge. The migrate engine's guard-per-statement
@@ -1093,9 +948,15 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
+    effective: &EffectivePolicy,
 ) -> Result<Vec<String>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
+        QueryError::InvalidFilter(format!(
+            "active table injection for {app_id}.{collection} is not renderable: {error}"
+        ))
+    })?;
 
     // SQLite `MainUnqualified` drops the schema qualifier entirely (`main` is the
     // app file); every other case keeps the `"<schema>"."<table>"` form. PG always
@@ -1112,7 +973,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         )
     };
 
-    let mut columns = build_system_field_columns(dialect);
+    let mut columns = build_injected_columns(collection, &inject, dialect)?;
 
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut union_checks: Vec<String> = Vec::new();
@@ -1129,8 +990,9 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 continue;
             }
             // A legacy internal `type: "id"` field is a PREFIX DECLARATION for
-            // the system `id` PK column already emitted by
-            // `build_system_field_columns`, NOT a second column. Skip it
+            // an injected `id` PK column, NOT a second column. Skip it only when
+            // this table's active policy actually injects `id`; under a no-inject
+            // policy an authored `id` is an ordinary author-owned column.
             // so we neither duplicate the `id` column nor trip the
             // reserved-name fence in `validate_field_name_for_declaration`.
             // We still validate the declared `idPrefix` here (defense in
@@ -1138,13 +1000,16 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // can't smuggle a reserved/malformed prefix past register-
             // model). A field named `id` with any OTHER type falls
             // through to `field_to_column_for_dialect`, which rejects it.
-            if field == "id" && def.get("type").and_then(|t| t.as_str()) == Some("id") {
-                if let Some(prefix) = def.get("idPrefix").and_then(|p| p.as_str()) {
-                    validate_id_prefix(prefix)?;
-                }
+            if let Some(prefix) = def.get("idPrefix").and_then(|p| p.as_str()) {
+                validate_id_prefix(prefix)?;
+            }
+            if inject.owns_id_primary_key()
+                && field == "id"
+                && def.get("type").and_then(|t| t.as_str()) == Some("id")
+            {
                 continue;
             }
-            let col_def = field_to_column_for_dialect(field, def, dialect)?;
+            let col_def = field_to_column_for_dialect(field, def, dialect, &inject)?;
             columns.push(col_def);
 
             // Path B sibling-column emission. When the
@@ -1206,7 +1071,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                         }
                     };
                     if should_inline {
-                        if let Ok(fk_clause) = build_fk_clause(app_id, field, def, target, dialect)
+                        if let Ok(fk_clause) =
+                            build_fk_clause(app_id, collection, field, def, target, dialect)
                         {
                             deferred_fks.push(fk_clause);
                         }
@@ -1235,18 +1101,13 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         }
     }
 
-    // `created_at` / `updated_at` are emitted as part of
-    // the seven system-field prefix at the top of `columns`; the
-    // legacy trailing emission is gone. See `build_system_field_columns`
-    // for the canonical declaration order.
-
     // Defensive last-line-of-defence assertion. The
     // declaration-time validator in `field_to_column` (via
     // `validate_field_name_for_declaration`) already rejects creator
-    // schemas that declare any of the seven system-field names; the
+    // schemas that declare an actively injected column name; the
     // loop above propagates that error and returns before this
     // assertion runs. The assertion guards a future regression where
-    // a creator-declared system field somehow makes it through the
+    // a creator-declared injected field somehow makes it through the
     // schema-iteration loop without raising — under debug builds the
     // panic surfaces immediately; release builds tolerate the
     // duplicated declaration and let the engine raise a
@@ -1256,7 +1117,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // the assertion measures the actual DDL output rather than
     // re-checking the input — catching any future emitter that adds
     // a column out-of-band (e.g. a sibling-column path that
-    // accidentally lands on a system-field name).
+    // accidentally lands on a policy-injected name).
     debug_assert!(
         {
             let mut seen = std::collections::HashSet::new();
@@ -1267,7 +1128,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 // strip the leading `"` if present.
                 let first = col.split_whitespace().next().unwrap_or("");
                 let name = first.trim_matches('"').trim_matches('`');
-                if SYSTEM_FIELD_NAMES.contains(&name) {
+                if inject.contains_column(name) {
                     if !seen.insert(name.to_string()) {
                         ok = false;
                         break;
@@ -1276,10 +1137,10 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             }
             ok
         },
-        "build_create_table_with_fks_for_dialect: duplicate system-field \
+        "build_create_table_with_fks_for_dialect: duplicate injected-field \
          declaration in column list — the declaration-time validator \
          (validate_field_name_for_declaration) should have rejected a \
-         creator-declared system field before reaching the DDL emitter. \
+         creator-declared injected field before reaching the DDL emitter. \
          Columns: {columns:?}",
     );
 
@@ -1303,18 +1164,10 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         columns.join(",\n  ")
     );
 
-    // Append the three implicit B-tree indexes
-    // (`deleted_at`, `updated_at`, `created_by`) as semicolon-
-    // separated `CREATE INDEX IF NOT EXISTS` statements. Bound 1:1
-    // to the table lifecycle — emitted here so a drop-table cascade
-    // takes them with it (instead of tracking them as separate
-    // `ChangeKind::AddIndex` diff ops).
-    //
-    // The index for `id` is not emitted (the PRIMARY KEY constraint
-    // already builds an implicit unique index). The index for
-    // `version` is not emitted (`version` bumps on every UPDATE and
-    // an index would thrash).
-    let system_index_stmts = build_system_field_indexes(app_id, collection, dialect, sqlite_scope);
+    // Append exactly the policy-injected indexes as structural statements bound
+    // 1:1 to the table lifecycle.
+    let system_index_stmts =
+        build_injected_indexes(app_id, collection, dialect, sqlite_scope, &inject)?;
 
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
@@ -1361,53 +1214,219 @@ pub fn build_encryption_sentinel_comments(
     out
 }
 
-/// Emit the seven platform-managed system-field column
-/// declarations in canonical order ([`SYSTEM_FIELD_NAMES`]).
-///
-/// Order MUST match `SYSTEM_FIELD_NAMES`. The dialect controls
-/// timestamp affinity (`TIMESTAMPTZ` on PG, `TEXT` on SQLite) and
-/// the default expression (`NOW()` on PG, `CURRENT_TIMESTAMP` on
-/// SQLite). `id`, `created_by`, `updated_by`, `version`, and the
-/// `INTEGER` affinity for `version` are dialect-identical.
-///
-/// The `id` PK uses inline `PRIMARY KEY` (not a `CONSTRAINT ...`
-/// table-level form) — matches the convention used for
-/// the legacy `id SERIAL PRIMARY KEY` line this replaces. The
-/// existing FK-attachment logic (`build_fk_clause`) references
-/// the `id` column by name, so the switch from `SERIAL` to `TEXT`
-/// is transparent to the FK emitter (the FK column TYPE narrowing
-/// cascades separately).
-fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
-    renderer(dialect).system_field_columns()
+/// Render the active policy's canonical injected columns and pinned primary key.
+/// The policy resolver has already mapped opaque inject tokens into closed IR;
+/// this function only applies dialect spelling. Empty injection emits no prefix.
+fn build_injected_columns(
+    table: &str,
+    inject: &ResolvedInject,
+    dialect: SqlDialect,
+) -> Result<Vec<String>, QueryError> {
+    let primary_key = inject.primary_key();
+    let mut columns =
+        Vec::with_capacity(inject.columns().len() + usize::from(primary_key.is_some()));
+    for column in inject.columns() {
+        let data_type = injected_column_type(column, dialect)?;
+        let inline_primary_key = primary_key
+            .is_some_and(|pk| pk.len() == 1 && pk.first().is_some_and(|name| name == &column.name));
+        let primary_key_clause = if inline_primary_key {
+            " PRIMARY KEY"
+        } else {
+            ""
+        };
+        let null_clause = if inline_primary_key {
+            ""
+        } else if column.nullable.unwrap_or(true) {
+            " NULL"
+        } else {
+            " NOT NULL"
+        };
+        let default_clause = column
+            .default
+            .as_ref()
+            .map(|default| {
+                render_injected_default(default, &column.ty, dialect)
+                    .map(|rendered| format!(" DEFAULT {rendered}"))
+                    .map_err(|error| {
+                        QueryError::InvalidFilter(format!(
+                            "injected column {:?} default is not renderable for {dialect:?}: {error}",
+                            column.name
+                        ))
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        columns.push(format!(
+            "{} {data_type}{primary_key_clause}{null_clause}{default_clause}",
+            injected_column_ident(&column.name, dialect),
+        ));
+    }
+
+    // A single-column PK over an injected column is rendered inline above, matching
+    // the migration snapshot renderer. Every other pinned PK is explicit so a
+    // composite key, or a key over an author-owned column, remains representable.
+    if let Some(primary_key) = primary_key.filter(|pk| {
+        pk.len() != 1
+            || !inject
+                .columns()
+                .iter()
+                .any(|column| pk.first().is_some_and(|name| name == &column.name))
+    }) {
+        let name = format!("{table}_pkey");
+        let rendered_columns = primary_key
+            .iter()
+            .map(|column| quote_ident_for_dialect(column, dialect))
+            .collect::<Vec<_>>()
+            .join(", ");
+        columns.push(format!(
+            "CONSTRAINT {} PRIMARY KEY ({rendered_columns})",
+            quote_ident_for_dialect(&name, dialect)
+        ));
+    }
+    Ok(columns)
 }
 
-/// Emit the three implicit B-tree indexes the platform
-/// auto-creates for every new table: `deleted_at` (soft-delete
-/// filtering), `updated_at` (cursor-paged read paths), and
-/// `created_by` (per-actor lookups + audit).
-///
-/// The PK on `id` covers `id` lookups via the implicit unique index;
-/// `version` is not indexed (every UPDATE bumps it; the index would
-/// thrash). See `docs/proposals/platform-system-fields.md` for
-/// the rationale.
-///
-/// Dialect controls the `ON` clause syntax:
-///
-/// - PG: `CREATE INDEX IF NOT EXISTS "<index>" ON "<schema>"."<table>" (<col>)`.
-/// - SQLite: `CREATE INDEX IF NOT EXISTS "<schema>"."<index>" ON "<table>" (<col>)`
-///   — SQLite places the schema on the index name, not the table.
-///
-/// The index name uses the existing [`index_name`] helper so the
-/// `<table>_<col>_idx` shape stays consistent with the rest of the
-/// auto-named per-field indexes and the NAMEDATALEN-safe 60-byte
-/// truncation kicks in for long table names.
-fn build_system_field_indexes(
+/// Keep the established CREATE-table spelling for policy-owned prefix columns:
+/// PostgreSQL/SQLite use the normalized policy identifier directly, while MySQL
+/// uses backticks. The policy is the trusted source of these canonical names;
+/// author-controlled identifiers continue through the regular quoting path.
+fn injected_column_ident(name: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Mysql => mysql_quote_ident(name),
+        SqlDialect::Postgres | SqlDialect::Sqlite => {
+            crate::render::declarative::quote_ident_if_needed(name)
+        }
+    }
+}
+
+fn render_injected_default(
+    default: &IrDefault,
+    ty: &ColType,
+    dialect: SqlDialect,
+) -> Result<String, crate::render::lower::IrLowerError> {
+    if matches!(
+        default,
+        IrDefault::Expr {
+            expr: Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args,
+            },
+        } if args.is_empty()
+    ) {
+        return Ok(renderer(dialect).current_timestamp_expr().to_string());
+    }
+    crate::render::lower::render_ir_default_for_type(default, ty, dialect)
+}
+
+fn injected_column_type(column: &IrColumn, dialect: SqlDialect) -> Result<String, QueryError> {
+    let token = match &column.ty {
+        ColType::Text => "string",
+        ColType::Timestamp => "date",
+        ColType::Int => "int",
+        _ => {
+            return Err(QueryError::InvalidFilter(format!(
+                "injected column {:?} has unsupported resolved type {:?}",
+                column.name, column.ty
+            )))
+        }
+    };
+    Ok(def_to_column_type_for_dialect(
+        &serde_json::json!({ "type": token }),
+        dialect,
+    ))
+}
+
+/// Render the active policy's canonical injected indexes. Physical names are
+/// derived from table + columns because the policy resolver intentionally lowers
+/// inject index names to unnamed IR indexes; this is the same migration-path rule.
+fn build_injected_indexes(
     app_id: &str,
     collection: &str,
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
-) -> Vec<String> {
-    renderer(dialect).system_field_indexes(app_id, collection, sqlite_scope)
+    inject: &ResolvedInject,
+) -> Result<Vec<String>, QueryError> {
+    inject
+        .indexes()
+        .iter()
+        .map(|index| render_injected_index(app_id, collection, dialect, sqlite_scope, index))
+        .collect()
+}
+
+fn render_injected_index(
+    app_id: &str,
+    collection: &str,
+    dialect: SqlDialect,
+    sqlite_scope: SqliteEmitScope,
+    index: &IrIndex,
+) -> Result<String, QueryError> {
+    if index.using.is_some()
+        || index.r#where.is_some()
+        || !index.include.is_empty()
+        || index.with.is_some()
+        || index.only.is_some()
+        || index.nulls_not_distinct.is_some()
+    {
+        return Err(QueryError::InvalidFilter(
+            "injected index carries unsupported non-B-tree facets".to_string(),
+        ));
+    }
+    let columns = index
+        .columns
+        .iter()
+        .map(|element| match element {
+            IndexElement::Column {
+                name,
+                order: None,
+                opclass: None,
+                collation: None,
+            } => Ok(name.as_str()),
+            _ => Err(QueryError::InvalidFilter(
+                "injected indexes must contain plain column elements".to_string(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "injected index must contain at least one column".to_string(),
+        ));
+    }
+    let unique = index.unique.unwrap_or(false);
+    let index_name = index
+        .name
+        .clone()
+        .unwrap_or_else(|| index_name(collection, &columns, unique));
+    let unique_clause = if unique { "UNIQUE " } else { "" };
+    let rendered_columns = columns
+        .iter()
+        .map(|column| quote_ident_for_dialect(column, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(match dialect {
+        SqlDialect::Postgres => format!(
+            "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {}.{} ({rendered_columns})",
+            quote_ident(&index_name),
+            quote_ident(app_id),
+            quote_ident(collection),
+        ),
+        SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => format!(
+            "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {} ({rendered_columns})",
+            quote_ident(&index_name),
+            quote_ident(collection),
+        ),
+        SqlDialect::Sqlite => format!(
+            "CREATE {unique_clause}INDEX IF NOT EXISTS {}.{} ON {} ({rendered_columns})",
+            quote_ident(app_id),
+            quote_ident(&index_name),
+            quote_ident(collection),
+        ),
+        SqlDialect::Mysql => format!(
+            "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
+            mysql_quote_ident(&index_name),
+            mysql_quote_ident(app_id),
+            mysql_quote_ident(collection),
+        ),
+    })
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
@@ -1431,7 +1450,7 @@ pub fn build_add_foreign_key(
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
-    let fk_clause = build_fk_clause(app_id, field, def, target, SqlDialect::Postgres)?;
+    let fk_clause = build_fk_clause(app_id, collection, field, def, target, SqlDialect::Postgres)?;
     Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
 
@@ -1454,40 +1473,36 @@ pub fn build_drop_foreign_key(
 
 /// Build a deterministic, NAMEDATALEN-safe FK constraint identifier.
 ///
-/// Postgres scopes constraint names per-table, so the name only needs
-/// to be unique among the constraints of a single table. We use
-/// `<field>_fkey` (the convention Postgres itself follows for
-/// auto-generated FK names). The second argument is reserved for future
-/// composite-FK use and is currently unused.
-pub fn fk_constraint_name(field: &str, _reserved: &str) -> String {
-    let full = format!("{field}_fkey");
-    if full.len() <= 60 {
-        return full;
+/// The default is `<table>_<field>_fkey`, matching PostgreSQL's convention and
+/// remaining unique under MySQL's schema-wide foreign-key namespace. An explicit
+/// authored name is returned verbatim; only derived names use the shared
+/// identifier cap.
+pub fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>) -> String {
+    if let Some(explicit_name) = explicit_name {
+        return explicit_name.to_string();
     }
-    let hash = short_hash_base32(&full);
-    let prefix_budget = 60usize.saturating_sub(9);
-    let mut prefix: String = full.chars().take(prefix_budget).collect();
-    if prefix.ends_with('_') {
-        prefix.pop();
-    }
-    format!("{prefix}_{hash}")
+    crate::render::lower::derived_fk_constraint_name(table, &[field.to_string()])
 }
 
 /// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES …` clause
 /// shared by inline CREATE TABLE emission and standalone ALTER TABLE.
 ///
-/// The constraint name uses only `<field>_fkey` (Postgres scopes
-/// constraint names per-table, so cross-table uniqueness is not needed)
-/// and is hash-truncated for ≤ 63 byte NAMEDATALEN budget.
+/// Absent an explicit `refName`, the constraint name is the shared
+/// `<table>_<field>_fkey` derivation.
 fn build_fk_clause(
     app_id: &str,
+    collection: &str,
     field: &str,
     def: &serde_json::Value,
     target: &str,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_collection(target)?;
-    let constraint_name = fk_constraint_name(field, "");
+    let constraint_name = fk_constraint_name(
+        collection,
+        field,
+        def.get("refName").and_then(serde_json::Value::as_str),
+    );
 
     let on_delete =
         normalize_fk_action_for_dialect(def.get("onDelete").and_then(|v| v.as_str()), dialect);
@@ -2394,17 +2409,17 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
 ///
-/// Validates the field name via [`validate_field_name_for_declaration`]
-/// before emitting DDL. The declaration-time variant fences the 7
-/// platform system field names ([`SYSTEM_FIELD_NAMES`]); filter-time
-/// call sites stay on the underlying [`validate_field_name`] so creators
-/// can keep filtering by `id` / `created_at` / etc.
+/// Validates the field name via [`validate_field_name_for_declaration`] before
+/// emitting DDL. The declaration-time variant fences only columns injected by
+/// this table's active policy; filter-time call sites stay on the underlying
+/// [`validate_field_name`].
 fn field_to_column_for_dialect(
     field: &str,
     def: &serde_json::Value,
     dialect: SqlDialect,
+    inject: &ResolvedInject,
 ) -> Result<String, QueryError> {
-    validate_field_name_for_declaration(field)?;
+    validate_field_name_for_declaration(field, inject)?;
     validate_encryption_sentinel_for_field(def)?;
     // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
@@ -2623,14 +2638,10 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 
 /// Map schema type to PostgreSQL type.
 ///
-/// `ref` columns emit `TEXT` so they match the
-/// `id TEXT PRIMARY KEY` of the system-field DDL. The parent PK is
-/// `TEXT` (typed_id wire format), so an
-/// `INTEGER` FK would fail with `column type mismatch` at FK-constraint
-/// creation time on Postgres. SQLite tolerates type mismatch (declared
-/// types are advisory) but the typed_id values inserted into a ref
-/// column are TEXT-shaped strings, so the storage class is TEXT either
-/// way.
+/// `ref` columns emit `TEXT`, matching the SDK's typed-id wire format. An
+/// `INTEGER` FK would fail with `column type mismatch` when the referenced key is
+/// text on Postgres. SQLite treats declared types as advisory, but typed-id values
+/// are still TEXT-shaped strings at storage time.
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
@@ -2963,6 +2974,123 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn confined_policy() -> EffectivePolicy {
+        crate::model::table_shape::zeroship_confined_ceiling()
+    }
+
+    fn no_inject_policy() -> EffectivePolicy {
+        crate::model::table_shape::zeroship_no_inject_ceiling()
+    }
+
+    fn explicit_default_policy() -> EffectivePolicy {
+        crate::model::table_shape::effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+columns = [
+  { name = "created_at", type = "timestamptz", nullable = false, default = "now" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "now" },
+  { name = "version", type = "integer", nullable = false, default = "1" },
+]
+"#,
+        )
+        .expect("explicit-default test policy composes")
+    }
+
+    fn confined_inject(table: &str) -> ResolvedInject {
+        ResolvedInject::for_table(&confined_policy(), "app1", table)
+            .expect("confined test injection resolves")
+    }
+
+    fn confined_injected_names(table: &str) -> Vec<String> {
+        confined_inject(table)
+            .columns()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    }
+
+    fn confined_injected_index_columns(table: &str) -> Vec<Vec<String>> {
+        confined_inject(table)
+            .indexes()
+            .iter()
+            .map(|index| {
+                index
+                    .columns
+                    .iter()
+                    .map(|element| match element {
+                        IndexElement::Column { name, .. } => name.clone(),
+                        IndexElement::Expr { .. } => {
+                            panic!("confined test policy must not inject expression indexes")
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    // Most schema-query tests exercise the historical confined shape. Keep the
+    // policy explicit in one test-only seam; tests for author-owned behavior call
+    // the production functions directly with `no_inject_policy()` below.
+    fn build_create_table_with_fks(
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+        fk_emit: &FkEmission<'_>,
+    ) -> Result<String, QueryError> {
+        super::build_create_table_with_fks(app_id, collection, schema, fk_emit, &confined_policy())
+    }
+
+    fn build_create_table_with_fks_for_dialect(
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+        fk_emit: &FkEmission<'_>,
+        dialect: SqlDialect,
+    ) -> Result<String, QueryError> {
+        super::build_create_table_with_fks_for_dialect(
+            app_id,
+            collection,
+            schema,
+            fk_emit,
+            dialect,
+            &confined_policy(),
+        )
+    }
+
+    fn build_create_table_with_fks_for_dialect_scoped(
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+        fk_emit: &FkEmission<'_>,
+        dialect: SqlDialect,
+        sqlite_scope: SqliteEmitScope,
+    ) -> Result<String, QueryError> {
+        super::build_create_table_with_fks_for_dialect_scoped(
+            app_id,
+            collection,
+            schema,
+            fk_emit,
+            dialect,
+            sqlite_scope,
+            &confined_policy(),
+        )
+    }
+
+    fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
+        super::validate_field_name_for_declaration(name, &confined_inject("posts"))
+    }
+
+    fn field_to_column_for_dialect(
+        field: &str,
+        def: &serde_json::Value,
+        dialect: SqlDialect,
+    ) -> Result<String, QueryError> {
+        super::field_to_column_for_dialect(field, def, dialect, &confined_inject("posts"))
+    }
+
     // -----------------------------------------------------------------------
     // SEC-4 — aggregation pipeline must NOT leak masked-column plaintext.
     //
@@ -3278,8 +3406,8 @@ mod tests {
     #[test]
     fn p7_id_prefix_decl_emits_single_id_column() {
         // **P7** — a legacy internal ID descriptor is a prefix declaration for the
-        // system `id` PK column, NOT a second column. The emitter must
-        // skip it: exactly one `id` column (the system PK), no duplicate,
+        // policy-injected `id` PK column, NOT a second column. The emitter must
+        // skip it: exactly one `id` column (the injected PK), no duplicate,
         // and no reserved-name rejection.
         let schema = json!({
             "id": {"type": "id", "idPrefix": "blog"},
@@ -3287,13 +3415,11 @@ mod tests {
         });
         let create =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
-        // The system PK is emitted as `id TEXT PRIMARY KEY` (unquoted —
-        // see `build_system_field_columns`). The prefix declaration must
-        // NOT add a second column (which would appear as a quoted
-        // `"id"` from the field loop's `quote_ident`).
+        // The injected PK is emitted exactly once. The prefix declaration must
+        // NOT add a second, quoted column from the author-field loop.
         assert!(
             create.contains("id TEXT PRIMARY KEY"),
-            "system id PK column present: {create}"
+            "injected id PK column present: {create}"
         );
         assert_eq!(
             create.matches("\"id\"").count(),
@@ -3319,6 +3445,20 @@ mod tests {
             matches!(err, QueryError::ReservedSystemFieldName(_)),
             "usr prefix must be rejected as reserved, got {err:?}"
         );
+    }
+
+    #[test]
+    fn no_inject_policy_still_rejects_reserved_id_prefix() {
+        let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
+        let err = super::build_create_table_with_fks(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            &no_inject_policy(),
+        )
+        .expect_err("ID-prefix reservations are independent of table injection");
+        assert!(matches!(err, QueryError::ReservedSystemFieldName(_)));
     }
 
     #[test]
@@ -3361,11 +3501,49 @@ mod tests {
         // `id TEXT PRIMARY KEY`).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
         // Inline FK clause with SQL/Postgres defaults omitted.
+        assert!(sql.contains("CONSTRAINT \"posts_authorId_fkey\""), "{sql}");
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
         assert!(sql.contains("REFERENCES \"app1\".\"users\" (id)"), "{sql}");
         assert!(!sql.contains("ON DELETE"), "{sql}");
         assert!(!sql.contains("ON UPDATE"), "{sql}");
         assert!(!sql.contains("DEFERRABLE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_explicit_fk_constraint_name_renders_on_every_dialect() {
+        let schema = json!({
+            "accountId": {
+                "type": "ref",
+                "refTarget": "accounts",
+                "refName": "fk_custom",
+            },
+        });
+
+        for (dialect, expected) in [
+            (
+                SqlDialect::Postgres,
+                r#"CONSTRAINT "fk_custom" FOREIGN KEY ("accountId")"#,
+            ),
+            (
+                SqlDialect::Mysql,
+                "CONSTRAINT `fk_custom` FOREIGN KEY (`accountId`)",
+            ),
+            (
+                SqlDialect::Sqlite,
+                r#"CONSTRAINT "fk_custom" FOREIGN KEY ("accountId")"#,
+            ),
+        ] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "entries",
+                &schema,
+                &FkEmission::Inline,
+                dialect,
+            )
+            .unwrap_or_else(|error| panic!("{dialect:?} named reference should render: {error}"));
+            assert!(sql.contains(expected), "{dialect:?}: {sql}");
+            assert!(!sql.contains("accountId_fkey"), "{dialect:?}: {sql}");
+        }
     }
 
     #[test]
@@ -3508,14 +3686,17 @@ mod tests {
 
     #[test]
     fn b2_fk_constraint_name_short() {
-        assert_eq!(fk_constraint_name("authorId", ""), "authorId_fkey");
+        assert_eq!(
+            fk_constraint_name("posts", "authorId", None),
+            "posts_authorId_fkey"
+        );
     }
 
     #[test]
     fn b2_fk_constraint_name_truncated() {
         let long = "a".repeat(80);
-        let name = fk_constraint_name(&long, "");
-        assert!(name.len() <= 60, "got {} bytes: {name}", name.len());
+        let name = fk_constraint_name("posts", &long, None);
+        assert!(name.len() <= 63, "got {} bytes: {name}", name.len());
     }
 
     #[test]
@@ -3730,11 +3911,9 @@ mod tests {
     // model.ts to inject `version: { type: "number", default: 1 }`
     // so the DDL emission below matches.
     //
-    // `version` is a reserved system-field name
-    // (`SYSTEM_FIELD_NAMES`); the declaration-time validator refuses
-    // a creator-declared `version` column. `build_create_table_with_fks`
-    // injects the seven system fields directly (not via a creator-shape
-    // entry). The test uses a placeholder field
+    // Under the confined test policy, `version` is an injected field name, so
+    // the declaration-time validator refuses a creator-declared `version`
+    // column. The test uses a placeholder field
     // name (`schema_revision`) to keep exercising the
     // `t.number().default(N)` DDL path that produces `DOUBLE PRECISION
     // ... DEFAULT 1`.
@@ -4353,30 +4532,21 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // platform system-field reservation (declaration-only)
+    // active-policy injected-field reservation (declaration-only)
     // -----------------------------------------------------------------
 
-    /// Each of the 7 platform-managed system field names must be refused
-    /// by `validate_field_name_for_declaration`. Mirrors the seven names
-    /// in `SYSTEM_FIELD_NAMES`. Filter-time validators continue to
+    /// Every field injected by the confined test policy must be refused by
+    /// `validate_field_name_for_declaration`. Filter-time validators continue to
     /// accept these names (covered by
     /// `system_field_names_allowed_in_filter_path`).
     #[test]
     fn system_field_names_refused_at_declaration() {
-        for name in &[
-            "id",
-            "created_at",
-            "updated_at",
-            "created_by",
-            "updated_by",
-            "version",
-            "deleted_at",
-        ] {
-            let err = validate_field_name_for_declaration(name).unwrap_err();
+        for name in confined_injected_names("posts") {
+            let err = validate_field_name_for_declaration(&name).unwrap_err();
             match err {
                 QueryError::ReservedSystemFieldName(msg) => {
                     assert!(
-                        msg.contains(name) && msg.contains("reserved"),
+                        msg.contains(&name) && msg.contains("reserved"),
                         "expected reserved-system-field message naming {name:?}, got: {msg}"
                     );
                 }
@@ -4386,14 +4556,13 @@ mod tests {
     }
 
     /// Filter-time validation (`validate_field_name`) MUST continue to
-    /// accept all 7 system field names. `db.users.find({ id: "..." })`
-    /// is the canonical query shape — fencing `id` at filter time would
-    /// break the entire SDK. The reservation is declaration-only.
+    /// accept every name injected by the confined test policy. The reservation
+    /// is declaration-only.
     #[test]
     fn system_field_names_allowed_in_filter_path() {
-        for name in SYSTEM_FIELD_NAMES {
+        for name in confined_injected_names("posts") {
             assert!(
-                validate_field_name(name).is_ok(),
+                validate_field_name(&name).is_ok(),
                 "system field {name:?} must be accepted by the filter-time validator"
             );
         }
@@ -4410,19 +4579,6 @@ mod tests {
                 "non-system field {name:?} must be accepted at declaration"
             );
         }
-    }
-
-    /// `SYSTEM_FIELD_NAMES` is the canonical list — every new addition
-    /// is a deliberate platform decision. Pinning the size to 7 surfaces
-    /// any drift in code review.
-    #[test]
-    fn system_field_names_has_exactly_seven_entries() {
-        assert_eq!(
-            SYSTEM_FIELD_NAMES.len(),
-            7,
-            "SYSTEM_FIELD_NAMES must list exactly 7 entries (id, created_at, \
-             updated_at, created_by, updated_by, version, deleted_at)"
-        );
     }
 
     // NOTE: `system_field_reservation_error_carries_correct_code` — which
@@ -4442,16 +4598,16 @@ mod tests {
     /// fails before any SQL is generated.
     #[test]
     fn build_create_table_refuses_creator_declared_system_field() {
-        for name in SYSTEM_FIELD_NAMES {
+        for name in confined_injected_names("posts") {
             let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert((*name).to_string(), serde_json::json!({ "type": "string" }));
+            schema_obj.insert(name.clone(), serde_json::json!({ "type": "string" }));
             let schema = serde_json::Value::Object(schema_obj);
             let err = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
                 .unwrap_err();
             match err {
                 QueryError::ReservedSystemFieldName(msg) => {
                     assert!(
-                        msg.contains(name),
+                        msg.contains(&name),
                         "CREATE TABLE must refuse system-field {name:?}; got: {msg}"
                     );
                 }
@@ -4461,7 +4617,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // CREATE TABLE prepends 7 system fields + 3 auto-indexes
+    // CREATE TABLE prepends the active policy's injected shape
     //
     // Tests the dialect-aware emitter
     // (`build_create_table_with_fks_for_dialect`) and the PG-flavoured
@@ -4471,12 +4627,13 @@ mod tests {
     // form vs PG's `ON <schema>.<table>`.
     // -----------------------------------------------------------------
 
-    /// All seven system fields must appear in CREATE TABLE on PG, in the
-    /// canonical `SYSTEM_FIELD_NAMES` order, before any user-declared
+    /// All confined-policy injected fields must appear in CREATE TABLE on PG, in
+    /// policy order, before any user-declared
     /// column (type / NOT NULL / DEFAULT) is exercised by the dedicated
     /// shape tests below.
     #[test]
-    fn create_table_prepends_seven_system_fields_pg() {
+    fn create_table_prepends_confined_injected_fields_pg() {
+        let names = confined_injected_names("posts");
         let schema = serde_json::json!({
             "title": { "type": "string" },
         });
@@ -4488,7 +4645,7 @@ mod tests {
             SqlDialect::Postgres,
         )
         .expect("build ok");
-        for name in SYSTEM_FIELD_NAMES {
+        for name in &names {
             assert!(
                 sql.contains(&format!(" {name} ")) || sql.contains(&format!(" {name},")),
                 "missing system field {name:?} in PG DDL: {sql}"
@@ -4496,7 +4653,7 @@ mod tests {
         }
         // Canonical declaration order: each name appears BEFORE the
         // next, and all of them appear before the user field `title`.
-        let positions: Vec<usize> = SYSTEM_FIELD_NAMES
+        let positions: Vec<usize> = names
             .iter()
             .map(|n| sql.find(n).expect("each name appears"))
             .collect();
@@ -4515,7 +4672,8 @@ mod tests {
     /// affinity (`TEXT` vs `TIMESTAMPTZ`) and the default expression
     /// (`CURRENT_TIMESTAMP` vs `NOW()`) differ.
     #[test]
-    fn create_table_prepends_seven_system_fields_sqlite() {
+    fn create_table_prepends_confined_injected_fields_sqlite() {
+        let names = confined_injected_names("posts");
         let schema = serde_json::json!({
             "title": { "type": "string" },
         });
@@ -4527,13 +4685,13 @@ mod tests {
             SqlDialect::Sqlite,
         )
         .expect("build ok");
-        for name in SYSTEM_FIELD_NAMES {
+        for name in &names {
             assert!(
                 sql.contains(name),
                 "missing system field {name:?} in SQLite DDL: {sql}"
             );
         }
-        let positions: Vec<usize> = SYSTEM_FIELD_NAMES
+        let positions: Vec<usize> = names
             .iter()
             .map(|n| sql.find(n).expect("each name appears"))
             .collect();
@@ -4567,16 +4725,17 @@ mod tests {
         }
     }
 
-    /// PG: `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+    /// A policy-authored timestamp default uses PostgreSQL's canonical spelling.
     #[test]
     fn create_table_emits_created_at_default_now_pg() {
         let schema = serde_json::json!({});
-        let sql = build_create_table_with_fks_for_dialect(
+        let sql = super::build_create_table_with_fks_for_dialect(
             "app1",
             "posts",
             &schema,
             &FkEmission::Inline,
             SqlDialect::Postgres,
+            &explicit_default_policy(),
         )
         .expect("build ok");
         assert!(
@@ -4589,16 +4748,17 @@ mod tests {
         );
     }
 
-    /// SQLite: `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`.
+    /// The same policy-authored timestamp default uses SQLite's spelling.
     #[test]
     fn create_table_emits_created_at_default_current_timestamp_sqlite() {
         let schema = serde_json::json!({});
-        let sql = build_create_table_with_fks_for_dialect(
+        let sql = super::build_create_table_with_fks_for_dialect(
             "app1",
             "posts",
             &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
+            &explicit_default_policy(),
         )
         .expect("build ok");
         assert!(
@@ -4620,17 +4780,17 @@ mod tests {
         );
     }
 
-    /// `version INTEGER NOT NULL DEFAULT 1` — identical on both
-    /// backends. Auto-bumped by CRUD updates.
+    /// A policy-authored integer default is identical on both backends.
     #[test]
     fn create_table_emits_version_default_one() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let sql = build_create_table_with_fks_for_dialect(
+            let sql = super::build_create_table_with_fks_for_dialect(
                 "app1",
                 "posts",
                 &serde_json::json!({}),
                 &FkEmission::Inline,
                 dialect,
+                &explicit_default_policy(),
             )
             .expect("build ok");
             assert!(
@@ -4672,12 +4832,12 @@ mod tests {
         );
     }
 
-    /// The three implicit B-tree indexes ride along with CREATE TABLE
-    /// as semicolon-separated statements. Each names its column in the
-    /// auto-named `<table>_<col>_idx` shape (idempotent — re-running
-    /// `IF NOT EXISTS`).
+    /// Every index resolved from the confined policy rides along with CREATE TABLE
+    /// as a semicolon-separated statement, using the auto-named
+    /// `<table>_<columns>_idx` shape.
     #[test]
-    fn create_table_emits_three_indexes_deleted_at_updated_at_created_by() {
+    fn create_table_emits_confined_policy_indexes() {
+        let index_columns = confined_injected_index_columns("posts");
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let sql = build_create_table_with_fks_for_dialect(
                 "app1",
@@ -4687,21 +4847,24 @@ mod tests {
                 dialect,
             )
             .expect("build ok");
-            for col in &["deleted_at", "updated_at", "created_by"] {
-                let idx = index_name("posts", &[col], false);
+            for columns in &index_columns {
+                let refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+                let idx = index_name("posts", &refs, false);
                 assert!(
                     sql.contains(&idx),
-                    "missing index {idx} for column {col} on {dialect:?}: {sql}"
+                    "missing injected index {idx} on {dialect:?}: {sql}"
                 );
                 assert!(
                     sql.contains("CREATE INDEX IF NOT EXISTS"),
                     "implicit indexes must use IF NOT EXISTS for idempotency on \
                      {dialect:?}: {sql}"
                 );
-                assert!(
-                    sql.contains(&format!("({})", quote_ident(col))),
-                    "index DDL must reference column ({col}) on {dialect:?}: {sql}"
-                );
+                let rendered_columns = refs
+                    .iter()
+                    .map(|column| quote_ident(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
             }
         }
     }
@@ -4745,9 +4908,7 @@ mod tests {
         );
     }
 
-    /// User-declared fields land AFTER the seven system fields. Pin
-    /// the order so an accidental refactor that inverts the prepend
-    /// loop fails here.
+    /// User-declared fields land after the confined policy's injected fields.
     #[test]
     fn create_table_appends_user_fields_after_system_fields() {
         let schema = serde_json::json!({
@@ -4886,9 +5047,9 @@ mod tests {
         // The validator raises `ReservedSystemFieldName` before
         // the debug_assert runs — verify the rejection happens at the
         // validator layer (the canonical first line of defence).
-        for name in SYSTEM_FIELD_NAMES {
+        for name in confined_injected_names("posts") {
             let mut obj = serde_json::Map::new();
-            obj.insert((*name).to_string(), serde_json::json!({ "type": "string" }));
+            obj.insert(name.clone(), serde_json::json!({ "type": "string" }));
             let schema = serde_json::Value::Object(obj);
             let err = build_create_table_with_fks_for_dialect(
                 "app1",
@@ -4911,6 +5072,7 @@ mod tests {
     /// fields between dialects fails here.
     #[test]
     fn pg_and_sqlite_emit_equivalent_create_table_for_system_fields() {
+        let names = confined_injected_names("posts");
         let schema = serde_json::json!({
             "title": { "type": "string", "required": true },
         });
@@ -4932,11 +5094,11 @@ mod tests {
         .expect("sqlite ok");
 
         // Same system-field NAMES in the same ORDER on both arms.
-        let pg_positions: Vec<usize> = SYSTEM_FIELD_NAMES
+        let pg_positions: Vec<usize> = names
             .iter()
             .map(|n| pg.find(n).expect("pg has name"))
             .collect();
-        let sq_positions: Vec<usize> = SYSTEM_FIELD_NAMES
+        let sq_positions: Vec<usize> = names
             .iter()
             .map(|n| sq.find(n).expect("sqlite has name"))
             .collect();
@@ -4948,11 +5110,94 @@ mod tests {
             assert!(w[0] < w[1], "sqlite names out of order: {sq}");
         }
 
-        // Both arms emit the 3 implicit indexes.
-        for col in &["deleted_at", "updated_at", "created_by"] {
-            let idx = index_name("posts", &[col], false);
+        // Both arms emit exactly the indexes resolved from the policy.
+        for columns in confined_injected_index_columns("posts") {
+            let refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+            let idx = index_name("posts", &refs, false);
             assert!(pg.contains(&idx), "pg missing index {idx}");
             assert!(sq.contains(&idx), "sqlite missing index {idx}");
+        }
+    }
+
+    #[test]
+    fn no_inject_policy_accepts_and_preserves_author_updated_at() {
+        let effective = no_inject_policy();
+        let inject = ResolvedInject::for_table(&effective, "app1", "posts")
+            .expect("no-inject policy resolves");
+        assert!(inject.columns().is_empty());
+        assert!(inject.indexes().is_empty());
+        assert!(inject.primary_key().is_none());
+        assert!(super::validate_field_name_for_declaration("updated_at", &inject).is_ok());
+
+        let sql = super::build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({ "updated_at": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+            &effective,
+        )
+        .expect("author-owned updated_at renders under no-inject policy");
+        assert!(sql.contains("\"updated_at\" TEXT"), "{sql}");
+        assert_eq!(sql.matches("\"updated_at\"").count(), 1, "{sql}");
+        assert!(!sql.contains("\"id\""), "{sql}");
+        assert!(!sql.contains("CREATE INDEX"), "{sql}");
+    }
+
+    #[test]
+    fn policy_keyword_and_quoted_identifiers_are_quoted_in_injected_sql() {
+        let effective = crate::model::table_shape::effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+columns = [
+  { name = "order", type = "text", nullable = false },
+  { name = '"CamelCase"', type = "text", nullable = true },
+]
+"#,
+        )
+        .expect("identifier-quoting policy composes");
+        let inject = ResolvedInject::for_table(&effective, "app1", "posts")
+            .expect("identifier-quoting policy resolves");
+        assert_eq!(inject.columns()[0].name, "order");
+        assert_eq!(inject.columns()[1].name, "CamelCase");
+
+        for (dialect, keyword, mixed_case) in [
+            (
+                SqlDialect::Postgres,
+                r#""order" TEXT NOT NULL"#,
+                r#""CamelCase" TEXT NULL"#,
+            ),
+            (
+                SqlDialect::Sqlite,
+                r#""order" TEXT NOT NULL"#,
+                r#""CamelCase" TEXT NULL"#,
+            ),
+            (
+                SqlDialect::Mysql,
+                "`order` VARCHAR(191) NOT NULL",
+                "`CamelCase` VARCHAR(191) NULL",
+            ),
+        ] {
+            let sql = super::build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &serde_json::json!({}),
+                &FkEmission::Inline,
+                dialect,
+                &effective,
+            )
+            .expect("policy-owned identifiers render");
+            assert!(
+                sql.contains(keyword),
+                "missing quoted keyword for {dialect:?}: {sql}"
+            );
+            assert!(
+                sql.contains(mixed_case),
+                "missing quoted mixed-case identifier for {dialect:?}: {sql}"
+            );
         }
     }
 

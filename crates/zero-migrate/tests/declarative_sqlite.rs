@@ -14,13 +14,27 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
+    desired_snapshot_for_dialect, zeroship_confined_ceiling, CollectionDescriptor,
+    DeclarativeAuthor, DeclarativeError, DesiredSchema, EffectivePolicy, FieldDescriptor,
     GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot, SqlGuard,
     SqliteBackend,
 };
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
+
+fn effective_policy() -> EffectivePolicy {
+    zeroship_confined_ceiling()
+}
+
+fn desired_sqlite(descriptors: &[CollectionDescriptor]) -> Result<DesiredSchema, DeclarativeError> {
+    desired_snapshot_for_dialect(
+        PROJECT,
+        descriptors,
+        SqlDialect::Sqlite,
+        &effective_policy(),
+    )
+}
 
 struct Paths {
     _dir: TempDir,
@@ -86,12 +100,18 @@ fn goodies_desc() -> CollectionDescriptor {
 #[compio::test]
 async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
     let desc = goodies_desc();
-    let desired = desired_snapshot(PROJECT, &[desc]).expect("desired_snapshot");
+    let desired = desired_sqlite(&[desc]).expect("desired_snapshot");
 
     // The SQLite author routes the new-table CREATE through the shared emitter.
     let author = sqlite_author();
     let plan = author
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff");
     let migs = plan.all_migrations();
     let create = migs
@@ -101,9 +121,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
 
     // The generated `up` is UNqualified (lands in `main` = the app file).
     assert!(
-        create
-            .up
-            .contains(r#"CREATE TABLE IF NOT EXISTS "accounts" ("#),
+        create.up.contains(r#"CREATE TABLE "accounts" ("#),
         "engine-generated SQLite up must be unqualified: {}",
         create.up
     );
@@ -226,11 +244,17 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = desired_snapshot(PROJECT, &[users, posts]).expect("desired_snapshot");
+    let desired = desired_sqlite(&[users, posts]).expect("desired_snapshot");
 
     let author = sqlite_author();
     let plan = author
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff");
     let migs = plan.all_migrations();
 
@@ -241,8 +265,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
     // FK present, inline, and references an UNqualified parent (SQLite rejects a
     // schema-qualified REFERENCES target).
     assert!(
-        posts_create.up.contains("FOREIGN KEY")
-            && posts_create.up.contains(r#"REFERENCES "users" (id)"#),
+        posts_create.up.contains("FOREIGN KEY") && posts_create.up.contains("REFERENCES users(id)"),
         "inline unqualified FK expected: {}",
         posts_create.up
     );
@@ -297,10 +320,16 @@ async fn sqlite_deferred_fk_is_typed_error() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = desired_snapshot(PROJECT, &[posts]).expect("desired_snapshot");
+    let desired = desired_sqlite(&[posts]).expect("desired_snapshot");
     let author = sqlite_author();
     let err = author
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect_err("a missing FK target must be rejected fail-closed");
     // Either the cross-app-FK-missing guard OR the SQLite deferred-FK arm — both are
     // fail-closed rejections; the SQLite path must never silently drop the FK.
@@ -384,17 +413,17 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 //   - `ALTER COLUMN … TYPE` / nullability → no such SQLite statement.
 //
 // These tests build a NON-EMPTY live snapshot (the first deploy, compiled through
-// the same `desired_snapshot` so the data_type spellings match — no spurious type
+// the same dialect-aware desired snapshot so the data_type spellings match — no spurious type
 // drift) and diff the second deploy against it.
 // ---------------------------------------------------------------------------
 
 /// The live snapshot for a first-deploy descriptor set: compiled through the same
-/// `desired_snapshot` machinery the second deploy uses, so the column `data_type`
+/// dialect-aware snapshot machinery the second deploy uses, so the column `data_type`
 /// spellings match exactly (a manually-built or SQLite-introspected live would use
 /// `SQLite` type affinities that the desired-side PG spellings would falsely diff
 /// against — a separate, deeper normalisation gap, out of scope for this finding).
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("first-deploy desired_snapshot");
+    let d = desired_sqlite(descs).expect("first-deploy desired_snapshot");
     let ownership: HashMap<String, String> = d
         .ownership
         .iter()
@@ -432,9 +461,15 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     // Apply the first deploy through the real backend (greenfield create).
     let p = paths("second_add_col");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
+    let first = desired_sqlite(std::slice::from_ref(&v1)).expect("v1 desired");
     let first_plan = sqlite_author()
-        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &first,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("v1 diff");
     for m in &first_plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -444,9 +479,9 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
 
     // Second deploy: diff v2 against the v1 live snapshot.
     let (live, ownership) = live_from(&[v1]);
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("second-deploy diff must succeed");
     let add = plan
         .all_migrations()
@@ -514,9 +549,15 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
 
     let p = paths("second_drop_idx");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
+    let first = desired_sqlite(std::slice::from_ref(&v1)).expect("v1 desired");
     let first_plan = sqlite_author()
-        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &first,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("v1 diff");
     for m in &first_plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -539,9 +580,9 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
 
     // Second deploy: diff produces a DROP INDEX.
     let (live, ownership) = live_from(&[v1]);
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("second-deploy diff must succeed");
     let drop = plan
         .all_migrations()
@@ -597,9 +638,9 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
     v2.fields[0].ty = "string".into();
 
     let (live, ownership) = live_from(&[v1]);
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("a SQLite existing-table type change now generates a rebuild (P3b)");
     assert_eq!(plan.rebuilds.len(), 1, "exactly one table rebuild");
     let rb = &plan.rebuilds[0];
@@ -638,7 +679,7 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
 // FAITHFUL real-introspected-live drift (the dialect-aware data_type fix).
 //
 // The tests above build their LIVE snapshot through `live_from` (= the SAME
-// `desired_snapshot` machinery, PG-spelled `data_type`), which sidesteps the
+// dialect-aware snapshot machinery, PG-spelled `data_type`), which sidesteps the
 // real bug: a second-deploy SQLite diff in production compares the DESIRED
 // snapshot (PG spellings: `bytea` / `double precision` / `timestamp with time
 // zone`) against a LIVE snapshot REAL-introspected from the app file (SQLite
@@ -709,9 +750,15 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
     // First deploy: CREATE the table through the real hardened backend.
     let p = paths("real_live_unchanged");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, std::slice::from_ref(&desc)).expect("v1 desired");
+    let first = desired_sqlite(std::slice::from_ref(&desc)).expect("v1 desired");
     let first_plan = sqlite_author()
-        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &first,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("v1 diff");
     for m in &first_plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -761,9 +808,9 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
     // Second deploy: the SAME descriptor — an UNCHANGED schema. Diffing the
     // PG-spelled desired against the SQLite-spelled REAL live must NOT flag a
     // type change.
-    let desired2 = desired_snapshot(PROJECT, &[desc]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[desc]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .unwrap_or_else(|e| {
             panic!(
                 "unchanged-schema second deploy against the REAL introspected live \
@@ -809,9 +856,15 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
 
     let p = paths("real_live_type_change");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, std::slice::from_ref(&v1)).expect("v1 desired");
+    let first = desired_sqlite(std::slice::from_ref(&v1)).expect("v1 desired");
     let first_plan = sqlite_author()
-        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &first,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("v1 diff");
     for m in &first_plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -834,9 +887,9 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
     let amount = v2.fields.iter_mut().find(|f| f.name == "amount").unwrap();
     amount.ty = "string".into();
 
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("a real number→string type change generates a rebuild (P3b)");
     assert_eq!(
         plan.rebuilds.len(),
@@ -882,11 +935,11 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
     v2.fields[0].ty = "string".into();
 
     let (live, ownership) = live_from(&[v1]);
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
 
     // Sanity: the underlying diff DOES produce a rebuild (so the plan below is real).
     let diff = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("diff");
     assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to carry");
 
@@ -894,7 +947,15 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
     let engine = MigrationEngine::new();
     let cfg = GuardConfig::confined_sqlite(PROJECT);
     let plan = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &cfg)
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &[],
+            &cfg,
+            &effective_policy(),
+        )
         .expect("plan_declarative now carries SQLite rebuilds, never fails closed");
     assert_eq!(
         plan.rebuilds.len(),
@@ -923,12 +984,13 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 // These pin the FULL `up`/`down` strings the SQLite render paths emit today, for
 // the create-table / add-column / create-index / drop-{table,column,index} paths
 // over a representative schema (PK, plain column, mask column, encrypted column,
-// FK, index). They are the explicit byte bar for the `DdlEmitter` extraction:
-// it is code-motion only, so these MUST stay green and UNCHANGED across it.
+// FK, index). They are the explicit byte bar for the `DdlEmitter` extraction.
+// The policy-source convergence intentionally removed SQLite defaults that were
+// absent from the confined ceiling; every other byte remains pinned.
 //
-// Note the create-table `up` is the SHARED `zero_migrate::schema` emitter's output
-// (routed) — pinned here so we'd notice an unrelated drift; the
-// add-column / index / drop paths are the engine's OWN render methods.
+// Note the create-table `up` is the shared resolved-snapshot renderer's output —
+// pinned here so we'd notice an unrelated drift; the add-column / index / drop
+// paths are the engine's own render methods.
 // ===========================================================================
 
 fn golden_find<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
@@ -941,7 +1003,7 @@ fn golden_find<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
 }
 
 fn golden_live(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("golden live desired_snapshot");
+    let d = desired_sqlite(descs).expect("golden live desired_snapshot");
     let ownership: HashMap<String, String> = d
         .ownership
         .iter()
@@ -1000,9 +1062,15 @@ async fn golden_sqlite_create_table_and_index() {
         }],
         runtime_options: Default::default(),
     };
-    let desired = desired_snapshot(PROJECT, &[users, accounts]).expect("desired_snapshot");
+    let desired = desired_sqlite(&[users, accounts]).expect("desired_snapshot");
     let migs = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("greenfield diff")
         .all_migrations();
 
@@ -1010,7 +1078,7 @@ async fn golden_sqlite_create_table_and_index() {
     let users_mig = golden_find(&migs, "create_table_users");
     assert_eq!(
         users_mig.up,
-        "CREATE TABLE IF NOT EXISTS \"users\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"handle\" TEXT NOT NULL\n);\nCREATE INDEX IF NOT EXISTS \"users_deleted_at_idx\" ON \"users\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"users_updated_at_idx\" ON \"users\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"users_created_by_idx\" ON \"users\" (\"created_by\")",
+        "CREATE TABLE \"users\" (\"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"handle\" TEXT NOT NULL, \"id\" TEXT PRIMARY KEY NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL);\nCREATE INDEX IF NOT EXISTS \"users_created_by_idx\" ON \"users\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"users_deleted_at_idx\" ON \"users\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"users_updated_at_idx\" ON \"users\" (\"updated_at\")",
     );
     assert_eq!(users_mig.down.as_deref(), Some(r#"DROP TABLE "users""#));
 
@@ -1018,7 +1086,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zero-migrate:enc:randomised:k1:string */,\n  \"secret_masked\" TEXT /* zero-migrate:mask:kind=full,classification=pii */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id)\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
+        "CREATE TABLE \"accounts\" (\"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" BLOB /* zero-migrate:enc:randomised:k1:string */, \"secret_masked\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT, \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
     );
     assert_eq!(
         accounts_mig.down.as_deref(),
@@ -1070,9 +1138,9 @@ async fn golden_sqlite_add_column() {
         ..Default::default()
     });
     let (live, ownership) = golden_live(std::slice::from_ref(&v1));
-    let desired2 = desired_snapshot(PROJECT, &[v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[v2]).expect("v2 desired");
     let migs = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect("add-column diff")
         .all_migrations();
 
@@ -1157,9 +1225,9 @@ async fn golden_sqlite_drops() {
         runtime_options: Default::default(),
     };
     let (live, ownership) = golden_live(&[live_accounts, gone]);
-    let desired = desired_snapshot(PROJECT, &[desired_accounts]).expect("desired");
+    let desired = desired_sqlite(&[desired_accounts]).expect("desired");
     let migs = sqlite_author()
-        .diff(&desired, &live, &ownership, &[])
+        .diff(&desired, &live, &ownership, &[], &effective_policy())
         .expect("drop diff")
         .all_migrations();
 
@@ -1198,7 +1266,7 @@ async fn golden_sqlite_drops() {
 /// 2. **FOREIGN KEY — a LEGITIMATE differ-only rebuild, NOT a column drift.** A `ref`
 ///    also declares a deferred FK. `SQLite` has no `ALTER TABLE ADD CONSTRAINT`, so the
 ///    full declarative differ reconciles the new FK via a 12-step table REBUILD
-///    (`add foreign key accounts.owner_fkey`). The `ifNotExists` existence-guard
+///    (`add foreign key accounts.accounts_owner_fkey`). The `ifNotExists` existence-guard
 ///    DELIBERATELY does NOT add this FK (a present column is a `SatisfiedNoop`; a `ref`
 ///    adds no FK via `ALTER`). So the guard and the full differ AGREE on the column and
 ///    DIVERGE on the FK — by design. This is the honest contour the report must state:
@@ -1235,10 +1303,16 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
 
     let p = paths("differ_string_to_ref_noop");
     let be = backend(&p);
-    let first = desired_snapshot(PROJECT, &[users.clone(), accounts_v1])
+    let first = desired_sqlite(&[users.clone(), accounts_v1])
         .expect("v1 desired (users + accounts.owner:string)");
     let first_plan = sqlite_author()
-        .diff(&first, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &first,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("v1 diff");
     for m in &first_plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -1283,9 +1357,9 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired2 = desired_snapshot(PROJECT, &[users, accounts_v2]).expect("v2 desired");
+    let desired2 = desired_sqlite(&[users, accounts_v2]).expect("v2 desired");
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, &[])
+        .diff(&desired2, &live, &ownership, &[], &effective_policy())
         .expect(
             "a within-TEXT-affinity facet change (string→ref) against the REAL introspected \
              live snapshot must NOT drift — the differ folds both sides through \
@@ -1325,7 +1399,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
     );
     let reason = &plan.rebuilds[0].spec.reason;
     assert!(
-        reason.contains("foreign key") && reason.contains("owner_fkey"),
+        reason.contains("foreign key") && reason.contains("accounts_owner_fkey"),
         "the single rebuild is the FK add, not a phantom type change: {reason:?}"
     );
     assert!(

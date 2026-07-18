@@ -150,9 +150,15 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
     );
 
     let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
-    let error = IrAuthor::new("main", OWNER, SqlDialect::Sqlite)
-        .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
-        .expect_err("different live SQLite collations must reject a composite FK");
+    let error = IrAuthor::new(
+        "main",
+        OWNER,
+        SqlDialect::Sqlite,
+        &zero_migrate::confined_no_inject_policy("main")
+            .expect("SQLite collation no-inject policy composes"),
+    )
+    .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
+    .expect_err("different live SQLite collations must reject a composite FK");
     assert!(
         error
             .to_string()
@@ -245,11 +251,17 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
         }
 
         let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
-        let error = IrAuthor::new(&schema, OWNER, SqlDialect::Postgres)
-            .lower(&composite_fk_ir("postgres_collation_fk"), &live)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-            .expect_err("different live PostgreSQL collations must reject a composite FK");
+        let error = IrAuthor::new(
+            &schema,
+            OWNER,
+            SqlDialect::Postgres,
+            &zero_migrate::confined_no_inject_policy(&schema)
+                .expect("Postgres collation no-inject policy composes"),
+        )
+        .lower(&composite_fk_ir("postgres_collation_fk"), &live)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+        .expect_err("different live PostgreSQL collations must reject a composite FK");
         if !error.contains("exact catalog collation differs")
             || !error.contains("pg_catalog.POSIX local")
             || !error.contains("pg_catalog.C target")

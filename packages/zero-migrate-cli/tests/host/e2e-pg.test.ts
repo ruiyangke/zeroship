@@ -31,6 +31,7 @@ import { dirname, join } from "node:path";
 
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { table, t } from "zero-migrate";
+import { NO_INJECT_POLICY_CEILING } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -107,6 +108,7 @@ async function applyAndAnchors(
       projectSchema: schema,
       driver: DRIVER,
       registry: {},
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       appliedBy: "deploy",
       nameFallback: "create_gadgets",
     });
@@ -145,6 +147,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       projectSchema: schema,
       driver: DRIVER,
       registry: {},
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_gadgets",
@@ -222,6 +225,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver: DRIVER,
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       migrations: [mig as never],
       nameFallbacks: ["create_gadgets"],
     });

@@ -5,7 +5,7 @@
 // callback:
 //
 //   import { apply, plan, status, history, validate } from "zero-migrate-cli";
-//   await apply({ migration, ownerApp, projectSchema, driver: { kind:"postgres", url } });
+//   await apply({ migration, ownerApp, projectSchema, policyCeiling, driver: { kind:"postgres", url } });
 //
 // The flow for `apply`:
 //   1. the pure-JS RECORDER (`zero-migrate/internal/recorder`, from the DSL package)
@@ -102,8 +102,9 @@ export interface HostApplyOptions {
   /** The project's `{ table: owner_app }` registry (ownership check).
    *  Defaults to `{}` (a fresh single-app project). */
   registry?: Record<string, string>;
-  /** Optional table-shape policy ceiling enforced while validating the migration. */
-  policyCeiling?: string;
+  /** Required trusted table-shape policy ceiling. Callers that want author-owned
+   *  shape must explicitly supply a no-inject ceiling. */
+  policyCeiling: string;
   /** The migrator role to `SET ROLE` under (least-privilege apply). Optional. */
   migratorRole?: string;
   /** Whether destructive changes are pre-approved. Default `false`. */
@@ -117,12 +118,26 @@ export interface HostApplyOptions {
 /** The typed `applyIr` reply — re-exported from the generated addon DTOs. */
 export type ApplyOutcome = ApplyReply;
 
+/** Fail fast at the JavaScript boundary too; TypeScript's required property does
+ * not protect plain JavaScript callers. */
+function assertExplicitPolicyCeiling(
+  value: unknown,
+  verb: "apply" | "status",
+): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `zero-migrate-cli: ${verb} requires an explicit policyCeiling (pass an injecting or no-inject policy document)`,
+    );
+  }
+}
+
 /**
  * Author the envelope (pure JS) then drive the addon's host-authoring `applyIr`
  * over the chosen driver — the full apply. Resolves to the typed
  * `ApplyReply`. The pinned session is always closed (success or throw).
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
+  assertExplicitPolicyCeiling(opts.policyCeiling, "apply");
   const addon = loadAddon();
   const priorMigrations = opts.priorMigrations ?? [];
   if (
@@ -280,22 +295,49 @@ export function plan(opts: HostPlanOptions): PlanReport {
   };
 }
 
-/** Options for {@link status}/{@link history}. */
-export interface HostStatusOptions {
+/** Inputs shared by both forms of {@link status}. */
+interface HostStatusBaseOptions {
   ownerApp: string;
   projectSchema: string;
   driver: DriverConfig;
   registry?: Record<string, string>;
+}
+
+/** Plan-aware status reconciles authored migrations through the same explicit
+ * policy ceiling used by {@link apply}. */
+export interface HostReconciledStatusOptions extends HostStatusBaseOptions {
   /** Ordered migration modules to reconcile as complete lowered plans. When
-   *  omitted, `status` preserves the legacy journal-only read behavior. */
-  migrations?: readonly MigrationModule[];
+   *  present, `status` returns plan-aware reconciliation. */
+  migrations: readonly MigrationModule[];
   /** Optional filename-derived fallback name for each migration. Must be the
    *  same length as `migrations` when supplied. */
   nameFallbacks?: readonly string[];
-  /** Optional table-shape policy ceiling; use the same value as apply. */
-  policyCeiling?: string;
+  /** Required trusted table-shape ceiling; use the same bytes as apply. */
+  policyCeiling: string;
   /** Legacy single fallback used when `nameFallbacks[index]` is absent. */
   nameFallback?: string;
+}
+
+/** Journal-only status does not lower authored migrations and therefore has no
+ * table-shape policy input. */
+export interface HostJournalStatusOptions extends HostStatusBaseOptions {
+  migrations?: undefined;
+  nameFallbacks?: never;
+  policyCeiling?: never;
+  nameFallback?: never;
+}
+
+/** Options for {@link status}. */
+export type HostStatusOptions =
+  | HostReconciledStatusOptions
+  | HostJournalStatusOptions;
+
+/** Options for {@link history}; history reads the journal and does not lower a
+ * migration set. */
+export interface HostHistoryOptions {
+  ownerApp: string;
+  projectSchema: string;
+  driver: DriverConfig;
 }
 
 /**
@@ -308,6 +350,9 @@ export interface HostStatusOptions {
  * `migrations` returns journal-only status.
  */
 export async function status(opts: HostStatusOptions): Promise<StatusReply> {
+  if (opts.migrations !== undefined) {
+    assertExplicitPolicyCeiling(opts.policyCeiling, "status");
+  }
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
@@ -349,7 +394,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
 
 /** `history` — the journal audit trail over the host driver. Returns the
  *  typed `HistoryReply` (no JSON parse; `eventSeq` is a `bigint`). */
-export async function history(opts: HostStatusOptions): Promise<HistoryReply> {
+export async function history(opts: HostHistoryOptions): Promise<HistoryReply> {
   if (opts.driver.kind !== "postgres") {
     throw new Error("zero-migrate-cli: history supports only PostgreSQL");
   }

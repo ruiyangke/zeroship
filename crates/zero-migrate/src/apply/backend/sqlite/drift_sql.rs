@@ -1765,6 +1765,7 @@ mod tests {
         );
         let desired = ir_fk_constraint_snapshot_for_columns(
             "ignored_by_sqlite",
+            "child",
             Some("fk_child_parent"),
             &["tenant".to_string(), "order".to_string()],
             "Parent",

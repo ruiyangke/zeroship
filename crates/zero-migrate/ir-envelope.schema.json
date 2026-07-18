@@ -4529,6 +4529,13 @@
               "type": "null"
             }
           ]
+        },
+        "name": {
+          "description": "Optional explicit foreign-key constraint name. Absent ⇒ the name is\nderived (`<table>_<column>_fkey`). Lets authors override the portable\ntable-qualified default without dropping to table-level `foreignKeys`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

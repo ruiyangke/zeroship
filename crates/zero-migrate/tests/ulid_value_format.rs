@@ -87,9 +87,14 @@ fn bare_type_id_ir(table: &str) -> MigrationIr {
 }
 
 fn lower_create_for_schema(dialect: SqlDialect, schema: &str, ir: &MigrationIr) -> String {
-    let migrations = IrAuthor::new(schema, "app_ulid_samples", dialect)
-        .lower(ir, &LiveSchema::default())
-        .expect("value-format create table must lower");
+    let migrations = IrAuthor::new(
+        schema,
+        "app_ulid_samples",
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(ir, &LiveSchema::default())
+    .expect("value-format create table must lower");
     assert_eq!(migrations.len(), 1);
     migrations.into_iter().next().unwrap().up
 }
@@ -112,9 +117,14 @@ fn lower_add(dialect: SqlDialect, table: &str) -> String {
         }]
     }))
     .expect("ULID add-column IR must deserialize");
-    let migrations = IrAuthor::new("app", "app_ulid_samples", dialect)
-        .lower(&ir, &LiveSchema::default())
-        .expect("ULID add column must lower");
+    let migrations = IrAuthor::new(
+        "app",
+        "app_ulid_samples",
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("ULID add column must lower");
     assert_eq!(migrations.len(), 1);
     migrations.into_iter().next().unwrap().up
 }

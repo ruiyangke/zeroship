@@ -808,6 +808,7 @@ const REF_ACTIONS: readonly RefAction[] = [
 type ColumnReferenceFacet = Readonly<{
   table: string;
   column: string;
+  name?: string;
   onDelete?: RefAction;
   onUpdate?: RefAction;
 }>;
@@ -921,7 +922,7 @@ class ColumnDefImpl implements ColumnDefType {
   references(
     table: string,
     column: string,
-    options: { onDelete?: RefAction; onUpdate?: RefAction } = {},
+    options: { onDelete?: RefAction; onUpdate?: RefAction; name?: string } = {},
   ): ColumnDefImpl {
     requireString(table, "t.*.references(table, column, options): table");
     if (table.length === 0) {
@@ -938,9 +939,13 @@ class ColumnDefImpl implements ColumnDefType {
       );
     }
     requirePlainObject(options, "t.*.references(table, column, options): options");
+    if (options.name !== undefined) {
+      requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
+    }
     const reference = compact({
       table,
       column,
+      name: options.name,
       onDelete: requireReferenceAction(
         options.onDelete,
         "t.*.references(table, column, { onDelete })",

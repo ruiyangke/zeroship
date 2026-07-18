@@ -66,6 +66,10 @@ fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
 }
 
+fn effective_policy() -> zero_migrate::EffectivePolicy {
+    zero_migrate::zeroship_confined_ceiling()
+}
+
 fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
     d.ownership
         .iter()
@@ -113,9 +117,15 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
         runtime_options: Default::default(),
     };
 
-    let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
+    let desired = desired_snapshot(PROJECT, &[mk()], &effective_policy()).expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff");
 
     let p = paths("vector_blob");
@@ -141,9 +151,9 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     // proves on its side.
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
-    let desired2 = desired_snapshot(PROJECT, &[mk()]).expect("re-desired");
+    let desired2 = desired_snapshot(PROJECT, &[mk()], &effective_policy()).expect("re-desired");
     let plan2 = sqlite_author()
-        .diff(&desired2, &live, &own, &[])
+        .diff(&desired2, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
@@ -181,10 +191,16 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = desired_snapshot(PROJECT, &[mk()])
+    let desired = desired_snapshot(PROJECT, &[mk()], &effective_policy())
         .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff with innerProduct metric must succeed on the SQLite engine path");
 
     let p = paths("vector_ip");
@@ -221,9 +237,15 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
+    let desired = desired_snapshot(PROJECT, &[mk()], &effective_policy()).expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff");
 
     let p = paths("geo_blob");
@@ -261,9 +283,9 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     // A re-diff against the REAL introspected live snapshot → ZERO drift.
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
-    let desired2 = desired_snapshot(PROJECT, &[mk()]).expect("re-desired");
+    let desired2 = desired_snapshot(PROJECT, &[mk()], &effective_policy()).expect("re-desired");
     let plan2 = sqlite_author()
-        .diff(&desired2, &live, &own, &[])
+        .diff(&desired2, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
@@ -309,9 +331,16 @@ async fn fts_field_applies_cleanly_on_sqlite() {
     // `__fts` GIN index. (Using the PG-default `desired_snapshot` here is exactly the
     // pre-fix bug — it would emit the broken `__fts` index.)
     let desired =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite).expect("desired");
+        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite, &effective_policy())
+            .expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff");
 
     let p = paths("fts_sqlite");
@@ -371,9 +400,10 @@ async fn fts_field_applies_cleanly_on_sqlite() {
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
     let desired2 =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite).expect("re-desired");
+        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite, &effective_policy())
+            .expect("re-desired");
     let plan2 = sqlite_author()
-        .diff(&desired2, &live, &own, &[])
+        .diff(&desired2, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),

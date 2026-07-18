@@ -8,7 +8,7 @@
 //! every op through the shared snapshot-builder + DDL emitter, `render/lower.rs`). So
 //! the facade hands the envelope + provenance here; this module runs the SAME
 //! fail-closed LOAD GATE + LOWER the IR envelope deploy path runs
-//! (`IrAuthor::new(schema, app, dialect).load_and_lower(bytes, app, &registry, &live,
+//! (`IrAuthor::new(schema, app, dialect, effective).load_and_lower(bytes, app, &registry, &live,
 //! None)`), and the resulting `Migration.checksum` is `Checksum::of_ir` folded by
 //! Rust over the canonical op list + the server-stamped `owner_app`. The JS side emits
 //! ops; Rust owns the checksum — exactly the invariant the pure-JS recorder
@@ -25,13 +25,14 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::journal::{AppliedEntry, Phase};
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::migration::Migration;
+#[cfg(test)]
 use zero_migrate::model::table_shape::confined_no_inject_policy;
 use zero_migrate::ops::status::PlanStatusManifest;
 #[cfg(any(feature = "napi", test))]
 use zero_migrate::ops::status::{AppliedPlanStatus, ReconciledPlanState};
 use zero_migrate::{
-    effective_policy_from_ceiling_toml, fold_ops_onto, resolve_create_table_policy, FoldError,
-    GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
+    effective_policy_from_ceiling_toml, fold_ops_onto, resolve_create_table_policy,
+    EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
 };
 
 /// Map the wire dialect spelling to the render [`SqlDialect`]. Unknown → `Err`.
@@ -124,10 +125,9 @@ pub(crate) fn require_applied_prefix(
 ///   ownership check); an empty object `{}` on a fresh single-app project.
 /// - `policy_ceiling_toml` — the **policy input**: the host's `RootCeiling` document
 ///   (TOML) that drives table-shape injection. The engine constructs NO default
-///   ceiling: `None` injects nothing (the author-owned shape passes through); `Some`
-///   composes the ceiling (against an empty draft) into the `EffectivePolicy` whose
-///   `injects_for(object)` drives column/index/PK injection. The monorepo caller
-///   passes zeroship's confined ceiling here (Phase 3).
+///   ceiling: the caller explicitly supplies either an injecting ceiling or a
+///   no-inject ceiling. It composes into the `EffectivePolicy` whose
+///   `injects_for(object)` drives column/index/PK injection.
 ///
 /// # Errors
 /// A JSON `Err(message)` on: an unknown dialect, a malformed registry, a malformed
@@ -140,7 +140,7 @@ pub fn lower_envelope_to_plan(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
 ) -> Result<LoweredArtifact, String> {
     lower_envelope_to_plan_with_live(
         envelope_json,
@@ -162,7 +162,7 @@ pub fn lower_envelope_to_plan_with_live(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
     live: &LiveSchema,
 ) -> Result<LoweredArtifact, String> {
     lower_envelope_to_plan_with_live_and_resolved_ir(
@@ -184,42 +184,36 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
     live: &LiveSchema,
 ) -> Result<(LoweredArtifact, MigrationIr), String> {
     let dialect = parse_sql_dialect(dialect)?;
     let registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
         .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
 
-    // **System-shape fold (mirrors the pure-JS recorder's fold).** The
-    // pure-JS host recorder drains ONLY the author-declared columns — the
-    // platform-managed system fields (`id`/`created_at`/`updated_at`/`version`/…)
-    // + the `["id"]` PRIMARY KEY are injected by `resolve_create_table_policy` off the
-    // host-supplied POLICY CEILING (the `EffectivePolicy`'s `injects_for`), NOT by the
+    // **Policy-shape fold (mirrors the pure-JS recorder's fold).** The
+    // pure-JS host recorder drains ONLY the author-declared columns. Every
+    // policy-owned column, pinned primary key, and index is injected by
+    // `resolve_create_table_policy` from the host-supplied POLICY CEILING (the
+    // `EffectivePolicy`'s `injects_for`), NOT by the
     // JS DSL. The engine hardcodes no ceiling: the monorepo passes zeroship's confined
     // ceiling. The native IR envelope on disk is post-fold (the recorder folds before
     // writing); the host path folds here so the addon lowers the SAME resolved shape —
-    // otherwise the confined table-shape guard rejects a createTable missing its system
+    // otherwise the table-shape guard rejects a createTable missing policy-owned
     // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
-    // sees the system fields (they are platform-owned).
+    // sees those injected columns.
     //
     // Injection and guard share this one composed `EffectivePolicy`; the load gate
     // no longer takes a separate `PolicyProfile` (retired in Cut 3).
-    let effective = match policy_ceiling_toml {
-        Some(toml) => effective_policy_from_ceiling_toml(toml)?,
-        // No ceiling supplied ⇒ inject nothing (author-owned shape). The engine
-        // constructs no default inject ceiling of its own, but still supplies the
-        // scoped confined namespace grants the guard requires.
-        None => confined_no_inject_policy(project_schema)?,
-    };
+    let effective = effective_policy_from_ceiling_toml(policy_ceiling_toml)?;
     let raw_ir: MigrationIr = serde_json::from_str(envelope_json)
         .map_err(|e| format!("envelope is not a MigrationIr document: {e}"))?;
-    let resolved = resolve_create_table_policy(&raw_ir, &effective)
+    let resolved = resolve_create_table_policy(&raw_ir, &effective, project_schema)
         .map_err(|e| format!("table-shape resolve failed: {e}"))?;
     let resolved_bytes = serde_json::to_string(&resolved)
         .map_err(|e| format!("resolved IR failed to serialize: {e}"))?;
 
-    let author = IrAuthor::new(project_schema, owner_app, dialect);
+    let author = IrAuthor::new(project_schema, owner_app, dialect, &effective);
 
     // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
     // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
@@ -248,7 +242,7 @@ pub fn lower_ordered_envelopes_to_plans(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
@@ -281,7 +275,7 @@ pub fn lower_ordered_envelopes_to_plans_for_apply(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
@@ -307,13 +301,14 @@ fn lower_ordered_envelopes_to_plans_inner(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
     strict_historical_apply: bool,
 ) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
+    let effective = effective_policy_from_ceiling_toml(policy_ceiling_toml)?;
     let mut registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
         .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
     let base_snapshot = snapshot;
@@ -363,6 +358,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                     project_schema,
                     owner_app,
                     resolved_contracts,
+                    &effective,
                 )? {
                     return Err(original_error);
                 }
@@ -408,7 +404,13 @@ fn lower_ordered_envelopes_to_plans_inner(
             for (op, inflight) in projection_ops {
                 let mut candidate = pending_ops.clone();
                 candidate.push(op.clone());
-                match fold_ops_onto(&base_snapshot, &candidate, dialect, project_schema) {
+                match fold_ops_onto(
+                    &base_snapshot,
+                    &candidate,
+                    dialect,
+                    project_schema,
+                    &effective,
+                ) {
                     Ok(_) => pending_ops = candidate,
                     Err(error)
                         if inflight
@@ -438,13 +440,19 @@ fn lower_ordered_envelopes_to_plans_inner(
                     owner_app,
                 );
             }
-            let projected = fold_ops_onto(&base_snapshot, &pending_ops, dialect, project_schema)
-                .map_err(|error| {
-                    format!(
-                        "failed to rebuild projected schema after envelope {:?}: {error}",
-                        resolved.name
-                    )
-                })?;
+            let projected = fold_ops_onto(
+                &base_snapshot,
+                &pending_ops,
+                dialect,
+                project_schema,
+                &effective,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to rebuild projected schema after envelope {:?}: {error}",
+                    resolved.name
+                )
+            })?;
             let logical_columns = live.logical_columns.clone();
             live = live_schema_with_ownership(projected, owner_app, &registry);
             live.logical_columns = logical_columns;
@@ -591,6 +599,7 @@ fn normalize_historical_renames(
     project_schema: &str,
     owner_app: &str,
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    effective: &EffectivePolicy,
 ) -> Result<bool, String> {
     let mut changed = false;
     // Undo authored renames from the final catalog back to the migration's
@@ -652,6 +661,7 @@ fn normalize_historical_renames(
                         &terminal.contract.ty,
                         dialect,
                         project_schema,
+                        effective,
                     )?;
                     let snapshot = live
                         .table_snapshots
@@ -686,6 +696,7 @@ fn normalize_historical_renames(
                         project_schema,
                         owner_app,
                         resolved_contracts,
+                        effective,
                     )?;
                 }
             }
@@ -703,6 +714,7 @@ fn synthetic_rename_source_column(
     durable_ddl_type: &str,
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
     if dialect == SqlDialect::Postgres {
         if let Some((data_type, _authored_ddl_type)) =
@@ -739,7 +751,7 @@ fn synthetic_rename_source_column(
         schema: None,
         existence_guard: None,
     };
-    let projected = fold_ops_onto(&base, &[add], dialect, project_schema)
+    let projected = fold_ops_onto(&base, &[add], dialect, project_schema, effective)
         .map_err(|error| format!("failed to reconstruct historical rename type: {error}"))?;
     let mut column = projected
         .tables
@@ -1130,7 +1142,7 @@ pub fn lower_envelope_to_migrations(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
 ) -> Result<Vec<Migration>, String> {
     let artifact = lower_envelope_to_plan(
         envelope_json,
@@ -1168,7 +1180,7 @@ pub fn lower_envelope_to_migrations_json(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: Option<&str>,
+    policy_ceiling_toml: &str,
 ) -> Result<String, String> {
     let migrations = lower_envelope_to_migrations(
         envelope_json,
@@ -1186,6 +1198,33 @@ pub fn lower_envelope_to_migrations_json(
 mod tests {
     use super::*;
     use zero_migrate::{BindValue, PlanStep};
+
+    const NO_INJECT_CEILING_TOML: &str = r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#;
+
+    fn no_inject_policy(schema: &str) -> zero_migrate::EffectivePolicy {
+        confined_no_inject_policy(schema).expect("test no-inject policy composes")
+    }
 
     // A minimal create-first envelope: one `createTable` op. Mirrors what the pure-JS
     // host recorder emits (ir_version stamped from the addon's `irVersion()` floor).
@@ -1440,6 +1479,7 @@ mod tests {
             "app_test",
             "app_test",
             &[],
+            &no_inject_policy("app_test"),
         )
         .expect("historical chain normalizes"));
         let names: Vec<&str> = live.table_snapshots["items"]
@@ -1544,7 +1584,7 @@ mod tests {
                 "app_test",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                None,
+                NO_INJECT_CEILING_TOML,
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("named type rename lowers from its live source type");
@@ -1591,7 +1631,7 @@ mod tests {
                 "AppSpace",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                None,
+                NO_INJECT_CEILING_TOML,
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("quoted named type identity lowers without comparing DDL quotes");
@@ -1638,7 +1678,7 @@ mod tests {
                 "app_test",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                None,
+                NO_INJECT_CEILING_TOML,
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("named type rename lowers from the original table");
@@ -1650,7 +1690,7 @@ mod tests {
                 "app_test",
                 "postgres",
                 "{}",
-                None,
+                NO_INJECT_CEILING_TOML,
                 zero_migrate::model::snapshot::SchemaSnapshot::default(),
                 &entries,
                 std::slice::from_ref(&terminal),
@@ -1710,7 +1750,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &decimal_rename_live("numeric(20,2)"),
         )
         .expect_err("a decimal rename must not normalize authored modifiers to the live type");
@@ -1727,7 +1767,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &decimal_rename_live("decimal(20,4)"),
         )
         .expect("decimal and numeric are equivalent PostgreSQL spellings");
@@ -1852,7 +1892,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &initial_live,
         )
         .expect("decimal rename lowers from the original table");
@@ -1864,7 +1904,7 @@ mod tests {
             "app_test",
             "postgres",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &entries,
             std::slice::from_ref(&terminal),
@@ -1907,7 +1947,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &rename_live(&["a"]),
         )
         .expect("first rename lowers");
@@ -1917,7 +1957,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &rename_live(&["b"]),
         )
         .expect("second rename lowers after the first resolves");
@@ -1936,7 +1976,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             final_snapshot,
             &entries,
             &terminals,
@@ -1972,7 +2012,7 @@ mod tests {
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             &rename_live(&["a"]),
         )
         .expect("rename lowers from its source shape");
@@ -2055,7 +2095,7 @@ mod tests {
     #[test]
     fn unknown_dialect_is_an_err_not_a_panic() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", Some(CEILING));
+        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", CEILING);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("unknown dialect"));
     }
@@ -2063,14 +2103,8 @@ mod tests {
     #[test]
     fn malformed_registry_is_an_err() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let r = lower_envelope_to_migrations(
-            &env,
-            "app_x",
-            "app_x",
-            "postgres",
-            "[1,2,3]",
-            Some(CEILING),
-        );
+        let r =
+            lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]", CEILING);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("registry_json"));
     }
@@ -2084,7 +2118,7 @@ mod tests {
             "app_x",
             "postgres",
             "{}",
-            Some("this is not = valid toml ["),
+            "this is not = valid toml [",
         );
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("policy"));
@@ -2108,7 +2142,7 @@ mod tests {
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            Some(CEILING),
+            CEILING,
         )
         .expect_err("flat migration consumers must not receive a comment-only marker");
         assert!(error.contains("complete ordered plan"), "{error}");
@@ -2119,7 +2153,7 @@ mod tests {
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            Some(CEILING),
+            CEILING,
         )
         .expect("the complete plan retains the structured operation");
         assert!(matches!(
@@ -2147,7 +2181,7 @@ mod tests {
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            Some(CEILING),
+            CEILING,
         )
         .expect_err("flat migration consumers must not lose identity synchronization");
         assert!(error.contains("complete ordered plan"), "{error}");
@@ -2158,7 +2192,7 @@ mod tests {
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            Some(CEILING),
+            CEILING,
         )
         .expect("the complete plan retains identity synchronization");
         assert!(matches!(
@@ -2182,7 +2216,7 @@ mod tests {
             "app_widgets",
             "postgres",
             "{}",
-            Some(CEILING),
+            CEILING,
         ) {
             Ok(migs) => {
                 assert!(
@@ -2217,7 +2251,7 @@ mod tests {
                 "app_widgets",
                 "postgres",
                 r#"{"widgets":"app_widgets"}"#,
-                None,
+                NO_INJECT_CEILING_TOML,
             )
             .expect("the complete data surface lowers to a plan")
         };
@@ -2340,7 +2374,7 @@ mod tests {
             "app_status_ordered",
             "postgres",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
@@ -2401,7 +2435,7 @@ mod tests {
             owner,
             "postgres",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
@@ -2413,9 +2447,15 @@ mod tests {
             [zero_migrate::PlanStep::Backfill { .. }]
         ));
 
-        let declaration_artifact =
-            lower_envelope_to_plan(&declaration, owner, owner, "postgres", "{}", None)
-                .expect("the declaration plan lowers independently");
+        let declaration_artifact = lower_envelope_to_plan(
+            &declaration,
+            owner,
+            owner,
+            "postgres",
+            "{}",
+            NO_INJECT_CEILING_TOML,
+        )
+        .expect("the declaration plan lowers independently");
         let declaration_manifest =
             PlanStatusManifest::from_applied_plan(&declaration_artifact.plan, &[])
                 .expect("the declaration manifest projects");
@@ -2431,16 +2471,20 @@ mod tests {
             .collect::<Vec<_>>();
         let declaration_ir: MigrationIr =
             serde_json::from_str(&declaration).expect("the declaration IR parses");
-        let live_snapshot =
-            zero_migrate::fold_ops(&declaration_ir.ops, SqlDialect::Postgres, owner)
-                .expect("the applied declaration is reflected in the catalog");
+        let live_snapshot = zero_migrate::fold_ops(
+            &declaration_ir.ops,
+            SqlDialect::Postgres,
+            owner,
+            &no_inject_policy(owner),
+        )
+        .expect("the applied declaration is reflected in the catalog");
         let applied_prefix_plans = lower_ordered_envelopes_to_plans(
             &[declaration, backfill.clone()],
             owner,
             owner,
             "postgres",
             &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
-            None,
+            NO_INJECT_CEILING_TOML,
             live_snapshot,
             &completed_declaration,
             &[],
@@ -2457,7 +2501,7 @@ mod tests {
             owner,
             "postgres",
             &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
-            None,
+            NO_INJECT_CEILING_TOML,
         )
         .expect_err("a backfill-only lower without the declaration map must fail closed");
         assert!(
@@ -2472,8 +2516,15 @@ mod tests {
 
         let owner = "app_status_inflight_absent";
         let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let create = lower_envelope_to_plan(&envelopes[0], owner, owner, "mysql", "{}", None)
-            .expect("create plan lowers");
+        let create = lower_envelope_to_plan(
+            &envelopes[0],
+            owner,
+            owner,
+            "mysql",
+            "{}",
+            NO_INJECT_CEILING_TOML,
+        )
+        .expect("create plan lowers");
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
             .expect("create manifest projects");
         let started = AppliedEntry {
@@ -2490,7 +2541,7 @@ mod tests {
             owner,
             "mysql",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
@@ -2509,10 +2560,22 @@ mod tests {
         let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Mysql, owner)
-            .expect("the inflight create is reflected in the catalog");
-        let create = lower_envelope_to_plan(&envelopes[0], owner, owner, "mysql", "{}", None)
-            .expect("create plan lowers");
+        let live_snapshot = zero_migrate::fold_ops(
+            &create_ir.ops,
+            SqlDialect::Mysql,
+            owner,
+            &no_inject_policy(owner),
+        )
+        .expect("the inflight create is reflected in the catalog");
+        let create = lower_envelope_to_plan(
+            &envelopes[0],
+            owner,
+            owner,
+            "mysql",
+            "{}",
+            NO_INJECT_CEILING_TOML,
+        )
+        .expect("create plan lowers");
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
             .expect("create manifest projects");
         let started = AppliedEntry {
@@ -2529,7 +2592,7 @@ mod tests {
             owner,
             "mysql",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
             live_snapshot,
             &journal_entries,
             &[],
@@ -2570,16 +2633,20 @@ mod tests {
         let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot =
-            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, "app_status_ordered")
-                .expect("applied create is reflected in the catalog");
+        let live_snapshot = zero_migrate::fold_ops(
+            &create_ir.ops,
+            SqlDialect::Postgres,
+            "app_status_ordered",
+            &no_inject_policy("app_status_ordered"),
+        )
+        .expect("applied create is reflected in the catalog");
         let applied_create = lower_envelope_to_plan(
             &envelopes[0],
             "app_status_ordered",
             "app_status_ordered",
             "postgres",
             "{}",
-            None,
+            NO_INJECT_CEILING_TOML,
         )
         .expect("create plan lowers");
         let manifest =
@@ -2606,7 +2673,7 @@ mod tests {
             "app_status_ordered",
             "postgres",
             r#"{"status_widgets":"app_status_ordered"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             live_snapshot,
             &journal_entries,
             &[],
@@ -2661,10 +2728,22 @@ mod tests {
         .to_string();
 
         let mixed_ir: MigrationIr = serde_json::from_str(&mixed).expect("mixed envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(&mixed_ir.ops[..2], SqlDialect::Postgres, owner)
-            .expect("the applied create/add prefix is reflected in the catalog");
-        let initial = lower_envelope_to_plan(&mixed, owner, owner, "postgres", "{}", None)
-            .expect("mixed plan lowers from its original catalog state");
+        let live_snapshot = zero_migrate::fold_ops(
+            &mixed_ir.ops[..2],
+            SqlDialect::Postgres,
+            owner,
+            &no_inject_policy(owner),
+        )
+        .expect("the applied create/add prefix is reflected in the catalog");
+        let initial = lower_envelope_to_plan(
+            &mixed,
+            owner,
+            owner,
+            "postgres",
+            "{}",
+            NO_INJECT_CEILING_TOML,
+        )
+        .expect("mixed plan lowers from its original catalog state");
         let manifest = PlanStatusManifest::from_applied_plan(&initial.plan, &initial.depends_on)
             .expect("mixed manifest projects");
         assert_eq!(
@@ -2692,7 +2771,7 @@ mod tests {
             owner,
             "postgres",
             r#"{"status_widgets":"app_status_partial"}"#,
-            None,
+            NO_INJECT_CEILING_TOML,
             live_snapshot,
             &journal_entries,
             &[],
@@ -2728,7 +2807,7 @@ mod tests {
                 "app_prefix_gate",
                 "postgres",
                 "{}",
-                None,
+                NO_INJECT_CEILING_TOML,
             )
             .expect("test envelope lowers");
             PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)

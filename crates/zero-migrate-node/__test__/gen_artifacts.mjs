@@ -125,8 +125,13 @@ const desc = JSON.parse(gen.runtimeJson);
 assert(desc.version === 1, 'runtime descriptor is v1');
 const widgets = desc.collections.widgets;
 assert(widgets && typeof widgets === 'object', 'widgets collection present');
-const SYS = ['id', 'created_at', 'updated_at', 'created_by', 'updated_by', 'version', 'deleted_at'];
-for (const s of SYS) {
+const injectedColumnBlock = CONFINED_CEILING_TOML.match(/columns = \[([\s\S]*?)\]\nindexes = \[/);
+assert(injectedColumnBlock, 'test ceiling exposes an inject columns block');
+const injectedFields = [...injectedColumnBlock[1].matchAll(/\bname\s*=\s*"([^"]+)"/g)].map(
+  (match) => match[1],
+);
+assert(injectedFields.length > 0, 'test ceiling injects at least one field');
+for (const s of injectedFields) {
   assert(widgets.fields[s] && typeof widgets.fields[s].type === 'string', `system field ${s} present with string type`);
 }
 assert(widgets.fields.label.type === 'string', 'label field type string');
@@ -141,7 +146,7 @@ assert(gen.envDbTs.includes('label: t.text(),'), 'renders label builder chain');
 assert(gen.envDbTs.includes('count: t.int().notNull(),'), 'renders count builder chain');
 assert(gen.envDbTs.includes('satisfies Record<string, CreateTableArgs>'), 'checks table payloads against CreateTableArgs');
 assert(gen.envDbTs.includes('export { schema };'), 'exports the passive schema map');
-for (const s of SYS) {
+for (const s of injectedFields) {
   assert(gen.envDbTs.includes(`${s}:`), `env.db.ts renders resolved system field ${s}`);
 }
 assert(!gen.envDbTs.includes('t.id('), 'never emits removed t.id');
@@ -150,13 +155,20 @@ assert(!gen.envDbTs.includes('t.ref('), 'never emits removed t.ref');
 assert(!gen.envDbTs.includes('.create('), 'never executes a lifecycle operation');
 
 // (4) error arms fail soft (never throw).
-const both = addon.genArtifacts({ envelopes: [envelope], descriptors: [descriptor] });
+const both = addon.genArtifacts({
+  envelopes: [envelope],
+  descriptors: [descriptor],
+  policyCeilingToml: CONFINED_CEILING_TOML,
+});
 assert(!both.ok && typeof both.error === 'string', 'both-arms is a soft error');
 
-const neither = addon.genArtifacts({});
+const neither = addon.genArtifacts({ policyCeilingToml: CONFINED_CEILING_TOML });
 assert(!neither.ok && typeof neither.error === 'string', 'no-arm is a soft error');
 
-const malformed = addon.genArtifacts({ envelopes: [{ ir_version: addon.irVersion(), ops: 'nope' }] });
+const malformed = addon.genArtifacts({
+  envelopes: [{ ir_version: addon.irVersion(), ops: 'nope' }],
+  policyCeilingToml: CONFINED_CEILING_TOML,
+});
 assert(!malformed.ok && typeof malformed.error === 'string', 'malformed envelope is a soft error');
 
 console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + soft-error arms (through the real .node)');

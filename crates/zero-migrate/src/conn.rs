@@ -195,6 +195,21 @@ impl ExecutorConfig {
         }
     }
 
+    /// Replace the guard's composed policy with the deployment's explicit policy.
+    ///
+    /// Host paths that resolve or lower authored IR under an
+    /// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy)
+    /// must carry that same policy into the executor's defense-in-depth guard.
+    /// This setter changes no project identity or confinement mode.
+    #[must_use]
+    pub fn with_effective_policy(
+        mut self,
+        effective: zero_migrate_policy::EffectivePolicy,
+    ) -> Self {
+        self.effective = effective;
+        self
+    }
+
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
     /// guard site uses (the two static first-passes + rollback + the
     /// precondition evaluator).

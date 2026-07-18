@@ -451,10 +451,15 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             |err| panic!("{kind} must validate on PG under platform scope: {err:?}"),
         );
 
-        let migrations = IrAuthor::new("app", "app_test", SqlDialect::Postgres)
-            .with_schema_scope(platform_scope.clone())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|err| panic!("{kind} must render on PG: {err:?}"));
+        let migrations = IrAuthor::new(
+            "app",
+            "app_test",
+            SqlDialect::Postgres,
+            &zero_migrate::zeroship_no_inject_ceiling(),
+        )
+        .with_schema_scope(platform_scope.clone())
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|err| panic!("{kind} must render on PG: {err:?}"));
         assert!(
             migrations
                 .iter()

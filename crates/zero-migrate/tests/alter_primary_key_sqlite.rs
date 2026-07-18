@@ -46,9 +46,14 @@ fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
         }]
     }))
     .expect("primary-key IR parses");
-    let plan = IrAuthor::new("app", "app_test", SqlDialect::Sqlite)
-        .lower_plan(&ir, &LiveSchema::default())
-        .expect("primary-key IR lowers");
+    let plan = IrAuthor::new(
+        "app",
+        "app_test",
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_plan(&ir, &LiveSchema::default())
+    .expect("primary-key IR lowers");
     match plan.steps.into_iter().next().expect("one step") {
         PlanStep::AlterPrimaryKey(step) => step,
         other => panic!("expected AlterPrimaryKey step, got {other:?}"),

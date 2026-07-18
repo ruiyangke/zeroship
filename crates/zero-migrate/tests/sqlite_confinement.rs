@@ -557,7 +557,7 @@ async fn reindex_no_arg_rejected_in_creator_up() {
 /// CREATE INDEX fires `SQLITE_REINDEX` intrinsically; the relaxation must let that
 /// pass on `main`, or the create fails to apply.
 #[compio::test]
-async fn create_table_with_system_field_indexes_applies_under_creator_up() {
+async fn create_table_with_policy_injected_indexes_applies_under_creator_up() {
     let p = paths("sysidx_create");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");

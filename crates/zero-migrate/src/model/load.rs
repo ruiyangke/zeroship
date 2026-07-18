@@ -421,6 +421,7 @@ mod tests {
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
             &crate::model::table_shape::zeroship_confined_ceiling(),
+            "app",
         )
         .expect("confined createTable resolves system fields");
         let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");

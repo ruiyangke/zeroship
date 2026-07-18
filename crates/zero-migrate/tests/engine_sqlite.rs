@@ -29,9 +29,10 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
-    DryRunError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
-    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
+    zeroship_confined_ceiling, Approval, CollectionDescriptor, DeclarativeApplyError,
+    DeclarativeAuthor, DryRunError, EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor,
+    GuardConfig, IndexDescriptor, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
+    ShadowConfig, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -72,10 +73,27 @@ fn guard_cfg() -> GuardConfig {
     GuardConfig::confined_sqlite(PROJECT)
 }
 
+fn effective_policy() -> EffectivePolicy {
+    zeroship_confined_ceiling()
+}
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        SqlDialect::Sqlite,
+        effective,
+    )
+}
+
 /// Live snapshot + ownership reconstructed from a descriptor set (the `desired_snapshot`
 /// machinery the engine uses), used as the "current live" for an incremental deploy.
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("desired_snapshot");
+    let d = desired_snapshot(PROJECT, descs, &effective_policy()).expect("desired_snapshot");
     let ownership: HashMap<String, String> = d
         .ownership
         .iter()
@@ -143,7 +161,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
     let cfg = exec_cfg();
 
     // --- Deploy 1: create the table THROUGH THE ENGINE (plain additive set). ---
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -152,11 +170,19 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     assert!(plan1.rebuilds.is_empty(), "first deploy has no rebuild");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("engine applies the create-table deploy");
 
@@ -166,7 +192,13 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.accounts (id, amount) VALUES ('a1', 1), ('a2', 2), ('a3', 3)")
+        .exec(
+            "INSERT INTO main.accounts \
+             (id, created_at, updated_at, version, amount) VALUES \
+             ('a1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 1), \
+             ('a2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 2), \
+             ('a3', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 3)",
+        )
         .await
         .expect("seed rows");
 
@@ -181,7 +213,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
 
     // --- Deploy 2: the type change. The engine PLANS a rebuild and DRIVES it. ---
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let plan2 = engine
         .plan_declarative(
             &desired2,
@@ -190,6 +222,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan_declarative carries the rebuild (no fail-close)");
     assert_eq!(
@@ -202,7 +235,14 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
     // Drive it through the GENERIC public engine path. A rebuild is destructive ⇒
     // the gate demands approval; supply it (the caller's decision — NOT auto-approved).
     let outcome = engine
-        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("engine drives the SQLite rebuild end-to-end");
     assert!(
@@ -268,7 +308,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
     let cfg = exec_cfg();
 
     // Deploy 1 (create) + seed a row.
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -277,10 +317,18 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply create");
     be.actor()
@@ -288,13 +336,17 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.ledger (id, balance) VALUES ('r1', 42)")
+        .exec(
+            "INSERT INTO main.ledger \
+             (id, created_at, updated_at, version, balance) VALUES \
+             ('r1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 42)",
+        )
         .await
         .expect("seed");
 
     // Deploy 2: the rebuild. Apply it once.
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let plan2 = engine
         .plan_declarative(
             &desired2,
@@ -303,12 +355,20 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan rebuild");
     assert_eq!(plan2.rebuilds.len(), 1);
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();
     let first = engine
-        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("first rebuild apply");
     assert!(
@@ -319,7 +379,14 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
     // (b) Re-apply the SAME plan instance: the versioned-journal `completed` gate
     //     skips it — applied stays empty, the rebuild version is reported skipped.
     let second = engine
-        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("re-applying the same rebuild plan is a no-op");
     assert!(
@@ -342,6 +409,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("re-plan from live");
     assert!(
@@ -404,7 +472,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
     let cfg = exec_cfg();
 
     // Deploy 1: create + seed a row whose `email` value must follow the rename.
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -413,10 +481,18 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply create");
     be.actor()
@@ -424,13 +500,17 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.contacts (id, email) VALUES ('c1', 'a@b.test')")
+        .exec(
+            "INSERT INTO main.contacts \
+             (id, created_at, updated_at, version, email) VALUES \
+             ('c1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'a@b.test')",
+        )
         .await
         .expect("seed");
 
     // Deploy 2: the RENAME, expressed as a hint (the creator's signed intent).
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hints = vec![RenameHint {
         table: "contacts".into(),
         from: "email".into(),
@@ -444,6 +524,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
             &sqlite_author(),
             &hints,
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan rename");
 
@@ -471,7 +552,14 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
 
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();
     engine
-        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("engine drives the rename-rebuild");
 
@@ -542,7 +630,7 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
     let engine = MigrationEngine::new();
     let cfg = exec_cfg();
 
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -551,15 +639,23 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply create");
 
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let plan2 = engine
         .plan_declarative(
             &desired2,
@@ -568,6 +664,7 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan rebuild");
     assert_eq!(plan2.rebuilds.len(), 1);
@@ -575,7 +672,14 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
 
     // Apply WITHOUT approval — the engine must refuse (ApprovalRequired), not auto-approve.
     let err = engine
-        .apply_declarative(&plan2, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect_err("a destructive rebuild without approval must be refused");
     assert!(
@@ -681,7 +785,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
     let cfg = exec_cfg();
 
     // --- v1: create + seed. ---
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -690,10 +794,18 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan v1");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply v1");
     be.actor()
@@ -701,13 +813,18 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.accounts (id, amount, legacy) VALUES ('a1', 10, 1), ('a2', 20, 2)")
+        .exec(
+            "INSERT INTO main.accounts \
+             (id, created_at, updated_at, version, amount, legacy) VALUES \
+             ('a1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 10, 1), \
+             ('a2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 20, 2)",
+        )
         .await
         .expect("seed rows");
 
     // --- v2: the DESTRUCTIVE drop of `legacy` (a rebuild), APPROVED. ---
     let (live1, own1) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let plan2 = engine
         .plan_declarative(
             &desired2,
@@ -716,6 +833,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan v2");
     assert_eq!(plan2.rebuilds.len(), 1, "the destructive drop is a rebuild");
@@ -727,7 +845,14 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
     );
     // Roll-FORWARD: we approve and APPLY the destructive step (not roll anything back).
     engine
-        .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply the approved destructive rebuild (roll-forward)");
 
@@ -756,7 +881,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 
     // --- v3: an additive forward migration on the POST-destructive shape. ---
     let (live2, own2) = live_from(&v2);
-    let desired3 = desired_snapshot(PROJECT, &v3).expect("v3 desired");
+    let desired3 = desired_snapshot(PROJECT, &v3, &effective_policy()).expect("v3 desired");
     let plan3 = engine
         .plan_declarative(
             &desired3,
@@ -765,6 +890,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan v3");
     assert!(
@@ -778,7 +904,14 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
         .map(|i| i.migration.version.as_str().to_string())
         .collect::<Vec<_>>();
     engine
-        .apply_declarative(&plan3, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan3,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply v3 (additive forward, no rollback)");
 
@@ -868,7 +1001,7 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
     let cfg = exec_cfg();
 
     // --- Cold deploy: create both collections. ---
-    let desired1 = desired_snapshot(PROJECT, &set()).expect("desired");
+    let desired1 = desired_snapshot(PROJECT, &set(), &effective_policy()).expect("desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -877,10 +1010,18 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan cold");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply cold deploy");
 
@@ -900,11 +1041,19 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         assert_eq!(rows.len(), 1, "table {t} must exist after the cold deploy");
     }
     be.actor()
-        .exec("INSERT INTO main.users (id, handle) VALUES ('u1', 'ada')")
+        .exec(
+            "INSERT INTO main.users \
+             (id, created_at, updated_at, version, handle) VALUES \
+             ('u1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada')",
+        )
         .await
         .expect("seed users");
     be.actor()
-        .exec("INSERT INTO main.posts (id, title) VALUES ('p1', 'hello')")
+        .exec(
+            "INSERT INTO main.posts \
+             (id, created_at, updated_at, version, title) VALUES \
+             ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'hello')",
+        )
         .await
         .expect("seed posts");
 
@@ -917,9 +1066,17 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         .iter()
         .map(|(t, a)| (t.clone(), a.clone()))
         .collect();
-    let desired2 = desired_snapshot(PROJECT, &set()).expect("re-desired");
+    let desired2 = desired_snapshot(PROJECT, &set(), &effective_policy()).expect("re-desired");
     let plan2 = engine
-        .plan_declarative(&desired2, &live, &own, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &own,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+            &effective_policy(),
+        )
         .expect("warm re-plan");
     assert!(
         plan2.plain.items.is_empty() && plan2.rebuilds.is_empty(),
@@ -935,7 +1092,14 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
     );
     // Applying the empty plan is a clean no-op.
     engine
-        .apply_declarative(&plan2, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("applying the empty warm-reboot plan is a no-op");
 
@@ -946,11 +1110,19 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.users (id, handle) VALUES ('u2', 'grace')")
+        .exec(
+            "INSERT INTO main.users \
+             (id, created_at, updated_at, version, handle) VALUES \
+             ('u2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'grace')",
+        )
         .await
         .expect("users still usable after warm reboot");
     be.actor()
-        .exec("INSERT INTO main.posts (id, title) VALUES ('p2', 'world')")
+        .exec(
+            "INSERT INTO main.posts \
+             (id, created_at, updated_at, version, title) VALUES \
+             ('p2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'world')",
+        )
         .await
         .expect("posts still usable after warm reboot");
     let users_n = be
@@ -1115,7 +1287,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
         indexes: vec![],
         runtime_options: Default::default(),
     }]);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let plan = engine
         .plan_declarative(
             &desired2,
@@ -1124,10 +1296,18 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan additive on top of baseline");
     engine
-        .apply_declarative(&plan, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("additive deploy applies cleanly on the baselined file");
     assert!(
@@ -1172,7 +1352,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
         indexes: vec![],
         runtime_options: Default::default(),
     }];
-    let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -1181,10 +1361,18 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     engine
-        .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::None,
+            &be,
+            &cfg,
+            "deployer",
+        )
         .await
         .expect("apply create");
 
@@ -1255,7 +1443,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
         indexes: vec![],
         runtime_options: Default::default(),
     }];
-    let desired = desired_snapshot(PROJECT, &v1).expect("v1 desired");
+    let desired = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -1264,6 +1452,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
             &sqlite_author(),
             &[],
             &guard_cfg(),
+            &effective_policy(),
         )
         .expect("plan create");
     let err = engine

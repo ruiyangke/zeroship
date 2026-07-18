@@ -35,6 +35,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { NO_INJECT_POLICY_CEILING } from "./policy.js";
 
 // The migration module. Under Bun we import the `.ts` directly; under plain Node
 // (which can't import `.ts`) we import the `bun build`-transpiled `.mjs` sibling.
@@ -152,6 +153,7 @@ async function main() {
       projectSchema: hostSchema,
       driver: { kind: "postgres", url: PG_URL },
       registry: {},
+      policyCeiling: NO_INJECT_POLICY_CEILING,
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",

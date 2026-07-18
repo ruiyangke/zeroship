@@ -387,15 +387,15 @@ TableSnapshot {
     ],
     constraints: [
         ConstraintSnapshot {
-            name: "articles_pkey",
-            kind: "PRIMARY KEY",
-            definition: "PRIMARY KEY (id)",
+            name: "articles_author_fkey",
+            kind: "FOREIGN KEY",
+            definition: "FOREIGN KEY (author) REFERENCES authors(id)",
             comment: None,
         },
         ConstraintSnapshot {
-            name: "author_fkey",
-            kind: "FOREIGN KEY",
-            definition: "FOREIGN KEY (author) REFERENCES authors(id)",
+            name: "articles_pkey",
+            kind: "PRIMARY KEY",
+            definition: "PRIMARY KEY (id)",
             comment: None,
         },
     ],

@@ -18,6 +18,11 @@ use zero_migrate::{
 const PROJECT_SCHEMA: &str = "app";
 const OWNER: &str = "app_typed_references";
 
+fn no_inject_policy() -> zero_migrate::EffectivePolicy {
+    zero_migrate::confined_no_inject_policy(PROJECT_SCHEMA)
+        .expect("typed-reference no-inject policy composes")
+}
+
 fn ir(name: &str, ops: Vec<Value>) -> MigrationIr {
     serde_json::from_value(json!({
         "ir_version": CURRENT_IR_VERSION,
@@ -222,7 +227,7 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
     let ir = typed_reference_matrix_ir();
 
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| panic!("{dialect:?} typed references must lower: {error}"));
         let child = create_sql(&migrations, dialect, "children");
@@ -301,8 +306,13 @@ fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
     let ir = typed_reference_matrix_ir();
 
     for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
-        let snapshot = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA)
-            .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
+        let snapshot = fold_ops(
+            &ir.ops,
+            dialect,
+            PROJECT_SCHEMA,
+            &zero_migrate::zeroship_no_inject_ceiling(),
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
         let parent = snapshot.tables["uuid_parents"]
             .columns
             .iter()
@@ -328,9 +338,14 @@ fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
 #[test]
 fn mysql_format_typed_references_accept_delete_and_update_actions_without_checks() {
     let ir = typed_reference_matrix_ir();
-    let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(&ir, &LiveSchema::default())
-        .expect("MySQL format-typed references with actions must lower");
+    let migrations = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &no_inject_policy(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("MySQL format-typed references with actions must lower");
     let child = create_sql(&migrations, SqlDialect::Mysql, "children");
 
     assert!(
@@ -405,9 +420,14 @@ fn sqlite_inlines_a_typed_reference_to_a_later_declared_parent() {
         None,
     );
 
-    let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Sqlite)
-        .lower(&ir, &LiveSchema::default())
-        .expect("SQLite must inline a logically proven forward reference");
+    let migrations = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Sqlite,
+        &no_inject_policy(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("SQLite must inline a logically proven forward reference");
     let child_position = migrations
         .iter()
         .position(|migration| migration.up.starts_with("CREATE TABLE \"children\""))
@@ -568,7 +588,7 @@ fn explicit_non_id_reference_column_is_preserved() {
     );
 
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| panic!("{dialect:?} non-id reference must lower: {error}"));
         let child = create_sql(&migrations, dialect, "children");
@@ -761,7 +781,12 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
         live.advance_logical_columns(&target, SqlDialect::Postgres, PROJECT_SCHEMA, None)
             .expect("record the authored formatted key contract");
 
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Postgres)
+        let migrations = IrAuthor::new(
+            PROJECT_SCHEMA,
+            OWNER,
+            SqlDialect::Postgres,
+            &no_inject_policy(),
+        )
             .lower(&child_ir, &live)
             .unwrap_or_else(|error| {
                 panic!(
@@ -821,7 +846,13 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 ),
             ],
         );
-        let parent_migrations = IrAuthor::new(&schema, OWNER, SqlDialect::Postgres)
+        let parent_migrations = IrAuthor::new(
+            &schema,
+            OWNER,
+            SqlDialect::Postgres,
+            &zero_migrate::confined_no_inject_policy(&schema)
+                .expect("cross-schema no-inject policy composes"),
+        )
             .lower(&targets, &LiveSchema::default())
             .map_err(|error| format!("lower formatted parent keys: {error}"))?;
         for migration in &parent_migrations {
@@ -876,7 +907,13 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 None,
             )],
         );
-        let child_migrations = IrAuthor::new(&schema, OWNER, SqlDialect::Postgres)
+        let child_migrations = IrAuthor::new(
+            &schema,
+            OWNER,
+            SqlDialect::Postgres,
+            &zero_migrate::confined_no_inject_policy(&schema)
+                .expect("cross-schema no-inject policy composes"),
+        )
             .lower(&children, &live)
             .map_err(|error| format!("lower typed child references from live catalog: {error}"))?;
         let marker = format!("CREATE TABLE \"{schema}\".\"children\"");
@@ -945,7 +982,7 @@ fn format_bearing_reference_to_unmanaged_target_without_authored_metadata_is_rej
     ] {
         let ir = unmanaged_child_ir(name, local_type, local_format);
         for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
-            let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+            let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
                 .lower(&ir, &unmanaged_live("text"))
                 .expect_err("a catalog type cannot supply missing authored format metadata");
             let rendered = error.to_string();
@@ -995,9 +1032,14 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
         },
     );
     let live = LiveSchema::from_catalog_snapshot(snapshot, "external_owner");
-    let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(&ir, &live)
-        .expect("live VARCHAR(36) must validate the recorded UUID reference contract");
+    let migrations = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &no_inject_policy(),
+    )
+    .lower(&ir, &live)
+    .expect("live VARCHAR(36) must validate the recorded UUID reference contract");
     let child = create_sql(&migrations, SqlDialect::Mysql, "children");
     assert!(
         child.contains("`uuid_parent_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin"),
@@ -1019,9 +1061,14 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
         character_set: "utf8mb4".to_string(),
         collation: "utf8mb4_bin".to_string(),
     });
-    let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(&ir, &mismatched_live)
-        .expect_err("binary collations on different MySQL character sets are incompatible");
+    let error = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &no_inject_policy(),
+    )
+    .lower(&ir, &mismatched_live)
+    .expect_err("binary collations on different MySQL character sets are incompatible");
     let rendered = error.to_string();
     assert!(
         rendered.contains("ascii / ascii_bin") && rendered.contains("utf8mb4 / utf8mb4_bin"),
@@ -1040,7 +1087,7 @@ fn primitive_unmanaged_reference_is_catalog_validated_without_type_inference() {
         (SqlDialect::Mysql, "int", "`parent_id` INT"),
         (SqlDialect::Sqlite, "integer", "\"parent_id\" INTEGER"),
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &unmanaged_live(live_type))
             .unwrap_or_else(|error| {
                 panic!("matching unmanaged primitive target must lower on {dialect:?}: {error}")
@@ -1052,7 +1099,7 @@ fn primitive_unmanaged_reference_is_catalog_validated_without_type_inference() {
         );
         assert_reference_target(child, dialect, "unmanaged_parents");
 
-        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &unmanaged_live("text"))
             .expect_err("an incompatible live primitive target must be rejected");
         let rendered = error.to_string();
@@ -1087,7 +1134,7 @@ fn primitive_unmanaged_reference_requires_a_live_single_column_candidate_key() {
         target.constraints.clear();
         target.indexes.clear();
 
-        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect)
+        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &live)
             .expect_err("an ordinary live column is not independently referenceable");
         let rendered = error.to_string();
@@ -1102,9 +1149,14 @@ fn primitive_unmanaged_reference_requires_a_live_single_column_candidate_key() {
 fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
     for (local_type, live_type) in [("int", "bigint"), ("bigInt", "integer")] {
         let ir = unmanaged_child_ir("sqlite_integer_width_mismatch", local_type, None);
-        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Sqlite)
-            .lower(&ir, &unmanaged_live(live_type))
-            .expect_err("SQLite affinity must not erase an unmanaged key's integer width");
+        let error = IrAuthor::new(
+            PROJECT_SCHEMA,
+            OWNER,
+            SqlDialect::Sqlite,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &unmanaged_live(live_type))
+        .expect_err("SQLite affinity must not erase an unmanaged key's integer width");
         let rendered = error.to_string();
         assert!(
             rendered.contains("local type") && rendered.contains("live target type"),
@@ -1113,9 +1165,83 @@ fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
     }
 
     let bigint = unmanaged_child_ir("sqlite_bigint_width_match", "bigInt", None);
-    IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Sqlite)
-        .lower(&bigint, &unmanaged_live("bigint"))
-        .expect("an explicitly declared unmanaged BIGINT target matches local bigInt");
+    IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Sqlite,
+        &no_inject_policy(),
+    )
+    .lower(&bigint, &unmanaged_live("bigint"))
+    .expect("an explicitly declared unmanaged BIGINT target matches local bigInt");
+}
+
+#[test]
+fn sqlite_declared_bigint_reference_matches_managed_integer_storage() {
+    let target = ir(
+        "create_managed_parents",
+        vec![create_table(
+            "managed_parents",
+            vec![column("id", "bigInt", false, None, None, None)],
+            Some(&["id"]),
+        )],
+    );
+    let child = ir(
+        "reference_managed_parents",
+        vec![create_table(
+            "children",
+            vec![column(
+                "parent_id",
+                "bigInt",
+                true,
+                None,
+                None,
+                Some(reference("managed_parents", None, None)),
+            )],
+            None,
+        )],
+    );
+
+    // zero-migrate renders every managed SQLite integer width as INTEGER, so
+    // PRAGMA reports this physical spelling even though the retained project
+    // declaration remains bigInt.
+    let mut snapshot = SchemaSnapshot::default();
+    snapshot.tables.insert(
+        "managed_parents".to_string(),
+        TableSnapshot {
+            columns: vec![ColumnSnapshot {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            constraints: vec![ConstraintSnapshot {
+                name: "managed_parents_pkey".to_string(),
+                kind: "PRIMARY KEY".to_string(),
+                definition: "PRIMARY KEY (id)".to_string(),
+                comment: None,
+            }],
+            indexes: Vec::new(),
+            runtime_options: Default::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: None,
+        },
+    );
+    let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
+    live.advance_logical_columns(&target, SqlDialect::Sqlite, PROJECT_SCHEMA, None)
+        .expect("record the managed BIGINT key contract");
+
+    let migrations = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Sqlite,
+        &no_inject_policy(),
+    )
+    .lower(&child, &live)
+    .expect("managed logical width must validate its engine-rendered INTEGER storage");
+    let sql = create_sql(&migrations, SqlDialect::Sqlite, "children");
+    assert!(sql.contains(r#""parent_id" INTEGER"#), "{sql}");
+    assert_reference_target(sql, SqlDialect::Sqlite, "managed_parents");
 }
 
 #[test]
@@ -1136,16 +1262,26 @@ fn mysql_unmanaged_text_reference_validates_catalog_collation_intent() {
         )],
     );
 
-    IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(
-            &case_insensitive,
-            &unmanaged_live_with_case_sensitive("text", Some(false)),
-        )
-        .expect("matching MySQL case-insensitive catalog collation must validate");
+    IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &no_inject_policy(),
+    )
+    .lower(
+        &case_insensitive,
+        &unmanaged_live_with_case_sensitive("text", Some(false)),
+    )
+    .expect("matching MySQL case-insensitive catalog collation must validate");
 
-    let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(&case_insensitive, &unmanaged_live("text"))
-        .expect_err("a binary MySQL target must not satisfy caseSensitive=false");
+    let error = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &no_inject_policy(),
+    )
+    .lower(&case_insensitive, &unmanaged_live("text"))
+    .expect_err("a binary MySQL target must not satisfy caseSensitive=false");
     assert!(
         error.to_string().contains("collation intent"),
         "unexpected MySQL collation diagnostic: {error}"

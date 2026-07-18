@@ -161,10 +161,9 @@ pub struct ApplyRequest {
     /// fully applied in the journal.
     pub prior_envelopes: Option<Vec<JsonValue>>,
     /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
-    /// table-shape injection. The engine constructs NO default ceiling — `None`
-    /// injects nothing (the author-owned shape passes through); the monorepo caller
-    /// passes zeroship's confined ceiling here (Phase 3).
-    pub policy_ceiling: Option<String>,
+    /// table-shape injection. This is required: callers that want author-owned
+    /// shape must explicitly supply a no-inject ceiling.
+    pub policy_ceiling: String,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,
     /// The audit `applied_by` label recorded in the journal.
@@ -206,8 +205,8 @@ pub struct StatusIrRequest {
     pub registry: std::collections::HashMap<String, String>,
     /// Ordered authored migration envelopes to reconcile.
     pub envelopes: Vec<JsonValue>,
-    /// Optional policy ceiling, identical to the `applyIr` lowering input.
-    pub policy_ceiling: Option<String>,
+    /// Required policy ceiling, identical to the `applyIr` lowering input.
+    pub policy_ceiling: String,
 }
 
 /// The typed request for completing or aborting one outstanding PostgreSQL
@@ -533,8 +532,8 @@ pub struct CollectionDescriptorDto {
     pub name: String,
     /// The declaring app id (`app_…`). The migrate producer stamps ownership from it.
     pub owner_app: String,
-    /// The declared fields (columns), excluding platform system fields (injected by
-    /// the producer).
+    /// The author-declared fields. Columns owned by the active policy are supplied
+    /// by the producer's explicit policy-resolution pass.
     pub fields: Vec<FieldDescriptorDto>,
     /// The declared named indexes.
     pub indexes: Option<Vec<IndexDescriptorDto>>,
@@ -564,13 +563,11 @@ pub struct GenArtifactsSource {
     pub project_schema: Option<String>,
     /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
     /// the confined system-shape injection — the SAME shape the apply path's
-    /// `policyCeilingToml` uses. The engine bakes in NO default confined preset:
-    /// `None` injects nothing (author-owned shape passes through); `Some` composes
-    /// the ceiling whose `injects_for` prepends the seven platform system columns +
-    /// `["id"]` PK + the system indexes into every created table (applied identically
-    /// on the envelope and descriptor sides, so the two stay byte-identical). The
-    /// monorepo caller passes zeroship's confined schema-emit ceiling here.
-    pub policy_ceiling_toml: Option<String>,
+    /// `policyCeilingToml` uses. This is required: callers explicitly supply either
+    /// an injecting ceiling or a no-inject ceiling. Its `injects_for` supplies each
+    /// covered table's columns, pinned primary key, and indexes (applied identically
+    /// on the envelope and descriptor sides, so the two stay byte-identical).
+    pub policy_ceiling_toml: String,
 }
 
 /// The typed reply for the sync, DB-free `loadVerify` gate. Never throws for a

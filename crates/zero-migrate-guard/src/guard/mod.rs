@@ -201,6 +201,14 @@ impl GuardConfig {
         }
     }
 
+    /// Replace the composed policy while preserving this config's dialect and
+    /// host-selected guard mode.
+    #[must_use]
+    pub fn with_effective_policy(mut self, effective: EffectivePolicy) -> Self {
+        self.effective = effective;
+        self
+    }
+
     /// Construct a **Confined** guard whose PDP is a caller-composed
     /// [`EffectivePolicy`] (Phase 2 Step 2b). Unlike [`GuardConfig::confined`] — whose
     /// effective policy is derived from the fixed confined [`VendorCapabilities`] and

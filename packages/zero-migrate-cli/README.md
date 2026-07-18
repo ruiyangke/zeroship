@@ -32,24 +32,35 @@ zero-migrate --version
 ```
 
 `apply`, `status`, `history`, and `resolve-pending` read `--database-url` or the
-`DATABASE_URL` environment variable. Destructive steps (deletes, backfills)
-require `--approve`.
+`DATABASE_URL` environment variable. `apply` and `status` also require an
+operator-controlled table-shape policy file through `--policy-ceiling`; there
+is no embedded default. Destructive steps (deletes, backfills) require
+`--approve`.
 
 ```
-DATABASE_URL=postgres://... zero-migrate apply --approve
+DATABASE_URL=postgres://... zero-migrate apply \
+  --policy-ceiling ./policy.toml \
+  --approve
 ```
+
+An explicit no-inject ceiling is `policy_version = 1`; save those bytes in the
+file when every table column is author-owned.
 
 ## Programmatic
 
 ```ts
+import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_orders.js";
+
+const policyCeiling = await readFile("./policy.toml", "utf8");
 
 await apply({
   migration,
   ownerApp: "app_orders",
   projectSchema: "app_orders",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
+  policyCeiling,
   approved: false,
 });
 ```

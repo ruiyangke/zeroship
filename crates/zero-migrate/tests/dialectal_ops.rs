@@ -63,9 +63,14 @@ fn pg_only_ir() -> MigrationIr {
 
 #[test]
 fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
-    let pg_steps = IrAuthor::new(PROJECT, APP, SqlDialect::Postgres)
-        .lower_steps(&pg_only_ir(), &LiveSchema::default())
-        .expect("PG dialectal leg lowers");
+    let pg_steps = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_steps(&pg_only_ir(), &LiveSchema::default())
+    .expect("PG dialectal leg lowers");
     assert_eq!(pg_steps.len(), 1);
     let PlanStep::Ddl(mig) = &pg_steps[0] else {
         panic!("PG hnsw leg should lower to DDL: {pg_steps:#?}");
@@ -77,9 +82,14 @@ fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
     );
 
     for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let steps = IrAuthor::new(PROJECT, APP, dialect)
-            .lower_steps(&pg_only_ir(), &LiveSchema::default())
-            .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
+        let steps = IrAuthor::new(
+            PROJECT,
+            APP,
+            dialect,
+            &zero_migrate::zeroship_no_inject_ceiling(),
+        )
+        .lower_steps(&pg_only_ir(), &LiveSchema::default())
+        .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
         assert!(
             steps.is_empty(),
             "{dialect:?} should skip absent pg-only leg"
@@ -117,8 +127,9 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
-    let resolved = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
-        .expect("test IR resolves");
+    let resolved =
+        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), PROJECT)
+            .expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -135,7 +146,12 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
         ]}"#,
     );
 
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("SQLite should lower createTable and skip absent dialectal leg");

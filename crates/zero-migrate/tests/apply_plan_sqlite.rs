@@ -17,8 +17,8 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
-    FieldDescriptor, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
+    Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, FieldDescriptor,
+    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
 };
 use zero_migrate::{PlanStep, RenameStep};
 
@@ -54,8 +54,26 @@ fn exec_cfg() -> ExecutorConfig {
     ExecutorConfig::new(PROJECT, PROJECT)
 }
 
+fn effective_policy() -> zero_migrate::EffectivePolicy {
+    zero_migrate::zeroship_confined_ceiling()
+}
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &zero_migrate::EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        SqlDialect::Sqlite,
+        effective,
+    )
+}
+
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
-    let d = desired_snapshot(PROJECT, descs).expect("first-deploy desired_snapshot");
+    let d = desired_snapshot(PROJECT, descs, &effective_policy())
+        .expect("first-deploy desired_snapshot");
     let ownership: HashMap<String, String> = d
         .ownership
         .iter()
@@ -65,9 +83,15 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
 }
 
 async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
-    let desired = desired_snapshot(PROJECT, desc).expect("desired");
+    let desired = desired_snapshot(PROJECT, desc, &effective_policy()).expect("desired");
     let plan = sqlite_author()
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("first-deploy diff");
     for m in &plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
@@ -102,21 +126,32 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
         .await
         .expect("mode");
     be.actor()
-        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada'), ('p2', 'grace')")
+        .exec(
+            "INSERT INTO main.people \
+             (id, created_at, updated_at, version, nickname) VALUES \
+             ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada'), \
+             ('p2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'grace')",
+        )
         .await
         .expect("seed rows");
 
     // Produce the SqliteRebuild via the differ + a rename hint (one rebuild, no
     // PG expand-contract on SQLite).
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
         table: "people".into(),
         from: "nickname".into(),
         to: "handle".into(),
     };
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .diff(
+            &desired2,
+            &live,
+            &ownership,
+            std::slice::from_ref(&hint),
+            &effective_policy(),
+        )
         .expect("rename diff");
     assert_eq!(
         plan.rebuilds.len(),
@@ -255,21 +290,31 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             .await
             .expect("mode");
         be_a.actor()
-            .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada')")
+            .exec(
+                "INSERT INTO main.people \
+                 (id, created_at, updated_at, version, nickname) VALUES \
+                 ('p1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ada')",
+            )
             .await
             .expect("seed row");
     }
 
     // 2) Build the SqliteRebuild via the differ (pure — no DB write).
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
         table: "people".into(),
         from: "nickname".into(),
         to: "handle".into(),
     };
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .diff(
+            &desired2,
+            &live,
+            &ownership,
+            std::slice::from_ref(&hint),
+            &effective_policy(),
+        )
         .expect("rename diff");
     assert_eq!(
         plan.rebuilds.len(),
@@ -347,14 +392,20 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
     apply_first_deploy(&be, &v1).await;
 
     let (live, ownership) = live_from(&v1);
-    let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
+    let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
         table: "people".into(),
         from: "nickname".into(),
         to: "handle".into(),
     };
     let plan = sqlite_author()
-        .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
+        .diff(
+            &desired2,
+            &live,
+            &ownership,
+            std::slice::from_ref(&hint),
+            &effective_policy(),
+        )
         .expect("rename diff");
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
     let engine = MigrationEngine::new();

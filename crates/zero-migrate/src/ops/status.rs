@@ -2307,9 +2307,14 @@ mod plan_status_tests {
             ]}"#,
         )
         .expect("synchronizeIdentity IR");
-        let plan = IrAuthor::new("app", "app_status", SqlDialect::Postgres)
-            .lower_plan(&ir, &LiveSchema::default())
-            .expect("synchronizeIdentity plan");
+        let plan = IrAuthor::new(
+            "app",
+            "app_status",
+            SqlDialect::Postgres,
+            &crate::zeroship_no_inject_ceiling(),
+        )
+        .lower_plan(&ir, &LiveSchema::default())
+        .expect("synchronizeIdentity plan");
 
         let projected =
             PlanStatusManifest::from_applied_plan(&plan, &[]).expect("manifest projection");

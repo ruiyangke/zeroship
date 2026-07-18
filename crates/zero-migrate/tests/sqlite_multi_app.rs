@@ -29,8 +29,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
-    SchemaSnapshot, SqliteBackend,
+    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, SchemaSnapshot,
+    SqliteBackend,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -59,6 +59,23 @@ fn backend(p: &Paths) -> SqliteBackend {
 /// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, SqlDialect::Sqlite)
+}
+
+fn effective_policy() -> zero_migrate::EffectivePolicy {
+    zero_migrate::zeroship_confined_ceiling()
+}
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &zero_migrate::EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        SqlDialect::Sqlite,
+        effective,
+    )
 }
 
 fn coll(name: &str, owner: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
@@ -91,7 +108,7 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
     let from_a = coll("shared", "app_a", vec![field("label", "string", true)]);
     let from_b = coll("shared", "app_b", vec![field("label", "string", true)]);
 
-    let desired = desired_snapshot(PROJECT, &[from_a, from_b])
+    let desired = desired_snapshot(PROJECT, &[from_a, from_b], &effective_policy())
         .expect("identical declarations union without conflict");
     // ONE merged table, owned by the smallest declarer.
     assert_eq!(
@@ -107,7 +124,13 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
 
     // The merged table APPLIES through the real backend (the owner deploys it).
     let plan = author_as("app_a")
-        .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect("diff the unioned table");
     let p = paths("redecl_apply");
     let be = backend(&p);
@@ -140,10 +163,11 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
             coll("shared", "app_a", vec![field("label", "string", true)]),
             coll("shared", "app_b", vec![field("label", "string", true)]),
         ],
+        &effective_policy(),
     )
     .expect("re-union");
     let plan2 = author_as("app_a")
-        .diff(&again_desired, &live, &own, &[])
+        .diff(&again_desired, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
@@ -166,7 +190,7 @@ async fn conflicting_declaration_is_rejected_fail_closed() {
     let from_a = coll("shared", "app_a", vec![field("label", "string", true)]);
     let from_b = coll("shared", "app_b", vec![field("count", "number", true)]);
 
-    let err = desired_snapshot(PROJECT, &[from_a, from_b])
+    let err = desired_snapshot(PROJECT, &[from_a, from_b], &effective_policy())
         .expect_err("conflicting shapes must be refused");
     match err {
         DeclarativeError::ConflictingDeclaration { table, apps } => {
@@ -197,6 +221,7 @@ async fn drop_of_table_owned_by_another_app_is_refused() {
             "app_other",
             vec![field("x", "string", true)],
         )],
+        &effective_policy(),
     )
     .expect("live desired");
     let live_ownership: HashMap<String, String> = live_desired
@@ -208,9 +233,15 @@ async fn drop_of_table_owned_by_another_app_is_refused() {
 
     // Desired: empty (the deploying app declares nothing) — but the differ must NOT
     // drop another app's live table.
-    let desired_empty = desired_snapshot(PROJECT, &[]).expect("empty desired");
+    let desired_empty = desired_snapshot(PROJECT, &[], &effective_policy()).expect("empty desired");
     let err = author_as("app_demo")
-        .diff(&desired_empty, &live_desired.snapshot, &live_ownership, &[])
+        .diff(
+            &desired_empty,
+            &live_desired.snapshot,
+            &live_ownership,
+            &[],
+            &effective_policy(),
+        )
         .expect_err("a non-owner drop of a live table must be refused");
     match err {
         DeclarativeError::NotTableOwner {
@@ -237,14 +268,21 @@ async fn drop_of_live_table_with_unknown_owner_is_refused() {
     let live_desired = desired_snapshot(
         PROJECT,
         &[coll("orphan", "app_demo", vec![field("x", "string", true)])],
+        &effective_policy(),
     )
     .expect("live desired");
 
-    let desired_empty = desired_snapshot(PROJECT, &[]).expect("empty desired");
+    let desired_empty = desired_snapshot(PROJECT, &[], &effective_policy()).expect("empty desired");
     // EMPTY ownership map — the differ cannot confirm the deploying app owns
     // `orphan`, so it fails closed rather than mass-dropping.
     let err = author_as("app_demo")
-        .diff(&desired_empty, &live_desired.snapshot, &HashMap::new(), &[])
+        .diff(
+            &desired_empty,
+            &live_desired.snapshot,
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
         .expect_err("a drop with unknown ownership must fail closed");
     match err {
         DeclarativeError::DropOfUnownedTable { table } => assert_eq!(table, "orphan"),

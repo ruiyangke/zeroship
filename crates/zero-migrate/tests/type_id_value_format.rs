@@ -70,9 +70,14 @@ fn type_id_ir(table: &str, prefix: &str) -> MigrationIr {
 }
 
 fn lower_create(dialect: SqlDialect, table: &str, prefix: &str) -> String {
-    let migrations = IrAuthor::new("app", "app_type_id_samples", dialect)
-        .lower(&type_id_ir(table, prefix), &LiveSchema::default())
-        .expect("TypeID create table must lower");
+    let migrations = IrAuthor::new(
+        "app",
+        "app_type_id_samples",
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&type_id_ir(table, prefix), &LiveSchema::default())
+    .expect("TypeID create table must lower");
     assert_eq!(migrations.len(), 1);
     migrations.into_iter().next().unwrap().up
 }
@@ -91,9 +96,14 @@ fn lower_add(dialect: SqlDialect, table: &str, prefix: &str) -> String {
         }]
     }))
     .expect("TypeID add-column IR must deserialize");
-    let migrations = IrAuthor::new("app", "app_type_id_samples", dialect)
-        .lower(&ir, &LiveSchema::default())
-        .expect("TypeID add column must lower");
+    let migrations = IrAuthor::new(
+        "app",
+        "app_type_id_samples",
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir, &LiveSchema::default())
+    .expect("TypeID add column must lower");
     assert_eq!(migrations.len(), 1);
     migrations.into_iter().next().unwrap().up
 }
@@ -222,9 +232,15 @@ async fn postgres_enforces_official_type_id_fixtures() {
     async {
         for (table, prefix) in [("bare", ""), ("prefixed", "prefix"), ("split", "pre_fix")] {
             let ir = type_id_ir(table, prefix);
-            let migrations = IrAuthor::new(&schema, "app_type_id_samples", SqlDialect::Postgres)
-                .lower(&ir, &LiveSchema::default())
-                .expect("lower PostgreSQL TypeID table");
+            let migrations = IrAuthor::new(
+                &schema,
+                "app_type_id_samples",
+                SqlDialect::Postgres,
+                &zero_migrate::confined_no_inject_policy(&schema)
+                    .expect("TypeID no-inject policy composes"),
+            )
+            .lower(&ir, &LiveSchema::default())
+            .expect("lower PostgreSQL TypeID table");
             assert_eq!(migrations.len(), 1);
             session
                 .batch(&migrations[0].up)

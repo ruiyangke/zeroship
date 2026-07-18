@@ -59,10 +59,12 @@ use crate::model::snapshot::{
     NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
+use crate::model::table_shape::ResolvedInject;
+#[cfg(test)]
+use crate::render::declarative::build_table_snapshot;
 use crate::render::declarative::{
-    build_resolved_table_snapshot, build_table_snapshot, constraintdef_cols,
-    ir_fk_constraint_snapshot_for_columns, push_primary_key_snapshot, quote_ident_if_needed,
-    CollectionDescriptor, DeclarativeError,
+    build_resolved_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot_for_columns,
+    push_primary_key_snapshot, quote_ident_if_needed, CollectionDescriptor, DeclarativeError,
 };
 use crate::render::lower::{
     author_type_override, create_index_snapshot, derived_check_constraint_name,
@@ -78,6 +80,7 @@ use crate::render::value_format::{
     catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
 use crate::schema::query::SqlDialect;
+use zero_migrate_policy::EffectivePolicy;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
 /// drift-irrelevant — it never enters `SchemaSnapshot` equality (the snapshot only
@@ -835,7 +838,9 @@ fn apply_fold_alter_primary_key(
 /// `dialect` selects the per-dialect shaping the shared builder applies (PG vs
 /// SQLite FTS folding, etc.); `project_schema` is embedded in FK `definition`s
 /// (`REFERENCES <schema>.<target>(id)`) — pass the schema the live DB is
-/// introspected under for the round-trip equality to hold.
+/// introspected under for the round-trip equality to hold. `effective` is the
+/// explicit policy used to recognize each resolved create-table injection prefix;
+/// the fold never supplies an ambient system shape.
 ///
 /// DML ops fold to no-ops; an incoherent stream is a structured [`FoldError`].
 ///
@@ -845,8 +850,15 @@ pub fn fold_ops(
     ops: &[Op],
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
-    fold_ops_onto(&SchemaSnapshot::default(), ops, dialect, project_schema)
+    fold_ops_onto(
+        &SchemaSnapshot::default(),
+        ops,
+        dialect,
+        project_schema,
+        effective,
+    )
 }
 
 /// Replay an ordered [`Op`] list on top of an existing logical snapshot.
@@ -862,6 +874,7 @@ pub fn fold_ops_onto(
     ops: &[Op],
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = base.tables.clone();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = base.partitions.clone();
@@ -983,6 +996,7 @@ pub fn fold_ops_onto(
                 indexes,
                 partition_by,
                 runtime_options,
+                schema,
                 ..
             } => {
                 if tables.contains_key(name) {
@@ -994,8 +1008,16 @@ pub fn fold_ops_onto(
                 if partitions.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
+                let effective_schema = schema.as_deref().unwrap_or(project_schema);
                 let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
-                let mut snap = build_resolved_table_snapshot(project_schema, &desc, dialect)?;
+                let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
+                    .map_err(|error| FoldError::Render(error.to_string()))?;
+                let mut snap = build_resolved_table_snapshot(
+                    effective_schema,
+                    &desc,
+                    dialect,
+                    &resolved_inject,
+                )?;
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
                     push_primary_key_snapshot(name, &mut snap, pk);
@@ -1008,14 +1030,15 @@ pub fn fold_ops_onto(
                     &mut snap,
                     &named_types,
                     dialect,
-                    project_schema,
+                    effective_schema,
+                    effective,
                 )?;
-                apply_fold_uuid_metadata(columns, &mut snap, dialect, project_schema)?;
-                apply_fold_value_format_metadata(columns, &mut snap, dialect, project_schema)?;
-                apply_fold_id_default_metadata(columns, &mut snap, dialect, project_schema)?;
+                apply_fold_uuid_metadata(columns, &mut snap, dialect, effective_schema)?;
+                apply_fold_value_format_metadata(columns, &mut snap, dialect, effective_schema)?;
+                apply_fold_id_default_metadata(columns, &mut snap, dialect, effective_schema)?;
                 fold_create_table_specs(
                     name,
-                    project_schema,
+                    effective_schema,
                     &mut snap,
                     constraints,
                     indexes,
@@ -1199,6 +1222,7 @@ pub fn fold_ops_onto(
                     *identity,
                     project_schema,
                     dialect,
+                    effective,
                 )?;
                 let source_col = IrColumn {
                     name: column.clone(),
@@ -1223,6 +1247,7 @@ pub fn fold_ops_onto(
                     &named_types,
                     dialect,
                     project_schema,
+                    effective,
                 )?;
                 apply_fold_uuid_column_metadata(&source_col, &mut col, dialect, project_schema)?;
                 apply_fold_value_format_column_metadata(
@@ -1382,6 +1407,7 @@ pub fn fold_ops_onto(
                     None,
                     project_schema,
                     dialect,
+                    effective,
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
@@ -1426,6 +1452,7 @@ pub fn fold_ops_onto(
                                 &named_types,
                                 dialect,
                                 project_schema,
+                                effective,
                             )?;
                         }
                     }
@@ -1516,7 +1543,7 @@ pub fn fold_ops_onto(
                         render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
                     IrDefault::Container { kind } => {
-                        render_container_default_for_data_type(*kind, &col.data_type)
+                        render_container_default_for_data_type(*kind, &col.data_type, dialect)
                             .map_err(fold_named_type_error)?
                     }
                     IrDefault::Json { value } => {
@@ -2036,9 +2063,11 @@ fn create_table_descriptor(
 }
 
 /// The `ColumnSnapshot`(s) for a single added field — routes ONE field through the
-/// shared `build_table_snapshot` (a one-field descriptor) and pulls the matching
+/// shared resolved snapshot builder (a one-field descriptor) and pulls the matching
 /// column out, so the default / encryption / comment sentinel is built by the shared
-/// kernel, never re-spelled. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
+/// kernel, never re-spelled. The table's active policy injection is explicit, but
+/// the one-field descriptor never matches its complete resolved prefix, so no
+/// column is injected or reshaped. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
 ///
 /// Returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
 /// shared builder injects for a masked column, so the OFFLINE fold snapshot grows the
@@ -2059,6 +2088,7 @@ fn add_column_snapshot(
     identity: Option<crate::model::ir::IdentityCol>,
     project_schema: &str,
     dialect: SqlDialect,
+    effective: &EffectivePolicy,
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
     if !dialect.supports(Capability::NonPkIdentity) && identity.is_some() {
         return Err(FoldError::Unsupported(
@@ -2089,7 +2119,9 @@ fn add_column_snapshot(
         indexes: Vec::new(),
         runtime_options: Default::default(),
     };
-    let snap = build_table_snapshot(project_schema, &desc, dialect)?;
+    let resolved_inject = ResolvedInject::for_table(effective, project_schema, table)
+        .map_err(|error| FoldError::Render(error.to_string()))?;
+    let snap = build_resolved_table_snapshot(project_schema, &desc, dialect, &resolved_inject)?;
     let sibling_name = format!("{column}_masked");
     let mut main = snap
         .columns
@@ -2230,6 +2262,7 @@ fn apply_fold_named_type_metadata(
     named_types: &NamedTypeRegistry,
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<(), FoldError> {
     for source in columns {
         if !matches!(source.ty, ColType::Enum { .. } | ColType::Domain { .. }) {
@@ -2247,6 +2280,7 @@ fn apply_fold_named_type_metadata(
             named_types,
             dialect,
             project_schema,
+            effective,
         )?;
     }
     Ok(())
@@ -2388,6 +2422,7 @@ fn apply_fold_named_type_column_metadata(
     named_types: &NamedTypeRegistry,
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<(), FoldError> {
     match &source.ty {
         ColType::Enum { name, .. } => match dialect {
@@ -2453,6 +2488,7 @@ fn apply_fold_named_type_column_metadata(
                 source.identity,
                 project_schema,
                 dialect,
+                effective,
             )?;
             col.data_type = base.data_type;
             col.ddl_type_override = base.ddl_type_override;
@@ -2587,6 +2623,7 @@ fn fold_create_table_specs(
                 }
                 let fk = ir_fk_constraint_snapshot_for_columns(
                     project_schema,
+                    table,
                     c.name.as_deref(),
                     columns,
                     references_table,
@@ -2824,6 +2861,7 @@ fn add_constraint_snapshot(
             Ok(FoldedConstraint {
                 constraint: Some(ir_fk_constraint_snapshot_for_columns(
                     project_schema,
+                    table,
                     name,
                     columns,
                     references_table,
@@ -3165,15 +3203,16 @@ fn recover_fk_policy(
 ///
 /// # Errors
 /// Any structural-incoherence [`FoldError`] [`fold_ops`] raises (the stream must
-/// be coherent first).
+/// be coherent first), or an unrepresentable inject rule in `effective`.
 pub fn fold_to_field_defs(
     ops: &[Op],
     dialect: SqlDialect,
     project_schema: &str,
+    effective: &EffectivePolicy,
 ) -> Result<BTreeMap<String, serde_json::Value>, FoldError> {
     // 1. Fail-closed coherence. `fold_ops` is the structural-coherence oracle
     //    (add-to-missing-table, drop-absent-column, duplicate-create, …).
-    fold_ops(ops, dialect, project_schema)?;
+    fold_ops(ops, dialect, project_schema, effective)?;
 
     // 2. Build a per-table FieldDescriptor map by replaying the ops' column shapes.
     //    We track FieldDescriptors (not snapshots) because the descriptor carries
@@ -3208,17 +3247,24 @@ pub fn fold_to_field_defs(
                 name,
                 columns,
                 constraints,
+                schema,
                 ..
             } => {
-                let system_prefix_len = confined_resolved_system_prefix_len(columns);
+                let effective_schema = schema.as_deref().unwrap_or(project_schema);
+                let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
+                    .map_err(|error| FoldError::Render(error.to_string()))?;
+                let injected_prefix_len = resolved_inject_prefix_len(columns, &resolved_inject);
                 let mut cols: indexmap::IndexMap<
                     String,
                     crate::render::declarative::FieldDescriptor,
                 > = indexmap::IndexMap::new();
                 for (idx, c) in columns.iter().enumerate() {
+                    let in_resolved_id_primary_key = idx < injected_prefix_len
+                        && c.name == "id"
+                        && resolved_inject.owns_id_primary_key();
                     cols.insert(
                         c.name.clone(),
-                        fold_create_column_to_field(c, idx < system_prefix_len),
+                        fold_create_column_to_field(c, in_resolved_id_primary_key),
                     );
                 }
                 tables.insert(name.clone(), cols);
@@ -3427,74 +3473,68 @@ pub fn fold_to_field_defs(
 
 fn fold_create_column_to_field(
     c: &IrColumn,
-    in_confined_system_prefix: bool,
+    in_resolved_id_primary_key: bool,
 ) -> crate::render::declarative::FieldDescriptor {
-    let mut field = ir_column_to_field(c);
-    if in_confined_system_prefix && c.name == "id" && c.id_prefix.is_some() {
+    let mut field = ir_column_to_field_resolved_create(c);
+    if in_resolved_id_primary_key && c.id_prefix.is_some() {
         field.ty = "id".to_string();
         field.required = false;
     }
     field
 }
 
-/// The zeroship CONFINED system-column prefix — `(name, data_type, nullable)` — the
-/// shape the confined ceiling's inject rule contributes. `fold` recognises this exact
-/// prefix on a resolved createTable so it can strip the platform-owned system columns
-/// back to the author's declared fields. (Zeroship-specific; the real ceiling moves
-/// to the monorepo in Phase 3, but the fold recovery must still recognise the shape
-/// it produced — kept here as a fixed const so `fold` carries no `PolicyProfile`.)
-const CONFINED_SYSTEM_COLUMNS: &[(&str, &str, bool)] = &[
-    ("id", "text", false),
-    ("created_at", "timestamp with time zone", false),
-    ("updated_at", "timestamp with time zone", false),
-    ("created_by", "text", true),
-    ("updated_by", "text", true),
-    ("version", "integer", false),
-    ("deleted_at", "timestamp with time zone", true),
-];
-
-fn confined_resolved_system_prefix_len(columns: &[IrColumn]) -> usize {
-    if columns.len() < CONFINED_SYSTEM_COLUMNS.len() {
+/// Length of the policy-resolved injected prefix carried by `columns`.
+///
+/// The create-table resolver prepends [`ResolvedInject::columns`] in canonical
+/// sealed-policy order. A legacy ID-prefix declaration may retain `id_prefix` and
+/// a typed reference on the injected `id`; an integer identity may replace that
+/// slot. Those are the same two policy-approved folds accepted by
+/// `resolve_create_table_policy`. Every other facet must match the canonical
+/// injected [`IrColumn`] exactly. A no-inject policy has an empty prefix.
+fn resolved_inject_prefix_len(columns: &[IrColumn], inject: &ResolvedInject) -> usize {
+    if columns.len() < inject.columns().len() {
         return 0;
     }
     let matches = columns
         .iter()
-        .zip(CONFINED_SYSTEM_COLUMNS)
-        .all(|(actual, expected)| resolved_system_column_matches(actual, expected));
+        .zip(inject.columns())
+        .all(|(actual, expected)| {
+            resolved_injected_column_matches(
+                actual,
+                expected,
+                inject.owns_id_primary_key() && expected.name == "id",
+            )
+        });
     if matches {
-        CONFINED_SYSTEM_COLUMNS.len()
+        inject.columns().len()
     } else {
         0
     }
 }
 
-fn resolved_system_column_matches(actual: &IrColumn, expected: &(&str, &str, bool)) -> bool {
-    let (name, data_type, nullable) = *expected;
-    if actual.name != name {
+fn resolved_injected_column_matches(
+    actual: &IrColumn,
+    expected: &IrColumn,
+    is_id_primary_key: bool,
+) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if actual.name != expected.name || !is_id_primary_key {
         return false;
     }
-    if actual.name == "id" && actual.identity.is_some() {
-        return matches!(actual.ty, ColType::Int | ColType::BigInt);
+    if actual.identity.is_some()
+        && matches!(
+            actual.ty,
+            ColType::SmallInt | ColType::Int | ColType::BigInt
+        )
+    {
+        return true;
     }
-    actual.ty == system_column_type_token(data_type)
-        && actual.nullable == Some(nullable)
-        && actual.default.is_none()
-        && actual.unique.is_none()
-        && actual.references.is_none()
-        && actual.case_sensitive.is_none()
-        && actual.vector_metric.is_none()
-        && actual.mask.is_none()
-        && actual.generated.is_none()
-        && actual.identity.is_none()
-}
-
-fn system_column_type_token(data_type: &str) -> ColType {
-    match data_type {
-        "text" => ColType::Text,
-        "timestamp with time zone" => ColType::Timestamp,
-        "integer" => ColType::Int,
-        _ => ColType::Text,
-    }
+    let mut folded_base = actual.clone();
+    folded_base.id_prefix = None;
+    folded_base.references = None;
+    folded_base == *expected
 }
 
 // ===========================================================================
@@ -3622,9 +3662,8 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
         })
     };
     match f.ty.as_str() {
-        // A legacy internal platform-ID descriptor represents the system `id` PK as
-        // a `uuid` carrier with an `id_prefix`; this is the inverse of
-        // `ir_column_to_field`'s internal `name=="id" && Uuid → "id"` mapping.
+        // A legacy internal platform-ID descriptor represents the policy-owned
+        // `id` slot as a UUID carrier with an `id_prefix`.
         "id" => Some(ColType::Uuid),
         // A `ref` column carries the FK target on `references`.
         "ref" => f
@@ -3789,10 +3828,9 @@ fn facet_check_constraints(
 /// - **enum / min / max** — as CHECK constraints in the closed-AST shapes
 ///   [`recover_check_facet`] lifts back ([`facet_check_constraints`]).
 ///
-/// One resolved `Op::CreateTable` per descriptor, in descriptor order. The columns
-/// include the confined profile's resolved system fields, the top-level
-/// `primary_key` is explicit, and system indexes are carried as ordinary IR
-/// indexes before checksum/fold.
+/// One resolved `Op::CreateTable` per descriptor, in descriptor order. The columns,
+/// top-level `primary_key`, and indexes include exactly the active policy's resolved
+/// injection before checksum/fold; an uncovered table remains author-shaped.
 ///
 /// # Errors
 /// [`ProduceError`] for an unmappable type token, an unrepresentable CHECK facet
@@ -3800,6 +3838,7 @@ fn facet_check_constraints(
 /// would silently drop the facet.
 pub fn descriptors_to_create_ops(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
+    project_schema: &str,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> Result<Vec<Op>, ProduceError> {
     let mut ops = Vec::with_capacity(descriptors.len());
@@ -3846,6 +3885,7 @@ pub fn descriptors_to_create_ops(
                         .unwrap_or_else(|| "id".to_string()),
                     on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
                     on_update: f.on_update.as_deref().and_then(parse_ref_action),
+                    name: f.reference_name.clone(),
                 })
             };
             columns.push(IrColumn {
@@ -3870,7 +3910,12 @@ pub fn descriptors_to_create_ops(
             if f.ty == "ref" {
                 if let Some(target) = &f.references {
                     constraints.push(IrConstraint {
-                        name: Some(format!("{}_{}_fkey", d.name, f.name)),
+                        name: Some(f.reference_name.clone().unwrap_or_else(|| {
+                            crate::render::lower::derived_fk_constraint_name(
+                                &d.name,
+                                std::slice::from_ref(&f.name),
+                            )
+                        })),
                         kind: IrConstraintKind::Fk {
                             columns: vec![f.name.clone()],
                             references_table: target.clone(),
@@ -3891,8 +3936,8 @@ pub fn descriptors_to_create_ops(
         }
         // Carry the author-declared named indexes onto the produced createTable so the
         // round-trip (descriptors → ops → fold) keeps them. `resolve_create_table_policy`
-        // EXTENDS this vec with the platform system indexes (deleted_at/updated_at/
-        // created_by) — it never replaces it — so author + system indexes both survive.
+        // extends this vec with exactly the active policy's injected indexes — it never
+        // replaces it — so author + policy-owned indexes both survive.
         // An empty `_indexes` yields `Vec::new()`, byte-identical to the pre-index shape.
         let indexes = d.indexes.iter().map(index_descriptor_to_ir).collect();
         let op = Op::CreateTable {
@@ -3917,11 +3962,12 @@ pub fn descriptors_to_create_ops(
             preconditions: Vec::new(),
             checksum: None,
         };
-        let resolved = crate::model::table_shape::resolve_create_table_policy(&ir, effective)
-            .map_err(|source| ProduceError::TableShape {
-                table: d.name.clone(),
-                message: source.to_string(),
-            })?;
+        let resolved =
+            crate::model::table_shape::resolve_create_table_policy(&ir, effective, project_schema)
+                .map_err(|source| ProduceError::TableShape {
+                    table: d.name.clone(),
+                    message: source.to_string(),
+                })?;
         ops.push(
             resolved
                 .ops
@@ -4076,13 +4122,21 @@ mod tests {
     use crate::model::policy::SchemaScope;
     use crate::model::snapshot::IdDefaultSnapshot;
 
-    use crate::model::table_shape::{resolve_create_table_policy, zeroship_confined_ceiling};
+    use crate::model::table_shape::{
+        effective_policy_from_ceiling_toml, resolve_create_table_policy, zeroship_confined_ceiling,
+        zeroship_no_inject_ceiling,
+    };
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
 
     fn fold(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
-        fold_ops(ops, SqlDialect::Postgres, SCHEMA)
+        fold_ops(
+            ops,
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_confined_ceiling(),
+        )
     }
 
     fn validate_ops(ops: Vec<Op>, dialect: Dialect) -> crate::model::validate::AuthoringError {
@@ -4157,7 +4211,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        resolve_create_table_policy(&ir, &zeroship_confined_ceiling())
+        resolve_create_table_policy(&ir, &zeroship_confined_ceiling(), "app")
             .expect("test createTable resolves")
             .ops
             .into_iter()
@@ -4188,6 +4242,156 @@ mod tests {
     }
 
     #[test]
+    fn no_inject_fold_preserves_author_updated_at_shape() {
+        let op = Op::CreateTable {
+            name: "events".to_string(),
+            columns: vec![col("updated_at", ColType::Text, true)],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let snap = fold_ops(
+            &[op],
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_no_inject_ceiling(),
+        )
+        .expect("no-inject create folds verbatim");
+        let events = &snap.tables["events"];
+        assert_eq!(events.columns.len(), 1, "no ambient columns are injected");
+        assert_eq!(events.columns[0].name, "updated_at");
+        assert_eq!(events.columns[0].data_type, "text");
+        assert!(events.columns[0].nullable);
+        assert!(events.indexes.is_empty());
+        assert!(events.constraints.is_empty());
+    }
+
+    #[test]
+    fn no_inject_fold_preserves_uuid_columns_named_id() {
+        let create_with_id = Op::CreateTable {
+            name: "external_keys".to_string(),
+            columns: vec![col("id", ColType::Uuid, true)],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let create_then_add = Op::CreateTable {
+            name: "imported_keys".to_string(),
+            columns: vec![col("label", ColType::Text, true)],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let add_id = Op::AddColumn {
+            table: "imported_keys".to_string(),
+            column: "id".to_string(),
+            ty: ColType::Uuid,
+            nullable: Some(true),
+            default: None,
+            value_format: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+            schema: None,
+            existence_guard: None,
+        };
+
+        let snap = fold_ops(
+            &[create_with_id, create_then_add, add_id],
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_no_inject_ceiling(),
+        )
+        .expect("no-inject UUID ids fold verbatim");
+
+        for table in ["external_keys", "imported_keys"] {
+            let id = snap.tables[table]
+                .columns
+                .iter()
+                .find(|column| column.name == "id")
+                .expect("author id remains present");
+            assert_eq!(id.data_type, "uuid");
+        }
+    }
+
+    #[test]
+    fn schema_qualified_create_uses_the_same_scoped_inject_for_fold_and_recovery() {
+        let effective = effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = { include = ["tenant_special.events"] }
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id", type = "text", nullable = false },
+]
+"#,
+        )
+        .expect("schema-scoped inject policy composes");
+        let mut id = col("id", ColType::Uuid, true);
+        id.id_prefix = Some("event".to_string());
+        let raw = MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "scoped_create".to_string(),
+            owner_app: "app_fold".to_string(),
+            ops: vec![Op::CreateTable {
+                name: "events".to_string(),
+                columns: vec![id, col("payload", ColType::Json, true)],
+                primary_key: Some(vec!["id".to_string()]),
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                partition_by: None,
+                runtime_options: None,
+                schema: Some("tenant_special".to_string()),
+                existence_guard: None,
+            }],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        let resolved = resolve_create_table_policy(&raw, &effective, SCHEMA)
+            .expect("the explicit schema selects the scoped inject");
+
+        let snapshot = fold_ops(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
+            .expect("fold uses the create op's explicit schema");
+        assert_eq!(
+            snapshot.tables["events"]
+                .columns
+                .iter()
+                .find(|column| column.name == "payload")
+                .and_then(|column| column.default.as_deref()),
+            Some("'{}'::jsonb"),
+            "the scoped injected prefix is recognized by snapshot folding"
+        );
+
+        let fields = fold_to_field_defs(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
+            .expect("runtime recovery uses the create op's explicit schema");
+        assert_eq!(fields["events"]["id"]["type"], serde_json::json!("id"));
+        assert_eq!(
+            fields["events"]["id"]["idPrefix"],
+            serde_json::json!("event")
+        );
+    }
+
+    #[test]
     fn fold_ops_onto_preserves_base_and_advances_complete_table_shape() {
         let create_op = create("events", vec![col("payload", ColType::Json, true)]);
         let base = fold(std::slice::from_ref(&create_op)).expect("base schema folds");
@@ -4211,8 +4415,14 @@ mod tests {
             },
         ];
 
-        let projected = fold_ops_onto(&base, &tail, SqlDialect::Postgres, SCHEMA)
-            .expect("tail projects onto catalog base");
+        let projected = fold_ops_onto(
+            &base,
+            &tail,
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_confined_ceiling(),
+        )
+        .expect("tail projects onto catalog base");
         let expected = fold(&std::iter::once(create_op).chain(tail).collect::<Vec<_>>())
             .expect("combined replay folds");
 
@@ -4243,7 +4453,8 @@ mod tests {
                     existence_guard: None,
                 },
             ];
-            let snapshot = fold_ops(&ops, dialect, SCHEMA).expect("UUID history folds");
+            let snapshot = fold_ops(&ops, dialect, SCHEMA, &zeroship_confined_ceiling())
+                .expect("UUID history folds");
             let member_key = snapshot.tables["members"]
                 .columns
                 .iter()
@@ -4277,6 +4488,7 @@ mod tests {
             ],
             SqlDialect::Mysql,
             SCHEMA,
+            &zeroship_confined_ceiling(),
         )
         .expect("MySQL TypeID history folds");
         let type_key = mysql.tables["type_keys"]
@@ -4302,9 +4514,14 @@ mod tests {
         };
 
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-            let projected =
-                fold_ops_onto(&base, std::slice::from_ref(&synchronize), dialect, SCHEMA)
-                    .expect("synchronization target validates");
+            let projected = fold_ops_onto(
+                &base,
+                std::slice::from_ref(&synchronize),
+                dialect,
+                SCHEMA,
+                &zeroship_confined_ceiling(),
+            )
+            .expect("synchronization target validates");
             assert_eq!(
                 projected, base,
                 "generator state must not become structural drift state"
@@ -4318,7 +4535,13 @@ mod tests {
             schema: None,
         };
         assert!(matches!(
-            fold_ops_onto(&base, &[missing], SqlDialect::Postgres, SCHEMA),
+            fold_ops_onto(
+                &base,
+                &[missing],
+                SqlDialect::Postgres,
+                SCHEMA,
+                &zeroship_confined_ceiling(),
+            ),
             Err(FoldError::MissingColumn { .. })
         ));
     }
@@ -4339,6 +4562,7 @@ mod tests {
             )],
             SqlDialect::Mysql,
             SCHEMA,
+            &zeroship_confined_ceiling(),
         )
         .expect("MySQL decimal create should fold");
         let amount = snap.tables["ledger"]
@@ -4363,6 +4587,7 @@ mod tests {
             )],
             SqlDialect::Sqlite,
             SCHEMA,
+            &zeroship_confined_ceiling(),
         )
         .expect("SQLite decimal create should fold");
         let amount = sqlite.tables["ledger"]
@@ -5667,6 +5892,7 @@ mod tests {
             ],
             SqlDialect::Postgres,
             SCHEMA,
+            &zeroship_no_inject_ceiling(),
         )
         .expect("PostgreSQL identity remains valid inside a composite key");
         assert!(pg_composite.tables["orders"]
@@ -5694,8 +5920,13 @@ mod tests {
                 schema: None,
             },
         ];
-        let sqlite = fold_ops(&sqlite_ops, SqlDialect::Sqlite, SCHEMA)
-            .expect("SQLite plain INTEGER PRIMARY KEY is a generated rowid contract");
+        let sqlite = fold_ops(
+            &sqlite_ops,
+            SqlDialect::Sqlite,
+            SCHEMA,
+            &zeroship_no_inject_ceiling(),
+        )
+        .expect("SQLite plain INTEGER PRIMARY KEY is a generated rowid contract");
         assert!(sqlite.tables["orders"]
             .constraints
             .iter()
@@ -5713,7 +5944,12 @@ mod tests {
         };
         *drop_identity_from = None;
         assert!(matches!(
-            fold_ops(&missing_drop, SqlDialect::Sqlite, SCHEMA),
+            fold_ops(
+                &missing_drop,
+                SqlDialect::Sqlite,
+                SCHEMA,
+                &zeroship_no_inject_ceiling(),
+            ),
             Err(FoldError::InvalidPrimaryKeyIdentityTransition { .. })
         ));
 
@@ -6076,8 +6312,13 @@ mod tests {
             add_col("a", "y", ColType::Int, false),
             create_index("a", Some("a_y_idx"), &["y"], false),
         ];
-        let snap = fold_ops(&ops, SqlDialect::Postgres, SCHEMA)
-            .expect("fold runs with no DB connection or async runtime");
+        let snap = fold_ops(
+            &ops,
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_confined_ceiling(),
+        )
+        .expect("fold runs with no DB connection or async runtime");
         assert!(snap.tables.contains_key("a"));
     }
 
@@ -6236,8 +6477,13 @@ mod tests {
             ),
         ];
         assert_validate_ops_ok(ops.clone(), Dialect::Sqlite);
-        let sqlite =
-            fold_ops(&ops, SqlDialect::Sqlite, SCHEMA).expect("table-level FK folds on SQLite");
+        let sqlite = fold_ops(
+            &ops,
+            SqlDialect::Sqlite,
+            SCHEMA,
+            &zeroship_confined_ceiling(),
+        )
+        .expect("table-level FK folds on SQLite");
         let memberships = &sqlite.tables["memberships"];
         assert!(memberships.constraints.iter().any(|constraint| {
             constraint.name == "m_team_fk" && constraint.kind == "FOREIGN KEY"
@@ -6339,12 +6585,17 @@ mod tests {
             indexes: Vec::new(),
             runtime_options: Default::default(),
         };
-        build_table_snapshot(SCHEMA, &desc, SqlDialect::Postgres)
-            .unwrap()
-            .columns
-            .into_iter()
-            .find(|c| c.name == column)
-            .unwrap()
+        build_table_snapshot(
+            SCHEMA,
+            &desc,
+            SqlDialect::Postgres,
+            &zeroship_confined_ceiling(),
+        )
+        .unwrap()
+        .columns
+        .into_iter()
+        .find(|c| c.name == column)
+        .unwrap()
     }
 
     /// GOLDEN: the fold's emitted default + sentinels for a createTable
@@ -6564,7 +6815,13 @@ mod tests {
     // ===================================================================
 
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
-        fold_to_field_defs(ops, SqlDialect::Postgres, SCHEMA).unwrap()
+        fold_to_field_defs(
+            ops,
+            SqlDialect::Postgres,
+            SCHEMA,
+            &zeroship_confined_ceiling(),
+        )
+        .unwrap()
     }
 
     /// The reconstructed wire-FieldDef object for `table.column`.
@@ -6990,6 +7247,217 @@ mod tests {
         }
     }
 
+    fn custom_nonlegacy_inject_policy() -> EffectivePolicy {
+        effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["tenant_key"]
+author_primary_key = "forbid"
+columns = [
+  { name = "tenant_key",    type = "text",    nullable = false },
+  { name = "id",            type = "text",    nullable = true  },
+  { name = "audit_revision", type = "integer", nullable = false, default = "41" },
+]
+indexes = [
+  { name = "audit_revision_lookup", columns = ["audit_revision"] },
+]
+"#,
+        )
+        .expect("custom non-legacy inject ceiling composes")
+    }
+
+    #[test]
+    fn custom_policy_snapshot_converges_across_declarative_and_resolved_fold() {
+        let effective = custom_nonlegacy_inject_policy();
+        let inject = ResolvedInject::for_table(&effective, SCHEMA, "entries")
+            .expect("custom inject resolves");
+        assert_eq!(
+            inject
+                .columns()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tenant_key", "id", "audit_revision"]
+        );
+        assert_eq!(inject.primary_key(), Some(&["tenant_key".to_string()][..]));
+        assert_eq!(inject.indexes().len(), 1);
+        assert!(
+            !inject.owns_id_primary_key(),
+            "an ordinary injected `id` is not the policy-owned primary key"
+        );
+
+        let authored = descriptor(
+            "entries",
+            vec![FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            }],
+        );
+        let declarative = build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
+            .expect("declarative snapshot builds from the custom policy");
+
+        let resolved_ops =
+            descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &effective)
+                .expect("migration producer resolves the same custom policy");
+        let Op::CreateTable {
+            columns,
+            primary_key,
+            indexes,
+            ..
+        } = &resolved_ops[0]
+        else {
+            panic!("descriptor produces a createTable op")
+        };
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tenant_key", "id", "audit_revision", "title"]
+        );
+        assert_eq!(
+            primary_key.as_deref(),
+            Some(&["tenant_key".to_string()][..])
+        );
+        assert_eq!(indexes, inject.indexes());
+
+        let folded = fold_ops(&resolved_ops, SqlDialect::Postgres, SCHEMA, &effective)
+            .expect("resolved migration folds under the same custom policy");
+        let migration = &folded.tables["entries"];
+        assert_eq!(
+            format!("{migration:#?}"),
+            format!("{declarative:#?}"),
+            "declarative and resolved-migration snapshots must match in every debug-visible byte"
+        );
+
+        let revision = declarative
+            .columns
+            .iter()
+            .find(|column| column.name == "audit_revision")
+            .expect("custom defaulted column is injected");
+        assert_eq!(revision.default.as_deref(), Some("41"));
+        assert!(declarative.indexes.iter().any(|index| {
+            index.name == "entries_audit_revision_idx"
+                && index.columns == ["audit_revision".to_string()]
+        }));
+        assert!(declarative.constraints.iter().any(|constraint| {
+            constraint.name == "entries_pkey" && constraint.definition == "PRIMARY KEY (tenant_key)"
+        }));
+    }
+
+    #[test]
+    fn no_inject_snapshot_preserves_author_order_and_converges_with_resolved_fold() {
+        let effective = zeroship_no_inject_ceiling();
+        let authored = descriptor(
+            "events",
+            vec![
+                FieldDescriptor {
+                    name: "zeta".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "updated_at".into(),
+                    ty: "int".into(),
+                    required: true,
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "alpha".into(),
+                    ty: "boolean".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let declarative = build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
+            .expect("no-inject declarative snapshot builds");
+        assert_eq!(
+            declarative
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "updated_at", "alpha"],
+            "empty injection must preserve the author's column order"
+        );
+        let updated_at = declarative
+            .columns
+            .iter()
+            .find(|column| column.name == "updated_at")
+            .expect("author updated_at survives");
+        assert_eq!(updated_at.data_type, "integer");
+        assert!(!updated_at.nullable);
+
+        let resolved_ops =
+            descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &effective)
+                .expect("no-inject migration producer preserves author shape");
+        let folded = fold_ops(&resolved_ops, SqlDialect::Postgres, SCHEMA, &effective)
+            .expect("no-inject resolved migration folds");
+        assert_eq!(
+            format!("{:#?}", folded.tables["events"]),
+            format!("{declarative:#?}"),
+            "no-inject declarative and resolved-migration snapshots must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn ordinary_injected_id_does_not_enable_legacy_id_or_identity_folding() {
+        let effective = custom_nonlegacy_inject_policy();
+        let inject = ResolvedInject::for_table(&effective, SCHEMA, "entries")
+            .expect("custom inject resolves");
+        assert!(inject.contains_column("id"));
+        assert!(!inject.owns_id_primary_key());
+
+        let prefixed_id = descriptor(
+            "entries",
+            vec![FieldDescriptor {
+                name: "id".into(),
+                ty: "id".into(),
+                id_prefix: Some("entry".into()),
+                ..Default::default()
+            }],
+        );
+        let identity_id = descriptor(
+            "entries",
+            vec![FieldDescriptor {
+                name: "id".into(),
+                ty: "bigInt".into(),
+                identity: Some(crate::model::ir::IdentityCol { always: false }),
+                ..Default::default()
+            }],
+        );
+
+        for (kind, authored) in [("legacy prefix", prefixed_id), ("identity", identity_id)] {
+            let declarative_error =
+                build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
+                    .expect_err("an ordinary injected `id` must reject author collision");
+            assert!(
+                declarative_error
+                    .to_string()
+                    .contains("collides with an injected policy column"),
+                "{kind} declaration unexpectedly used the declarative ID fold: {declarative_error}"
+            );
+
+            let producer_error = descriptors_to_create_ops(&[authored], SCHEMA, &effective)
+                .expect_err("migration resolution must reject the same collision");
+            assert!(
+                matches!(
+                    producer_error,
+                    ProduceError::TableShape { ref message, .. }
+                        if message.contains("column \"id\"")
+                            && message.contains("collides with an injected")
+                ),
+                "{kind} declaration unexpectedly used the migration ID fold: {producer_error}"
+            );
+        }
+    }
+
     #[test]
     fn producer_emits_fk_constraint_with_policy_for_ref_columns() {
         let d = descriptor(
@@ -7003,7 +7471,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("expected a createTable")
         };
@@ -7051,7 +7519,7 @@ mod tests {
                 },
             ],
         );
-        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -7085,6 +7553,9 @@ mod tests {
     fn producer_preserves_column_order_through_fold() {
         // The reconstructed FieldDef map must preserve the descriptor's declared
         // column order (the round-trip compares serialized maps).
+        let effective = zeroship_confined_ceiling();
+        let inject =
+            ResolvedInject::for_table(&effective, "app", "t").expect("confined injection resolves");
         let d = descriptor(
             "t",
             vec![
@@ -7105,7 +7576,7 @@ mod tests {
                 },
             ],
         );
-        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(&[d], "app", &effective).unwrap();
         let Op::CreateTable {
             columns,
             primary_key,
@@ -7118,49 +7589,88 @@ mod tests {
         assert_eq!(
             columns
                 .iter()
-                .take(7)
+                .take(inject.columns().len())
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "id",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-                "version",
-                "deleted_at"
-            ],
+            inject
+                .columns()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
             "producer emits the resolved confined system-field prefix"
         );
         assert_eq!(
             primary_key.as_deref(),
-            Some(&["id".to_string()][..]),
+            inject.primary_key(),
             "producer carries the resolved top-level primary key"
         );
-        assert_eq!(indexes.len(), 3, "producer carries resolved system indexes");
-        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).unwrap();
+        assert_eq!(
+            indexes,
+            inject.indexes(),
+            "producer carries resolved indexes"
+        );
+        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective).unwrap();
         let keys: Vec<&str> = defs["t"]
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect();
+        let mut expected_keys = inject
+            .columns()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        expected_keys.extend(["zeta", "alpha", "mid"]);
         assert_eq!(
-            keys,
-            vec![
-                "id",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-                "version",
-                "deleted_at",
-                "zeta",
-                "alpha",
-                "mid"
-            ],
+            keys, expected_keys,
             "resolved system prefix is carried and declared order is preserved, not sorted"
         );
+    }
+
+    #[test]
+    fn recovery_recognizes_injected_prefix_from_active_policy() {
+        let effective = effective_policy_from_ceiling_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id",           type = "text",    nullable = false },
+  { name = "audit_marker", type = "integer", nullable = false, default = "1" },
+]
+"#,
+        )
+        .expect("custom inject ceiling composes");
+        let d = descriptor(
+            "entries",
+            vec![
+                FieldDescriptor {
+                    name: "id".into(),
+                    ty: "id".into(),
+                    id_prefix: Some("entry".into()),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "title".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        let ops = descriptors_to_create_ops(&[d], "app", &effective).expect("descriptor resolves");
+        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+            .expect("custom policy prefix recovers");
+        let entries = defs["entries"].as_object().expect("entries FieldDef map");
+        assert_eq!(
+            entries.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["id", "audit_marker", "title"]
+        );
+        assert_eq!(entries["id"]["type"], serde_json::json!("id"));
+        assert_eq!(entries["id"]["idPrefix"], serde_json::json!("entry"));
     }
 
     #[test]
@@ -7199,7 +7709,8 @@ mod tests {
             },
         ];
 
-        let ops = descriptors_to_create_ops(&[d.clone()], &zeroship_confined_ceiling()).unwrap();
+        let ops =
+            descriptors_to_create_ops(&[d.clone()], "app", &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { indexes, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -7267,7 +7778,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        let err = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap_err();
+        let err = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap_err();
         assert!(
             matches!(err, ProduceError::UnknownType { .. }),
             "unmappable token fails closed"

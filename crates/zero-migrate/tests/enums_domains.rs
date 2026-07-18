@@ -87,7 +87,12 @@ fn create_domain() -> Op {
 }
 
 fn lower_all(dialect: SqlDialect, ops: Vec<Op>) -> Vec<String> {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect);
+    let author = IrAuthor::new(
+        SCHEMA,
+        OWNER,
+        dialect,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    );
     author
         .lower(&ir(ops), &LiveSchema::default())
         .unwrap()
@@ -216,8 +221,14 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
         )]),
         ..Default::default()
     };
-    let folded = zero_migrate::fold_ops_onto(&base, &ops, SqlDialect::Postgres, SCHEMA)
-        .expect("explicit named type references fold");
+    let folded = zero_migrate::fold_ops_onto(
+        &base,
+        &ops,
+        SqlDialect::Postgres,
+        SCHEMA,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("explicit named type references fold");
     let columns = &folded.tables["subscriptions"].columns;
     let tier = columns
         .iter()
@@ -319,7 +330,12 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
 
 #[test]
 fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
-    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql);
+    let author = IrAuthor::new(
+        SCHEMA,
+        OWNER,
+        SqlDialect::Mysql,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    );
     let err = author
         .lower(
             &ir(vec![
@@ -352,7 +368,12 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
 
 #[test]
 fn pg_guarded_type_drops_stamp_named_type_probes() {
-    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        SCHEMA,
+        OWNER,
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    );
     let migrations = author
         .lower(
             &ir(vec![

@@ -79,15 +79,10 @@ pub struct PreviewOpts {
     /// upstream by the load gate; here it only affects DML journal identity, never
     /// the rendered SQL). For the preview it is a cosmetic attribution.
     pub owner_app: String,
-}
-
-impl Default for PreviewOpts {
-    fn default() -> Self {
-        Self {
-            default_schema: "public".to_string(),
-            owner_app: "app_preview".to_string(),
-        }
-    }
+    /// The composed policy whose inject rules shaped any resolved create-table
+    /// operation being previewed. This is mandatory; preview has no ambient
+    /// system-field profile.
+    pub effective_policy: zero_migrate_policy::EffectivePolicy,
 }
 
 /// The dialect's human name for the header.
@@ -339,7 +334,12 @@ fn render_ir_envelope_rendered(
     // out of the Confined `Single(default_schema)` scope and fails to lower → it is
     // labeled `[runtime-resolved]` "not offline-renderable" rather than rendered
     // into the wrong schema (honest, fail-closed). NEVER requires a DB to pick.
-    let author = IrAuthor::new(opts.default_schema.clone(), opts.owner_app.clone(), dialect);
+    let author = IrAuthor::new(
+        opts.default_schema.clone(),
+        opts.owner_app.clone(),
+        dialect,
+        &opts.effective_policy,
+    );
 
     let live = LiveSchema::default();
     let rendered = render_ir_ops(&author, &ir, &live, dialect, &opts.default_schema);
@@ -968,6 +968,8 @@ mod tests {
         PreviewOpts {
             default_schema: "public".to_string(),
             owner_app: "app_preview".to_string(),
+            effective_policy: crate::confined_no_inject_policy("public")
+                .expect("no-inject preview policy"),
         }
     }
 
@@ -1024,7 +1026,8 @@ mod tests {
     #[test]
     fn mysql_plan_and_set_previews_wrap_the_whole_author_stream() {
         let ir: MigrationIr = serde_json::from_str(SIMPLE_IR).expect("fixture parses");
-        let author = IrAuthor::new("public", "app_preview", SqlDialect::Mysql);
+        let effective = crate::confined_no_inject_policy("public").expect("no-inject policy");
+        let author = IrAuthor::new("public", "app_preview", SqlDialect::Mysql, &effective);
         let plan = author
             .lower_plan(&ir, &LiveSchema::default())
             .expect("fixture lowers offline");

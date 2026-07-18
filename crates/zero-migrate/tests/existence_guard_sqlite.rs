@@ -80,9 +80,14 @@ fn lower(op: Op) -> Vec<Migration> {
         preconditions: vec![],
         checksum: None,
     };
-    let ir = resolve_create_table_policy(&ir, &zeroship_confined_ceiling())
+    let ir = resolve_create_table_policy(&ir, &zeroship_confined_ceiling(), "main")
         .expect("guard test IR resolves");
-    let author = IrAuthor::new("main", "app_test", SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        "main",
+        "app_test",
+        SqlDialect::Sqlite,
+        &zeroship_confined_ceiling(),
+    );
     author
         .lower(&ir, &LiveSchema::default())
         .expect("guarded op lowers")

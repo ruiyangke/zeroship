@@ -84,8 +84,10 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 /// `desired_snapshot_for_dialect` the differ uses — so the live facts the rename
 /// rebuild consumes are byte-identical to a `t.*`-diff's desired snapshot.
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
-    let desired = desired_snapshot_for_dialect(PROJECT, descriptors, SchemaDialect::Sqlite)
-        .expect("desired snapshot");
+    let effective = zero_migrate::zeroship_confined_ceiling();
+    let desired =
+        desired_snapshot_for_dialect(PROJECT, descriptors, SchemaDialect::Sqlite, &effective)
+            .expect("desired snapshot");
     // Every table is owned by the deploying app (`APP`) — the same-app rename case.
     let table_ownership = desired
         .snapshot
@@ -130,7 +132,12 @@ fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
 /// `SQLite` file actually has the table the rename rebuilds. Returns the live facts.
 async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) {
     // Lower each table's createTable IR and apply it.
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let engine = MigrationEngine::new();
     for d in descriptors {
         let cols: Vec<zero_migrate::model::ir::IrColumn> = d
@@ -175,8 +182,9 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             preconditions: vec![],
             checksum: None,
         };
-        let ir = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
-            .expect("test IR resolves");
+        let ir =
+            resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), PROJECT)
+                .expect("test IR resolves");
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .expect("lower create");
@@ -221,12 +229,27 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         )
         .await
         .expect("seed");
+    be.actor()
+        .exec("CREATE INDEX people_nickname_idx ON people (nickname)")
+        .await
+        .expect("create dependent nickname index");
 
     // The live facts (full table structure) the SQLite rebuild needs.
-    let live = live_schema_for(&v1);
+    let mut live = live_schema_for(&v1);
+    let catalog = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect the real pre-rename table");
+    live.tables = catalog.tables.keys().cloned().collect();
+    live.table_snapshots = catalog.tables;
 
     // Lower the rename `nickname → handle` on the SQLite leg.
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
     let steps = author
         .lower_steps(&ir, &live)
@@ -304,6 +327,23 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         info.iter().all(|r| r[1].as_deref() != Some("nickname")),
         "the old column name is gone after the rebuild rename"
     );
+    let dependent_index = be
+        .actor()
+        .query(
+            "SELECT sql FROM main.sqlite_master \
+             WHERE type = 'index' AND name = 'people_nickname_idx'",
+        )
+        .await
+        .expect("read dependent index after rename");
+    let dependent_index = dependent_index[0][0]
+        .as_deref()
+        .expect("dependent index SQL survives");
+    assert!(
+        (dependent_index.contains("(handle)") || dependent_index.contains("(\"handle\")"))
+            && !dependent_index.contains("(nickname)")
+            && !dependent_index.contains("(\"nickname\")"),
+        "SQLite's own rename parser updates captured dependent index SQL: {dependent_index}"
+    );
 
     // The journal records the REBUILD migration as Completed — the proof it ran via
     // `rebuild_one` and NOT `run_online` (run_online journals the PG E1..C2
@@ -348,7 +388,12 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     let v1 = vec![descriptor("events", "count", "int")];
     // Create it for real with an int column.
     {
-        let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+        let author = IrAuthor::new(
+            PROJECT,
+            APP,
+            SqlDialect::Sqlite,
+            &zero_migrate::zeroship_confined_ceiling(),
+        );
         let engine = MigrationEngine::new();
         let ir = MigrationIr {
             ir_version: 1,
@@ -404,7 +449,12 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     }
 
     let live = live_schema_for(&v1);
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let ir = rename_ir("events", "count", "total", ColType::Int);
     let steps = author.lower_steps(&ir, &live).expect("rename lowers");
 
@@ -444,7 +494,12 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     // v1: people(nickname:string) — the live column is text-affinity.
     let v1 = vec![descriptor("people", "nickname", "string")];
     let live = live_schema_for(&v1);
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     // The IR claims the renamed column is `Int` — disagreeing with the live text type.
     let ir = rename_ir("people", "nickname", "handle", ColType::Int);
     let err = author
@@ -478,7 +533,12 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
         .insert("people".into(), "app_other".into());
 
     // The IrAuthor deploys as `APP` (≠ app_other) — a non-owner rename.
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
     let err = author
         .lower_steps(&ir, &live)
@@ -509,7 +569,12 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 // `renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema`.
 #[test]
 fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // LiveSchema knows the table NAME but not its structure (table_snapshots /
     // sqlite_schemas empty) — there is no live `from` column to reconcile against.
@@ -537,7 +602,12 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 #[test]
 fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     use zero_migrate::{ColumnSnapshot, TableSnapshot};
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // Carry the live `from` column TYPE (so the type gate passes — text == text),
     // but DO NOT populate `sqlite_schemas` (the rebuild's SDK Value is missing).
@@ -618,6 +688,103 @@ fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
     }
 }
 
+/// A child table whose `parent_id` FK targets a different table in the same
+/// project, plus an ordinary text column that can be renamed independently.
+fn referencing_descriptor(table: &str, parent: &str) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: table.into(),
+        owner_app: APP.into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "parent_id".into(),
+                ty: "ref".into(),
+                required: true,
+                references: Some(parent.into()),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "nickname".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    }
+}
+
+// A scoped rename diff contains only the rebuilt child table, but its FK target
+// may be another table already present in the complete live-schema universe. The
+// lowerer must validate against `LiveSchema::tables`, then retain the FK in the
+// rebuilt CREATE rather than treating that external target as dangling.
+#[test]
+fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
+    let parent = descriptor("departments", "name", "string");
+    let child = referencing_descriptor("employees", "departments");
+    let live = live_schema_for(&[parent, child]);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
+
+    let steps = author
+        .lower_steps(
+            &rename_ir("employees", "nickname", "handle", ColType::Text),
+            &live,
+        )
+        .expect("the known external FK target permits the scoped rename diff");
+    let create = match &steps[..] {
+        [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] => {
+            &rebuild.spec.new_table_create
+        }
+        other => panic!("expected one SQLite rebuild, got {other:?}"),
+    };
+
+    assert!(
+        create.contains("REFERENCES \"departments\" (id)"),
+        "the rebuild must retain the child FK to the known live parent: {create}"
+    );
+}
+
+// The complete live-table set is the validation authority for FK targets outside
+// the one-table rename diff. Removing the parent from that set must still fail
+// closed, even though the test fixture retains unrelated cached parent details in
+// its other LiveSchema maps.
+#[test]
+fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
+    let parent = descriptor("departments", "name", "string");
+    let child = referencing_descriptor("employees", "departments");
+    let mut live = live_schema_for(&[parent, child]);
+    assert!(live.tables.remove("departments"));
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
+
+    let error = author
+        .lower_steps(
+            &rename_ir("employees", "nickname", "handle", ColType::Text),
+            &live,
+        )
+        .expect_err("a scoped rename must reject a genuinely missing FK target");
+    match error {
+        IrLowerError::RenameLower(message) => {
+            assert!(
+                message.contains("employees")
+                    && message.contains("departments")
+                    && message.contains("no app"),
+                "the dangling-FK refusal must identify the child and target: {message}"
+            );
+        }
+        other => panic!("expected RenameLower for a dangling FK target, got: {other}"),
+    }
+}
+
 // Rename-to-EXISTING-column collision (SQLite leg). A `renameColumn` whose
 // `to` equals a column that ALREADY exists on the live table must fail closed at the
 // LOWER gate (`RenameLower`), NOT silently OVERWRITE the existing `to` field def when
@@ -625,7 +792,12 @@ fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
 // The live table carries BOTH `nickname` (the from) and `handle` (the to).
 #[test]
 fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_confined_ceiling(),
+    );
     // Live `people(nickname, handle)` — both real columns + SDK schema entries.
     let live = live_schema_for(&[descriptor2("people", "nickname", "handle")]);
     // Rename nickname → handle, but `handle` ALREADY exists.

@@ -2658,6 +2658,7 @@ mod render_tests {
             }],
             SqlDialect::Mysql,
             "proj_x",
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
         )
         .expect("portable ID table fold");
 
@@ -2946,6 +2947,7 @@ mod render_tests {
                 }],
                 SqlDialect::Mysql,
                 "proj_x",
+                &crate::model::table_shape::zeroship_no_inject_ceiling(),
             )
             .expect("identity probe must fold")
         };
@@ -3055,8 +3057,13 @@ mod render_tests {
             ]
         }))
         .expect("typed-reference literal fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(&ir.ops, SqlDialect::Mysql, "proj_x")
-            .expect("typed-reference literal fixture must fold");
+        let expected = crate::render::fold::fold_ops(
+            &ir.ops,
+            SqlDialect::Mysql,
+            "proj_x",
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+        )
+        .expect("typed-reference literal fixture must fold");
         let fk_name = expected.tables["children"]
             .constraints
             .iter()
@@ -3320,8 +3327,13 @@ mod render_tests {
             ]
         }))
         .expect("MySQL key-format fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(&ir.ops, SqlDialect::Mysql, "proj_x")
-            .expect("MySQL key-format fixture must fold");
+        let expected = crate::render::fold::fold_ops(
+            &ir.ops,
+            SqlDialect::Mysql,
+            "proj_x",
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+        )
+        .expect("MySQL key-format fixture must fold");
         let type_check = crate::render::value_format::column_metadata(
             "id",
             &ValueFormat::TypeId {
@@ -3486,8 +3498,13 @@ mod render_tests {
             }]
         }))
         .expect("regrouped TypeID fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(&ir.ops, SqlDialect::Mysql, "proj_x")
-            .expect("regrouped TypeID fixture must fold");
+        let expected = crate::render::fold::fold_ops(
+            &ir.ops,
+            SqlDialect::Mysql,
+            "proj_x",
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+        )
+        .expect("regrouped TypeID fixture must fold");
         let canonical =
             crate::render::value_format::column_metadata("id", &value_format, SqlDialect::Mysql)
                 .expect("TypeID metadata")
@@ -3659,8 +3676,13 @@ mod render_tests {
                 existence_guard: None,
             },
         ];
-        let expected = crate::render::fold::fold_ops(&ops, SqlDialect::Mysql, "proj_x")
-            .expect("named table UNIQUE and composite FK fold for MySQL");
+        let expected = crate::render::fold::fold_ops(
+            &ops,
+            SqlDialect::Mysql,
+            "proj_x",
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+        )
+        .expect("named table UNIQUE and composite FK fold for MySQL");
 
         let parent_candidate = expected.tables["parents"]
             .indexes

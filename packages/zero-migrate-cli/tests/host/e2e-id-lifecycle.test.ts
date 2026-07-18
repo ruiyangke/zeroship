@@ -25,6 +25,7 @@ import {
   type MigrationModule,
 } from "zero-migrate-cli";
 import { ids, table, t } from "zero-migrate";
+import { NO_INJECT_POLICY_CEILING } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -105,6 +106,7 @@ async function applyInitial(
     projectSchema,
     driver,
     registry: {},
+    policyCeiling: NO_INJECT_POLICY_CEILING,
     approved: true,
     appliedBy: "id-lifecycle-e2e",
     nameFallback: migration.name,
@@ -126,6 +128,7 @@ async function applyAfter(
     projectSchema,
     driver,
     registry,
+    policyCeiling: NO_INJECT_POLICY_CEILING,
     approved: true,
     appliedBy: "id-lifecycle-e2e",
     nameFallback: migration.name,
@@ -143,6 +146,7 @@ async function assertCleanStatus(
     projectSchema,
     driver,
     registry,
+    policyCeiling: NO_INJECT_POLICY_CEILING,
     migrations: [migration],
     nameFallbacks: [migration.name],
   });

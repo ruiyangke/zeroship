@@ -193,7 +193,7 @@ pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // `EffectivePolicy`).
 pub use model::table_shape::{
     confined_no_inject_policy, effective_policy_from_ceiling_toml, resolve_create_table_policy,
-    TableShapeError,
+    ResolvedInject, TableShapeError,
 };
 pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at

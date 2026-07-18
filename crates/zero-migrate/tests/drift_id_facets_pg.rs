@@ -502,9 +502,20 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
 
     let result: Result<(), String> = async {
         let ir = fixture(&schema);
-        let expected = fold_ops(&ir.ops, SqlDialect::Postgres, &schema)
+        let expected = fold_ops(
+            &ir.ops,
+            SqlDialect::Postgres,
+            &schema,
+            &zero_migrate::zeroship_no_inject_ceiling(),
+        )
             .map_err(|error| format!("fold PostgreSQL drift fixture: {error}"))?;
-        let migrations = IrAuthor::new(&schema, OWNER, SqlDialect::Postgres)
+        let migrations = IrAuthor::new(
+            &schema,
+            OWNER,
+            SqlDialect::Postgres,
+            &zero_migrate::confined_no_inject_policy(&schema)
+                .expect("ID-facet no-inject policy composes"),
+        )
             .lower(&ir, &LiveSchema::default())
             .map_err(|error| format!("lower PostgreSQL drift fixture: {error}"))?;
         // The unqualified nextval fixture intentionally exercises normal

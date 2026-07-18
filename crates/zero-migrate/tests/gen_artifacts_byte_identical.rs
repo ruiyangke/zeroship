@@ -1,7 +1,8 @@
 //! **`genArtifacts` byte-identical-by-construction + v1-shape pins.**
 //!
 //! The schema-artifact emitter (`gen-types`) has two front-doors:
-//!   - `render_artifacts(ops, schema)` — the GENERATED source (op.* migrations).
+//!   - `render_artifacts(ops, schema, effective)` — the GENERATED source (op.*
+//!     migrations).
 //!   - `render_artifacts_from_descriptors(descriptors, schema, effective)` — the
 //!     MANUAL source (a declared `CollectionDescriptor` set), routed through
 //!     `descriptors_to_create_ops` (which injects the confined system shape under
@@ -21,7 +22,7 @@
 //!
 //! This is the TRUE byte-identical guarantee: the generated side feeds RAW,
 //! UNRESOLVED envelope ops (author columns only) and the resolution injects the 7
-//! system fields + `[id]` PK + 3 system indexes, so the descriptor path (which
+//! policy-injected fields + PK + indexes, so the descriptor path (which
 //! resolves the same way) still matches byte-for-byte. Earlier this test resolved
 //! and compared, but did not START from the recorder's raw author-only shape.
 //!   1. the two produce BYTE-IDENTICAL `schema.runtime.json` (the byte-identical
@@ -37,12 +38,21 @@ use serde_json::Value;
 use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 use zero_migrate::{
-    render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy,
-    zeroship_confined_ceiling,
+    render_artifacts, render_artifacts_from_descriptors, zeroship_confined_ceiling, ResolvedInject,
 };
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
+
+fn confined_injected_column_names() -> Vec<String> {
+    let effective = zeroship_confined_ceiling();
+    ResolvedInject::for_table(&effective, SCHEMA, "people")
+        .expect("confined people injection resolves")
+        .columns()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect()
+}
 
 /// A `CollectionDescriptor` for a `people` table with a plain `name` string, a
 /// `required` `email` string, and an author-declared named index on `name` — the
@@ -105,10 +115,9 @@ fn people_raw_envelope() -> MigrationIr {
     }
 }
 
-/// The GENERATED source: the RAW author-only recorder envelope resolved through the
-/// create-table policy under the Confined profile — the EXACT step
-/// `gen_artifacts_from_envelopes` runs before folding. The raw side carries NO system
-/// columns; resolution injects the 7 system fields + `[id]` PK + 3 system indexes.
+/// The GENERATED source: the RAW author-only recorder envelope. `render_artifacts`
+/// must resolve it through its explicit policy before folding, exactly as the Node
+/// envelope entry point does. The raw side carries no injected columns or PK.
 fn people_ops_generated() -> Vec<Op> {
     let raw = people_raw_envelope();
     // Sanity: the raw recorder shape has ONLY the two author columns — no system
@@ -132,20 +141,16 @@ fn people_ops_generated() -> Vec<Op> {
     } else {
         panic!("expected a createTable");
     }
-    resolve_create_table_policy(&raw, &zeroship_confined_ceiling())
-        .expect("create-table policy resolves")
-        .ops
+    raw.ops
 }
 
 #[test]
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
-    let generated = render_artifacts(&people_ops_generated(), SCHEMA).expect("generated render");
-    let manual = render_artifacts_from_descriptors(
-        &[people_descriptor()],
-        SCHEMA,
-        &zeroship_confined_ceiling(),
-    )
-    .expect("manual render");
+    let effective = zeroship_confined_ceiling();
+    let generated =
+        render_artifacts(&people_ops_generated(), SCHEMA, &effective).expect("generated render");
+    let manual = render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &effective)
+        .expect("manual render");
 
     assert_eq!(
         generated.runtime_json, manual.runtime_json,
@@ -176,16 +181,16 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let people = &v["collections"]["people"];
     assert!(people.is_object(), "collection present: {v}");
 
-    // Snake_case fields INCLUDING all seven platform system fields.
+    // Snake_case fields including every column injected by the active policy.
     let fields = &people["fields"];
-    for sys in zero_migrate::schema::query::SYSTEM_FIELD_NAMES {
+    for sys in confined_injected_column_names() {
         assert!(
-            fields.get(sys).is_some(),
+            fields.get(&sys).is_some(),
             "runtime descriptor field map must carry system field {sys}: {fields}"
         );
         // Each field is an object with a string `type`.
         assert!(
-            fields[sys]["type"].is_string(),
+            fields[sys.as_str()]["type"].is_string(),
             "field {sys} has a string type: {fields}"
         );
     }
@@ -254,7 +259,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     );
 
     // The resolved IR is the source, including policy-injected system fields.
-    for sys in zero_migrate::schema::query::SYSTEM_FIELD_NAMES {
+    for sys in confined_injected_column_names() {
         assert!(
             ts.contains(&format!("{sys}:")),
             "env.db.ts must render the resolved system field {sys}:\n{ts}"

@@ -15,10 +15,14 @@ use std::collections::HashMap;
 use support::PgDevSession;
 
 use zero_migrate::{
-    desired_snapshot, diff_snapshots, snapshot_schema, Approval, CollectionDescriptor,
-    DeclarativeAuthor, ExecutorConfig, FieldDescriptor, GuardConfig, MigrationEngine,
-    PostgresBackend,
+    desired_snapshot, diff_snapshots, snapshot_schema, zeroship_confined_ceiling, Approval,
+    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
+    GuardConfig, MigrationEngine, PostgresBackend,
 };
+
+fn effective_policy() -> EffectivePolicy {
+    zeroship_confined_ceiling()
+}
 
 fn token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,8 +118,12 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
 
     // Desired: one collection `widgets` with a required `title` string field.
     let desc = descriptor("widgets", "title", "string", true);
-    let desired = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&desc))
-        .expect("desired_snapshot");
+    let desired = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&desc),
+        &effective_policy(),
+    )
+    .expect("desired_snapshot");
 
     // Live: empty (the table does not exist yet).
     let live_empty = snapshot_schema(&session, &cfg.project_schema)
@@ -136,12 +144,20 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
             &author,
             &[],
             &guard_cfg(&cfg),
+            &effective_policy(),
         )
         .expect("plan_declarative");
     assert!(plan.renames.is_empty(), "an additive create has no renames");
     let backend = PostgresBackend::new_generic(&session);
     engine
-        .apply_declarative(&plan, Approval::Approved, &backend, &cfg, "app_test")
+        .apply_declarative(
+            &plan,
+            &effective_policy(),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
         .await
         .expect("apply_declarative create widgets");
 
@@ -177,6 +193,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
             &author,
             &[],
             &guard_cfg(&cfg),
+            &effective_policy(),
         )
         .expect("plan_declarative 2");
     assert!(
@@ -204,8 +221,12 @@ async fn declarative_add_column_diff_applies() {
 
     // Deploy v1: widgets(title).
     let v1_desc = descriptor("widgets", "title", "string", true);
-    let desired_v1 =
-        desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v1_desc)).expect("desired v1");
+    let desired_v1 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v1_desc),
+        &effective_policy(),
+    )
+    .expect("desired v1");
     let live0 = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("live0");
@@ -217,11 +238,19 @@ async fn declarative_add_column_diff_applies() {
             &author,
             &[],
             &guard_cfg(&cfg),
+            &effective_policy(),
         )
         .expect("plan v1");
     let backend = PostgresBackend::new_generic(&session);
     engine
-        .apply_declarative(&plan1, Approval::Approved, &backend, &cfg, "app_test")
+        .apply_declarative(
+            &plan1,
+            &effective_policy(),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
         .await
         .expect("apply v1");
 
@@ -246,8 +275,12 @@ async fn declarative_add_column_diff_applies() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired_v2 =
-        desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v2_desc)).expect("desired v2");
+    let desired_v2 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v2_desc),
+        &effective_policy(),
+    )
+    .expect("desired v2");
     let live1 = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("live1");
@@ -259,6 +292,7 @@ async fn declarative_add_column_diff_applies() {
             &author,
             &[],
             &guard_cfg(&cfg),
+            &effective_policy(),
         )
         .expect("plan v2");
     assert!(
@@ -267,7 +301,14 @@ async fn declarative_add_column_diff_applies() {
     );
     let backend2 = PostgresBackend::new_generic(&session);
     engine
-        .apply_declarative(&plan2, Approval::Approved, &backend2, &cfg, "app_test")
+        .apply_declarative(
+            &plan2,
+            &effective_policy(),
+            Approval::Approved,
+            &backend2,
+            &cfg,
+            "app_test",
+        )
         .await
         .expect("apply v2 add-column");
 

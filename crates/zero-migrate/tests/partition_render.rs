@@ -61,12 +61,17 @@ fn ir_ops(ops: Vec<Op>) -> MigrationIr {
 }
 
 fn pg_sql(op: Op) -> Vec<String> {
-    IrAuthor::new("app", "app_partition", SqlDialect::Postgres)
-        .lower(&ir(op), &LiveSchema::default())
-        .expect("lower")
-        .into_iter()
-        .map(|m| m.up)
-        .collect()
+    IrAuthor::new(
+        "app",
+        "app_partition",
+        SqlDialect::Postgres,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower(&ir(op), &LiveSchema::default())
+    .expect("lower")
+    .into_iter()
+    .map(|m| m.up)
+    .collect()
 }
 
 fn int_bound(value: i64) -> PartitionBoundValue {
@@ -159,7 +164,13 @@ fn insert_events(rows: &[(i64, &str)]) -> Op {
 }
 
 fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
-    let snap = fold_ops(ops, SqlDialect::Sqlite, "prj_partition").expect("fold partition ops");
+    let snap = fold_ops(
+        ops,
+        SqlDialect::Sqlite,
+        "prj_partition",
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .expect("fold partition ops");
     let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
     live.table_snapshots = snap.tables;
     live.partitions = snap.partitions;
@@ -177,9 +188,14 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
     // unrelated setup and teardown plans into checksum drift.
     let mut migration = ir_ops(ops);
     migration.name = format!("partition_render_{}", std::panic::Location::caller().line());
-    IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
-        .lower_steps(&migration, live)
-        .expect("lower partition ops to SQLite")
+    IrAuthor::new(
+        "prj_partition",
+        "app_partition",
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_steps(&migration, live)
+    .expect("lower partition ops to SQLite")
 }
 
 fn rendered_partition_sql(steps: &[zero_migrate::PlanStep]) -> String {
@@ -304,9 +320,14 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     validate_ir_scoped(&migration_ir, Dialect::Sqlite, &[], None)
         .expect("collapse-affirmed partition recording validates on SQLite");
 
-    let steps = IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
-        .lower_steps(&migration_ir, &LiveSchema::default())
-        .expect("lower collapse-affirmed partition recording on SQLite");
+    let steps = IrAuthor::new(
+        "prj_partition",
+        "app_partition",
+        SqlDialect::Sqlite,
+        &zero_migrate::zeroship_no_inject_ceiling(),
+    )
+    .lower_steps(&migration_ir, &LiveSchema::default())
+    .expect("lower collapse-affirmed partition recording on SQLite");
     assert_eq!(
         steps.len(),
         2,

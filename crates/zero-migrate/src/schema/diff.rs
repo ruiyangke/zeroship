@@ -29,6 +29,8 @@
 use compio_postgres::Pool;
 use serde_json::Value;
 
+use crate::model::table_shape::ResolvedInject;
+
 #[cfg(feature = "introspect")]
 use crate::schema::error::SchemaError;
 
@@ -619,10 +621,14 @@ pub struct ForeignKeyInfo {
     pub deferrable: bool,
 }
 
-fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String> {
-    let mut columns: std::collections::HashSet<String> = crate::schema::query::SYSTEM_FIELD_NAMES
+fn desired_physical_columns(
+    schema: &Value,
+    inject: &ResolvedInject,
+) -> std::collections::HashSet<String> {
+    let mut columns: std::collections::HashSet<String> = inject
+        .columns()
         .iter()
-        .map(|name| (*name).to_string())
+        .map(|column| column.name.clone())
         .collect();
 
     let Some(obj) = schema.as_object() else {
@@ -959,7 +965,9 @@ SELECT COALESCE(c.reltuples::bigint, 0) AS rows
 ///
 /// The first deploy (`live.tables` doesn't contain `collection`) returns
 /// a single [`ChangeKind::CreateTable`] op. Subsequent deploys diff
-/// per-field against the live column set.
+/// per-field against the live column set. `inject` is the explicit resolved
+/// policy shape for this exact table; only those columns are protected as
+/// policy-owned during destructive-drop classification.
 pub fn compute_diff(
     live: &LiveSchema,
     app_id: &str,
@@ -967,6 +975,7 @@ pub fn compute_diff(
     schema: &Value,
     create_table_sql: &str,
     declared_indexes: &[crate::schema::query::IndexSpec],
+    inject: &ResolvedInject,
 ) -> Vec<DiffOp> {
     let mut ops = Vec::new();
 
@@ -1469,7 +1478,7 @@ pub fn compute_diff(
 
     // ----- column drops (destructive) -----
     if let Some(live_cols) = live_cols {
-        let desired_columns = desired_physical_columns(schema);
+        let desired_columns = desired_physical_columns(schema, inject);
         for col in live_cols.keys() {
             // Compare against the physical desired shape, not just the
             // creator-declared field map. System fields and generated
@@ -1572,6 +1581,47 @@ fn classify_add_column(def: &Value, live: &LiveSchema, collection: &str) -> Chan
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn confined_inject(app_id: &str, collection: &str) -> ResolvedInject {
+        ResolvedInject::for_table(
+            &crate::model::table_shape::zeroship_confined_ceiling(),
+            app_id,
+            collection,
+        )
+        .expect("confined test injection resolves")
+    }
+
+    fn no_inject(app_id: &str, collection: &str) -> ResolvedInject {
+        ResolvedInject::for_table(
+            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            app_id,
+            collection,
+        )
+        .expect("no-inject test policy resolves")
+    }
+
+    // Diff tests historically exercised the confined platform shape. Keep that
+    // policy choice explicit at the test boundary while retaining compact call
+    // sites; no-inject behavior calls the production function directly below.
+    fn compute_diff(
+        live: &LiveSchema,
+        app_id: &str,
+        collection: &str,
+        schema: &Value,
+        create_table_sql: &str,
+        declared_indexes: &[crate::schema::query::IndexSpec],
+    ) -> Vec<DiffOp> {
+        let inject = confined_inject(app_id, collection);
+        super::compute_diff(
+            live,
+            app_id,
+            collection,
+            schema,
+            create_table_sql,
+            declared_indexes,
+            &inject,
+        )
+    }
 
     fn live_with_rows(coll: &str, n: i64) -> LiveSchema {
         let mut live = LiveSchema::default();
@@ -1847,12 +1897,13 @@ mod tests {
         // undeclared user columns to drop.
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
-        for name in crate::schema::query::SYSTEM_FIELD_NAMES {
+        let inject = confined_inject("app1", "users");
+        for column in inject.columns() {
             cols.insert(
-                (*name).to_string(),
+                column.name.clone(),
                 ColumnInfo {
                     pg_type: "text".into(),
-                    not_null: matches!(*name, "id" | "created_at" | "updated_at" | "version"),
+                    not_null: !column.nullable.unwrap_or(true),
                     ..Default::default()
                 },
             );
@@ -1873,6 +1924,26 @@ mod tests {
                 .any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
             "system columns must survive schema revalidation without destructive drops: {ops:?}"
         );
+    }
+
+    #[test]
+    fn no_inject_policy_does_not_protect_ambient_system_names_from_drop() {
+        let live = live_with_cols(
+            "users",
+            vec![(
+                "updated_at",
+                ColumnInfo {
+                    pg_type: "text".into(),
+                    ..Default::default()
+                },
+            )],
+        );
+        let inject = no_inject("app1", "users");
+        let ops = super::compute_diff(&live, "app1", "users", &json!({}), "", &[], &inject);
+        assert!(ops.iter().any(|op| {
+            matches!(op.change_kind, ChangeKind::DropColumn)
+                && op.field.as_deref() == Some("updated_at")
+        }));
     }
 
     #[test]

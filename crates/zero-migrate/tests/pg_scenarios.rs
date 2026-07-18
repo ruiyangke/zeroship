@@ -422,10 +422,19 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         ]}"#,
     )
     .expect("parse per-row IR fixture");
-    let resolved = resolve_create_table_policy(&authored, &zeroship_no_inject_ceiling())
-        .expect("resolve no-inject table policy");
+    let resolved = resolve_create_table_policy(
+        &authored,
+        &zeroship_no_inject_ceiling(),
+        &cfg.project_schema,
+    )
+    .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
-    let author = IrAuthor::new(&cfg.project_schema, "app_test", SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        "app_test",
+        SqlDialect::Postgres,
+        &zeroship_no_inject_ceiling(),
+    );
     let artifact = author
         .load_and_lower_guarded(
             &ir,
