@@ -1,0 +1,21 @@
+policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"

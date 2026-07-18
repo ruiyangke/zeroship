@@ -1,0 +1,1198 @@
+[
+  {
+    "ir_version": 1,
+    "name": "create_departments",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "departments",
+        "columns": [
+          {
+            "name": "id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "dept"
+              }
+            }
+          },
+          {
+            "name": "code",
+            "type": {
+              "char": {
+                "length": 8
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "is_active",
+            "type": "boolean",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": true
+              }
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp",
+            "nullable": false,
+            "default": {
+              "expr": {
+                "node": "fnSynth",
+                "fn": "now",
+                "args": []
+              }
+            }
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_job_grades",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "job_grades",
+        "columns": [
+          {
+            "name": "id",
+            "type": "bigInt",
+            "nullable": false
+          },
+          {
+            "name": "grade_code",
+            "type": {
+              "char": {
+                "length": 4
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "min_salary",
+            "type": {
+              "decimal": {
+                "precision": 12,
+                "scale": 2
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "max_salary",
+            "type": {
+              "decimal": {
+                "precision": 12,
+                "scale": 2
+              }
+            },
+            "nullable": false
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_employees",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "employees",
+        "columns": [
+          {
+            "name": "id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "emp"
+              }
+            }
+          },
+          {
+            "name": "dept_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "dept"
+              }
+            },
+            "references": {
+              "table": "departments",
+              "column": "id",
+              "onDelete": "restrict"
+            }
+          },
+          {
+            "name": "grade_id",
+            "type": "bigInt",
+            "nullable": false,
+            "references": {
+              "table": "job_grades",
+              "column": "id",
+              "onDelete": "restrict"
+            }
+          },
+          {
+            "name": "email",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "first_name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "last_name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "hire_date",
+            "type": "date",
+            "nullable": false
+          },
+          {
+            "name": "base_salary",
+            "type": {
+              "decimal": {
+                "precision": 12,
+                "scale": 2
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "employment_type",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": "active"
+              }
+            }
+          },
+          {
+            "name": "manager_id",
+            "type": "text",
+            "valueFormat": {
+              "typeId": {
+                "prefix": "emp"
+              }
+            },
+            "references": {
+              "table": "employees",
+              "column": "id",
+              "onDelete": "setNull"
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp",
+            "nullable": false,
+            "default": {
+              "expr": {
+                "node": "fnSynth",
+                "fn": "now",
+                "args": []
+              }
+            }
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "add_work_location",
+    "ops": [
+      {
+        "op": "addColumn",
+        "table": "employees",
+        "column": "work_location",
+        "type": "text"
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_positions",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "positions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": "ulid"
+          },
+          {
+            "name": "title",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "department_scope",
+            "type": {
+              "char": {
+                "length": 8
+              }
+            }
+          },
+          {
+            "name": "is_leadership",
+            "type": "boolean",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": false
+              }
+            }
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_position_history",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "employee_position_history",
+        "columns": [
+          {
+            "name": "employee_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "emp"
+              }
+            },
+            "references": {
+              "table": "employees",
+              "column": "id",
+              "onDelete": "cascade"
+            }
+          },
+          {
+            "name": "position_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": "ulid",
+            "references": {
+              "table": "positions",
+              "column": "id",
+              "onDelete": "restrict"
+            }
+          },
+          {
+            "name": "effective_from",
+            "type": "date",
+            "nullable": false
+          },
+          {
+            "name": "effective_to",
+            "type": "date"
+          }
+        ],
+        "primaryKey": [
+          "employee_id",
+          "effective_from"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_payroll",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "payroll_runs",
+        "columns": [
+          {
+            "name": "id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": "ulid"
+          },
+          {
+            "name": "period_label",
+            "type": {
+              "char": {
+                "length": 7
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "run_date",
+            "type": "date",
+            "nullable": false
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": "draft"
+              }
+            }
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      },
+      {
+        "op": "createTable",
+        "name": "payroll_items",
+        "columns": [
+          {
+            "name": "run_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": "ulid",
+            "references": {
+              "table": "payroll_runs",
+              "column": "id",
+              "onDelete": "cascade"
+            }
+          },
+          {
+            "name": "employee_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "emp"
+              }
+            },
+            "references": {
+              "table": "employees",
+              "column": "id",
+              "onDelete": "restrict"
+            }
+          },
+          {
+            "name": "gross_pay",
+            "type": {
+              "decimal": {
+                "precision": 14,
+                "scale": 2
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "tax",
+            "type": {
+              "decimal": {
+                "precision": 14,
+                "scale": 2
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "net_pay",
+            "type": {
+              "decimal": {
+                "precision": 14,
+                "scale": 2
+              }
+            },
+            "generated": {
+              "expr": {
+                "node": "binOp",
+                "op": "sub",
+                "lhs": {
+                  "node": "colRef",
+                  "name": "gross_pay"
+                },
+                "rhs": {
+                  "node": "colRef",
+                  "name": "tax"
+                }
+              },
+              "stored": true
+            }
+          }
+        ],
+        "primaryKey": [
+          "run_id",
+          "employee_id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "create_leave_requests",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "leave_requests",
+        "columns": [
+          {
+            "name": "id",
+            "type": "uuid",
+            "nullable": false,
+            "default": {
+              "expr": {
+                "node": "uuidV4"
+              }
+            }
+          },
+          {
+            "name": "employee_id",
+            "type": "text",
+            "nullable": false,
+            "valueFormat": {
+              "typeId": {
+                "prefix": "emp"
+              }
+            },
+            "references": {
+              "table": "employees",
+              "column": "id",
+              "onDelete": "cascade"
+            }
+          },
+          {
+            "name": "leave_type",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "start_date",
+            "type": "date",
+            "nullable": false
+          },
+          {
+            "name": "end_date",
+            "type": "date",
+            "nullable": false
+          },
+          {
+            "name": "days",
+            "type": {
+              "decimal": {
+                "precision": 4,
+                "scale": 1
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": "pending"
+              }
+            }
+          },
+          {
+            "name": "metadata",
+            "type": "json",
+            "nullable": false,
+            "default": {
+              "container": "object"
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp",
+            "nullable": false,
+            "default": {
+              "expr": {
+                "node": "fnSynth",
+                "fn": "now",
+                "args": []
+              }
+            }
+          }
+        ],
+        "primaryKey": [
+          "id"
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "add_indexes",
+    "ops": [
+      {
+        "op": "createIndex",
+        "table": "departments",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "code"
+          }
+        ],
+        "name": "uq_departments_code",
+        "unique": true
+      },
+      {
+        "op": "createIndex",
+        "table": "job_grades",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "grade_code"
+          }
+        ],
+        "name": "uq_job_grades_code",
+        "unique": true
+      },
+      {
+        "op": "createIndex",
+        "table": "employees",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "email"
+          }
+        ],
+        "name": "uq_employees_email",
+        "unique": true
+      },
+      {
+        "op": "createIndex",
+        "table": "positions",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "title"
+          }
+        ],
+        "name": "uq_positions_title",
+        "unique": true
+      },
+      {
+        "op": "createIndex",
+        "table": "payroll_runs",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "period_label"
+          }
+        ],
+        "name": "uq_payroll_runs_period",
+        "unique": true
+      },
+      {
+        "op": "createIndex",
+        "table": "employees",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "dept_id"
+          },
+          {
+            "kind": "column",
+            "name": "status"
+          }
+        ],
+        "name": "ix_employees_dept_status"
+      },
+      {
+        "op": "createIndex",
+        "table": "leave_requests",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "employee_id"
+          },
+          {
+            "kind": "column",
+            "name": "status"
+          }
+        ],
+        "name": "ix_leave_employee_status"
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "seed_reference_data",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "departments",
+        "columns": [
+          "id",
+          "code",
+          "name"
+        ],
+        "rows": [
+          [
+            "dept_01arz3ndektsv4rrffq69g5001",
+            "HQ",
+            "Headquarters"
+          ],
+          [
+            "dept_01arz3ndektsv4rrffq69g5002",
+            "ENG",
+            "Engineering"
+          ],
+          [
+            "dept_01arz3ndektsv4rrffq69g5003",
+            "SALES",
+            "Sales"
+          ],
+          [
+            "dept_01arz3ndektsv4rrffq69g5004",
+            "HR",
+            "People Ops"
+          ]
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "job_grades",
+        "columns": [
+          "id",
+          "grade_code",
+          "min_salary",
+          "max_salary"
+        ],
+        "rows": [
+          [
+            {
+              "int64": "1"
+            },
+            "G1",
+            {
+              "decimal": "40000.00"
+            },
+            {
+              "decimal": "60000.00"
+            }
+          ],
+          [
+            {
+              "int64": "2"
+            },
+            "G2",
+            {
+              "decimal": "60000.00"
+            },
+            {
+              "decimal": "90000.00"
+            }
+          ],
+          [
+            {
+              "int64": "3"
+            },
+            "G3",
+            {
+              "decimal": "90000.00"
+            },
+            {
+              "decimal": "130000.00"
+            }
+          ],
+          [
+            {
+              "int64": "4"
+            },
+            "G4",
+            {
+              "decimal": "130000.00"
+            },
+            {
+              "decimal": "200000.00"
+            }
+          ]
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "positions",
+        "columns": [
+          "id",
+          "title",
+          "department_scope",
+          "is_leadership"
+        ],
+        "rows": [
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G7001",
+            "Chief Executive",
+            "ALL",
+            true
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G7002",
+            "Software Engineer",
+            "ENG",
+            false
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G7003",
+            "Account Executive",
+            "SALES",
+            false
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G7004",
+            "People Manager",
+            "HR",
+            false
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "seed_employees",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "employees",
+        "columns": [
+          "id",
+          "dept_id",
+          "grade_id",
+          "email",
+          "first_name",
+          "last_name",
+          "hire_date",
+          "base_salary",
+          "employment_type",
+          "manager_id"
+        ],
+        "rows": [
+          [
+            "emp_01arz3ndektsv4rrffq69g6001",
+            "dept_01arz3ndektsv4rrffq69g5002",
+            {
+              "int64": "4"
+            },
+            "ada@example.com",
+            "Ada",
+            "Lovelace",
+            "2019-03-01",
+            {
+              "decimal": "185000.00"
+            },
+            "full_time",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6002",
+            "dept_01arz3ndektsv4rrffq69g5002",
+            {
+              "int64": "3"
+            },
+            "alan@example.com",
+            "Alan",
+            "Turing",
+            "2020-06-15",
+            {
+              "decimal": "120000.00"
+            },
+            "full_time",
+            "emp_01arz3ndektsv4rrffq69g6001"
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6003",
+            "dept_01arz3ndektsv4rrffq69g5003",
+            {
+              "int64": "3"
+            },
+            "grace@example.com",
+            "Grace",
+            "Hopper",
+            "2018-01-10",
+            {
+              "decimal": "115000.00"
+            },
+            "full_time",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6004",
+            "dept_01arz3ndektsv4rrffq69g5004",
+            {
+              "int64": "2"
+            },
+            "edsger@example.com",
+            "Edsger",
+            "Dijkstra",
+            "2021-09-01",
+            {
+              "decimal": "72000.00"
+            },
+            "part_time",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6005",
+            "dept_01arz3ndektsv4rrffq69g5002",
+            {
+              "int64": "4"
+            },
+            "barbara@example.com",
+            "Barbara",
+            "Liskov",
+            "2022-02-01",
+            {
+              "decimal": "175000.00"
+            },
+            "contract",
+            "emp_01arz3ndektsv4rrffq69g6001"
+          ]
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "employee_position_history",
+        "columns": [
+          "employee_id",
+          "position_id",
+          "effective_from",
+          "effective_to"
+        ],
+        "rows": [
+          [
+            "emp_01arz3ndektsv4rrffq69g6001",
+            "01ARZ3NDEKTSV4RRFFQ69G7001",
+            "2019-03-01",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6002",
+            "01ARZ3NDEKTSV4RRFFQ69G7002",
+            "2020-06-15",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6003",
+            "01ARZ3NDEKTSV4RRFFQ69G7003",
+            "2018-01-10",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6004",
+            "01ARZ3NDEKTSV4RRFFQ69G7004",
+            "2021-09-01",
+            null
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6005",
+            "01ARZ3NDEKTSV4RRFFQ69G7002",
+            "2022-02-01",
+            null
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "seed_operations",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "payroll_runs",
+        "columns": [
+          "id",
+          "period_label",
+          "run_date",
+          "status"
+        ],
+        "rows": [
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "2026-01",
+            "2026-01-31",
+            "approved"
+          ]
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "payroll_items",
+        "columns": [
+          "run_id",
+          "employee_id",
+          "gross_pay",
+          "tax"
+        ],
+        "rows": [
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "emp_01arz3ndektsv4rrffq69g6001",
+            {
+              "decimal": "15416.67"
+            },
+            {
+              "decimal": "5395.83"
+            }
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "emp_01arz3ndektsv4rrffq69g6002",
+            {
+              "decimal": "10000.00"
+            },
+            {
+              "decimal": "2800.00"
+            }
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "emp_01arz3ndektsv4rrffq69g6003",
+            {
+              "decimal": "9583.33"
+            },
+            {
+              "decimal": "2683.33"
+            }
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "emp_01arz3ndektsv4rrffq69g6004",
+            {
+              "decimal": "3000.00"
+            },
+            {
+              "decimal": "600.00"
+            }
+          ],
+          [
+            "01ARZ3NDEKTSV4RRFFQ69G8001",
+            "emp_01arz3ndektsv4rrffq69g6005",
+            {
+              "decimal": "14583.33"
+            },
+            {
+              "decimal": "5104.17"
+            }
+          ]
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "leave_requests",
+        "columns": [
+          "employee_id",
+          "leave_type",
+          "start_date",
+          "end_date",
+          "days",
+          "status"
+        ],
+        "rows": [
+          [
+            "emp_01arz3ndektsv4rrffq69g6002",
+            "vacation",
+            "2026-02-10",
+            "2026-02-14",
+            {
+              "decimal": "5.0"
+            },
+            "approved"
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6003",
+            "sick",
+            "2026-01-20",
+            "2026-01-20",
+            {
+              "decimal": "1.0"
+            },
+            "approved"
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6004",
+            "personal",
+            "2026-03-01",
+            "2026-03-01",
+            {
+              "decimal": "0.5"
+            },
+            "pending"
+          ],
+          [
+            "emp_01arz3ndektsv4rrffq69g6005",
+            "vacation",
+            "2026-04-01",
+            "2026-04-10",
+            {
+              "decimal": "7.0"
+            },
+            "rejected"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "backfill_full_name",
+    "ops": [
+      {
+        "op": "addColumn",
+        "table": "employees",
+        "column": "full_name",
+        "type": "text"
+      },
+      {
+        "op": "backfill",
+        "table": "employees",
+        "cursorColumns": [
+          "id"
+        ],
+        "cursorStability": {
+          "mode": "guardUpdates"
+        },
+        "batchSize": 2,
+        "set": {
+          "full_name": {
+            "node": "binOp",
+            "op": "concat",
+            "lhs": {
+              "node": "binOp",
+              "op": "concat",
+              "lhs": {
+                "node": "colRef",
+                "name": "first_name"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": " "
+              }
+            },
+            "rhs": {
+              "node": "colRef",
+              "name": "last_name"
+            }
+          }
+        },
+        "name": "backfill_employee_full_name"
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "adjust_compensation",
+    "ops": [
+      {
+        "op": "update",
+        "table": "employees",
+        "set": {
+          "status": "terminated"
+        },
+        "where": {
+          "node": "binOp",
+          "op": "eq",
+          "lhs": {
+            "node": "colRef",
+            "name": "email"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": "grace@example.com"
+          }
+        }
+      },
+      {
+        "op": "delete",
+        "table": "leave_requests",
+        "where": {
+          "node": "binOp",
+          "op": "eq",
+          "lhs": {
+            "node": "colRef",
+            "name": "status"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": "rejected"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "add_audit_columns",
+    "ops": [
+      {
+        "op": "addColumn",
+        "table": "departments",
+        "column": "updated_at",
+        "type": "timestamp"
+      },
+      {
+        "op": "addColumn",
+        "table": "employees",
+        "column": "updated_at",
+        "type": "timestamp"
+      }
+    ]
+  },
+  {
+    "ir_version": 1,
+    "name": "rename_salary_column",
+    "ops": [
+      {
+        "op": "renameColumn",
+        "table": "employees",
+        "from": "base_salary",
+        "to": "annual_base_salary",
+        "type": {
+          "decimal": {
+            "precision": 12,
+            "scale": 2
+          }
+        }
+      }
+    ]
+  }
+]
