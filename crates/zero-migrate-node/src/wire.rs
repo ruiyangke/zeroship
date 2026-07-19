@@ -170,6 +170,29 @@ pub struct ApplyRequest {
     pub applied_by: String,
 }
 
+/// The typed request for the in-process SQLite `applyIrSqlite` verb.
+///
+/// Unlike [`ApplyRequest`], this carries the complete ordered envelope sequence:
+/// SQLite opens its bundled-rusqlite backend in the addon and deploys every
+/// pending envelope in one engine call, without a host-driver callback.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ApplyIrSqliteRequest {
+    /// The deploying app id (`app_…`) stamped onto every lowered migration.
+    pub owner_app: String,
+    /// The logical project/schema name used by lowering and executor confinement.
+    pub project_schema: String,
+    /// The project's `{ table: owner_app }` ownership registry.
+    pub registry: std::collections::HashMap<String, String>,
+    /// The host's required `RootCeiling` policy document (TOML).
+    pub policy_ceiling_toml: String,
+    /// Whether destructive changes are pre-approved.
+    pub approved: bool,
+    /// Ordered authored migration IR envelopes as real JavaScript values.
+    pub envelopes: Vec<JsonValue>,
+}
+
 /// The typed request for the `status` verb.
 #[cfg(feature = "napi")]
 #[napi(object)]

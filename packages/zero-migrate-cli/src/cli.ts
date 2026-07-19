@@ -25,7 +25,7 @@
 
 import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { join, resolve, isAbsolute } from "node:path";
+import { extname, join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
@@ -117,6 +117,8 @@ interface Args {
   positional?: string;
   dir: string;
   databaseUrl?: string;
+  /** Optional SQLite migration-journal file override. */
+  journalPath?: string;
   /** Dialect selected for offline plan validation. Defaults to PostgreSQL. */
   dialect?: "postgres" | "mysql" | "sqlite";
   /** Path to the trusted JSON table-ownership registry. */
@@ -177,6 +179,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case "database-url":
         args.databaseUrl = takeVal();
+        break;
+      case "journal":
+        args.journalPath = takeVal();
         break;
       case "dialect": {
         const value = takeVal();
@@ -271,6 +276,9 @@ function parseArgs(argv: string[]): Args {
   ) {
     throw new CliError("flag --policy-ceiling is only valid with apply or status");
   }
+  if (args.journalPath !== undefined && args.command !== "apply") {
+    throw new CliError("flag --journal is only valid with apply");
+  }
   // Fall back only when the flag was absent. An explicitly empty flag is an error.
   if (args.databaseUrl === undefined) {
     const env = process.env.DATABASE_URL;
@@ -348,23 +356,55 @@ async function loadPolicyCeiling(path: string | undefined): Promise<string> {
   }
 }
 
+/** Derive the separate SQLite migration-journal filename next to the app DB. */
+function sqliteJournalPath(appPath: string): string {
+  const extension = extname(appPath);
+  if (extension.length === 0) return `${appPath}.migrations`;
+  return `${appPath.slice(0, -extension.length)}.migrations${extension}`;
+}
+
 /** Select the supported Node driver from a database URL scheme. */
-function driverFor(databaseUrl: string): DriverConfig {
-  const lower = databaseUrl.trimStart().toLowerCase();
+export function driverFor(databaseUrl: string, journalOverride?: string): DriverConfig {
+  const trimmed = databaseUrl.trimStart();
+  const lower = trimmed.toLowerCase();
+  const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+  const isWindowsDrivePath = /^[a-z]:[\\/]/i.test(trimmed);
   if (lower.startsWith("postgres://") || lower.startsWith("postgresql://")) {
+    if (journalOverride !== undefined) {
+      throw new CliError("flag --journal is only valid for a SQLite database URL");
+    }
     return { kind: "postgres", url: databaseUrl };
   }
   if (lower.startsWith("mysql://")) {
+    if (journalOverride !== undefined) {
+      throw new CliError("flag --journal is only valid for a SQLite database URL");
+    }
     return { kind: "mysql", url: databaseUrl };
   }
-  if (lower.startsWith("sqlite:") || lower.endsWith(".sqlite") || lower.endsWith(".db")) {
-    throw new CliError(
-      "SQLite is not supported by the Node CLI. Use the Rust API for SQLite, or " +
-        "provide a postgres:// or mysql:// database URL.",
-    );
+  const isBareSqlitePath =
+    (!hasUriScheme || isWindowsDrivePath) &&
+    (lower.endsWith(".sqlite") || lower.endsWith(".db"));
+  if (lower.startsWith("sqlite:") || isBareSqlitePath) {
+    const appPath = lower.startsWith("sqlite:")
+      ? trimmed.replace(/^sqlite:(?:\/\/)?/i, "")
+      : trimmed;
+    if (appPath.length === 0) {
+      throw new CliError("SQLite database URL needs an application database path");
+    }
+    if (journalOverride !== undefined && journalOverride.length === 0) {
+      throw new CliError("flag --journal needs a non-empty file path");
+    }
+    return {
+      kind: "sqlite",
+      appPath,
+      journalPath: journalOverride ?? sqliteJournalPath(appPath),
+    };
+  }
+  if (journalOverride !== undefined) {
+    throw new CliError("flag --journal is only valid for a SQLite database URL");
   }
   throw new CliError(
-    "could not infer a driver from the database URL (expected a postgres:// or mysql:// scheme)",
+    "could not infer a driver from the database URL (expected a postgres:// or mysql:// scheme, or sqlite:<path>)",
   );
 }
 
@@ -519,7 +559,7 @@ async function runApply(args: Args): Promise<number> {
       "missing database URL (pass --database-url or set DATABASE_URL)",
     );
   }
-  const driver = driverFor(args.databaseUrl);
+  const driver = driverFor(args.databaseUrl, args.journalPath);
   const policyCeiling = await loadPolicyCeiling(args.policyCeilingPath);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -649,7 +689,7 @@ Usage:
   zero-migrate new <name> [--dir <dir>]
   zero-migrate plan    [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate preview [--dir <dir>] [--json]
-  zero-migrate apply   [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+  zero-migrate apply   [--dir <dir>] --database-url <url> --policy-ceiling <file> [--journal <path>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
   zero-migrate status  [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate history [--database-url <url>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
@@ -657,7 +697,8 @@ Usage:
 
 Flags:
   --dir <dir>           Migration directory (default ./migrations)
-  --database-url <url>  postgres:// or mysql:// DSN (or the DATABASE_URL env)
+  --database-url <url>  postgres:// or mysql:// DSN, or sqlite:<path> (or DATABASE_URL)
+  --journal <path>      SQLite journal override (default: <app>.migrations.<ext>)
   --dialect <name>      plan dialect: postgres, mysql, or sqlite (default postgres)
   --registry <file>     Trusted JSON map of table names to owner app IDs
   --policy-ceiling <file>
@@ -671,10 +712,10 @@ Flags:
   --version             Print the zero-migrate version
   --help                This help
 
-new/plan/preview are offline and do not connect to a database. apply/status/history
-support PostgreSQL (history is PostgreSQL only); apply/status also support MySQL 8.
-Use the Rust API to apply SQLite migrations. TypeScript (.ts) migrations load via
-tsx (an optional dependency) -- install it, or run under "npx tsx" or Bun.
+new/plan/preview are offline and do not connect to a database. apply supports
+PostgreSQL, MySQL 8, and SQLite; status supports PostgreSQL and MySQL 8; history is
+PostgreSQL only. TypeScript (.ts) migrations load via tsx (an optional dependency)
+-- install it, or run under "npx tsx" or Bun.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */

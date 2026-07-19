@@ -52,10 +52,13 @@ export type { IrEnvelope, MigrationModule } from "zero-migrate/internal/recorder
  *  in-process via rusqlite and never crosses the seam. */
 export type DriverConfig =
   | { kind: "postgres"; url: string }
-  | { kind: "mysql"; url: string };
+  | { kind: "mysql"; url: string }
+  | { kind: "sqlite"; appPath: string; journalPath: string };
+
+type NetworkDriverConfig = Exclude<DriverConfig, { kind: "sqlite" }>;
 
 /** The dialect string the addon lower + load-verify + backend-select expect. */
-function dialectOf(driver: DriverConfig): "postgres" | "mysql" {
+function dialectOf(driver: DriverConfig): "postgres" | "mysql" | "sqlite" {
   return driver.kind;
 }
 
@@ -65,7 +68,7 @@ function dialectOf(driver: DriverConfig): "postgres" | "mysql" {
  *  as exact strings). Both open sessions return the SAME `AddonHostDriver` shape (the
  *  generated `JsRequest`/`JsReply`/`JsError` DTOs) — no cast. */
 async function openSession(
-  driver: DriverConfig,
+  driver: NetworkDriverConfig,
 ): Promise<{ hostDriver: AddonHostDriver; close: () => Promise<void> }> {
   if (driver.kind === "postgres") {
     const s = await openPgSession(driver.url);
@@ -75,9 +78,8 @@ async function openSession(
     const s = await openMysqlSession(driver.url);
     return { hostDriver: s.hostDriver, close: s.close };
   }
-  throw new Error(
-    `zero-migrate-cli: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`,
-  );
+  const unreachable: never = driver;
+  throw new Error(`zero-migrate-cli: unsupported network driver ${String(unreachable)}`);
 }
 
 /** Common inputs to the host verbs. */
@@ -132,9 +134,10 @@ function assertExplicitPolicyCeiling(
 }
 
 /**
- * Author the envelope (pure JS) then drive the addon's host-authoring `applyIr`
- * over the chosen driver — the full apply. Resolves to the typed
- * `ApplyReply`. The pinned session is always closed (success or throw).
+ * Author the envelope (pure JS) then drive the addon's apply path. PostgreSQL
+ * and MySQL use the host-driver `applyIr` seam; SQLite sends the complete ordered
+ * envelope sequence to bundled rusqlite through `applyIrSqlite`. Resolves to the
+ * typed `ApplyReply`. Network sessions are always closed (success or throw).
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   assertExplicitPolicyCeiling(opts.policyCeiling, "apply");
@@ -152,6 +155,18 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
     authorEnvelope(addon, migration, opts.priorNameFallbacks?.[index]),
   );
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
+
+  if (opts.driver.kind === "sqlite") {
+    return await addon.applyIrSqlite(opts.driver.appPath, opts.driver.journalPath, {
+      ownerApp: opts.ownerApp,
+      projectSchema: opts.projectSchema,
+      registry: opts.registry ?? {},
+      policyCeilingToml: opts.policyCeiling,
+      approved: opts.approved ?? false,
+      envelopes: [...priorEnvelopes, envelope],
+    });
+  }
+
   const { hostDriver, close } = await openSession(opts.driver);
   try {
     // The verb boundary is TYPED: pass an `ApplyRequest`, get an
@@ -350,6 +365,11 @@ export interface HostHistoryOptions {
  * `migrations` returns journal-only status.
  */
 export async function status(opts: HostStatusOptions): Promise<StatusReply> {
+  if (opts.driver.kind === "sqlite") {
+    throw new Error(
+      "zero-migrate-cli: status is not available for SQLite; SQLite apply is supported",
+    );
+  }
   if (opts.migrations !== undefined) {
     assertExplicitPolicyCeiling(opts.policyCeiling, "status");
   }

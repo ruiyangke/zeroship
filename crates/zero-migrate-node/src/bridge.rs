@@ -31,7 +31,9 @@
 //! NO `tokio_rt`.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -45,18 +47,18 @@ use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::{Migration, MigrationId};
 use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
-use zero_migrate::{LiveSchema, MigrationEngine};
+use zero_migrate::{LiveSchema, MigrationEngine, MigrationIr, SqlDialect, SqliteBackend};
 
 use crate::api;
 use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 use crate::wire::{
-    ApplyPendingContractDto, ApplyReply, ApplyRequest, BlockedPlanDto, CollectionDescriptorDto,
-    FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
-    HistoryRequest, LoadVerifyReply, PendingContractStatusDto, PlanStatusDto, PlanStatusStepDto,
-    ResolvePendingRequest, RuntimeOptionsDto, StatusIrRequest, StatusReply, StatusRequest,
-    UnexpectedJournalEntryDto,
+    ApplyIrSqliteRequest, ApplyPendingContractDto, ApplyReply, ApplyRequest, BlockedPlanDto,
+    CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource,
+    HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply, PendingContractStatusDto,
+    PlanStatusDto, PlanStatusStepDto, ResolvePendingRequest, RuntimeOptionsDto, StatusIrRequest,
+    StatusReply, StatusRequest, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -471,6 +473,28 @@ where
             let session = NapiHostSession::new(dispatch);
             engine(session)
         },
+        move |outcome: std::result::Result<T, String>| match outcome {
+            Ok(reply) => deferred.resolve(move |_| Ok(reply)),
+            Err(msg) => deferred.reject(Error::from_reason(msg)),
+        },
+    );
+
+    detach_promise(env, promise)
+}
+
+/// The in-process peer of [`run_verb`]. It preserves the same deferred + dedicated
+/// worker-thread topology but needs no [`NapiHostSession`]: bundled SQLite is
+/// opened and driven entirely inside the Rust worker.
+fn run_in_process_verb<T, Fut, E>(env: Env, engine: E) -> Result<Object<'static>>
+where
+    T: ToNapiValue + Send + 'static,
+    Fut: Future<Output = std::result::Result<T, String>>,
+    E: FnOnce() -> Fut + Send + 'static,
+{
+    let (deferred, promise) = env.create_deferred::<T, _>()?;
+
+    run_engine_blocking(
+        engine,
         move |outcome: std::result::Result<T, String>| match outcome {
             Ok(reply) => deferred.resolve(move |_| Ok(reply)),
             Err(msg) => deferred.reject(Error::from_reason(msg)),
@@ -1075,6 +1099,76 @@ pub fn apply_ir(
                 .await
             }
         }
+    })
+}
+
+/// `applyIrSqlite` — deploy an ordered migration-IR sequence through the bundled
+/// in-process SQLite backend. There is no host-driver callback: the hardened app
+/// and journal connections are opened on the engine worker thread, and the same
+/// high-level library deploy loop used by Rust callers owns lowering, idempotent
+/// journal skips, apply, and live-schema threading.
+#[napi(js_name = "applyIrSqlite", ts_return_type = "Promise<ApplyReply>")]
+pub fn apply_ir_sqlite(
+    env: Env,
+    app_path: String,
+    journal_path: String,
+    req: ApplyIrSqliteRequest,
+) -> Result<Object<'static>> {
+    let ApplyIrSqliteRequest {
+        owner_app,
+        project_schema,
+        registry,
+        policy_ceiling_toml,
+        approved,
+        envelopes,
+    } = req;
+
+    let envelopes = envelopes
+        .into_iter()
+        .enumerate()
+        .map(|(index, envelope)| {
+            serde_json::from_value::<MigrationIr>(envelope).map_err(|error| {
+                Error::from_reason(format!(
+                    "envelope at index {index} is not a MigrationIr document: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let registry: BTreeMap<String, String> = registry.into_iter().collect();
+    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling_toml)
+        .map_err(Error::from_reason)?;
+    let approval = if approved {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
+
+    run_in_process_verb(env, move || async move {
+        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+        let exec_cfg = ExecutorConfig::new(project_schema.clone(), project_schema.clone())
+            .with_effective_policy(effective.clone());
+        let outcome = MigrationEngine::new()
+            .deploy_envelopes(
+                &envelopes,
+                &backend,
+                &effective,
+                SqlDialect::Sqlite,
+                &project_schema,
+                &owner_app,
+                &registry,
+                approval,
+                &exec_cfg,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        Ok(ApplyReply {
+            applied: outcome.applied,
+            skipped: outcome.skipped,
+            recovered: outcome.recovered,
+            pending_contracts: Vec::new(),
+        })
     })
 }
 

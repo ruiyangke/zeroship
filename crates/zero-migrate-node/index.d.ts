@@ -14,6 +14,37 @@
  */
 export declare function applyIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: ApplyRequest): Promise<ApplyReply>
 
+/**
+ * `applyIrSqlite` — deploy an ordered migration-IR sequence through the bundled
+ * in-process SQLite backend. There is no host-driver callback: the hardened app
+ * and journal connections are opened on the engine worker thread, and the same
+ * high-level library deploy loop used by Rust callers owns lowering, idempotent
+ * journal skips, apply, and live-schema threading.
+ */
+export declare function applyIrSqlite(appPath: string, journalPath: string, req: ApplyIrSqliteRequest): Promise<ApplyReply>
+
+/**
+ * The typed request for the in-process SQLite `applyIrSqlite` verb.
+ *
+ * Unlike [`ApplyRequest`], this carries the complete ordered envelope sequence:
+ * SQLite opens its bundled-rusqlite backend in the addon and deploys every
+ * pending envelope in one engine call, without a host-driver callback.
+ */
+export interface ApplyIrSqliteRequest {
+  /** The deploying app id (`app_…`) stamped onto every lowered migration. */
+  ownerApp: string
+  /** The logical project/schema name used by lowering and executor confinement. */
+  projectSchema: string
+  /** The project's `{ table: owner_app }` ownership registry. */
+  registry: Record<string, string>
+  /** The host's required `RootCeiling` policy document (TOML). */
+  policyCeilingToml: string
+  /** Whether destructive changes are pre-approved. */
+  approved: boolean
+  /** Ordered authored migration IR envelopes as real JavaScript values. */
+  envelopes: Array<JsonValue>
+}
+
 /** One outstanding online-rename contract returned after apply. */
 export interface ApplyPendingContractDto {
   /** Table whose old and new columns currently coexist. */

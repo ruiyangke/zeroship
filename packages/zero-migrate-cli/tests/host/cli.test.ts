@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { driverFor } from "../../src/cli.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -91,7 +92,7 @@ test("CLI resolve-pending requires one action, approval, and PostgreSQL", () => 
 test("CLI rejects the unsupported mariadb URL scheme", () => {
   const result = runCli(
     "apply",
-    "--database-url=mariadb://private-user:secret-password@localhost/app",
+    "--database-url=mariadb://private-user:secret-password@localhost/app.db",
   );
   assert.equal(result.status, 1);
   assert.match(result.stderr, /could not infer a driver/);
@@ -134,18 +135,52 @@ test("CLI honors --help before validating subcommand positionals", () => {
   }
 });
 
-test("CLI help and SQLite errors use user-facing language", () => {
+test("CLI help advertises SQLite apply in user-facing language", () => {
   const help = runCli("--help");
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--dialect <name>/);
   assert.match(help.stdout, /--registry <file>/);
   assert.match(help.stdout, /--policy-ceiling <file>/);
+  assert.match(help.stdout, /--journal <path>/);
+  assert.match(help.stdout, /apply supports\s+PostgreSQL, MySQL 8, and SQLite/);
   assert.doesNotMatch(help.stdout, /\u2014|host driver seam|addon|in-process/);
 
   const sqlite = runCli("apply", "--database-url=sqlite:///tmp/app.db");
   assert.equal(sqlite.status, 1);
-  assert.match(sqlite.stderr, /SQLite is not supported by the Node CLI/);
+  assert.match(sqlite.stderr, /missing policy ceiling/);
+  assert.doesNotMatch(sqlite.stderr, /SQLite is not supported/);
   assert.doesNotMatch(sqlite.stderr, /\u2014|host driver seam|addon|in-process/);
+});
+
+test("CLI derives SQLite app and journal paths and honors --journal", () => {
+  assert.deepEqual(driverFor("sqlite:/tmp/app.db"), {
+    kind: "sqlite",
+    appPath: "/tmp/app.db",
+    journalPath: "/tmp/app.migrations.db",
+  });
+  assert.deepEqual(driverFor("sqlite:///tmp/app.sqlite"), {
+    kind: "sqlite",
+    appPath: "/tmp/app.sqlite",
+    journalPath: "/tmp/app.migrations.sqlite",
+  });
+  assert.deepEqual(driverFor("sqlite:./data/app"), {
+    kind: "sqlite",
+    appPath: "./data/app",
+    journalPath: "./data/app.migrations",
+  });
+  assert.deepEqual(driverFor("./data/app.db", "/tmp/custom-journal.sqlite"), {
+    kind: "sqlite",
+    appPath: "./data/app.db",
+    journalPath: "/tmp/custom-journal.sqlite",
+  });
+  assert.throws(
+    () => driverFor("postgres://localhost/app", "/tmp/journal.db"),
+    /--journal is only valid for a SQLite database URL/,
+  );
+  assert.throws(
+    () => driverFor("sqlite:/tmp/app.db", ""),
+    /--journal needs a non-empty file path/,
+  );
 });
 
 test("CLI apply and status require an explicit policy ceiling file", () => {

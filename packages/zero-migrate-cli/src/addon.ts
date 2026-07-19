@@ -24,6 +24,7 @@ import type {
   JsRequest as GenJsRequest,
   JsReply as GenJsReply,
   JsError as GenJsError,
+  ApplyIrSqliteRequest,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -36,6 +37,7 @@ import type {
 } from "zero-migrate-node";
 
 export type {
+  ApplyIrSqliteRequest,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -83,6 +85,13 @@ export interface MigrateAddon {
    *  `Checksum::of_ir`), then drive `executor::apply` over the host driver. Resolves
    *  to a typed `ApplyReply`. */
   applyIr(hostDriver: AddonHostDriver, req: ApplyRequest): Promise<ApplyReply>;
+
+  /** SQLite apply through the addon's bundled in-process rusqlite backend. */
+  applyIrSqlite(
+    appPath: string,
+    journalPath: string,
+    req: ApplyIrSqliteRequest,
+  ): Promise<ApplyReply>;
 
   /** `status` over the host driver. Resolves to a typed `StatusReply`. */
   status(hostDriver: AddonHostDriver, req: StatusRequest): Promise<StatusReply>;
