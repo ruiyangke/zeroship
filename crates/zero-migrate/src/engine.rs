@@ -23,15 +23,26 @@
 //! if a caller hand-built a plan, the executor still independently denies the
 //! dangerous surface and confines execution. The engine never disables those.
 
+use std::collections::BTreeMap;
+
 use crate::apply::backend::MigrationBackend;
+use crate::apply::drift::DriftError;
 use crate::apply::executor::{self, ApplyError, ApplyOutcome, LockMode, RollbackError};
+use crate::apply::journal::{AppliedEntry, JournaledKind, Phase};
 pub use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
+use crate::model::ir::{MigrationIr, Op};
 use crate::model::migration::{Checksum, Migration, MigrationId};
+use crate::model::table_shape::resolve_create_table_policy;
+use crate::ops::status::PlanStatusManifest;
 use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
+use crate::render::fold::{fold_ops, fold_to_field_defs};
+use crate::render::lower::{IrAuthor, LiveSchema, LoweredArtifact};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{PlanStep, RenameStep};
+use crate::schema::query::SqlDialect;
+use zero_migrate_policy::EffectivePolicy;
 
 /// Sentinel touched-set entry meaning "this deploy touches a table I cannot
 /// NAME". The lowering folds it in when a `dropIndex` omits its
@@ -92,6 +103,10 @@ impl MigrationPlan {
 /// A failure from [`MigrationEngine::apply`].
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// Preparing or refreshing one ordered IR envelope failed before the ordinary
+    /// apply gate could return a more specific engine error.
+    #[error("IR envelope deploy failed: {0}")]
+    EnvelopeDeploy(String),
     /// The declarative plan was authored under a different composed policy than
     /// the one supplied for apply. Refused before any DDL so snapshot shape and
     /// execution can never observe different inject rules.
@@ -246,12 +261,364 @@ pub enum RollbackEngineError {
 #[derive(Debug, Clone, Default)]
 pub struct MigrationEngine;
 
+/// Combined executor result for an ordered IR-envelope deploy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AggregateOutcome {
+    /// Journal versions applied during this invocation, in deploy order.
+    pub applied: Vec<String>,
+    /// Journal versions already complete and therefore skipped.
+    pub skipped: Vec<String>,
+    /// Non-transactional versions recovered during this invocation.
+    pub recovered: Vec<String>,
+}
+
+fn envelope_deploy_error(
+    migration_name: &str,
+    stage: &str,
+    error: impl std::fmt::Display,
+) -> EngineError {
+    EngineError::EnvelopeDeploy(format!(
+        "migration {migration_name:?} failed during {stage}: {error}"
+    ))
+}
+
+fn drift_to_engine_error(error: DriftError) -> EngineError {
+    let apply = match error {
+        DriftError::Db(error) => ApplyError::Db(error),
+        DriftError::Journal(error) => ApplyError::Journal(error),
+        DriftError::Snapshot(message) => {
+            ApplyError::Backend(format!("live schema introspection failed: {message}"))
+        }
+        DriftError::Backend(message) => ApplyError::Backend(message),
+    };
+    EngineError::Apply(apply)
+}
+
+fn declarative_to_engine_error(migration_name: &str, error: DeclarativeApplyError) -> EngineError {
+    match error {
+        DeclarativeApplyError::Plain(error) => error,
+        DeclarativeApplyError::Expand(error) => {
+            envelope_deploy_error(migration_name, "plan apply", error)
+        }
+    }
+}
+
+/// Return the exact completed step ids when every journal-visible step in an
+/// artifact is complete with its expected checksum. An incomplete plan returns
+/// `None`; a stable id carrying a different non-repeatable checksum is drift.
+fn completed_artifact_steps(
+    artifact: &LoweredArtifact,
+    journal: &[AppliedEntry],
+) -> Result<Option<Vec<String>>, EngineError> {
+    let manifest = PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+        .map_err(|error| {
+            EngineError::EnvelopeDeploy(format!(
+                "migration {:?} could not build its journal manifest: {error}",
+                artifact.plan.name
+            ))
+        })?;
+    let mut skipped = Vec::with_capacity(manifest.steps.len());
+    for step in manifest.steps {
+        let Some(entry) = journal
+            .iter()
+            .find(|entry| entry.version == step.version.as_str())
+        else {
+            return Ok(None);
+        };
+        if entry.phase != Phase::Completed {
+            return Ok(None);
+        }
+        if entry.checksum != step.checksum.as_str() {
+            if step.repeatable && entry.kind.is_some_and(JournaledKind::is_repeatable) {
+                return Ok(None);
+            }
+            return Err(EngineError::Apply(ApplyError::ChecksumDrift {
+                version: entry.version.clone(),
+                recorded: entry.checksum.clone(),
+                expected: step.checksum.as_str().to_string(),
+            }));
+        }
+        skipped.push(entry.version.clone());
+    }
+    Ok(Some(skipped))
+}
+
+/// Re-lower against the authored historical schema and accept the result only
+/// when every derived step has exact completed journal evidence. This is the
+/// rerun path for a completed SQLite rename: the current catalog correctly lacks
+/// the old source column, while the historical view still has it.
+fn lower_completed_historical(
+    dialect: SqlDialect,
+    author: &IrAuthor,
+    resolved_json: &str,
+    app: &str,
+    registry: &BTreeMap<String, String>,
+    historical_live: &LiveSchema,
+    guard: &GuardConfig,
+    journal: &[AppliedEntry],
+) -> Result<Option<(LoweredArtifact, Vec<String>)>, EngineError> {
+    if dialect != SqlDialect::Sqlite {
+        return Ok(None);
+    }
+    let Ok(artifact) =
+        author.load_and_lower_guarded(resolved_json, app, registry, historical_live, guard)
+    else {
+        return Ok(None);
+    };
+    let Some(skipped) = completed_artifact_steps(&artifact, journal)? else {
+        return Ok(None);
+    };
+    Ok(Some((artifact, skipped)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_historical_live(
+    historical_live: &mut LiveSchema,
+    resolved: &MigrationIr,
+    cumulative_ops: &[Op],
+    policy: &EffectivePolicy,
+    dialect: SqlDialect,
+    project: &str,
+    app: &str,
+) -> Result<(), String> {
+    if dialect == SqlDialect::Sqlite {
+        historical_live
+            .advance_logical_columns(resolved, dialect, project, None)
+            .map_err(|error| error.to_string())?;
+    }
+    let logical_columns = historical_live.logical_columns.clone();
+    let snapshot =
+        fold_ops(cumulative_ops, dialect, project, policy).map_err(|error| error.to_string())?;
+    *historical_live = LiveSchema::from_catalog_snapshot(snapshot, app);
+    if dialect == SqlDialect::Sqlite {
+        historical_live.logical_columns = logical_columns;
+        historical_live.sqlite_schemas =
+            fold_to_field_defs(cumulative_ops, dialect, project, policy)
+                .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 impl MigrationEngine {
     /// Construct the engine. (Stateless; the executor + guard config are passed
     /// per call so one engine serves every project.)
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Resolve, guarded-lower, and apply an ordered set of migration IR envelopes.
+    ///
+    /// Live catalog state is refreshed after every envelope. SQLite additionally
+    /// preserves authored logical-column formats and the lossless SDK-shaped field
+    /// map needed by table rebuilds, because neither can be recovered completely
+    /// from SQLite affinity/catalog metadata.
+    ///
+    /// Completed plans are reconciled against their exact journal step identities
+    /// before apply. The historical logical view is used as a fallback for an
+    /// already-completed SQLite rename, whose source column is intentionally absent
+    /// from the current catalog and therefore cannot be freshly lowered against it.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError`] from journal/bootstrap/apply, or
+    /// [`EngineError::EnvelopeDeploy`] for policy resolution, guarded lowering,
+    /// schema refresh, or lossless SQLite supplementation failures.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deploy_envelopes<B: MigrationBackend>(
+        &self,
+        envelopes: &[MigrationIr],
+        backend: &B,
+        policy: &EffectivePolicy,
+        dialect: SqlDialect,
+        project: &str,
+        app: &str,
+        registry: &BTreeMap<String, String>,
+        approval: Approval,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<AggregateOutcome, EngineError> {
+        backend
+            .ensure_journal(exec_cfg)
+            .await
+            .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+        backend.acquire_project_lock(exec_cfg).await?;
+
+        let result = self
+            .deploy_envelopes_locked(
+                envelopes, backend, policy, dialect, project, app, registry, approval, exec_cfg,
+            )
+            .await;
+        let release = backend.release_project_lock(exec_cfg).await;
+        match (result, release) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(_), Err(error)) => Err(EngineError::Apply(error)),
+            (Err(error), _) => Err(error),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn deploy_envelopes_locked<B: MigrationBackend>(
+        &self,
+        envelopes: &[MigrationIr],
+        backend: &B,
+        policy: &EffectivePolicy,
+        dialect: SqlDialect,
+        project: &str,
+        app: &str,
+        registry: &BTreeMap<String, String>,
+        approval: Approval,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<AggregateOutcome, EngineError> {
+        let snapshot = backend
+            .snapshot_schema(exec_cfg)
+            .await
+            .map_err(drift_to_engine_error)?;
+        let mut live = LiveSchema::from_catalog_snapshot(snapshot, app);
+        let mut historical_live = LiveSchema::default();
+        let mut cumulative_ops: Vec<Op> = Vec::new();
+        let mut effective_registry = registry.clone();
+        let guard = GuardConfig::from_policy(policy.clone(), dialect);
+        let author = IrAuthor::new(project, app, dialect, policy);
+        let mut aggregate = AggregateOutcome::default();
+
+        for envelope in envelopes {
+            let migration_name = envelope.name.clone();
+            let resolved =
+                resolve_create_table_policy(envelope, policy, project).map_err(|error| {
+                    envelope_deploy_error(&migration_name, "table-shape policy resolution", error)
+                })?;
+            let resolved_json = serde_json::to_string(&resolved).map_err(|error| {
+                envelope_deploy_error(&migration_name, "resolved IR serialization", error)
+            })?;
+            let journal = backend
+                .applied(exec_cfg)
+                .await
+                .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+
+            let current = author.load_and_lower_guarded(
+                &resolved_json,
+                app,
+                &effective_registry,
+                &live,
+                &guard,
+            );
+
+            let created_tables = match current {
+                Ok(artifact) => {
+                    if let Some(skipped) = completed_artifact_steps(&artifact, &journal)? {
+                        aggregate.skipped.extend(skipped);
+                        artifact.created_tables
+                    } else if let Some((historical, skipped)) = lower_completed_historical(
+                        dialect,
+                        &author,
+                        &resolved_json,
+                        app,
+                        &effective_registry,
+                        &historical_live,
+                        &guard,
+                        &journal,
+                    )? {
+                        aggregate.skipped.extend(skipped);
+                        historical.created_tables
+                    } else {
+                        let created_tables = artifact.created_tables.clone();
+                        let outcome = self
+                            .apply_applied_plan_with_touched_and_depends(
+                                &artifact.plan,
+                                &artifact.touched_tables,
+                                &artifact.depends_on,
+                                approval,
+                                backend,
+                                exec_cfg,
+                                "deploy",
+                                LockMode::AlreadyHeld,
+                            )
+                            .await
+                            .map_err(|error| declarative_to_engine_error(&migration_name, error))?;
+                        aggregate.applied.extend(outcome.applied.applied);
+                        aggregate.skipped.extend(outcome.applied.skipped);
+                        aggregate.recovered.extend(outcome.applied.recovered);
+                        created_tables
+                    }
+                }
+                Err(current_error) => {
+                    if let Some((historical, skipped)) = lower_completed_historical(
+                        dialect,
+                        &author,
+                        &resolved_json,
+                        app,
+                        &effective_registry,
+                        &historical_live,
+                        &guard,
+                        &journal,
+                    )? {
+                        aggregate.skipped.extend(skipped);
+                        historical.created_tables
+                    } else {
+                        return Err(envelope_deploy_error(
+                            &migration_name,
+                            "guarded lowering",
+                            current_error,
+                        ));
+                    }
+                }
+            };
+
+            for table in created_tables {
+                effective_registry
+                    .entry(table)
+                    .or_insert_with(|| app.to_string());
+            }
+
+            cumulative_ops.extend(resolved.ops.iter().cloned());
+            if dialect == SqlDialect::Sqlite {
+                refresh_historical_live(
+                    &mut historical_live,
+                    &resolved,
+                    &cumulative_ops,
+                    policy,
+                    dialect,
+                    project,
+                    app,
+                )
+                .map_err(|error| {
+                    envelope_deploy_error(&migration_name, "historical schema projection", error)
+                })?;
+                live.advance_logical_columns(&resolved, dialect, project, None)
+                    .map_err(|error| {
+                        envelope_deploy_error(
+                            &migration_name,
+                            "SQLite logical-column advance",
+                            error,
+                        )
+                    })?;
+                let logical_columns = live.logical_columns.clone();
+                // `SqliteBackend::snapshot_schema` delegates to the same SQLite
+                // catalog routine as its inherent `snapshot_schema_sqlite`; the
+                // trait call keeps this method generic over `B`.
+                let snapshot = backend
+                    .snapshot_schema(exec_cfg)
+                    .await
+                    .map_err(drift_to_engine_error)?;
+                live = LiveSchema::from_catalog_snapshot(snapshot, app);
+                live.logical_columns = logical_columns;
+                live.sqlite_schemas = fold_to_field_defs(&cumulative_ops, dialect, project, policy)
+                    .map_err(|error| {
+                        envelope_deploy_error(
+                            &migration_name,
+                            "SQLite rebuild-facet supplementation",
+                            error,
+                        )
+                    })?;
+            } else {
+                let snapshot = backend
+                    .snapshot_schema(exec_cfg)
+                    .await
+                    .map_err(drift_to_engine_error)?;
+                live = LiveSchema::from_catalog_snapshot(snapshot, app);
+            }
+        }
+
+        Ok(aggregate)
     }
 
     /// Lint + preview a migration set **read-only** (no DB) — the dry-run /

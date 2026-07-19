@@ -150,7 +150,7 @@ pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
 #[cfg(pg_seam)]
 pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use engine::{
-    recognizes_contract_apply, DeclarativeApplyError, DeclarativeDeployOutcome,
+    recognizes_contract_apply, AggregateOutcome, DeclarativeApplyError, DeclarativeDeployOutcome,
     DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
     PlannedMigration, RollbackEngineError,
 };

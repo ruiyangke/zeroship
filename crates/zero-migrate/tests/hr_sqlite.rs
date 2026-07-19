@@ -4,10 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
 use zero_migrate::{
-    confined_no_inject_policy, fold_to_field_defs, resolve_create_table_policy, Approval,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, Op,
+    confined_no_inject_policy, Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr,
     SqlDialect, SqliteBackend,
 };
 
@@ -80,9 +78,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
         SqliteBackend::open(&paths.app, &paths.journal).expect("open hardened SQLite backend");
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT);
     let registry = registry();
-    let guard = GuardConfig::confined_sqlite(PROJECT.to_string());
     let no_inject = confined_no_inject_policy(PROJECT).expect("author-owned table policy");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &no_inject);
     let engine = MigrationEngine::new();
 
     let envelopes: Vec<MigrationIr> =
@@ -101,65 +97,54 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
         "preview envelopes remain in filename order"
     );
 
-    let mut live = LiveSchema::default();
-    let mut cumulative_ops: Vec<Op> = Vec::new();
+    let outcome = engine
+        .deploy_envelopes(
+            &envelopes,
+            &backend,
+            &no_inject,
+            SqlDialect::Sqlite,
+            PROJECT,
+            APP,
+            &registry,
+            Approval::Approved,
+            &exec_cfg,
+        )
+        .await
+        .expect("deploy the ordered HR envelope set");
+    assert!(
+        outcome.applied.len() >= envelopes.len(),
+        "every HR envelope must apply at least one journaled plan step: {outcome:?}"
+    );
+    println!("applied HR envelopes: {:?}", outcome.applied);
 
-    for envelope in envelopes {
-        let migration_name = envelope.name.clone();
-        let resolved = resolve_create_table_policy(&envelope, &no_inject, PROJECT)
-            .unwrap_or_else(|error| panic!("resolve {migration_name}: {error}"));
-        let ir_json = serde_json::to_string(&resolved)
-            .unwrap_or_else(|error| panic!("serialize {migration_name}: {error}"));
+    let rerun = engine
+        .deploy_envelopes(
+            &envelopes,
+            &backend,
+            &no_inject,
+            SqlDialect::Sqlite,
+            PROJECT,
+            APP,
+            &registry,
+            Approval::Approved,
+            &exec_cfg,
+        )
+        .await
+        .expect("the complete HR envelope rerun is idempotent");
+    assert!(
+        rerun.applied.is_empty(),
+        "rerun must apply nothing: {rerun:?}"
+    );
+    assert!(
+        !rerun.skipped.is_empty(),
+        "rerun must report completed journal steps: {rerun:?}"
+    );
 
-        // The guarded/full-plan path is required here: the flat load_and_lower API
-        // projects away DML, backfills, and SQLite rebuild rename steps.
-        let artifact = author
-            .load_and_lower_guarded(&ir_json, APP, &registry, &live, &guard)
-            .unwrap_or_else(|error| panic!("lower {migration_name}: {error}"));
-        let outcome = engine
-            .apply_applied_plan_with_touched_and_depends(
-                &artifact.plan,
-                &artifact.touched_tables,
-                &artifact.depends_on,
-                Approval::Approved,
-                &backend,
-                &exec_cfg,
-                "deploy",
-                LockMode::Acquire,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("apply {migration_name}: {error}"));
-        assert!(
-            !outcome.applied.applied.is_empty(),
-            "{migration_name} must apply at least one plan step"
-        );
-        println!("applied {migration_name}: {:?}", outcome.applied.applied);
-
-        // Logical value-format contracts are authored facts and cannot be recovered
-        // from SQLite affinity. Preserve them while refreshing the physical schema
-        // from the database after every migration.
-        live.advance_logical_columns(&resolved, SqlDialect::Sqlite, PROJECT, None)
-            .unwrap_or_else(|error| {
-                panic!("advance logical schema after {migration_name}: {error}")
-            });
-        cumulative_ops.extend(resolved.ops.iter().cloned());
-        let snapshot = backend
-            .snapshot_schema_sqlite()
-            .await
-            .unwrap_or_else(|error| panic!("snapshot after {migration_name}: {error}"));
-        let logical_columns = live.logical_columns.clone();
-        live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-        live.logical_columns = logical_columns;
-
-        // SQLite rename rebuilds require the lossless SDK-shaped column facets in
-        // addition to the catalog snapshot. Recover that map from the exact authored
-        // IR accumulated so far; the SQLite catalog alone cannot represent it.
-        live.sqlite_schemas =
-            fold_to_field_defs(&cumulative_ops, SqlDialect::Sqlite, PROJECT, &no_inject)
-                .unwrap_or_else(|error| {
-                    panic!("fold SQLite schema after {migration_name}: {error}")
-                });
-    }
+    let snapshot = backend
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect completed HR schema");
+    let live = LiveSchema::from_catalog_snapshot(snapshot, APP);
 
     let table_rows = backend
         .actor()
