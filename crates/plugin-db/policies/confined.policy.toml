@@ -1,0 +1,66 @@
+# The confined table-shape ceiling for plugin-db's SQLite `register_model` engine
+# path (the dev-tier `zeroship serve` local backend). The published `zero-migrate`
+# engine deliberately ships NO production confined-inject ceiling ("the REAL
+# confined ceiling moves to the monorepo"; the engine's `ZEROSHIP_CONFINED_CEILING_TOML`
+# is `#[cfg(test)]`-only), so the injecting shape must be supplied by the monorepo.
+#
+# The [[inject]] shape mirrors the canonical monorepo confined ceiling in
+# `crates/migrated/policies/confined.policy.toml` (seven system columns + three
+# system indexes + `["id"]` PK + `author_primary_key = "forbid"`, injected
+# `scope = "all"` into every created table) — keep the column/index/PK set in
+# lockstep; the system-field shape is a platform invariant.
+#
+# ONE deliberate divergence: this ceiling stamps the system-column DB DEFAULTS
+# (`created_at`/`updated_at` = now(), `version` = 1) directly on the inject
+# columns. The creator path (migrated) gets those defaults from the JS RECORDER at
+# author time, so its ceiling omits them; this SQLite `register_model` path has no
+# recorder, so plugin-db INSERTs (which never supply created_at/updated_at/version
+# — see `crud/system_fields_pass`) rely on the DDL default firing. `now()` is the
+# canonical synth form; the dialect-aware desired-snapshot render localizes it to
+# `CURRENT_TIMESTAMP` for SQLite (this path uses `desired_snapshot_for_dialect`).
+policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[grant]]
+key = "runtime.lock_timeout_ms"
+value = 30000
+scope = "all"
+
+[[grant]]
+key = "runtime.statement_timeout_ms"
+value = 300000
+scope = "all"
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id",         type = "text",        nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "now()" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "now()" },
+  { name = "created_by", type = "text",        nullable = true  },
+  { name = "updated_by", type = "text",        nullable = true  },
+  { name = "version",    type = "integer",     nullable = false, default = "1" },
+  { name = "deleted_at", type = "timestamptz", nullable = true  },
+]
+indexes = [
+  { name = "ix_deleted_at", columns = ["deleted_at"] },
+  { name = "ix_updated_at", columns = ["updated_at"] },
+  { name = "ix_created_by", columns = ["created_by"] },
+]

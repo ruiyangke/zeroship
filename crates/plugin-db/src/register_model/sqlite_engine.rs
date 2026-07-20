@@ -64,8 +64,9 @@ use zero_migrate::render::declarative::{
     CollectionDescriptor, FieldDescriptor, IndexDescriptor,
 };
 use zero_migrate::{
-    desired_snapshot, Approval, Checksum, ChecksumInput, DeclarativeApplyError, DeclarativeAuthor,
-    ExecutorConfig, GuardConfig, Migration, MigrationEngine, MigrationFlags, MigrationId,
+    desired_snapshot_for_dialect, effective_policy_from_ceiling_toml, Approval, Checksum,
+    ChecksumInput, DeclarativeApplyError, DeclarativeAuthor, ExecutorConfig, GuardConfig, Migration,
+    MigrationEngine, MigrationFlags, MigrationId,
 };
 // The engine's own dialect enum (re-exported from `zero-migrate-ir`). Distinct
 // from `zeroship_schema::query::SqlDialect` (the schema crate plugin-db keeps for
@@ -125,8 +126,23 @@ pub(crate) async fn run_sqlite_via_engine(
     let descriptors =
         build_union_descriptors(app_id, collection, schema, indexes, &other_schemas(app_id))?;
 
-    // The desired snapshot.
-    let desired = desired_snapshot(app_id, &descriptors)
+    // The confined effective policy the engine now threads through
+    // desired_snapshot / plan_declarative / apply_declarative. This path relies on
+    // the ceiling's mandatory [[inject]] to add the seven system columns (id,
+    // created_at, …) + system indexes + `["id"]` PK to every table — plugin-db's
+    // descriptors carry only the creator's own columns. The engine ships no
+    // production confined-inject ceiling, so the monorepo supplies it (mirrors
+    // crates/migrated/policies/confined.policy.toml). Its grants/inject are
+    // `scope = "all"`, so it applies regardless of the (SQLite-inert) schema name.
+    const CONFINED_CEILING_TOML: &str = include_str!("../../policies/confined.policy.toml");
+    let effective = effective_policy_from_ceiling_toml(CONFINED_CEILING_TOML)
+        .map_err(|e| DbError::internal(format!("sqlite engine: confined policy failed: {e}")))?;
+
+    // The desired snapshot. This path is SQLite, so it MUST use the dialect-aware
+    // snapshot: the plain `desired_snapshot` defaults to Postgres and would render
+    // the system-column `now()` default as literal `now()` (invalid SQLite) instead
+    // of `CURRENT_TIMESTAMP`, besides differing on FTS5 physical shape.
+    let desired = desired_snapshot_for_dialect(app_id, &descriptors, SqlDialect::Sqlite, &effective)
         .map_err(|e| DbError::internal(format!("sqlite engine: desired_snapshot failed: {e}")))?;
 
     let engine = MigrationEngine::new();
@@ -199,7 +215,7 @@ pub(crate) async fn run_sqlite_via_engine(
             .collect();
 
         let plan = engine
-            .plan_declarative(&desired, &live, &live_ownership, &author, &[], &guard_cfg)
+            .plan_declarative(&desired, &live, &live_ownership, &author, &[], &guard_cfg, &effective)
             .map_err(|e| DbError::internal(format!("sqlite engine: plan_declarative failed: {e}")))?;
 
         // The set of collections whose column shape changed — for the CDC bridge
@@ -218,7 +234,7 @@ pub(crate) async fn run_sqlite_via_engine(
         // applies rather than being refused/silent-skipped. Structurally safe in
         // prod (the worker hard-aborts on a SQLite DSN, so this is unreachable).
         engine
-            .apply_declarative(&plan, Approval::Approved, &backend_b, &exec_cfg, &deploy_id)
+            .apply_declarative(&plan, &effective, Approval::Approved, &backend_b, &exec_cfg, &deploy_id)
             .await
             .map_err(map_apply_err)?;
 

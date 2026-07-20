@@ -4,6 +4,10 @@ resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
     "refs",
+    # The vendored `zero-migrate` engine submodule is its OWN cargo workspace;
+    # exclude its tree so this workspace treats it as an external path-dep target
+    # (see `[workspace.dependencies]` zero-migrate*) rather than scanning it as a member.
+    "third_party/zero-migrate",
 ]
 
 # ---------------------------------------------------------------------------
@@ -202,18 +206,19 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # with the published `zero-migrate` engine below — is the sole migration path now;
 # the in-tree `crates/zeroship-migrate` engine has been deleted.
 zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
-# The published, standalone `zero-migrate` engine (path dep may point outside the
-# workspace). The `zeroship-migrated` service consumes it (via the adapter) instead
-# of the in-tree `zeroship-migrate`.
-zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
+# The published, standalone `zero-migrate` engine, vendored as a git submodule at
+# `third_party/zero-migrate` (pinned to a commit recorded in this repo's tree). The
+# `zeroship-migrated` service consumes it (via the adapter) instead of the in-tree
+# `zeroship-migrate`. Init with `git submodule update --init --recursive`.
+zero-migrate = { path = "third_party/zero-migrate/crates/zero-migrate" }
 # The engine's Policy Decision Point (the knob/rule/document model + composition
 # algebra) and its IR-side builtin registry. The `zeroship-migrated` managed-policy
 # server composes the monorepo-owned confined/platform ceilings against untrusted
 # creator drafts through these directly (`compose_strict` + `RootCeiling` +
 # `builtin_registry`); the top-level `zero-migrate` facade re-exports only the seal +
 # `resolve_create_table_policy`, not the composition surface.
-zero-migrate-policy = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-policy" }
-zero-migrate-ir = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-ir" }
+zero-migrate-policy = { path = "third_party/zero-migrate/crates/zero-migrate-policy" }
+zero-migrate-ir = { path = "third_party/zero-migrate/crates/zero-migrate-ir" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

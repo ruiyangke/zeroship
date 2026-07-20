@@ -25,7 +25,7 @@ zeroship-authz = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
 # Phase F Stage 3: this service consumes ONLY the published `zero-migrate` engine
-# (the standalone at /home/ruiyang/Projects/zero-migrate) plus the monorepo's
+# (vendored as a submodule at third_party/zero-migrate) plus the monorepo's
 # `zeroship-migrate-adapter` (the `CompioPgSession` mapping the platform's io_uring
 # PG driver onto the engine's driver-neutral `SqlSession` seam). The in-tree
 # `zeroship-migrate` (v6) dependency is GONE: this crate no longer links the
