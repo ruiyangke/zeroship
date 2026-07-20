@@ -1,0 +1,39 @@
+# The zeroship CONFINED guard charter. Managed lowering uses the inject-bearing
+# confined ceiling; the rendered-DDL guard uses this otherwise-equivalent charter
+# without an inject rule so it can vet the CREATE TABLE emitted by that lower.
+#
+# The managed server binds the creation and movement grants below, plus the
+# default-deny cross-schema grant, to one exact app schema before composing this
+# charter. Keep these grants aligned with confined.policy.toml. The only intentional
+# difference is the absence of the mandatory system-shape [[inject]].
+
+policy_version = 1
+
+# ── creation / movement authority (default-deny; the app may create + name tables) ──
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+# Destructive posture: the confined app may author destructive ops (the managed
+# server gates them behind operator approval at preflight, not at the policy floor).
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+# Per-op timeout CEILINGS (ms), identical to the managed confined ceiling.
+[[grant]]
+key = "runtime.lock_timeout_ms"
+value = 30000
+scope = "all"
+
+[[grant]]
+key = "runtime.statement_timeout_ms"
+value = 300000
+scope = "all"

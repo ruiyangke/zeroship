@@ -1845,7 +1845,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     assert_eq!(body["error"], "migration_policy_invalid");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("sql.raw") && detail.contains("GrantExceedsCeiling"),
+        detail.contains("sql.raw") && detail.contains("GrantExceedsCharter"),
         "draft escalation should be rejected explicitly, got: {body}"
     );
 

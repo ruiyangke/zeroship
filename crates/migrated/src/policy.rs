@@ -19,10 +19,10 @@
 //!   ([`zero_migrate::seal`] / [`SealedPolicy::verify`]).
 //!
 //! The composed engine [`EffectivePolicy`] drives table-shape injection
-//! (`resolve_create_table_policy`) and escalation-reject. The three MANAGED knobs a
-//! confined app's guard still needs (`require_rls`, `destructive_ops`,
-//! `extensions`) are read back out of the composed policy into a [`ManagedPosture`]
-//! so the per-app guard can consume that exact policy — one source of truth, no drift.
+//! (`resolve_create_table_policy`) and escalation-reject. The rendered-DDL guard uses
+//! a separate authored confined charter with the same grants and exact app-schema
+//! binding, but no inject rule: lower enforces the managed shape, while the guard
+//! remains the confinement and dangerous-operation belt around the rendered plan.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +48,10 @@ const SEAL_MATCHER_VERSION: u32 = 1;
 /// The monorepo-owned CONFINED ceiling — the default operator ceiling a creator app
 /// gets (the successor to the engine's deleted `PolicyProfile::confined()`).
 pub const CONFINED_CEILING_TOML: &str = include_str!("../policies/confined.policy.toml");
+/// The monorepo-owned no-inject charter used only to guard DDL rendered by managed
+/// lowering. Its grants mirror [`CONFINED_CEILING_TOML`]; its inject block is omitted.
+const CONFINED_GUARD_CHARTER_TOML: &str =
+    include_str!("../policies/confined-guard.policy.toml");
 /// The monorepo-owned PLATFORM ceiling — the operator-internal (author-owned,
 /// no-inject) posture (the successor to `PolicyProfile::platform()`).
 pub const PLATFORM_CEILING_TOML: &str = include_str!("../policies/platform.policy.toml");
@@ -176,17 +180,17 @@ fn mint_nonce() -> [u8; 16] {
 }
 
 /// The effective managed policy for one app: the composed engine PDP policy (the
-/// source for injection + escalation-reject) plus the ceiling identity and the
-/// derived managed posture the per-app guard is tightened with.
+/// source for injection + escalation-reject) plus the ceiling identity and its
+/// derived managed posture for approval decisions and audit records.
 #[derive(Debug, Clone)]
 pub struct EffectivePolicy {
     pub ceiling_id: String,
     pub ceiling_version: u64,
     /// The composed, unforgeable engine PDP policy — the source for
-    /// `resolve_create_table_policy` and every guard decision.
+    /// `resolve_create_table_policy`, lowering, and managed approval decisions.
     pub policy: PdpPolicy,
     /// The three managed knobs (`require_rls`, `destructive_ops`, `extensions`) read
-    /// back out of `policy`, used to tighten the per-app `GuardConfig::confined`.
+    /// back out of `policy` for approval decisions and audit records.
     pub managed: ManagedPosture,
 }
 
@@ -240,10 +244,10 @@ scope = "all"
     }
 }
 
-/// The managed knobs the confined per-app guard is tightened with. Read out of the
-/// composed engine policy so there is a single source of truth. Approval is NOT one of
-/// these — it is the separate sealed `safety.require_approval` obligation the host
-/// enforces (see [`EffectivePolicy::approval_level`]), never a `destructive_ops` state.
+/// The managed knobs read from the composed engine policy for approval decisions and
+/// audit records. Approval is NOT one of these — it is the separate sealed
+/// `safety.require_approval` obligation the host enforces (see
+/// [`EffectivePolicy::approval_level`]), never a `destructive_ops` state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedPosture {
     pub require_rls: bool,
@@ -407,6 +411,17 @@ impl ManagedCeiling {
     }
 }
 
+/// Compose the fixed no-inject guard charter after binding its schema authority to
+/// one exact app schema. Managed shape injection remains on the separate composed
+/// ceiling/draft policy used by [`EffectivePolicy`] and `IrAuthor` lowering.
+pub(crate) fn confined_guard_policy_for_schema(
+    schema: &str,
+) -> Result<PdpPolicy, ManagedPolicyError> {
+    let charter = bind_confined_charter_to_schema(CONFINED_GUARD_CHARTER_TOML, schema)
+        .map_err(ManagedPolicyError::CeilingCompose)?;
+    effective_policy_from_charter_toml(&charter).map_err(ManagedPolicyError::CeilingCompose)
+}
+
 fn schema_scope_value(schema: &str) -> toml::Value {
     let mut scope = toml::map::Map::new();
     scope.insert(
@@ -538,7 +553,7 @@ impl SealVerifier {
 pub struct SealedManagedPolicy {
     pub ceiling_id: String,
     pub ceiling_version: u64,
-    /// The composed engine policy the seal covers (the apply/guard source).
+    /// The composed engine policy the seal covers (the shape/lowering source).
     pub effective: PdpPolicy,
     /// The managed posture derived from `effective`.
     pub managed: ManagedPosture,
@@ -610,6 +625,58 @@ mod tests {
             guard.schema_scope(),
             Some(zero_migrate::SchemaScope::Single(app_schema)),
             "the effective policy must retain the exact app-schema boundary"
+        );
+    }
+
+    #[test]
+    fn confined_guard_preserves_schema_bound_grants_without_inject() {
+        let app_schema = Uuid::new_v4().to_string();
+        let guard_policy = confined_guard_policy_for_schema(&app_schema)
+            .expect("fixed no-inject guard charter composes");
+        let lower_charter = bind_confined_charter_to_schema(CONFINED_CEILING_TOML, &app_schema)
+            .expect("fixed confined ceiling binds");
+        let lower_policy = effective_policy_from_charter_toml(&lower_charter)
+            .expect("fixed confined ceiling composes");
+
+        let owned_schema = ObjectName::schema(app_schema.as_bytes().to_vec());
+        let owned_table =
+            ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
+        let foreign_table = ObjectName::table(b"other_app".to_vec(), b"widgets".to_vec());
+        let objects = [&owned_schema, &owned_table, &foreign_table];
+        for key_name in [
+            KEY_SCHEMA_CREATE_TABLE,
+            KEY_SCHEMA_RENAME,
+            KEY_SCHEMA_CROSS_SCHEMA,
+            KEY_SAFETY_DESTRUCTIVE_OPS,
+            "runtime.lock_timeout_ms",
+            "runtime.statement_timeout_ms",
+        ] {
+            let knob = key(key_name);
+            for object in objects {
+                assert_eq!(
+                    guard_policy.grants(&knob, object),
+                    lower_policy.grants(&knob, object),
+                    "guard grant {key_name} must match the confined ceiling at {object:?}"
+                );
+            }
+        }
+
+        assert!(
+            !lower_policy.injects_for(&owned_table).is_empty(),
+            "managed lower must retain the mandatory system-shape inject"
+        );
+        assert!(
+            guard_policy.injects_for(&owned_table).is_empty(),
+            "rendered-DDL guard must not carry inject coverage"
+        );
+        let guard = zero_migrate::guard::GuardConfig::from_policy(
+            guard_policy,
+            zero_migrate::SqlDialect::Postgres,
+        );
+        assert_eq!(
+            guard.schema_scope(),
+            Some(zero_migrate::SchemaScope::Single(app_schema)),
+            "guard must remain confined to the exact app schema"
         );
     }
 
