@@ -506,15 +506,14 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             &ir.ops,
             SqlDialect::Postgres,
             &schema,
-            &zero_migrate::zeroship_no_inject_ceiling(),
+            &support::no_inject("app"),
         )
             .map_err(|error| format!("fold PostgreSQL drift fixture: {error}"))?;
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("ID-facet no-inject policy composes"),
+            &support::no_inject(&schema),
         )
             .lower(&ir, &LiveSchema::default())
             .map_err(|error| format!("lower PostgreSQL drift fixture: {error}"))?;

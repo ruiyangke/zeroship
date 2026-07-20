@@ -27,12 +27,12 @@ function assert(cond, msg) {
   }
 }
 
-// --- The confined schema-emit ceiling (a `RootCeiling` TOML) both sources pass as
-//     `policyCeilingToml`. The engine bakes in NO confined preset: the caller supplies
-//     the injection shape. Both sides pass the SAME ceiling ⇒ byte-identical output.
-//     This mirrors the monorepo's bundled confined schema-emit ceiling (the 7 system
+// --- The confined schema-emit charter (a `RootCharter` TOML) both sources pass as
+//     `charterLayers`. The engine bakes in NO confined preset: the caller supplies
+//     the injection shape. Both sides pass the SAME charter ⇒ byte-identical output.
+//     This mirrors the monorepo's bundled confined schema-emit charter (the 7 system
 //     columns + [id] PK + 3 system indexes + the grants emission needs). ---
-const CONFINED_CEILING_TOML = `policy_version = 1
+const CONFINED_CHARTER_TOML = `policy_version = 1
 
 [[grant]]
 key = "schema.cross_schema"
@@ -107,10 +107,10 @@ const descriptor = {
   ],
 };
 
-const gen = addon.genArtifacts({ envelopes: [envelope], policyCeilingToml: CONFINED_CEILING_TOML });
+const gen = addon.genArtifacts({ envelopes: [envelope], charterLayers: [CONFINED_CHARTER_TOML] });
 assert(gen.ok, `generated source ok: ${gen.error}`);
 
-const man = addon.genArtifacts({ descriptors: [descriptor], policyCeilingToml: CONFINED_CEILING_TOML });
+const man = addon.genArtifacts({ descriptors: [descriptor], charterLayers: [CONFINED_CHARTER_TOML] });
 assert(man.ok, `manual source ok: ${man.error}`);
 
 // (1) byte-identical runtimeJson + envDbTs.
@@ -125,12 +125,12 @@ const desc = JSON.parse(gen.runtimeJson);
 assert(desc.version === 1, 'runtime descriptor is v1');
 const widgets = desc.collections.widgets;
 assert(widgets && typeof widgets === 'object', 'widgets collection present');
-const injectedColumnBlock = CONFINED_CEILING_TOML.match(/columns = \[([\s\S]*?)\]\nindexes = \[/);
-assert(injectedColumnBlock, 'test ceiling exposes an inject columns block');
+const injectedColumnBlock = CONFINED_CHARTER_TOML.match(/columns = \[([\s\S]*?)\]\nindexes = \[/);
+assert(injectedColumnBlock, 'test charter exposes an inject columns block');
 const injectedFields = [...injectedColumnBlock[1].matchAll(/\bname\s*=\s*"([^"]+)"/g)].map(
   (match) => match[1],
 );
-assert(injectedFields.length > 0, 'test ceiling injects at least one field');
+assert(injectedFields.length > 0, 'test charter injects at least one field');
 for (const s of injectedFields) {
   assert(widgets.fields[s] && typeof widgets.fields[s].type === 'string', `system field ${s} present with string type`);
 }
@@ -158,17 +158,23 @@ assert(!gen.envDbTs.includes('.create('), 'never executes a lifecycle operation'
 const both = addon.genArtifacts({
   envelopes: [envelope],
   descriptors: [descriptor],
-  policyCeilingToml: CONFINED_CEILING_TOML,
+  charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(!both.ok && typeof both.error === 'string', 'both-arms is a soft error');
 
-const neither = addon.genArtifacts({ policyCeilingToml: CONFINED_CEILING_TOML });
+const neither = addon.genArtifacts({ charterLayers: [CONFINED_CHARTER_TOML] });
 assert(!neither.ok && typeof neither.error === 'string', 'no-arm is a soft error');
 
 const malformed = addon.genArtifacts({
   envelopes: [{ ir_version: addon.irVersion(), ops: 'nope' }],
-  policyCeilingToml: CONFINED_CEILING_TOML,
+  charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(!malformed.ok && typeof malformed.error === 'string', 'malformed envelope is a soft error');
+
+const noCharters = addon.genArtifacts({ envelopes: [envelope], charterLayers: [] });
+assert(
+  !noCharters.ok && noCharters.error?.includes('at least one policy charter is required'),
+  'an empty charterLayers list preserves the layered loader error',
+);
 
 console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + soft-error arms (through the real .node)');

@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::BTreeMap;
 
 use zero_migrate::guard::GuardConfig;
@@ -245,13 +247,8 @@ fn raw_view(sql: &str, materialized: Option<bool>) -> Op {
 }
 
 fn lower_up(dialect: SqlDialect, op: Op) -> Result<String, Box<IrLowerError>> {
-    let author = IrAuthor::new(
-        SCHEMA,
-        "app_a",
-        dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    )
-    .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
+    let author = IrAuthor::new(SCHEMA, "app_a", dialect, &support::no_inject("app"))
+        .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -434,12 +431,12 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let confined = SchemaScope::Single(SCHEMA.to_string());
     validate_ir_scoped(&structured, Dialect::Postgres, &[], Some(&confined)).unwrap();
 
-    let guard_cfg = GuardConfig::confined(SCHEMA);
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(SCHEMA), SqlDialect::Postgres);
     IrAuthor::new(
         SCHEMA,
         "app_a",
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_guarded(&structured, &guard_cfg, &LiveSchema::default())
     .expect("plain structured view is core under confined lower_guarded");
@@ -452,7 +449,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         SCHEMA,
         "app_a",
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_guarded(&raw, &guard_cfg, &LiveSchema::default())
     .unwrap_err();
@@ -470,7 +467,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         SCHEMA,
         "app_a",
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .with_schema_scope(operator)
     .lower(&raw, &LiveSchema::default())
@@ -562,7 +559,7 @@ fn fold_records_views_and_drop_removes_them() {
         std::slice::from_ref(&create),
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .unwrap();
     let mut expected_views = BTreeMap::new();
@@ -594,7 +591,7 @@ fn fold_records_views_and_drop_removes_them() {
         &[create, drop],
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .unwrap();
     assert!(folded.views.is_empty());

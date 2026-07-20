@@ -28,6 +28,8 @@
 //!     the live vtable (excluding its FTS5 shadow tables), so a re-diff is
 //!     ZERO-drift. (See `fts_field_applies_cleanly_on_sqlite` below.)
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -67,7 +69,7 @@ fn sqlite_author() -> DeclarativeAuthor {
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {

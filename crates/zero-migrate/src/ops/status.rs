@@ -2311,7 +2311,7 @@ mod plan_status_tests {
             "app",
             "app_status",
             SqlDialect::Postgres,
-            &crate::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .lower_plan(&ir, &LiveSchema::default())
         .expect("synchronizeIdentity plan");

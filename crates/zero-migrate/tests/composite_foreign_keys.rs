@@ -18,8 +18,7 @@ const PROJECT_SCHEMA: &str = "app";
 const OWNER: &str = "app_composite_foreign_keys";
 
 fn no_inject_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::confined_no_inject_policy(PROJECT_SCHEMA)
-        .expect("composite-FK no-inject policy composes")
+    support::no_inject(PROJECT_SCHEMA)
 }
 
 fn column(
@@ -268,13 +267,8 @@ fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_inde
             "supporting index must preserve FK order on {dialect:?}: {supporting_sql}"
         );
 
-        let folded = fold_ops(
-            &ir.ops,
-            dialect,
-            PROJECT_SCHEMA,
-            &zero_migrate::zeroship_no_inject_ceiling(),
-        )
-        .unwrap_or_else(|error| panic!("composite FK must fold on {dialect:?}: {error}"));
+        let folded = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA, &support::no_inject("app"))
+            .unwrap_or_else(|error| panic!("composite FK must fold on {dialect:?}: {error}"));
         let index = folded.tables["children"]
             .indexes
             .iter()
@@ -450,7 +444,7 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
             &base_ir.ops,
             dialect,
             PROJECT_SCHEMA,
-            &zero_migrate::zeroship_no_inject_ceiling(),
+            &support::no_inject("app"),
         )
         .unwrap_or_else(|error| panic!("base schema folds on {dialect:?}: {error}"));
         let mut live = LiveSchema::from_catalog_snapshot(base_snapshot, OWNER);
@@ -580,7 +574,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
         &base.ops,
         SqlDialect::Mysql,
         PROJECT_SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("base schema folds");
     let live = LiveSchema::from_catalog_snapshot(live_snapshot.clone(), OWNER);
@@ -637,7 +631,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
         &add.ops,
         SqlDialect::Mysql,
         PROJECT_SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("stand-alone composite FK folds onto the live shape");
     let folded_support = folded_after.tables["children"]
@@ -655,7 +649,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
         &declared.ops,
         SqlDialect::Mysql,
         PROJECT_SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("declared FK schema folds");
     let declared_live = LiveSchema::from_catalog_snapshot(declared_snapshot, OWNER);
@@ -723,7 +717,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
         &base.ops,
         SqlDialect::Mysql,
         PROJECT_SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("base schema folds");
     snapshot
@@ -793,7 +787,7 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
         &declared.ops,
         SqlDialect::Sqlite,
         PROJECT_SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("declared SQLite schema folds");
     let live = LiveSchema::from_catalog_snapshot(live_snapshot, OWNER);
@@ -1194,8 +1188,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
             &schema,
             OWNER,
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("cross-schema no-inject policy composes"),
+            &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
         .map_err(|error| format!("lower composite FK: {error}"))?;

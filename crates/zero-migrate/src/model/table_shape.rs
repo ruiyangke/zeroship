@@ -99,8 +99,8 @@ pub enum TableShapeError {
 ///
 /// Column order is the sealed inject total order (outermost inject first, each
 /// spec's columns in document order); indexes likewise. The primary key is the
-/// FIRST covering spec that pins one (the outermost ceiling wins — a draft cannot
-/// override a ceiling PK, which `admit`'s collision blame already
+/// FIRST covering spec that pins one (the outermost charter wins — a draft cannot
+/// override a charter PK, which `admit`'s collision blame already
 /// guarantees is non-conflicting). `author_primary_key` is `Forbid` if ANY covering
 /// spec forbids (obligations union up).
 #[derive(Debug, Clone, PartialEq)]
@@ -626,102 +626,78 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
         && actual.identity == expected.identity
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Test-support: the GENERIC engine test ceiling
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// The engine's GENERIC test ceiling, as an in-repo `RootCeiling` TOML string. It
-/// reproduces TODAY's confined system shape as a SINGLE ⊤-scope `inject` rule: the
-/// seven system columns (`id`/`created_at`/`updated_at`/`created_by`/`updated_by`/
-/// `version`/`deleted_at`), the three system indexes (`deleted_at`/`updated_at`/
-/// `created_by`), `primary_key = ["id"]`, and `author_primary_key = "forbid"`.
-///
-/// This is deliberately the engine's own test scaffolding — NOT a shipped preset.
-/// Zeroship's REAL confined ceiling moves to the monorepo in Phase 3; the engine
-/// constructs no default ceiling of its own.
-#[cfg(any(test, feature = "test-support"))]
-pub const ZEROSHIP_CONFINED_CEILING_TOML: &str = r#"policy_version = 1
-
-[[grant]]
-key = "schema.cross_schema"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "schema.create_table"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "schema.rename"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "safety.destructive_ops"
-value = "allow"
-scope = "all"
-
-[[inject]]
-scope = "all"
-mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
-columns = [
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
-]
-indexes = [
-  { name = "ix_deleted_at", columns = ["deleted_at"] },
-  { name = "ix_updated_at", columns = ["updated_at"] },
-  { name = "ix_created_by", columns = ["created_by"] },
-]
-"#;
-
-/// Build an [`EffectivePolicy`] from a `RootCeiling` document (TOML). The ceiling
+/// Build an [`EffectivePolicy`] from a `RootCharter` document (TOML). The charter
 /// is parsed against the engine's builtin registry, then composes against a
-/// grant-only draft extracted from the same ceiling. Inject/require/validate
-/// rules survive from the root ceiling; grants become effective through the draft
-/// side of `admit` after proving they do not exceed the root ceiling.
-/// Inject-only ceilings still compose because the extracted draft is empty.
+/// grant-only draft extracted from the same charter. Inject/require/validate
+/// rules survive from the root charter; grants become effective through the draft
+/// side of `admit` after proving they do not exceed the root charter.
+/// Inject-only charters still compose because the extracted draft is empty.
 ///
 /// This is the engine-side constructor the production authoring verb
-/// (`lower_envelope_to_migrations`) and the test ceiling both go through — the
-/// engine never fabricates an `EffectivePolicy` by hand.
+/// (`lower_envelope_to_migrations`) and tests both go through. The engine never
+/// fabricates an `EffectivePolicy` by hand.
 ///
 /// # Errors
-/// A human-readable message on: a malformed ceiling document, a malformed empty
+/// A human-readable message on: a malformed charter document, a malformed empty
 /// draft (unreachable), or a composition failure.
-pub fn effective_policy_from_ceiling_toml(ceiling_toml: &str) -> Result<EffectivePolicy, String> {
+pub fn effective_policy_from_charter_toml(charter_toml: &str) -> Result<EffectivePolicy, String> {
     let registry = policy_registry::builtin_registry();
-    let ceiling = zero_migrate_policy::RootCeiling::parse_toml(ceiling_toml, &registry)
-        .map_err(|e| format!("policy ceiling failed to load: {e:?}"))?;
-    let draft_toml = grant_only_draft_toml(ceiling_toml)?;
+    let charter = zero_migrate_policy::RootCharter::parse_toml(charter_toml, &registry)
+        .map_err(|e| format!("policy charter failed to load: {e:?}"))?;
+    let draft_toml = grant_only_draft_toml(charter_toml)?;
     let draft = zero_migrate_policy::PolicyDoc::parse_toml(
         &draft_toml,
         &registry,
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
-    zero_migrate_policy::admit(&ceiling, &draft, &registry)
+    zero_migrate_policy::admit(&charter, &draft, &registry)
         .map_err(|e| format!("policy composition failed: {e:?}"))
 }
 
-fn grant_only_draft_toml(ceiling_toml: &str) -> Result<String, String> {
-    let parsed: toml::Value = toml::from_str(ceiling_toml)
-        .map_err(|e| format!("policy ceiling failed to parse as TOML: {e}"))?;
+/// Compose an ORDERED list of charter documents into one sealed [`EffectivePolicy`].
+/// `layers[0]` is the ROOT charter (the bound; the only layer where a `mandatory`
+/// inject is legal). Each subsequent document is admitted as an untrusted narrowing
+/// layer over the accumulated policy: its grants must be less than or equal to the
+/// bound (rejected, not clipped, on escalation) and its inject/require/validate rules
+/// union up. Grants a layer is silent on inherit from below.
+///
+/// # Errors
+/// Returns an error when no root charter is supplied, a document fails to load in
+/// its required context, or a non-root layer exceeds the accumulated charter.
+pub fn effective_policy_from_charter_layers(layers: &[&str]) -> Result<EffectivePolicy, String> {
+    let Some(root) = layers.first() else {
+        return Err("at least one policy charter is required".to_string());
+    };
+    if layers.len() == 1 {
+        return effective_policy_from_charter_toml(root);
+    }
+
+    let registry = policy_registry::builtin_registry();
+    let mut acc = effective_policy_from_charter_toml(root)?;
+    for (index, source) in layers.iter().enumerate().skip(1) {
+        let draft = zero_migrate_policy::PolicyDoc::parse_toml(
+            source,
+            &registry,
+            zero_migrate_policy::LoadContext::NonRootLayer,
+        )
+        .map_err(|e| format!("policy layer {} failed to load: {e:?}", index + 1))?;
+        acc = zero_migrate_policy::admit(&acc, &draft, &registry)
+            .map_err(|e| format!("policy layer {} rejected: {e:?}", index + 1))?;
+    }
+    Ok(acc)
+}
+
+fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
+    let parsed: toml::Value = toml::from_str(charter_toml)
+        .map_err(|e| format!("policy charter failed to parse as TOML: {e}"))?;
     let Some(table) = parsed.as_table() else {
-        return Err("policy ceiling root must be a TOML table".to_string());
+        return Err("policy charter root must be a TOML table".to_string());
     };
 
     let mut draft = toml::map::Map::new();
     let Some(version) = table.get("policy_version").cloned() else {
-        return Err("policy ceiling is missing policy_version".to_string());
+        return Err("policy charter is missing policy_version".to_string());
     };
     draft.insert("policy_version".to_string(), version);
     if let Some(default_scope) = table.get("default_scope").cloned() {
@@ -734,190 +710,11 @@ fn grant_only_draft_toml(ceiling_toml: &str) -> Result<String, String> {
         .map_err(|e| format!("grant-only policy draft failed to serialize: {e}"))
 }
 
-/// The GENERIC engine test ceiling as a composed [`EffectivePolicy`]: the shared
-/// helper every in-crate and integration test routes its
-/// `resolve_create_table_policy` setup through. Reproduces the confined system
-/// shape via [`ZEROSHIP_CONFINED_CEILING_TOML`].
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-pub fn zeroship_confined_ceiling() -> EffectivePolicy {
-    effective_policy_from_ceiling_toml(ZEROSHIP_CONFINED_CEILING_TOML)
-        .expect("embedded generic test ceiling composes")
-}
-
-/// A NO-INJECT effective policy: injects nothing, so `resolve_create_table_policy`
-/// is a no-op and the author-owned table shape passes through verbatim. This is the
-/// test peer of the retired `PolicyProfile::platform()` (author-owned) setup — the
-/// engine-external tests route their platform/author-owned injection setup through
-/// this instead of naming the policy crate.
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-pub fn zeroship_no_inject_ceiling() -> EffectivePolicy {
-    confined_no_inject_policy("app").expect("embedded no-inject confined policy composes")
-}
-
-/// A no-inject confined policy for the named project schema. This is the
-/// author-owned path: table-shape resolution is a no-op, while the guard still
-/// receives the scoped namespace grants it needs for create/rename attribution.
-pub fn confined_no_inject_policy(project_schema: &str) -> Result<EffectivePolicy, String> {
-    let schemas = vec![project_schema.to_string()];
-    let scope = schema_scope_value(&schemas);
-    let grant_rules = vec![
-        // Cross-schema confinement: a confined migration may reference only its own
-        // project schema. This is the guard's `grants(schema.cross_schema, s)` source.
-        grant_rule(
-            policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
-            toml::Value::Boolean(true),
-            scope.clone(),
-        ),
-        grant_rule(
-            policy_registry::KEY_SCHEMA_CREATE_TABLE,
-            toml::Value::Boolean(true),
-            scope.clone(),
-        ),
-        grant_rule(
-            policy_registry::KEY_SCHEMA_RENAME,
-            toml::Value::Boolean(true),
-            scope,
-        ),
-        grant_rule(
-            policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS,
-            toml::Value::String("allow".to_string()),
-            toml::Value::String("all".to_string()),
-        ),
-    ];
-
-    effective_policy_from_grant_rules(grant_rules)
-}
-
-/// A no-inject operator policy for platform-owned flows. It grants the builtin
-/// vendor capability set, scoped creation/rename grants for `schemas` (or `all`
-/// when the list is empty), and the extension name allowlist.
-pub fn operator_no_inject_policy(
-    schemas: &[String],
-    extensions: &[String],
-) -> Result<EffectivePolicy, String> {
-    operator_policy_inner(schemas, extensions)
-}
-
-/// The **trusted** (dbmate-like) no-inject policy: the operator capability set + ⊤
-/// cross-schema (no confinement). The belt-skip is NOT a policy grant anymore — it is
-/// the root/host-set [`GuardMode::Off`] the [`ExecutorConfig::trusted`] /
-/// [`GuardConfig::trusted`] constructors stamp. This policy is therefore the SAME
-/// content as the operator policy (over ⊤); the Trusted-vs-Platform difference is the
-/// `GuardMode`, carried on the config, not in the composed policy.
-///
-/// [`GuardMode::Off`]: crate::guard::GuardMode::Off
-/// [`GuardConfig::trusted`]: crate::guard::GuardConfig::trusted
-/// [`ExecutorConfig::trusted`]: crate::conn::ExecutorConfig::trusted
-pub fn trusted_no_inject_policy() -> Result<EffectivePolicy, String> {
-    operator_policy_inner(&[], &[])
-}
-
-fn operator_policy_inner(
-    schemas: &[String],
-    extensions: &[String],
-) -> Result<EffectivePolicy, String> {
-    let mut grant_rules = Vec::new();
-    let all = toml::Value::String("all".to_string());
-    // Whole-DB Bool vendor capabilities (Global ⊤). NOTE `code.extension` is NOT here
-    // — it is a StrSet allowlist (the allowlist IS the capability), emitted below.
-    for key in [
-        policy_registry::KEY_ACCESS_ROLE,
-        policy_registry::KEY_ACCESS_GRANT,
-        policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
-        policy_registry::KEY_ACCESS_POLICY,
-        policy_registry::KEY_ACCESS_RLS,
-        policy_registry::KEY_SCHEMA_PARTITION,
-        policy_registry::KEY_CODE_FUNCTION,
-        policy_registry::KEY_SQL_RAW,
-        policy_registry::KEY_SQL_RAW_VIEW_BODY,
-        policy_registry::KEY_CODE_MATERIALIZED_VIEW,
-    ] {
-        grant_rules.push(grant_rule(key, toml::Value::Boolean(true), all.clone()));
-    }
-    // Cross-schema + creation/rename, scoped to the owned schema allowlist (⊤ when
-    // empty — the trusted posture, which skips the belt via GuardMode anyway).
-    let creation_scope = schema_scope_value(schemas);
-    for key in [
-        policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
-        policy_registry::KEY_SCHEMA_CREATE_TABLE,
-        policy_registry::KEY_SCHEMA_RENAME,
-    ] {
-        grant_rules.push(grant_rule(
-            key,
-            toml::Value::Boolean(true),
-            creation_scope.clone(),
-        ));
-    }
-    // The CREATE EXTENSION allowlist (StrSet) IS the extension capability (empty = deny
-    // all). The raw-island role/search_path needle relaxation is now the guard's
-    // INTERNAL vendor-lower rule (GuardMode::Enforced + access.role) — no grant here.
-    if !extensions.is_empty() {
-        grant_rules.push(grant_rule(
-            policy_registry::KEY_CODE_EXTENSION,
-            toml::Value::Array(
-                extensions
-                    .iter()
-                    .map(|s| toml::Value::String(s.clone()))
-                    .collect(),
-            ),
-            all.clone(),
-        ));
-    }
-    grant_rules.push(grant_rule(
-        policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS,
-        toml::Value::String("allow".to_string()),
-        all,
-    ));
-
-    effective_policy_from_grant_rules(grant_rules)
-}
-
-fn schema_scope_value(schemas: &[String]) -> toml::Value {
-    if schemas.is_empty() {
-        toml::Value::String("all".to_string())
-    } else {
-        let mut scope = toml::map::Map::new();
-        scope.insert(
-            "include".to_string(),
-            toml::Value::Array(
-                schemas
-                    .iter()
-                    .map(|s| toml::Value::String(s.clone()))
-                    .collect(),
-            ),
-        );
-        toml::Value::Table(scope)
-    }
-}
-
-fn grant_rule(key: &str, value: toml::Value, scope: toml::Value) -> toml::Value {
-    let mut grant = toml::map::Map::new();
-    grant.insert("key".to_string(), toml::Value::String(key.to_string()));
-    grant.insert("value".to_string(), value);
-    grant.insert("scope".to_string(), scope);
-    toml::Value::Table(grant)
-}
-
-fn effective_policy_from_grant_rules(
-    grant_rules: Vec<toml::Value>,
-) -> Result<EffectivePolicy, String> {
-    let mut doc = toml::map::Map::new();
-    doc.insert(
-        "policy_version".to_string(),
-        toml::Value::Integer(i64::from(zero_migrate_policy::SUPPORTED_POLICY_VERSION)),
-    );
-    doc.insert("grant".to_string(), toml::Value::Array(grant_rules));
-    let toml = toml::to_string(&toml::Value::Table(doc))
-        .map_err(|e| format!("no-inject confined policy failed to serialize: {e}"))?;
-    effective_policy_from_ceiling_toml(&toml)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::ir::{CanonicalOpList, ColumnReference, MigrationIr, CURRENT_IR_VERSION};
+    use crate::test_fixtures::{confined_charter, no_inject, CONFINED_CHARTER_TOML};
     use crate::{Checksum, MigrationFlags};
 
     fn resolve_create_table_policy(
@@ -979,22 +776,22 @@ mod tests {
         }
     }
 
-    /// An alternate ceiling with the SAME injected shape as the confined ceiling but
+    /// An alternate charter with the SAME injected shape as the confined charter but
     /// authored differently (indexes named differently — index names are not part of
     /// the injected IR shape; the resolver appends unnamed IR indexes over the
     /// injected columns). Used to prove checksum-invariance under equivalent-shape
     /// policies (G6).
-    fn equivalent_shape_ceiling() -> EffectivePolicy {
-        let toml = ZEROSHIP_CONFINED_CEILING_TOML
+    fn equivalent_shape_charter() -> EffectivePolicy {
+        let toml = CONFINED_CHARTER_TOML
             .replace("ix_deleted_at", "renamed_deleted_at_idx")
             .replace("ix_updated_at", "renamed_updated_at_idx")
             .replace("ix_created_by", "renamed_created_by_idx");
-        effective_policy_from_ceiling_toml(&toml).expect("equivalent-shape ceiling composes")
+        effective_policy_from_charter_toml(&toml).expect("equivalent-shape charter composes")
     }
 
     #[test]
     fn unquoted_inject_identifiers_are_canonicalized_before_collision_checks() {
-        let effective = effective_policy_from_ceiling_toml(
+        let effective = effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -1031,7 +828,7 @@ indexes = [
 
     #[test]
     fn malformed_inject_identifier_is_rejected_during_resolution() {
-        let effective = effective_policy_from_ceiling_toml(
+        let effective = effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -1056,7 +853,7 @@ columns = [
     #[test]
     fn short_text_defaults_return_typed_errors_without_panicking() {
         for default in ["", "'"] {
-            let effective = effective_policy_from_ceiling_toml(&format!(
+            let effective = effective_policy_from_charter_toml(&format!(
                 r#"policy_version = 1
 
 [[inject]]
@@ -1081,7 +878,7 @@ columns = [
 
     #[test]
     fn confined_prepends_exact_resolved_inject_shape_and_pk() {
-        let effective = zeroship_confined_ceiling();
+        let effective = confined_charter();
         let inject = ResolvedInject::for_table(&effective, "public", "widgets")
             .expect("confined injection resolves");
         let resolved = resolve_create_table_policy(&ir(vec![text_col("title")], None), &effective)
@@ -1111,15 +908,15 @@ columns = [
 
     #[test]
     fn platform_preserves_author_shape() {
-        // The explicit no-inject ceiling is a no-op: the author-owned table shape
+        // The explicit no-inject charter is a no-op: the author-owned table shape
         // passes through verbatim.
         let input = ir(
             vec![text_col("id"), text_col("team")],
             Some(vec!["id".into()]),
         );
-        let no_inject = zeroship_no_inject_ceiling();
+        let no_inject = no_inject("app");
         let resolved =
-            resolve_create_table_policy(&input, &no_inject).expect("no-inject ceiling is a no-op");
+            resolve_create_table_policy(&input, &no_inject).expect("no-inject charter is a no-op");
         assert_eq!(resolved, input);
     }
 
@@ -1127,7 +924,7 @@ columns = [
     fn system_column_collision_is_rejected_except_id_prefix() {
         let err = resolve_create_table_policy(
             &ir(vec![text_col("created_at")], None),
-            &zeroship_confined_ceiling(),
+            &confined_charter(),
         )
         .expect_err("created_at collision");
         assert!(matches!(
@@ -1142,7 +939,7 @@ columns = [
         id.id_prefix = Some("post".into());
         let resolved = resolve_create_table_policy(
             &ir(vec![id], Some(vec!["id".into()])),
-            &zeroship_confined_ceiling(),
+            &confined_charter(),
         )
         .expect("id prefix folds");
         let Op::CreateTable { columns, .. } = &resolved.ops[0] else {
@@ -1163,7 +960,7 @@ columns = [
 
         let once = resolve_create_table_policy(
             &ir(vec![id], Some(vec!["id".into()])),
-            &zeroship_confined_ceiling(),
+            &confined_charter(),
         )
         .expect("a primary-key reference survives the platform ID prefix fold");
         let Op::CreateTable { columns, .. } = &once.ops[0] else {
@@ -1172,18 +969,16 @@ columns = [
         assert_eq!(columns[0].id_prefix.as_deref(), Some("post"));
         assert_eq!(columns[0].references, Some(reference("parent_posts")));
 
-        let twice = resolve_create_table_policy(&once, &zeroship_confined_ceiling())
+        let twice = resolve_create_table_policy(&once, &confined_charter())
             .expect("a folded ID reference is a conforming resolved shape");
         assert_eq!(once, twice);
     }
 
     #[test]
     fn forged_reference_on_injected_system_column_is_rejected() {
-        let mut resolved = resolve_create_table_policy(
-            &ir(vec![text_col("title")], None),
-            &zeroship_confined_ceiling(),
-        )
-        .expect("initial policy resolution");
+        let mut resolved =
+            resolve_create_table_policy(&ir(vec![text_col("title")], None), &confined_charter())
+                .expect("initial policy resolution");
         let Op::CreateTable { columns, .. } = &mut resolved.ops[0] else {
             panic!("create op")
         };
@@ -1193,7 +988,7 @@ columns = [
             .expect("injected created_at")
             .references = Some(reference("other_rows"));
 
-        let error = resolve_create_table_policy(&resolved, &zeroship_confined_ceiling())
+        let error = resolve_create_table_policy(&resolved, &confined_charter())
             .expect_err("an injected slot cannot acquire an authored reference facet");
         assert!(matches!(
             error,
@@ -1210,7 +1005,7 @@ columns = [
 
         let err = resolve_create_table_policy(
             &ir(vec![id], Some(vec!["id".into()])),
-            &zeroship_confined_ceiling(),
+            &confined_charter(),
         )
         .expect_err("an explicit UUID key must not fold into the injected text key");
 
@@ -1223,12 +1018,12 @@ columns = [
     #[test]
     fn author_primary_key_under_pinned_pk_is_forbidden() {
         // A non-`id` author PK under the confined (PK-pinning, author-PK-forbid)
-        // ceiling is rejected.
+        // charter is rejected.
         let mut extra = text_col("code");
         extra.nullable = Some(false);
         let err = resolve_create_table_policy(
             &ir(vec![extra], Some(vec!["code".into()])),
-            &zeroship_confined_ceiling(),
+            &confined_charter(),
         )
         .expect_err("author PK forbidden under pinned PK");
         assert!(matches!(
@@ -1250,25 +1045,23 @@ columns = [
 
     /// G6 (checksum honesty): the checksum is over the RESOLVED IR (injected columns
     /// are part of the applied DDL), and it depends on the RESOLVED SHAPE, not on how
-    /// the policy was authored. Two ceilings that inject the SAME columns/indexes/PK
+    /// the policy was authored. Two charters that inject the SAME columns/indexes/PK
     /// resolve to byte-identical IR ⇒ the SAME checksum. And the checksum IS sensitive
-    /// to the actual injected columns (a no-inject ceiling differs).
+    /// to the actual injected columns (a no-inject charter differs).
     #[test]
     fn checksum_is_invariant_under_equivalent_shape_and_sensitive_to_injection() {
         let input = ir(vec![text_col("title")], None);
 
-        let confined =
-            resolve_create_table_policy(&input, &zeroship_confined_ceiling()).expect("confined");
+        let confined = resolve_create_table_policy(&input, &confined_charter()).expect("confined");
         let equivalent =
-            resolve_create_table_policy(&input, &equivalent_shape_ceiling()).expect("equivalent");
+            resolve_create_table_policy(&input, &equivalent_shape_charter()).expect("equivalent");
         // Equivalent injected SHAPE ⇒ byte-identical resolved IR ⇒ identical checksum.
         assert_eq!(confined.ops, equivalent.ops);
         assert_eq!(checksum_of(&confined), checksum_of(&equivalent));
 
-        // Sensitivity: a ceiling that injects nothing resolves to a DIFFERENT shape
+        // Sensitivity: a charter that injects nothing resolves to a DIFFERENT shape
         // (no system columns) ⇒ a different checksum.
-        let no_inject =
-            resolve_create_table_policy(&input, &zeroship_no_inject_ceiling()).expect("no-inject");
+        let no_inject = resolve_create_table_policy(&input, &no_inject("app")).expect("no-inject");
         assert_ne!(confined.ops, no_inject.ops);
         assert_ne!(checksum_of(&confined), checksum_of(&no_inject));
     }
@@ -1278,9 +1071,8 @@ columns = [
     #[test]
     fn resolve_is_idempotent() {
         let input = ir(vec![text_col("title")], None);
-        let once = resolve_create_table_policy(&input, &zeroship_confined_ceiling()).expect("once");
-        let twice =
-            resolve_create_table_policy(&once, &zeroship_confined_ceiling()).expect("twice");
+        let once = resolve_create_table_policy(&input, &confined_charter()).expect("once");
+        let twice = resolve_create_table_policy(&once, &confined_charter()).expect("twice");
         assert_eq!(once, twice);
     }
 }

@@ -1,3 +1,5 @@
+mod support;
+
 use zero_migrate::model::ir::{
     ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrScalar, IrValue,
     MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
@@ -65,7 +67,7 @@ fn pg_sql(op: Op) -> Vec<String> {
         "app",
         "app_partition",
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
     .expect("lower")
@@ -168,7 +170,7 @@ fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
         ops,
         SqlDialect::Sqlite,
         "prj_partition",
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold partition ops");
     let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
@@ -178,7 +180,11 @@ fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
 }
 
 fn partition_exec_cfg() -> ExecutorConfig {
-    ExecutorConfig::new("prj_partition", "app_partition")
+    ExecutorConfig::new(
+        "prj_partition",
+        "app_partition",
+        support::no_inject("app_partition"),
+    )
 }
 
 #[track_caller]
@@ -192,7 +198,7 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
         "prj_partition",
         "app_partition",
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_steps(&migration, live)
     .expect("lower partition ops to SQLite")
@@ -324,7 +330,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         "prj_partition",
         "app_partition",
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_steps(&migration_ir, &LiveSchema::default())
     .expect("lower collapse-affirmed partition recording on SQLite");

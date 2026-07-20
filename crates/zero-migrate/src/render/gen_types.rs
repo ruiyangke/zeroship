@@ -425,15 +425,15 @@ pub fn render_artifacts(
 /// source). This turns the descriptors into `createTable` ops via
 /// [`crate::descriptors_to_create_ops`] — which resolves each descriptor's
 /// table shape under the supplied `effective` policy (injecting the confined
-/// system columns/indexes/PK the caller's ceiling declares) — and then routes
+/// system columns/indexes/PK the caller's charter declares) — and then routes
 /// through the SAME [`render_artifacts`] tail. So the manual and generated paths
 /// are byte-identical for equivalent schemas, PROVIDED both are driven by an
 /// `EffectivePolicy` that injects the same shape (the generated path resolves the
-/// raw envelope ops through the SAME ceiling before folding).
+/// raw envelope ops through the SAME charter before folding).
 ///
-/// The engine constructs no default ceiling: the caller composes the confined
-/// `EffectivePolicy` (the monorepo passes zeroship's confined ceiling; the tests
-/// pass the generic confined test ceiling) and threads it in.
+/// The engine constructs no default charter: the caller composes the confined
+/// `EffectivePolicy` (the monorepo passes zeroship's confined charter; the tests
+/// pass the generic confined test charter) and threads it in.
 ///
 /// # Errors
 /// [`GenTypesError::Produce`] if the descriptor set cannot be turned into ops
@@ -1779,9 +1779,7 @@ fn first_divergence(committed: &str, generated: &str) -> String {
 mod tests {
     use super::*;
     use crate::model::ir::RefAction;
-    use crate::model::table_shape::{
-        zeroship_confined_ceiling, zeroship_no_inject_ceiling, ResolvedInject,
-    };
+    use crate::model::table_shape::ResolvedInject;
     use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 
     fn column(name: &str, ty: ColType) -> IrColumn {
@@ -2085,7 +2083,7 @@ mod tests {
 
     #[test]
     fn runtime_json_carries_exactly_the_active_policy_injection() {
-        let effective = zeroship_confined_ceiling();
+        let effective = crate::test_fixtures::confined_charter();
         let descriptors = [CollectionDescriptor {
             name: "hits".to_string(),
             owner_app: "app_test".to_string(),
@@ -2131,7 +2129,7 @@ mod tests {
 
     #[test]
     fn runtime_json_no_inject_preserves_author_updated_at() {
-        let effective = zeroship_no_inject_ceiling();
+        let effective = crate::test_fixtures::no_inject("app");
         let descriptors = [CollectionDescriptor {
             name: "events".to_string(),
             owner_app: "app_test".to_string(),
@@ -2168,7 +2166,7 @@ mod tests {
 
     #[test]
     fn runtime_json_no_inject_preserves_uuid_column_named_id() {
-        let effective = zeroship_no_inject_ceiling();
+        let effective = crate::test_fixtures::no_inject("app");
         let ops = vec![Op::CreateTable {
             name: "external_keys".to_string(),
             columns: vec![column("id", ColType::Uuid)],

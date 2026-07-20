@@ -2975,15 +2975,15 @@ mod tests {
     use serde_json::json;
 
     fn confined_policy() -> EffectivePolicy {
-        crate::model::table_shape::zeroship_confined_ceiling()
+        crate::test_fixtures::confined_charter()
     }
 
     fn no_inject_policy() -> EffectivePolicy {
-        crate::model::table_shape::zeroship_no_inject_ceiling()
+        crate::test_fixtures::no_inject("app")
     }
 
     fn explicit_default_policy() -> EffectivePolicy {
-        crate::model::table_shape::effective_policy_from_ceiling_toml(
+        crate::model::table_shape::effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -5146,7 +5146,7 @@ columns = [
 
     #[test]
     fn policy_keyword_and_quoted_identifiers_are_quoted_in_injected_sql() {
-        let effective = crate::model::table_shape::effective_policy_from_ceiling_toml(
+        let effective = crate::model::table_shape::effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]

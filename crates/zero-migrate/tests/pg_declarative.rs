@@ -15,13 +15,13 @@ use std::collections::HashMap;
 use support::PgDevSession;
 
 use zero_migrate::{
-    desired_snapshot, diff_snapshots, snapshot_schema, zeroship_confined_ceiling, Approval,
-    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
-    GuardConfig, MigrationEngine, PostgresBackend,
+    desired_snapshot, diff_snapshots, snapshot_schema, Approval, CollectionDescriptor,
+    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
+    MigrationEngine, PostgresBackend, SqlDialect,
 };
 
 fn effective_policy() -> EffectivePolicy {
-    zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn token() -> String {
@@ -37,7 +37,11 @@ fn token() -> String {
 }
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
-    let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
+    let mut c = ExecutorConfig::new(
+        format!("prj_{tok}"),
+        format!("proj_{tok}"),
+        support::no_inject(&format!("proj_{tok}")),
+    );
     c.pg.meta_schema = format!("meta_{tok}");
     c
 }
@@ -64,7 +68,10 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 }
 
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
-    GuardConfig::confined(cfg.project_schema.clone())
+    GuardConfig::from_policy(
+        support::no_inject(&cfg.project_schema),
+        SqlDialect::Postgres,
+    )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {

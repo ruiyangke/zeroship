@@ -11,14 +11,14 @@
 //! This test constructs the SAME logical schema two independent ways — a
 //! **RAW author-only** `op.*` `CreateTable` (the exact shape the pure-JS recorder
 //! emits — NO system columns/indexes) resolved through the create-table policy
-//! (`resolve_create_table_policy` under the confined ceiling
-//! `zeroship_confined_ceiling()`), EXACTLY as the `gen_artifacts_from_envelopes` napi
+//! (`resolve_create_table_policy` under the confined charter
+//! `support::confined_charter()`), EXACTLY as the `gen_artifacts_from_envelopes` napi
 //! path now does before folding — AND an equivalent `CollectionDescriptor` (which
-//! `descriptors_to_create_ops` resolves under the SAME ceiling) — and pins:
+//! `descriptors_to_create_ops` resolves under the SAME charter) — and pins:
 //!
 //! The injection is POLICY-DRIVEN (the engine bakes in no confined preset), so BOTH
 //! sides are driven by the SAME composed `EffectivePolicy` — which is what preserves
-//! the byte-identical guarantee now that the shape comes from the ceiling.
+//! the byte-identical guarantee now that the shape comes from the charter.
 //!
 //! This is the TRUE byte-identical guarantee: the generated side feeds RAW,
 //! UNRESOLVED envelope ops (author columns only) and the resolution injects the 7
@@ -33,19 +33,19 @@
 //!   3. the emitted `env.db.ts` is a passive schema map whose current
 //!      `zero-migrate` builder calls satisfy `CreateTableArgs`.
 
+mod support;
+
 use serde_json::Value;
 
 use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{
-    render_artifacts, render_artifacts_from_descriptors, zeroship_confined_ceiling, ResolvedInject,
-};
+use zero_migrate::{render_artifacts, render_artifacts_from_descriptors, ResolvedInject};
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
 
 fn confined_injected_column_names() -> Vec<String> {
-    let effective = zeroship_confined_ceiling();
+    let effective = support::confined_charter();
     ResolvedInject::for_table(&effective, SCHEMA, "people")
         .expect("confined people injection resolves")
         .columns()
@@ -146,7 +146,7 @@ fn people_ops_generated() -> Vec<Op> {
 
 #[test]
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
-    let effective = zeroship_confined_ceiling();
+    let effective = support::confined_charter();
     let generated =
         render_artifacts(&people_ops_generated(), SCHEMA, &effective).expect("generated render");
     let manual = render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &effective)
@@ -170,7 +170,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
         SCHEMA,
-        &zeroship_confined_ceiling(),
+        &support::confined_charter(),
     )
     .expect("render");
     let v: Value = serde_json::from_str(&artifacts.runtime_json).expect("runtime json parses");
@@ -229,7 +229,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
         SCHEMA,
-        &zeroship_confined_ceiling(),
+        &support::confined_charter(),
     )
     .expect("render");
     let ts = &artifacts.env_db_ts;
@@ -285,7 +285,7 @@ fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
         SCHEMA,
-        &zeroship_confined_ceiling(),
+        &support::confined_charter(),
     )
     .expect("render");
 

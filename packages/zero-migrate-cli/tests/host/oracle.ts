@@ -35,7 +35,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
-import { NO_INJECT_POLICY_CEILING } from "./policy.js";
+import { NO_INJECT_POLICY } from "./policy.js";
 
 // The migration module. Under Bun we import the `.ts` directly; under plain Node
 // (which can't import `.ts`) we import the `bun build`-transpiled `.mjs` sibling.
@@ -153,7 +153,7 @@ async function main() {
       projectSchema: hostSchema,
       driver: { kind: "postgres", url: PG_URL },
       registry: {},
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",
@@ -241,6 +241,7 @@ async function main() {
       ownerApp: OWNER_APP,
       projectSchema: freshSchema,
       driver: { kind: "postgres", url: PG_URL },
+      policy: [NO_INJECT_POLICY],
     });
     // Typed reply: `currentVersion` camelCase; `undefined` when
     // nothing is applied.
@@ -256,6 +257,7 @@ async function main() {
       ownerApp: OWNER_APP,
       projectSchema: hostSchema,
       driver: { kind: "postgres", url: PG_URL },
+      policy: [NO_INJECT_POLICY],
     });
     record(
       "oracle-3 history() over host driver (applied schema)",

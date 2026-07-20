@@ -89,6 +89,17 @@ impl ApplyDialect {
     }
 }
 
+fn charter_layer_refs(charter_layers: &[String]) -> Vec<&str> {
+    charter_layers.iter().map(String::as_str).collect()
+}
+
+fn effective_policy_from_wire_layers(
+    charter_layers: &[String],
+) -> std::result::Result<zero_migrate::EffectivePolicy, String> {
+    let layers = charter_layer_refs(charter_layers);
+    zero_migrate::effective_policy_from_charter_layers(&layers)
+}
+
 // ---------------------------------------------------------------------------
 // Sync, DB-free entrypoints — inline on the napi call thread.
 // ---------------------------------------------------------------------------
@@ -125,13 +136,13 @@ pub fn load_verify(
 /// `CollectionDescriptor` set — the manual source) into the two co-emitted
 /// artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
 /// renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
-/// same `policyCeilingToml` drives both (the confined system-shape injection is
+/// same ordered `charterLayers` stack drives both (the confined system-shape injection is
 /// policy-driven, not a baked-in engine preset; the caller supplies the confined
-/// ceiling).
+/// charter).
 ///
 /// Runs inline on the napi call thread (no DB, no host driver). Returns a typed
 /// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
-/// malformed policy ceiling (never a throw). Exactly one of `envelopes`/`descriptors`
+/// malformed policy charter (never a throw). Exactly one of `envelopes`/`descriptors`
 /// must be populated.
 #[napi(js_name = "genArtifacts")]
 #[must_use]
@@ -140,9 +151,10 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
         envelopes,
         descriptors,
         project_schema,
-        policy_ceiling_toml,
+        charter_layers,
     } = source;
     let schema = project_schema.as_deref();
+    let charter_refs = charter_layer_refs(&charter_layers);
     match (envelopes, descriptors) {
         (Some(_), Some(_)) => gen_artifacts_err(
             "genArtifacts: exactly one of `envelopes` (generated source) or `descriptors` \
@@ -153,7 +165,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
              `descriptors` (manual source)",
         ),
         (Some(envelopes), None) => {
-            api::gen_artifacts_from_envelopes(&envelopes, schema, &policy_ceiling_toml)
+            api::gen_artifacts_from_envelopes(&envelopes, schema, &charter_refs)
         }
         (None, Some(dtos)) => {
             let descriptors = match dtos
@@ -164,7 +176,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
                 Ok(d) => d,
                 Err(e) => return gen_artifacts_err(e),
             };
-            api::gen_artifacts_from_descriptors(&descriptors, schema, &policy_ceiling_toml)
+            api::gen_artifacts_from_descriptors(&descriptors, schema, &charter_refs)
         }
     }
 }
@@ -694,10 +706,11 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling: &str,
+    charter_layers: &[String],
     approval: Approval,
     applied_by: &str,
 ) -> std::result::Result<ApplyReply, String> {
+    let charter_refs = charter_layer_refs(charter_layers);
     backend
         .ensure_journal(cfg)
         .await
@@ -731,7 +744,7 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                 project_schema,
                 dialect,
                 registry_json,
-                policy_ceiling,
+                &charter_refs,
                 &live,
             ) {
                 Ok(artifact) => artifact,
@@ -742,7 +755,7 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                         project_schema,
                         dialect,
                         registry_json,
-                        policy_ceiling,
+                        &charter_refs,
                         snapshot,
                         &journal_entries,
                         &resolved_contracts,
@@ -761,7 +774,7 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                 project_schema,
                 dialect,
                 registry_json,
-                policy_ceiling,
+                &charter_refs,
                 snapshot,
                 &journal_entries,
                 &resolved_contracts,
@@ -829,8 +842,9 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling: &str,
+    charter_layers: &[String],
 ) -> std::result::Result<StatusReply, String> {
+    let charter_refs = charter_layer_refs(charter_layers);
     backend
         .ensure_journal(cfg)
         .await
@@ -862,7 +876,7 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
             project_schema,
             dialect,
             registry_json,
-            policy_ceiling,
+            &charter_refs,
             snapshot,
             &journal_entries,
             &resolved_contracts,
@@ -1045,7 +1059,7 @@ pub fn apply_ir(
         migrator_role,
         approved,
         applied_by,
-        policy_ceiling,
+        charter_layers,
         ..
     } = req;
     let approval = if approved {
@@ -1053,13 +1067,15 @@ pub fn apply_ir(
     } else {
         Approval::None
     };
-    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling)
-        .map_err(Error::from_reason)?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let mut cfg =
-            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone())
-                .with_effective_policy(effective);
+        let mut cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
@@ -1075,7 +1091,7 @@ pub fn apply_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    &policy_ceiling,
+                    &charter_layers,
                     approval,
                     &applied_by,
                 )
@@ -1092,7 +1108,7 @@ pub fn apply_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    &policy_ceiling,
+                    &charter_layers,
                     approval,
                     &applied_by,
                 )
@@ -1118,7 +1134,7 @@ pub fn apply_ir_sqlite(
         owner_app,
         project_schema,
         registry,
-        policy_ceiling_toml,
+        charter_layers,
         approved,
         envelopes,
     } = req;
@@ -1135,8 +1151,8 @@ pub fn apply_ir_sqlite(
         })
         .collect::<Result<Vec<_>>>()?;
     let registry: BTreeMap<String, String> = registry.into_iter().collect();
-    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling_toml)
-        .map_err(Error::from_reason)?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
     let approval = if approved {
         Approval::Approved
     } else {
@@ -1146,8 +1162,11 @@ pub fn apply_ir_sqlite(
     run_in_process_verb(env, move || async move {
         let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
             .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-        let exec_cfg = ExecutorConfig::new(project_schema.clone(), project_schema.clone())
-            .with_effective_policy(effective.clone());
+        let exec_cfg = ExecutorConfig::new(
+            project_schema.clone(),
+            project_schema.clone(),
+            effective.clone(),
+        );
         let outcome = MigrationEngine::new()
             .deploy_envelopes(
                 &envelopes,
@@ -1190,6 +1209,7 @@ pub fn resolve_pending(
         action,
         approved,
         applied_by,
+        charter_layers,
     } = req;
 
     MigrationId::parse(&pending_version)
@@ -1208,10 +1228,15 @@ pub fn resolve_pending(
     } else {
         Approval::None
     };
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let mut cfg =
-            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
+        let mut cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
@@ -1231,8 +1256,8 @@ pub fn resolve_pending(
 
 /// The `project_id` an `ExecutorConfig` carries. The IR host path uses the project
 /// schema as the project id (a fresh single-app project's schema == its id in the
-/// create-first posture), matching the reference `ExecutorConfig::new(schema,
-/// schema)`. A distinct project id can be threaded through a future facade arg.
+/// create-first posture). A distinct project id can be threaded through a future
+/// facade arg.
 fn owner_app_project(project_schema: &str) -> String {
     project_schema.to_string()
 }
@@ -1259,7 +1284,7 @@ pub fn status_ir(
         dialect,
         registry,
         envelopes,
-        policy_ceiling,
+        charter_layers,
     } = req;
     let registry_json = serde_json::to_string(&registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
@@ -1272,12 +1297,15 @@ pub fn status_ir(
         })
         .collect::<Result<Vec<_>>>()?;
     let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
-    let effective = zero_migrate::effective_policy_from_ceiling_toml(&policy_ceiling)
-        .map_err(Error::from_reason)?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone())
-            .with_effective_policy(effective);
+        let cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
         match target {
             ApplyDialect::Postgres => {
                 let backend = zero_migrate::PostgresBackend::new_generic(&session);
@@ -1289,7 +1317,7 @@ pub fn status_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    &policy_ceiling,
+                    &charter_layers,
                 )
                 .await
             }
@@ -1303,7 +1331,7 @@ pub fn status_ir(
                     &project_schema,
                     &dialect,
                     &registry_json,
-                    &policy_ceiling,
+                    &charter_layers,
                 )
                 .await
             }
@@ -1333,12 +1361,15 @@ pub fn status(
         project_id,
         project_schema,
         dialect,
+        charter_layers,
         ..
     } = req;
     let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let cfg = ExecutorConfig::new(project_id, project_schema);
+        let cfg = ExecutorConfig::new(project_id, project_schema, effective);
         match target {
             ApplyDialect::Postgres => {
                 let backend = zero_migrate::PostgresBackend::new_generic(&session);
@@ -1366,10 +1397,13 @@ pub fn history(
     let HistoryRequest {
         project_id,
         project_schema,
+        charter_layers,
     } = req;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
-        let cfg = ExecutorConfig::new(project_id, project_schema);
+        let cfg = ExecutorConfig::new(project_id, project_schema, effective);
         zero_migrate::ops::status::history(&session, &cfg)
             .await
             .map(|h| history_reply(&h))

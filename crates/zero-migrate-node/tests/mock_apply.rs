@@ -21,6 +21,8 @@
 //! applied yet), so the supplied migration is pending and IS applied; its version
 //! then appears in the `ApplyOutcome.applied` list — the journal outcome assertion.
 
+mod support;
+
 use std::cell::RefCell;
 
 use zero_migrate::apply::executor::{apply, LockMode};
@@ -242,8 +244,8 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     let outcome = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg =
-            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let cfg = ExecutorConfig::new("prj_mock", "proj_mock", support::no_inject("proj_mock"))
+            .with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
         let version_str = migration.version.as_str().to_string();
 
@@ -283,7 +285,11 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
 fn mysql_journal_only_status_uses_only_mysql_sql() {
     let (status, log) = futures::executor::block_on(async {
         let session = NapiHostSession::new(MockDispatch::new());
-        let cfg = ExecutorConfig::new("prj_mysql_status", "proj_mysql_status");
+        let cfg = ExecutorConfig::new(
+            "prj_mysql_status",
+            "proj_mysql_status",
+            support::no_inject("proj_mysql_status"),
+        );
         let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
 
         let status = zero_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
@@ -329,8 +335,8 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
     let log = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg =
-            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let cfg = ExecutorConfig::new("prj_mock", "proj_mock", support::no_inject("proj_mock"))
+            .with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
 
         apply(
@@ -387,8 +393,8 @@ fn data_only_plan_executes_and_journals_through_the_host_bridge() {
     let (outcome, log, dml_version) = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg =
-            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let cfg = ExecutorConfig::new("prj_mock", "proj_mock", support::no_inject("proj_mock"))
+            .with_migrator_role("migrator_prj_mock");
         let (step, dml_version) = update_step();
         let backend = PostgresBackend::new_generic(&session);
 
@@ -429,8 +435,8 @@ fn mixed_ddl_and_dml_plan_preserves_authored_execution_order() {
     let log = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg =
-            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let cfg = ExecutorConfig::new("prj_mock", "proj_mock", support::no_inject("proj_mock"))
+            .with_migrator_role("migrator_prj_mock");
         let create = migration("create_mock", "CREATE TABLE mock_t (id int, label text)");
         let create_version = create.version.as_str().to_string();
         let (update, update_version) = update_step();

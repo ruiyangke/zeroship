@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use zero_migrate::model::expr::{Expr, PgExtractField, ScalarFn};
@@ -455,7 +457,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "app",
             "app_test",
             SqlDialect::Postgres,
-            &zero_migrate::zeroship_no_inject_ceiling(),
+            &support::no_inject("app"),
         )
         .with_schema_scope(platform_scope.clone())
         .lower(&ir, &LiveSchema::default())

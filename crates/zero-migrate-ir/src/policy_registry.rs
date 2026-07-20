@@ -4,7 +4,7 @@
 //! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
 //! the composition algebra, the unforgeable [`EffectivePolicy`]). It is content-free
 //! by design. THIS module is the engine's *content*: it declares zero-migrate's
-//! knobs — the vendor capabilities as grant keys, the op-timeout ceilings, the
+//! knobs — the vendor capabilities as grant keys, the op-timeout upper bounds, the
 //! index/table-rewrite postures, and the data-security obligations — as a builtin
 //! [`PolicyRegistry`], and maps the guard's statement classes onto those keys.
 //!
@@ -47,7 +47,7 @@
 //!
 //! # Polarities
 //!
-//! Vendor capabilities + op ceilings + the index/table-rewrite postures are
+//! Vendor capabilities + op upper bounds + the index/table-rewrite postures are
 //! `Grant` (compose DOWN, deny-by-default). The `safety.require_rls`/
 //! `safety.no_hard_delete` obligations are `Require` (compose UP, un-droppable).
 //! `safety.destructive_ops` is a rank-ordered `Grant` (forbid ⊑ warn ⊑ allow — the
@@ -132,10 +132,10 @@ pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
 
 // ── runtime — execution & resource behavior ─────────────────────────────────────
 
-/// Per-op `lock_timeout` ceiling in ms (UintCeiling, hard floor 1 — the
+/// Per-op `lock_timeout` upper bound in ms (UintCharter, hard floor 1 — the
 /// no-indefinite-lock invariant, II.5).
 pub const KEY_RUNTIME_LOCK_TIMEOUT_MS: &str = "runtime.lock_timeout_ms";
-/// Per-op `statement_timeout` ceiling in ms (UintCeiling, hard floor 1).
+/// Per-op `statement_timeout` upper bound in ms (UintCharter, hard floor 1).
 pub const KEY_RUNTIME_STATEMENT_TIMEOUT_MS: &str = "runtime.statement_timeout_ms";
 /// Index-creation posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
 pub const KEY_RUNTIME_INDEX_CREATION: &str = "runtime.index_creation";
@@ -241,14 +241,14 @@ fn bool_require(key: &str, object_model: ObjectModel, docs: &str) -> KnobDef {
     }
 }
 
-/// A `UintCeiling` grant (a monotone ms ceiling; `hard_floor = 1` forbids the
-/// indefinite-lock value 0). Default is the loosest legal ceiling — but a ceiling
-/// knob's DEFAULT must itself be the tightest value composition allows, and for a
-/// UintCeiling the tightest is the hard floor. We default to `1` (the floor).
-fn uint_ceiling(key: &str, docs: &str) -> KnobDef {
+/// A `UintCharter` grant (a monotone ms upper bound; `hard_floor = 1` forbids the
+/// indefinite-lock value 0). Default is the loosest legal upper bound — but an
+/// upper-bound knob's DEFAULT must itself be the tightest value composition allows, and for a
+/// UintCharter the tightest is the hard floor. We default to `1` (the floor).
+fn uint_charter(key: &str, docs: &str) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
-        kind: KnobKind::UintCeiling { hard_floor: 1 },
+        kind: KnobKind::UintCharter { hard_floor: 1 },
         polarity: Polarity::Grant,
         default: KnobValue::Uint(1),
         enforcement: Enforcement::Enforced,
@@ -369,9 +369,9 @@ pub fn builtin_registry() -> PolicyRegistry {
             // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
             bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
             bool_grant(KEY_SQL_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
-            // ── runtime — op-timeout ceilings + index/rewrite postures ──────────
-            uint_ceiling(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout ceiling (ms; no indefinite lock)."),
-            uint_ceiling(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout ceiling (ms)."),
+            // ── runtime — op-timeout upper bounds + index/rewrite postures ──────
+            uint_charter(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout upper bound (ms; no indefinite lock)."),
+            uint_charter(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout upper bound (ms)."),
             posture_grant(KEY_RUNTIME_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow."),
             posture_grant(KEY_RUNTIME_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow."),
             // ── safety — data protection (limits AND obligations) ───────────────
@@ -473,14 +473,14 @@ mod tests {
     }
 
     #[test]
-    fn timeout_ceilings_forbid_the_indefinite_lock_value() {
+    fn timeout_upper_bounds_forbid_the_indefinite_lock_value() {
         let reg = builtin_registry();
         for k in [
             KEY_RUNTIME_LOCK_TIMEOUT_MS,
             KEY_RUNTIME_STATEMENT_TIMEOUT_MS,
         ] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
-            assert_eq!(def.kind, KnobKind::UintCeiling { hard_floor: 1 });
+            assert_eq!(def.kind, KnobKind::UintCharter { hard_floor: 1 });
             // The default is itself legal for the kind.
             assert!(def.default.validate_for(&def.kind).is_ok());
         }

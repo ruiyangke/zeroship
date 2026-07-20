@@ -8778,7 +8778,7 @@ mod snapshot_builder_refactor_safety_tests {
     //! index) on BOTH dialects.
 
     fn confined_policy() -> zero_migrate_policy::EffectivePolicy {
-        crate::zeroship_confined_ceiling()
+        crate::test_fixtures::confined_charter()
     }
 
     fn confined_inject(schema: &str, table: &str) -> ResolvedInject {
@@ -8787,7 +8787,7 @@ mod snapshot_builder_refactor_safety_tests {
     }
 
     fn no_inject(schema: &str, table: &str) -> ResolvedInject {
-        let effective = crate::confined_no_inject_policy(schema).expect("no-inject policy");
+        let effective = crate::test_fixtures::no_inject(schema);
         ResolvedInject::for_table(&effective, schema, table).expect("empty inject shape")
     }
     use super::{
@@ -8910,7 +8910,7 @@ mod snapshot_builder_refactor_safety_tests {
             indexes: vec![],
             runtime_options: Default::default(),
         };
-        let effective = crate::confined_no_inject_policy("app").expect("explicit no-inject policy");
+        let effective = crate::test_fixtures::no_inject("app");
         let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &effective)
             .expect("author-owned updated_at is valid without injection");
 
@@ -8936,7 +8936,7 @@ mod snapshot_builder_refactor_safety_tests {
             indexes: vec![],
             runtime_options: Default::default(),
         };
-        let effective = crate::confined_no_inject_policy("app").expect("no-inject policy");
+        let effective = crate::test_fixtures::no_inject("app");
         build_table_snapshot("app", &d, SqlDialect::Postgres, &effective)
             .expect_err("ID-prefix reservations are independent of table injection");
     }

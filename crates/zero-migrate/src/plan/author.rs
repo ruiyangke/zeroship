@@ -24,6 +24,7 @@
 
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use crate::{EffectivePolicy, SqlDialect};
 
 /// A pluggable source of versioned migrations.
 ///
@@ -364,30 +365,20 @@ impl MigrationAuthor for DeterministicAuthor {
 /// cannot classify) surfaces as an [`AuthorError`] at authoring time.
 #[derive(Debug, Clone)]
 pub struct RawSqlAuthor {
-    /// The project schema the guard confines the supplied SQL to.
-    project_schema: String,
     /// The declaring app (`app_…`) recorded on the migration.
     owner_app: String,
-    /// Extensions the supplied SQL is permitted to `CREATE EXTENSION`.
-    extension_allowlist: Vec<String>,
+    /// The explicitly authored policy used to inspect the supplied SQL.
+    effective: EffectivePolicy,
 }
 
 impl RawSqlAuthor {
-    /// Construct a raw-SQL author bound to a project schema + owner app.
+    /// Construct a raw-SQL author bound to an owner app and explicit policy.
     #[must_use]
-    pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
+    pub fn new(owner_app: impl Into<String>, effective: EffectivePolicy) -> Self {
         Self {
-            project_schema: project_schema.into(),
             owner_app: owner_app.into(),
-            extension_allowlist: Vec::new(),
+            effective,
         }
-    }
-
-    /// Permit the supplied SQL to `CREATE EXTENSION` the named extensions.
-    #[must_use]
-    pub fn with_extension_allowlist(mut self, exts: Vec<String>) -> Self {
-        self.extension_allowlist = exts;
-        self
     }
 
     /// Wrap pre-generated `up`/`down` SQL as a versioned [`Migration`].
@@ -401,10 +392,10 @@ impl RawSqlAuthor {
     /// [`AuthorError::Guard`] if `up` is unparseable (the guard cannot classify
     /// it). A *denial* is deferred to [`plan`](crate::engine::MigrationEngine::plan).
     pub fn wrap(&self, name: &str, up: &str, down: Option<&str>) -> Result<Migration, AuthorError> {
-        let guard = SqlGuard::new(
-            GuardConfig::confined(self.project_schema.clone())
-                .with_extension_allowlist(self.extension_allowlist.clone()),
-        );
+        let guard = SqlGuard::new(GuardConfig::from_policy(
+            self.effective.clone(),
+            SqlDialect::Postgres,
+        ));
         // Derive flags from a guard pass when it succeeds; on a *denial* keep
         // conservative defaults but err only if UNPARSEABLE (a denial is the
         // engine plan's to surface, not authoring's). A denied-but-parseable
@@ -661,7 +652,7 @@ mod tests {
 
     #[test]
     fn raw_sql_author_wraps_safe_additive_sql_with_clean_flags() {
-        let author = RawSqlAuthor::new("proj_acme", "app_acme");
+        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
         let m = author
             .wrap(
                 "seed_settings",
@@ -681,7 +672,7 @@ mod tests {
 
     #[test]
     fn raw_sql_author_flags_destructive_drop_requiring_approval() {
-        let author = RawSqlAuthor::new("proj_acme", "app_acme");
+        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
         let m = author
             .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
             .expect("wrap");
@@ -695,7 +686,7 @@ mod tests {
 
     #[test]
     fn raw_sql_author_rejects_unparseable_up() {
-        let author = RawSqlAuthor::new("proj_acme", "app_acme");
+        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
         let err = author
             .wrap("broken", "THIS IS NOT SQL ;;", None)
             .unwrap_err();
@@ -710,7 +701,7 @@ mod tests {
         // A cross-tenant read is parseable but will be DENIED by plan(); the
         // author still mints it (conservative requires_approval) so plan can
         // report the denial precisely rather than failing at authoring.
-        let author = RawSqlAuthor::new("proj_acme", "app_acme");
+        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
         let m = author
             .wrap("evil", "SELECT * FROM control.users", None)
             .expect("parseable, so wrap succeeds");

@@ -420,7 +420,7 @@ mod tests {
         };
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             "app",
         )
         .expect("confined createTable resolves system fields");

@@ -968,8 +968,7 @@ mod tests {
         PreviewOpts {
             default_schema: "public".to_string(),
             owner_app: "app_preview".to_string(),
-            effective_policy: crate::confined_no_inject_policy("public")
-                .expect("no-inject preview policy"),
+            effective_policy: crate::test_fixtures::no_inject("public"),
         }
     }
 
@@ -1026,7 +1025,7 @@ mod tests {
     #[test]
     fn mysql_plan_and_set_previews_wrap_the_whole_author_stream() {
         let ir: MigrationIr = serde_json::from_str(SIMPLE_IR).expect("fixture parses");
-        let effective = crate::confined_no_inject_policy("public").expect("no-inject policy");
+        let effective = crate::test_fixtures::no_inject("public");
         let author = IrAuthor::new("public", "app_preview", SqlDialect::Mysql, &effective);
         let plan = author
             .lower_plan(&ir, &LiveSchema::default())

@@ -8,23 +8,24 @@
 //! generated DDL; a raw untrusted SQL string is REFUSED on the Confined `SQLite`
 //! guard; Platform fail-closes to Confined on `SQLite`).
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot_for_dialect, zeroship_confined_ceiling, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, DesiredSchema, EffectivePolicy, FieldDescriptor,
-    GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot, SqlGuard,
-    SqliteBackend,
+    desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
+    DesiredSchema, EffectivePolicy, FieldDescriptor, GuardConfig, GuardError, IndexDescriptor,
+    Migration, MigrationEngine, SchemaSnapshot, SqlGuard, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
 
 fn effective_policy() -> EffectivePolicy {
-    zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_sqlite(descriptors: &[CollectionDescriptor]) -> Result<DesiredSchema, DeclarativeError> {
@@ -351,7 +352,10 @@ async fn sqlite_deferred_fk_is_typed_error() {
 /// the backend); a RAW untrusted SQL string is REFUSED by the Confined `SQLite` guard.
 #[test]
 fn confined_sqlite_guard_rejects_raw_sql() {
-    let guard = SqlGuard::new(GuardConfig::confined_sqlite(PROJECT));
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        SqlDialect::Sqlite,
+    ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
     let err = guard
@@ -367,7 +371,10 @@ fn confined_sqlite_guard_rejects_raw_sql() {
 /// not bleed into the PG path).
 #[test]
 fn confined_pg_guard_still_checks_raw_sql() {
-    let guard = SqlGuard::new(GuardConfig::confined(PROJECT));
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        SqlDialect::Postgres,
+    ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
         .expect("PG raw DDL must still pass the PG Confined guard");
@@ -382,7 +389,8 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::confined(PROJECT).for_dialect(SqlDialect::Sqlite);
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres)
+        .for_dialect(SqlDialect::Sqlite);
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
@@ -393,7 +401,10 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     );
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
-    let pg = SqlGuard::new(GuardConfig::confined(PROJECT).for_dialect(SqlDialect::Postgres));
+    let pg = SqlGuard::new(
+        GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres)
+            .for_dialect(SqlDialect::Postgres),
+    );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
         .is_ok());
@@ -945,7 +956,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new();
-    let cfg = GuardConfig::confined_sqlite(PROJECT);
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
     let plan = engine
         .plan_declarative(
             &desired2,
@@ -986,7 +997,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 // over a representative schema (PK, plain column, mask column, encrypted column,
 // FK, index). They are the explicit byte bar for the `DdlEmitter` extraction.
 // The policy-source convergence intentionally removed SQLite defaults that were
-// absent from the confined ceiling; every other byte remains pinned.
+// absent from the confined charter; every other byte remains pinned.
 //
 // Note the create-table `up` is the shared resolved-snapshot renderer's output —
 // pinned here so we'd notice an unrelated drift; the add-column / index / drop

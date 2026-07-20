@@ -19,17 +19,20 @@
 //! - `guard_for` selects the right per-engine guard by dialect, with no by-name
 //!   `SQLite` knowledge in the core.
 
+mod support;
+
 use zero_migrate::guard::{
     guard_for, GuardConfig, GuardError, MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
+use zero_migrate::SqlDialect;
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
 fn pg_guard() -> PgGuard {
-    PgGuard::from_config(
-        GuardConfig::confined("project_acme")
-            .with_extension_allowlist(vec!["pgcrypto".to_string(), "uuid-ossp".to_string()]),
-    )
+    PgGuard::from_config(GuardConfig::from_policy(
+        support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
+        SqlDialect::Postgres,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +113,10 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // A raw, untrusted SQLite string handed to the PG guard (a SQLite-keyed config)
     // is refused rather than mis-parsed by libpg_query — the defensive property the
     // engine no longer relies on (it routes SQLite through SqliteDescriptorGuard).
-    let guard = SqlGuard::new(GuardConfig::confined_sqlite("project_acme"));
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject("project_acme"),
+        SqlDialect::Sqlite,
+    ));
     let err = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect_err("raw SQLite SQL handed to the PG guard must fail closed");
@@ -126,10 +132,10 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
 
 #[test]
 fn guard_for_pg_runs_the_deny_list() {
-    let guard = guard_for(
-        &GuardConfig::confined("project_acme")
-            .with_extension_allowlist(vec!["pgcrypto".to_string()]),
-    );
+    let guard = guard_for(&GuardConfig::from_policy(
+        support::no_inject_with_extensions("project_acme", &["pgcrypto"]),
+        SqlDialect::Postgres,
+    ));
     // The PG-selected guard denies the deny-list set …
     assert!(matches!(
         guard.check("COPY project_acme.t TO PROGRAM 'id'"),
@@ -145,7 +151,10 @@ fn guard_for_pg_runs_the_deny_list() {
 fn guard_for_sqlite_trusts_descriptor_ddl() {
     // The SQLite-selected guard trusts descriptor-diff DDL (the apply/plan path),
     // so apply is NOT broken by a raw-rejection on legitimate descriptor SQL.
-    let guard = guard_for(&GuardConfig::confined_sqlite("project_acme"));
+    let guard = guard_for(&GuardConfig::from_policy(
+        support::no_inject("project_acme"),
+        SqlDialect::Sqlite,
+    ));
     let outcome = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect("SQLite descriptor path trusts the engine-generated DDL");

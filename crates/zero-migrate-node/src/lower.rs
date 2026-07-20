@@ -25,13 +25,11 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::journal::{AppliedEntry, Phase};
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::migration::Migration;
-#[cfg(test)]
-use zero_migrate::model::table_shape::confined_no_inject_policy;
 use zero_migrate::ops::status::PlanStatusManifest;
 #[cfg(any(feature = "napi", test))]
 use zero_migrate::ops::status::{AppliedPlanStatus, ReconciledPlanState};
 use zero_migrate::{
-    effective_policy_from_ceiling_toml, fold_ops_onto, resolve_create_table_policy,
+    effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
 };
 
@@ -123,15 +121,15 @@ pub(crate) fn require_applied_prefix(
 /// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
 /// - `registry_json` — the project's `{ "table": "owner_app", … }` map (drives the
 ///   ownership check); an empty object `{}` on a fresh single-app project.
-/// - `policy_ceiling_toml` — the **policy input**: the host's `RootCeiling` document
-///   (TOML) that drives table-shape injection. The engine constructs NO default
-///   ceiling: the caller explicitly supplies either an injecting ceiling or a
-///   no-inject ceiling. It composes into the `EffectivePolicy` whose
+/// - `charter_layers` - the **policy input**: ordered charter documents (TOML)
+///   that drive table-shape injection. The first document is the root bound and
+///   each subsequent document is an untrusted narrowing layer. They compose into
+///   the `EffectivePolicy` whose
 ///   `injects_for(object)` drives column/index/PK injection.
 ///
 /// # Errors
 /// A JSON `Err(message)` on: an unknown dialect, a malformed registry, a malformed
-/// policy ceiling document, the load gate refusing the artifact (malformed / future
+/// policy charter document, the load gate refusing the artifact (malformed / future
 /// `ir_version` / structural reject / ownership violation / checksum-hint mismatch),
 /// or a lower failure — never a panic.
 pub fn lower_envelope_to_plan(
@@ -140,7 +138,7 @@ pub fn lower_envelope_to_plan(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
 ) -> Result<LoweredArtifact, String> {
     lower_envelope_to_plan_with_live(
         envelope_json,
@@ -148,7 +146,7 @@ pub fn lower_envelope_to_plan(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
         &LiveSchema::default(),
     )
 }
@@ -162,7 +160,7 @@ pub fn lower_envelope_to_plan_with_live(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
     live: &LiveSchema,
 ) -> Result<LoweredArtifact, String> {
     lower_envelope_to_plan_with_live_and_resolved_ir(
@@ -171,7 +169,7 @@ pub fn lower_envelope_to_plan_with_live(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
         live,
     )
     .map(|(artifact, _resolved)| artifact)
@@ -184,7 +182,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
     live: &LiveSchema,
 ) -> Result<(LoweredArtifact, MigrationIr), String> {
     let dialect = parse_sql_dialect(dialect)?;
@@ -194,10 +192,10 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     // **Policy-shape fold (mirrors the pure-JS recorder's fold).** The
     // pure-JS host recorder drains ONLY the author-declared columns. Every
     // policy-owned column, pinned primary key, and index is injected by
-    // `resolve_create_table_policy` from the host-supplied POLICY CEILING (the
+    // `resolve_create_table_policy` from the host-supplied POLICY CHARTER (the
     // `EffectivePolicy`'s `injects_for`), NOT by the
-    // JS DSL. The engine hardcodes no ceiling: the monorepo passes zeroship's confined
-    // ceiling. The native IR envelope on disk is post-fold (the recorder folds before
+    // JS DSL. The engine hardcodes no charter: the host passes its explicitly authored
+    // charter. The native IR envelope on disk is post-fold (the recorder folds before
     // writing); the host path folds here so the addon lowers the SAME resolved shape —
     // otherwise the table-shape guard rejects a createTable missing policy-owned
     // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
@@ -205,7 +203,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     //
     // Injection and guard share this one composed `EffectivePolicy`; the load gate
     // no longer takes a separate `PolicyProfile` (retired in Cut 3).
-    let effective = effective_policy_from_ceiling_toml(policy_ceiling_toml)?;
+    let effective = effective_policy_from_charter_layers(charter_layers)?;
     let raw_ir: MigrationIr = serde_json::from_str(envelope_json)
         .map_err(|e| format!("envelope is not a MigrationIr document: {e}"))?;
     let resolved = resolve_create_table_policy(&raw_ir, &effective, project_schema)
@@ -242,7 +240,7 @@ pub fn lower_ordered_envelopes_to_plans(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
@@ -253,7 +251,7 @@ pub fn lower_ordered_envelopes_to_plans(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
         snapshot,
         journal_entries,
         resolved_contracts,
@@ -275,7 +273,7 @@ pub fn lower_ordered_envelopes_to_plans_for_apply(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
@@ -286,7 +284,7 @@ pub fn lower_ordered_envelopes_to_plans_for_apply(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
         snapshot,
         journal_entries,
         resolved_contracts,
@@ -301,14 +299,14 @@ fn lower_ordered_envelopes_to_plans_inner(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
     strict_historical_apply: bool,
 ) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
-    let effective = effective_policy_from_ceiling_toml(policy_ceiling_toml)?;
+    let effective = effective_policy_from_charter_layers(charter_layers)?;
     let mut registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
         .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
     let base_snapshot = snapshot;
@@ -334,7 +332,7 @@ fn lower_ordered_envelopes_to_plans_inner(
             project_schema,
             dialect_name(dialect),
             &effective_registry,
-            policy_ceiling_toml,
+            charter_layers,
             &live,
         );
         let (artifact, resolved) = match initial {
@@ -377,7 +375,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                     project_schema,
                     dialect_name(dialect),
                     &historical_registry_json,
-                    policy_ceiling_toml,
+                    charter_layers,
                     &historical_live,
                 )?;
                 if strict_historical_apply {
@@ -1142,7 +1140,7 @@ pub fn lower_envelope_to_migrations(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
 ) -> Result<Vec<Migration>, String> {
     let artifact = lower_envelope_to_plan(
         envelope_json,
@@ -1150,7 +1148,7 @@ pub fn lower_envelope_to_migrations(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
     )?;
     if artifact.plan.steps.iter().any(|step| {
         matches!(
@@ -1180,7 +1178,7 @@ pub fn lower_envelope_to_migrations_json(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
 ) -> Result<String, String> {
     let migrations = lower_envelope_to_migrations(
         envelope_json,
@@ -1188,7 +1186,7 @@ pub fn lower_envelope_to_migrations_json(
         project_schema,
         dialect,
         registry_json,
-        policy_ceiling_toml,
+        charter_layers,
     )?;
     serde_json::to_string(&migrations)
         .map_err(|e| format!("failed to serialize lowered migrations: {e}"))
@@ -1197,9 +1195,10 @@ pub fn lower_envelope_to_migrations_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{no_inject, CONFINED_CHARTER_TOML};
     use zero_migrate::{BindValue, PlanStep};
 
-    const NO_INJECT_CEILING_TOML: &str = r#"policy_version = 1
+    const NO_INJECT_CHARTER_TOML: &str = r#"policy_version = 1
 
 [[grant]]
 key = "schema.cross_schema"
@@ -1223,7 +1222,7 @@ scope = "all"
 "#;
 
     fn no_inject_policy(schema: &str) -> zero_migrate::EffectivePolicy {
-        confined_no_inject_policy(schema).expect("test no-inject policy composes")
+        no_inject(schema)
     }
 
     // A minimal create-first envelope: one `createTable` op. Mirrors what the pure-JS
@@ -1335,8 +1334,7 @@ scope = "all"
         ]
     }
 
-    // The generic confined test ceiling the monorepo will supply in Phase 3.
-    const CEILING: &str = zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML;
+    const CHARTER: &str = CONFINED_CHARTER_TOML;
 
     fn primary_key_projection(columns: &[&str]) -> zero_migrate::model::snapshot::SchemaSnapshot {
         let columns = columns
@@ -1584,7 +1582,7 @@ scope = "all"
                 "app_test",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("named type rename lowers from its live source type");
@@ -1631,7 +1629,7 @@ scope = "all"
                 "AppSpace",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("quoted named type identity lowers without comparing DDL quotes");
@@ -1678,7 +1676,7 @@ scope = "all"
                 "app_test",
                 "postgres",
                 r#"{"items":"app_test"}"#,
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
                 &named_type_rename_live(catalog_type, ddl_type),
             )
             .expect("named type rename lowers from the original table");
@@ -1690,7 +1688,7 @@ scope = "all"
                 "app_test",
                 "postgres",
                 "{}",
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
                 zero_migrate::model::snapshot::SchemaSnapshot::default(),
                 &entries,
                 std::slice::from_ref(&terminal),
@@ -1750,7 +1748,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &decimal_rename_live("numeric(20,2)"),
         )
         .expect_err("a decimal rename must not normalize authored modifiers to the live type");
@@ -1767,7 +1765,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &decimal_rename_live("decimal(20,4)"),
         )
         .expect("decimal and numeric are equivalent PostgreSQL spellings");
@@ -1892,7 +1890,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &initial_live,
         )
         .expect("decimal rename lowers from the original table");
@@ -1904,7 +1902,7 @@ scope = "all"
             "app_test",
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &entries,
             std::slice::from_ref(&terminal),
@@ -1947,7 +1945,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &rename_live(&["a"]),
         )
         .expect("first rename lowers");
@@ -1957,7 +1955,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &rename_live(&["b"]),
         )
         .expect("second rename lowers after the first resolves");
@@ -1976,7 +1974,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             final_snapshot,
             &entries,
             &terminals,
@@ -2012,7 +2010,7 @@ scope = "all"
             "app_test",
             "postgres",
             r#"{"items":"app_test"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             &rename_live(&["a"]),
         )
         .expect("rename lowers from its source shape");
@@ -2095,7 +2093,7 @@ scope = "all"
     #[test]
     fn unknown_dialect_is_an_err_not_a_panic() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", CEILING);
+        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", &[CHARTER]);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("unknown dialect"));
     }
@@ -2104,13 +2102,13 @@ scope = "all"
     fn malformed_registry_is_an_err() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let r =
-            lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]", CEILING);
+            lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]", &[CHARTER]);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("registry_json"));
     }
 
     #[test]
-    fn malformed_policy_ceiling_is_an_err() {
+    fn malformed_policy_charter_is_an_err() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let r = lower_envelope_to_migrations(
             &env,
@@ -2118,10 +2116,18 @@ scope = "all"
             "app_x",
             "postgres",
             "{}",
-            "this is not = valid toml [",
+            &["this is not = valid toml ["],
         );
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("policy"));
+    }
+
+    #[test]
+    fn empty_charter_layers_preserve_the_loader_error() {
+        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let error = lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "{}", &[])
+            .expect_err("an empty charter layer list must fail closed");
+        assert_eq!(error, "at least one policy charter is required");
     }
 
     #[test]
@@ -2142,7 +2148,7 @@ scope = "all"
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            CEILING,
+            &[CHARTER],
         )
         .expect_err("flat migration consumers must not receive a comment-only marker");
         assert!(error.contains("complete ordered plan"), "{error}");
@@ -2153,7 +2159,7 @@ scope = "all"
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            CEILING,
+            &[CHARTER],
         )
         .expect("the complete plan retains the structured operation");
         assert!(matches!(
@@ -2181,7 +2187,7 @@ scope = "all"
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            CEILING,
+            &[CHARTER],
         )
         .expect_err("flat migration consumers must not lose identity synchronization");
         assert!(error.contains("complete ordered plan"), "{error}");
@@ -2192,7 +2198,7 @@ scope = "all"
             "app_x",
             "postgres",
             r#"{"items":"app_x"}"#,
-            CEILING,
+            &[CHARTER],
         )
         .expect("the complete plan retains identity synchronization");
         assert!(matches!(
@@ -2216,7 +2222,7 @@ scope = "all"
             "app_widgets",
             "postgres",
             "{}",
-            CEILING,
+            &[CHARTER],
         ) {
             Ok(migs) => {
                 assert!(
@@ -2251,7 +2257,7 @@ scope = "all"
                 "app_widgets",
                 "postgres",
                 r#"{"widgets":"app_widgets"}"#,
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
             )
             .expect("the complete data surface lowers to a plan")
         };
@@ -2374,7 +2380,7 @@ scope = "all"
             "app_status_ordered",
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
@@ -2435,7 +2441,7 @@ scope = "all"
             owner,
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
@@ -2453,7 +2459,7 @@ scope = "all"
             owner,
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect("the declaration plan lowers independently");
         let declaration_manifest =
@@ -2484,7 +2490,7 @@ scope = "all"
             owner,
             "postgres",
             &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             live_snapshot,
             &completed_declaration,
             &[],
@@ -2501,7 +2507,7 @@ scope = "all"
             owner,
             "postgres",
             &format!(r#"{{"cross_artifact_ids":"{owner}"}}"#),
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect_err("a backfill-only lower without the declaration map must fail closed");
         assert!(
@@ -2522,7 +2528,7 @@ scope = "all"
             owner,
             "mysql",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect("create plan lowers");
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
@@ -2541,7 +2547,7 @@ scope = "all"
             owner,
             "mysql",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             zero_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
@@ -2573,7 +2579,7 @@ scope = "all"
             owner,
             "mysql",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect("create plan lowers");
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
@@ -2592,7 +2598,7 @@ scope = "all"
             owner,
             "mysql",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             live_snapshot,
             &journal_entries,
             &[],
@@ -2646,7 +2652,7 @@ scope = "all"
             "app_status_ordered",
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect("create plan lowers");
         let manifest =
@@ -2673,7 +2679,7 @@ scope = "all"
             "app_status_ordered",
             "postgres",
             r#"{"status_widgets":"app_status_ordered"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             live_snapshot,
             &journal_entries,
             &[],
@@ -2741,7 +2747,7 @@ scope = "all"
             owner,
             "postgres",
             "{}",
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
         )
         .expect("mixed plan lowers from its original catalog state");
         let manifest = PlanStatusManifest::from_applied_plan(&initial.plan, &initial.depends_on)
@@ -2771,7 +2777,7 @@ scope = "all"
             owner,
             "postgres",
             r#"{"status_widgets":"app_status_partial"}"#,
-            NO_INJECT_CEILING_TOML,
+            &[NO_INJECT_CHARTER_TOML],
             live_snapshot,
             &journal_entries,
             &[],
@@ -2807,7 +2813,7 @@ scope = "all"
                 "app_prefix_gate",
                 "postgres",
                 "{}",
-                NO_INJECT_CEILING_TOML,
+                &[NO_INJECT_CHARTER_TOML],
             )
             .expect("test envelope lowers");
             PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)

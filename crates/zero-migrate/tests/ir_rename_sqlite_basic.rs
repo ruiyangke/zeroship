@@ -18,6 +18,8 @@
 //!
 //! No shims, no PG-gated skips: the real `SQLite` runtime + the real journal.
 
+mod support;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -60,7 +62,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn exec_cfg() -> ExecutorConfig {
-    ExecutorConfig::new(PROJECT, PROJECT)
+    ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
 /// A one-field-collection descriptor (`name: field(ty)`), `required`.
@@ -84,7 +86,7 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 /// `desired_snapshot_for_dialect` the differ uses — so the live facts the rename
 /// rebuild consumes are byte-identical to a `t.*`-diff's desired snapshot.
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
-    let effective = zero_migrate::zeroship_confined_ceiling();
+    let effective = support::confined_charter();
     let desired =
         desired_snapshot_for_dialect(PROJECT, descriptors, SchemaDialect::Sqlite, &effective)
             .expect("desired snapshot");
@@ -136,7 +138,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let engine = MigrationEngine::new();
     for d in descriptors {
@@ -182,9 +184,8 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             preconditions: vec![],
             checksum: None,
         };
-        let ir =
-            resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), PROJECT)
-                .expect("test IR resolves");
+        let ir = resolve_create_table_policy(&ir, &support::confined_charter(), PROJECT)
+            .expect("test IR resolves");
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .expect("lower create");
@@ -248,7 +249,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
     let steps = author
@@ -392,7 +393,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
             PROJECT,
             APP,
             SqlDialect::Sqlite,
-            &zero_migrate::zeroship_confined_ceiling(),
+            &support::confined_charter(),
         );
         let engine = MigrationEngine::new();
         let ir = MigrationIr {
@@ -453,7 +454,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let ir = rename_ir("events", "count", "total", ColType::Int);
     let steps = author.lower_steps(&ir, &live).expect("rename lowers");
@@ -498,7 +499,7 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     // The IR claims the renamed column is `Int` — disagreeing with the live text type.
     let ir = rename_ir("people", "nickname", "handle", ColType::Int);
@@ -537,7 +538,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
     let err = author
@@ -573,7 +574,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // LiveSchema knows the table NAME but not its structure (table_snapshots /
@@ -606,7 +607,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // Carry the live `from` column TYPE (so the type gate passes — text == text),
@@ -727,7 +728,7 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
 
     let steps = author
@@ -763,7 +764,7 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
 
     let error = author
@@ -796,7 +797,7 @@ fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     // Live `people(nickname, handle)` — both real columns + SDK schema entries.
     let live = live_schema_for(&[descriptor2("people", "nickname", "handle")]);

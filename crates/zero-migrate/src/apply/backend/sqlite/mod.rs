@@ -1078,7 +1078,7 @@ mod lock_tests {
         let journal = dir.path().join("journal.sqlite");
         let first = SqliteBackend::open(&app, &journal).expect("first backend");
         let second = SqliteBackend::open(&app, &journal).expect("second backend");
-        let cfg = ExecutorConfig::new("project", "main");
+        let cfg = ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
 
         first
             .acquire_project_lock(&cfg)
@@ -1109,7 +1109,8 @@ mod lock_tests {
             SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
         let second = SqliteBackend::open(&app, &dir.path().join("journal-b.sqlite"))
             .expect("second backend");
-        let mut cfg = ExecutorConfig::new("project", "main");
+        let mut cfg =
+            ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
         cfg.pg.lock_timeout = Duration::from_millis(25);
 
         first.acquire_project_lock(&cfg).await.expect("first lock");
@@ -1137,7 +1138,7 @@ mod lock_tests {
         std::fs::hard_link(&app, &alias).expect("hard link app database");
         let second = SqliteBackend::open(&alias, &dir.path().join("journal-b.sqlite"))
             .expect("hard-link backend");
-        let cfg = ExecutorConfig::new("project", "main");
+        let cfg = ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
 
         first.acquire_project_lock(&cfg).await.expect("first lock");
         assert!(matches!(

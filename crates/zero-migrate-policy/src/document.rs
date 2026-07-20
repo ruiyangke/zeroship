@@ -24,16 +24,16 @@ use crate::{Pattern, Scope, ScopeError};
 pub const SUPPORTED_POLICY_VERSION: u32 = 1;
 
 /// The layer a document is being loaded AS. Two axes it governs:
-/// - **`mandatory` injects** are `RootCeiling`-only; any non-root layer that carries
+/// - **`mandatory` injects** are `RootCharter`-only; any non-root layer that carries
 ///   one is rejected (`MandatoryInjectOnNonRootLayer`, II.4.2).
-/// - **`extends`** is TRUSTED-only (H-1): the `RootCeiling` and trusted catalog
+/// - **`extends`** is TRUSTED-only (H-1): the `RootCharter` and trusted catalog
 ///   entries may inherit a trusted base; an untrusted creator DRAFT that carries
 ///   `extends` is a hard load error (`ExtendsForbiddenInDraft`, II.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoadContext {
-    /// The host's root ceiling — the only layer allowed a mandatory inject; trusted,
+    /// The host's root charter — the only layer allowed a mandatory inject; trusted,
     /// so `extends` is permitted.
-    RootCeiling,
+    RootCharter,
     /// A TRUSTED, non-root catalog entry (a `ProfileCatalog` `env` fragment): no
     /// mandatory inject, but `extends` IS permitted (resolved against the trusted
     /// catalog).
@@ -49,7 +49,7 @@ impl LoadContext {
     fn is_trusted(self) -> bool {
         matches!(
             self,
-            LoadContext::RootCeiling | LoadContext::TrustedCatalogEntry
+            LoadContext::RootCharter | LoadContext::TrustedCatalogEntry
         )
     }
 }
@@ -103,7 +103,7 @@ pub enum LoadError {
         expected: Polarity,
         found: Polarity,
     },
-    /// A knob value is invalid for its knob's kind (or below a `UintCeiling`
+    /// A knob value is invalid for its knob's kind (or below a `UintCharter`
     /// hard floor) (II.2.1).
     InvalidKnobValue { key: String, detail: String },
     /// A scope pattern literal is malformed (bad glob, >2 segments, bad quoting).
@@ -124,7 +124,7 @@ pub enum LoadError {
     /// inject's own required table name) on overlapping scope (II.4.4).
     SelfContradictoryInjectValidate { detail: String },
     /// An UNTRUSTED creator draft carries an `extends` field (H-1, II.7). A draft may
-    /// never inherit a catalog base — the ceiling it is admitted against already
+    /// never inherit a catalog base — the charter it is admitted against already
     /// carries the operator floor. Forbidding it removes the untrusted-`extends`
     /// laundering hazard outright.
     ExtendsForbiddenInDraft,
@@ -335,7 +335,7 @@ impl PolicyDoc {
 
     /// Parse + validate a TRUSTED document that may `extends` a base, resolving the
     /// base chain against the injected trusted `catalog` (II.7, H-1) with cycle
-    /// detection. `ctx` MUST be a trusted context (`RootCeiling`/`TrustedCatalogEntry`)
+    /// detection. `ctx` MUST be a trusted context (`RootCharter`/`TrustedCatalogEntry`)
     /// — an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
     /// base document's rules are inherited UNDER this document's (doc-level overlay:
     /// this doc's rules are the inner/override layer, base is outer), and its
@@ -437,7 +437,7 @@ impl PolicyDoc {
         // ── injects ──────────────────────────────────────────────────────────────
         for mut inj in wire.inject {
             // mandatory-on-non-root gate.
-            if inj.mandatory && ctx != LoadContext::RootCeiling {
+            if inj.mandatory && ctx != LoadContext::RootCharter {
                 return Err(LoadError::MandatoryInjectOnNonRootLayer);
             }
             let scope = resolve_content_scope(inj.scope.take(), &default_scope)?;

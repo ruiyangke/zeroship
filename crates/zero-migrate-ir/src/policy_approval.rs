@@ -154,13 +154,13 @@ pub const fn variants() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::policy_registry::builtin_registry;
-    use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCeiling};
+    use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCharter};
 
-    /// Compose an [`EffectivePolicy`] over the builtin registry from a ceiling TOML
+    /// Compose an [`EffectivePolicy`] over the builtin registry from a charter TOML
     /// (the operator obligation) against an empty creator draft.
-    fn effective_from_ceiling(ceiling_toml: &str) -> EffectivePolicy {
+    fn effective_from_charter(charter_toml: &str) -> EffectivePolicy {
         let reg = builtin_registry();
-        let root = RootCeiling::parse_toml(ceiling_toml, &reg).expect("ceiling parses");
+        let root = RootCharter::parse_toml(charter_toml, &reg).expect("charter parses");
         let empty_draft =
             PolicyDoc::parse_toml("policy_version = 1\n", &reg, LoadContext::NonRootLayer)
                 .expect("empty draft parses");
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn never_requires_no_approval() {
         // No require_approval rule at all → default `never`.
-        let ep = effective_from_ceiling("policy_version = 1\n");
+        let ep = effective_from_charter("policy_version = 1\n");
         assert!(!migration_requires_approval(
             &ep,
             &[drop_table("app_main", "t"), add_column("app_main", "t")],
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn always_requires_approval_for_any_op() {
-        let ep = effective_from_ceiling(
+        let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
         );
         // Even a purely additive op requires approval under `always`.
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn on_destructive_gates_only_destructive_ops() {
-        let ep = effective_from_ceiling(
+        let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n",
         );
         // Additive-only migration → no approval.
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn level_resolves_per_object_scope() {
         // `always` scoped ONLY to app_secret.*; app_main is left at the default `never`.
-        let ep = effective_from_ceiling(
+        let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
         );
         // An additive op on the unscoped schema → no approval.
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn empty_ops_never_require_approval() {
-        let ep = effective_from_ceiling(
+        let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
         );
         assert!(!migration_requires_approval(&ep, &[], "app_main"));

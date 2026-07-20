@@ -1177,7 +1177,8 @@ mod pg_confinement_shape_tests {
     /// (or restored the old long 30000 ms lock_timeout) flips this assertion RED.
     #[test]
     fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
-        let cfg = ExecutorConfig::new("prj_x", "proj_x").with_migrator_role("migrator_proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"))
+            .with_migrator_role("migrator_proj_x");
         let m = trivial_migration();
 
         let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
@@ -1215,7 +1216,7 @@ mod pg_confinement_shape_tests {
 
     #[test]
     fn structured_dml_pins_standard_string_literals_transaction_locally() {
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let session = dml_set_local_session_sql(&cfg).expect("DML session SQL renders");
 
         assert!(
@@ -1236,7 +1237,7 @@ mod pg_confinement_shape_tests {
     /// `cfg.lock_timeout_ms()` unconditionally).
     #[test]
     fn per_migration_lock_timeout_override_renders_over_default() {
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         // Default budget (3000 ms) when the migration sets no override.
         let default_m = trivial_migration();
         let default_session = set_local_session_sql(&cfg, &default_m).expect("session sql renders");
@@ -1269,7 +1270,11 @@ mod pg_confinement_shape_tests {
     #[test]
     fn sqlite_shaped_config_carries_no_pg_role_confinement() {
         // Exactly what crates/plugin-db sqlite_engine.rs constructs.
-        let cfg = ExecutorConfig::new("app_test", "app_test");
+        let cfg = ExecutorConfig::new(
+            "app_test",
+            "app_test",
+            crate::test_fixtures::no_inject("app_test"),
+        );
         assert!(
             cfg.pg.migrator_role.is_none(),
             "a SQLite-shaped config must carry no PG migrator role (SET ROLE) — \

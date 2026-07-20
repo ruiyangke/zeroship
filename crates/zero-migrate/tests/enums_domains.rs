@@ -1,3 +1,5 @@
+mod support;
+
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
@@ -87,12 +89,7 @@ fn create_domain() -> Op {
 }
 
 fn lower_all(dialect: SqlDialect, ops: Vec<Op>) -> Vec<String> {
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
     author
         .lower(&ir(ops), &LiveSchema::default())
         .unwrap()
@@ -226,7 +223,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
         &ops,
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("explicit named type references fold");
     let columns = &folded.tables["subscriptions"].columns;
@@ -330,12 +327,7 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
 
 #[test]
 fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        SqlDialect::Mysql,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql, &support::no_inject("app"));
     let err = author
         .lower(
             &ir(vec![
@@ -372,7 +364,7 @@ fn pg_guarded_type_drops_stamp_named_type_probes() {
         SCHEMA,
         OWNER,
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     );
     let migrations = author
         .lower(

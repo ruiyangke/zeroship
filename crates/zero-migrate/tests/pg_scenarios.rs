@@ -35,11 +35,10 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
     apply, check_checksum_drift, ensure_journal, history, resolve_create_table_policy,
-    snapshot_schema, status, zeroship_no_inject_ceiling, ApplyError, Approval, ApprovalScope,
-    BackfillSpec, BindValue, DeclarativeApplyError, EngineError, ExecutorConfig,
-    ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine,
-    MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep,
-    Resolution, SqlDialect,
+    snapshot_schema, status, ApplyError, Approval, ApprovalScope, BackfillSpec, BindValue,
+    DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine, MigrationFlags, MigrationId,
+    MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution, SqlDialect,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,7 +59,11 @@ fn token() -> String {
 }
 
 fn cfg_for(tok: &str) -> ExecutorConfig {
-    let mut c = ExecutorConfig::new(format!("prj_{tok}"), format!("proj_{tok}"));
+    let mut c = ExecutorConfig::new(
+        format!("prj_{tok}"),
+        format!("proj_{tok}"),
+        support::no_inject(&format!("proj_{tok}")),
+    );
     c.pg.meta_schema = format!("meta_{tok}");
     c
 }
@@ -422,18 +425,15 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         ]}"#,
     )
     .expect("parse per-row IR fixture");
-    let resolved = resolve_create_table_policy(
-        &authored,
-        &zeroship_no_inject_ceiling(),
-        &cfg.project_schema,
-    )
-    .expect("resolve no-inject table policy");
+    let resolved =
+        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
+            .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
         SqlDialect::Postgres,
-        &zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     );
     let artifact = author
         .load_and_lower_guarded(
@@ -441,7 +441,10 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             "app_test",
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::confined(cfg.project_schema.clone()),
+            &GuardConfig::from_policy(
+                support::no_inject(&cfg.project_schema),
+                SqlDialect::Postgres,
+            ),
         )
         .expect("declared perRow destination formats must lower on PostgreSQL");
     MigrationEngine::new()

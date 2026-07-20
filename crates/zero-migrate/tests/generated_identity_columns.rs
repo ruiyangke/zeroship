@@ -1,3 +1,5 @@
+mod support;
+
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, validate_ir, BinaryOp, ColType, Expr, GeneratedCol,
@@ -30,7 +32,7 @@ fn raw_ir(op: Op) -> MigrationIr {
 
 fn ir(op: Op) -> MigrationIr {
     let ir = raw_ir(op);
-    resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), SCHEMA)
+    resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("test IR resolves")
 }
 
@@ -39,7 +41,7 @@ fn ir(op: Op) -> MigrationIr {
 // needed to exercise column-facet validation that the confined shape gate pre-empts.
 fn ir_platform(op: Op) -> MigrationIr {
     let ir = raw_ir(op);
-    resolve_create_table_policy(&ir, &zero_migrate::zeroship_no_inject_ceiling(), SCHEMA)
+    resolve_create_table_policy(&ir, &support::no_inject("app"), SCHEMA)
         .expect("test IR resolves under platform")
 }
 
@@ -107,12 +109,7 @@ fn pk(columns: &[&str]) -> Option<Vec<String>> {
 }
 
 fn lower_create(dialect: SqlDialect, op: Op) -> LowerResult {
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_confined_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -124,12 +121,7 @@ fn lower_create(dialect: SqlDialect, op: Op) -> LowerResult {
 }
 
 fn lower_first(dialect: SqlDialect, op: Op) -> LowerResult {
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_confined_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -397,7 +389,7 @@ fn fold_carries_generated_and_identity_column_facets() {
         &[generated_create(true)],
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold generated column");
     let table = snap.tables.get("line_items").expect("line_items table");
@@ -420,7 +412,7 @@ fn fold_carries_generated_and_identity_column_facets() {
         &[create_table(vec![id], pk_id())],
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold identity column");
     let table = snap.tables.get("line_items").expect("line_items table");

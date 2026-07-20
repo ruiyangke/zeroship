@@ -154,8 +154,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
         "main",
         OWNER,
         SqlDialect::Sqlite,
-        &zero_migrate::confined_no_inject_policy("main")
-            .expect("SQLite collation no-inject policy composes"),
+        &support::no_inject("main"),
     )
     .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
     .expect_err("different live SQLite collations must reject a composite FK");
@@ -255,8 +254,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             &schema,
             OWNER,
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("Postgres collation no-inject policy composes"),
+            &support::no_inject(&schema),
         )
         .lower(&composite_fk_ir("postgres_collation_fk"), &live)
         .map(|_| ())

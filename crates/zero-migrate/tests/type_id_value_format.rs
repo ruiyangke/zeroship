@@ -74,7 +74,7 @@ fn lower_create(dialect: SqlDialect, table: &str, prefix: &str) -> String {
         "app",
         "app_type_id_samples",
         dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&type_id_ir(table, prefix), &LiveSchema::default())
     .expect("TypeID create table must lower");
@@ -100,7 +100,7 @@ fn lower_add(dialect: SqlDialect, table: &str, prefix: &str) -> String {
         "app",
         "app_type_id_samples",
         dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("TypeID add column must lower");
@@ -236,8 +236,7 @@ async fn postgres_enforces_official_type_id_fixtures() {
                 &schema,
                 "app_type_id_samples",
                 SqlDialect::Postgres,
-                &zero_migrate::confined_no_inject_policy(&schema)
-                    .expect("TypeID no-inject policy composes"),
+                &support::no_inject(&schema),
             )
             .lower(&ir, &LiveSchema::default())
             .expect("lower PostgreSQL TypeID table");

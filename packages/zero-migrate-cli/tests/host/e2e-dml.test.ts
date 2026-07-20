@@ -11,7 +11,7 @@ import {
   type MigrationModule,
 } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
-import { NO_INJECT_POLICY_CEILING } from "./policy.js";
+import { NO_INJECT_POLICY } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -84,7 +84,7 @@ function applyOptions(
     projectSchema,
     driver,
     registry: {},
-    policyCeiling: NO_INJECT_POLICY_CEILING,
+    policy: [NO_INJECT_POLICY],
     approved,
     appliedBy: "dml-e2e",
     nameFallback: MIGRATION_NAME,
@@ -125,7 +125,7 @@ async function assertAppliedPlan(
     projectSchema,
     driver,
     registry: {},
-    policyCeiling: NO_INJECT_POLICY_CEILING,
+    policy: [NO_INJECT_POLICY],
     migrations: [migration],
     nameFallbacks: [MIGRATION_NAME],
   });
@@ -346,6 +346,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
+      policy: [NO_INJECT_POLICY],
     });
     assert.equal(journalOnly.plans, undefined, "journal-only status omits plan details");
     assert.deepEqual(

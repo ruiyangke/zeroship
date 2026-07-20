@@ -14,6 +14,8 @@
 //!
 //! Run with `--test-threads=1` for parity with the rest of the suite.
 
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -49,7 +51,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn exec_cfg() -> ExecutorConfig {
-    ExecutorConfig::new(PROJECT, PROJECT)
+    ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -70,15 +72,14 @@ async fn apply_doc(
     approval: Approval,
 ) -> Vec<Op> {
     let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses");
-    let resolved =
-        resolve_create_table_policy(&raw, &zero_migrate::zeroship_confined_ceiling(), PROJECT)
-            .expect("test IR resolves");
+    let resolved = resolve_create_table_policy(&raw, &support::confined_charter(), PROJECT)
+        .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let document = zero_migrate::model::load::load_ir_document(
         &ir,
@@ -211,7 +212,7 @@ async fn fold_equals_introspect_sqlite() {
         &all_ops,
         SqlDialect::Sqlite,
         PROJECT,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     )
     .expect("fold the corpus offline");
 

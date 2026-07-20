@@ -140,14 +140,18 @@ test("CLI help advertises SQLite apply in user-facing language", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--dialect <name>/);
   assert.match(help.stdout, /--registry <file>/);
-  assert.match(help.stdout, /--policy-ceiling <file>/);
+  assert.match(help.stdout, /--policy <file>/);
+  assert.match(help.stdout, /history .*--policy <file>/);
+  assert.match(help.stdout, /resolve-pending .*--policy <file>/);
+  assert.match(help.stdout, /Repeatable ordered TOML policy layer; first is the root\/bound/);
+  assert.match(help.stdout, /only root may use mandatory injects/);
   assert.match(help.stdout, /--journal <path>/);
   assert.match(help.stdout, /apply supports\s+PostgreSQL, MySQL 8, and SQLite/);
   assert.doesNotMatch(help.stdout, /\u2014|host driver seam|addon|in-process/);
 
   const sqlite = runCli("apply", "--database-url=sqlite:///tmp/app.db");
   assert.equal(sqlite.status, 1);
-  assert.match(sqlite.stderr, /missing policy ceiling/);
+  assert.match(sqlite.stderr, /missing policy/);
   assert.doesNotMatch(sqlite.stderr, /SQLite is not supported/);
   assert.doesNotMatch(sqlite.stderr, /\u2014|host driver seam|addon|in-process/);
 });
@@ -183,23 +187,26 @@ test("CLI derives SQLite app and journal paths and honors --journal", () => {
   );
 });
 
-test("CLI apply and status require an explicit policy ceiling file", () => {
-  for (const command of ["apply", "status"]) {
-    const missing = runCli(
-      command,
+test("CLI database verbs require an explicit policy file", () => {
+  const invocations = [
+    ["apply"],
+    ["status"],
+    ["history"],
+    ["resolve-pending", "mig_0000000000000000000001", "--apply", "--approve"],
+  ];
+  for (const invocation of invocations) {
+    const base = [
+      ...invocation,
       "--database-url=postgres://127.0.0.1:1/never_connect",
-    );
-    assert.equal(missing.status, 1);
-    assert.match(missing.stderr, /missing policy ceiling.*--policy-ceiling <file>/i);
+    ];
+    const missing = runCli(...base);
+    assert.equal(missing.status, 1, `${invocation[0]} must reject a missing policy`);
+    assert.match(missing.stderr, /missing policy.*--policy <file>/i);
     assert.doesNotMatch(missing.stderr, /ECONNREFUSED|connect/i);
 
-    const empty = runCli(
-      command,
-      "--database-url=postgres://127.0.0.1:1/never_connect",
-      "--policy-ceiling=",
-    );
-    assert.equal(empty.status, 1);
-    assert.match(empty.stderr, /--policy-ceiling needs a non-empty file path/i);
+    const empty = runCli(...base, "--policy=");
+    assert.equal(empty.status, 1, `${invocation[0]} must reject an empty policy path`);
+    assert.match(empty.stderr, /--policy needs a non-empty file path/i);
     assert.doesNotMatch(empty.stderr, /ECONNREFUSED|connect/i);
   }
 });
@@ -212,11 +219,34 @@ test("CLI rejects an empty policy document before opening a database session", (
     const result = runCli(
       "apply",
       "--database-url=postgres://127.0.0.1:1/never_connect",
-      `--policy-ceiling=${policyPath}`,
+      `--policy=${policyPath}`,
     );
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /policy ceiling file .* is empty/i);
+    assert.match(result.stderr, /policy file .* is empty/i);
     assert.doesNotMatch(result.stderr, /ECONNREFUSED|connect/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI loads repeated policy files in occurrence order", () => {
+  const dir = mkdtempSync(join(HERE, ".cli-policy-layers-"));
+  try {
+    const missingRootPath = join(dir, "missing-root.toml");
+    const laterLayerPath = join(dir, "later-layer.toml");
+    writeFileSync(laterLayerPath, "policy_version = 1\n");
+
+    const result = runCli(
+      "apply",
+      "--database-url=postgres://127.0.0.1:1/never_connect",
+      "--policy",
+      missingRootPath,
+      `--policy=${laterLayerPath}`,
+    );
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stderr.includes(missingRootPath), result.stderr);
+    assert.doesNotMatch(result.stderr, /migrations dir|ECONNREFUSED|connect/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -324,7 +354,7 @@ export function up() {}
       "apply",
       `--dir=${dir}`,
       "--database-url=postgres://127.0.0.1:1/never_connect",
-      `--policy-ceiling=${policyPath}`,
+      `--policy=${policyPath}`,
     );
     assert.equal(applied.status, 1);
     assert.match(applied.stderr, /duplicate migration name.*shared_identity/i);

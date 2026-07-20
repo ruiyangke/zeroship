@@ -160,10 +160,9 @@ pub struct ApplyRequest {
     /// and accepts that metadata only after the corresponding plans are proven
     /// fully applied in the journal.
     pub prior_envelopes: Option<Vec<JsonValue>>,
-    /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
-    /// table-shape injection. This is required: callers that want author-owned
-    /// shape must explicitly supply a no-inject ceiling.
-    pub policy_ceiling: String,
+    /// The **policy input**: an ordered list of policy charter documents (TOML).
+    /// The first document is the root bound; each subsequent document narrows it.
+    pub charter_layers: Vec<String>,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,
     /// The audit `applied_by` label recorded in the journal.
@@ -185,8 +184,8 @@ pub struct ApplyIrSqliteRequest {
     pub project_schema: String,
     /// The project's `{ table: owner_app }` ownership registry.
     pub registry: std::collections::HashMap<String, String>,
-    /// The host's required `RootCeiling` policy document (TOML).
-    pub policy_ceiling_toml: String,
+    /// Ordered policy charter documents (TOML), starting with the root bound.
+    pub charter_layers: Vec<String>,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,
     /// Ordered authored migration IR envelopes as real JavaScript values.
@@ -207,6 +206,9 @@ pub struct StatusRequest {
     /// The pre-lowered migrations to reconcile against the journal, each a
     /// `Migration` as a JS value (empty array for the read/empty-journal flow).
     pub migrations: Vec<JsonValue>,
+    /// Ordered policy charter documents (TOML), starting with the root bound and
+    /// used by the executor's guard.
+    pub charter_layers: Vec<String>,
 }
 
 /// The typed request for the plan-aware `statusIr` verb.
@@ -228,8 +230,8 @@ pub struct StatusIrRequest {
     pub registry: std::collections::HashMap<String, String>,
     /// Ordered authored migration envelopes to reconcile.
     pub envelopes: Vec<JsonValue>,
-    /// Required policy ceiling, identical to the `applyIr` lowering input.
-    pub policy_ceiling: String,
+    /// Required ordered policy charters, identical to the `applyIr` lowering input.
+    pub charter_layers: Vec<String>,
 }
 
 /// The typed request for completing or aborting one outstanding PostgreSQL
@@ -253,6 +255,9 @@ pub struct ResolvePendingRequest {
     pub approved: bool,
     /// Audit label recorded with the cleanup and resolution.
     pub applied_by: String,
+    /// Ordered policy charter documents (TOML), starting with the root bound and
+    /// used by the executor's guard.
+    pub charter_layers: Vec<String>,
 }
 
 /// The typed request for the `history` verb.
@@ -264,6 +269,9 @@ pub struct HistoryRequest {
     pub project_id: String,
     /// The confined project schema.
     pub project_schema: String,
+    /// Ordered policy charter documents (TOML), starting with the root bound and
+    /// used by the executor's guard.
+    pub charter_layers: Vec<String>,
 }
 
 /// The typed reply for `applyIr` (the projected [`ApplyOutcome`]).
@@ -584,13 +592,11 @@ pub struct GenArtifactsSource {
     /// The project schema the fold threads (FK `definition`s embed it). Optional;
     /// defaults to `"public"`.
     pub project_schema: Option<String>,
-    /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
-    /// the confined system-shape injection — the SAME shape the apply path's
-    /// `policyCeilingToml` uses. This is required: callers explicitly supply either
-    /// an injecting ceiling or a no-inject ceiling. Its `injects_for` supplies each
-    /// covered table's columns, pinned primary key, and indexes (applied identically
-    /// on the envelope and descriptor sides, so the two stay byte-identical).
-    pub policy_ceiling_toml: String,
+    /// The **policy input**: ordered charter documents (TOML) that drive the
+    /// confined system-shape injection. The first document is the root bound and
+    /// each subsequent document is an untrusted narrowing layer. The composed
+    /// policy is applied identically on the envelope and descriptor sides.
+    pub charter_layers: Vec<String>,
 }
 
 /// The typed reply for the sync, DB-free `loadVerify` gate. Never throws for a

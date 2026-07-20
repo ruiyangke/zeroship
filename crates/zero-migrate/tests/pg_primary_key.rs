@@ -27,7 +27,11 @@ fn token() -> String {
 }
 
 fn cfg_for(token: &str) -> ExecutorConfig {
-    let mut cfg = ExecutorConfig::new(format!("pk_project_{token}"), format!("pk_app_{token}"));
+    let mut cfg = ExecutorConfig::new(
+        format!("pk_project_{token}"),
+        format!("pk_app_{token}"),
+        support::no_inject(&format!("pk_app_{token}")),
+    );
     cfg.pg.meta_schema = format!("pk_meta_{token}");
     cfg
 }

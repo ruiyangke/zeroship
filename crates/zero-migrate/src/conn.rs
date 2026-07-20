@@ -159,11 +159,9 @@ pub struct ExecutorConfig {
     /// SQLite ignores the role, schema, and statement settings, but reuses
     /// `lock_timeout` for its application-file lock.
     pub pg: PgConfinement,
-    /// PRIVATE (`pub(crate)`). The composed policy every executor-path guard uses.
-    /// Confined configs carry a no-inject policy with project-scoped
-    /// create/rename/cross-schema grants; platform/trusted configs carry the operator
-    /// policy. The guard is built from this single policy source for every COMPOSABLE
-    /// decision.
+    /// PRIVATE (`pub(crate)`). The caller-authored composed policy every
+    /// executor-path guard uses. The guard is built from this single policy source
+    /// for every composable decision.
     pub(crate) effective: zero_migrate_policy::EffectivePolicy,
     /// PRIVATE (`pub(crate)`). The root/host-set [`GuardMode`] the executor stamps onto
     /// every guard it builds. `Off` ONLY for the Trusted (dbmate-like) posture — the
@@ -174,18 +172,22 @@ pub struct ExecutorConfig {
 }
 
 impl ExecutorConfig {
-    /// A config with sane default timeouts for the named project + schema.
+    /// A config with sane default timeouts and an explicit policy for the named
+    /// project and schema.
     ///
     /// The meta schema defaults to `<project_schema>_migrations` so it sits
     /// beside the project schema but is a distinct namespace.
     #[must_use]
-    pub fn new(project_id: impl Into<String>, project_schema: impl Into<String>) -> Self {
+    pub fn new(
+        project_id: impl Into<String>,
+        project_schema: impl Into<String>,
+        effective: zero_migrate_policy::EffectivePolicy,
+    ) -> Self {
         let project_schema = project_schema.into();
         let meta_schema = format!("{project_schema}_migrations");
         Self {
             project_id: project_id.into(),
-            effective: crate::model::table_shape::confined_no_inject_policy(&project_schema)
-                .expect("confined no-inject policy composes"),
+            effective,
             project_schema,
             // The PG-specific confinement block (meta schema, timeouts, role,
             // extension-resolution schemas). Inert for a SQLite-backed config.
@@ -214,16 +216,8 @@ impl ExecutorConfig {
     /// guard site uses (the two static first-passes + rollback + the
     /// precondition evaluator).
     ///
-    /// `Confined` ⇒ `GuardConfig::confined(self.project_schema)` (byte-identical
-    /// to the old hardcoded `GuardConfig { project_schema, ext: [] }`).
-    /// `Platform` ⇒ `GuardConfig::platform(&cap, self.platform_schemas,
-    /// self.platform_exts)`, re-using the token that rides on this config — so
-    /// the Platform plan is not re-denied by the executor's own guard.
-    /// `Trusted` ⇒ `GuardConfig::trusted(&cap)` — the deny-list is skipped
-    /// entirely (the public dbmate-like posture), re-using the operator token.
-    ///
-    /// A privileged profile WITHOUT a token (never constructible via the
-    /// `pub(crate)` ctors, which always stamp one) FAILS CLOSED to Confined.
+    /// The caller-authored policy is preserved exactly. Trusted test configs differ
+    /// only by their explicit host-selected [`GuardMode`](crate::guard::GuardMode).
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
         crate::guard::GuardConfig::from_policy_with_mode(
@@ -238,40 +232,29 @@ impl ExecutorConfig {
     /// only through named in-crate seams, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
-    /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
-    /// the `CREATE EXTENSION` allowlist.
+    /// into Platform. The caller must supply the explicitly authored policy.
     ///
     /// # The operator-side production Platform seam
     ///
-    /// This is the PUBLIC, token-gated seam an operator-side host uses to build a
-    /// Platform-trust executor — the APPLY-half peer of the already-public
-    /// [`GuardConfig::platform`](crate::guard::GuardConfig::platform) LOWER-half
-    /// seam. It requires an [`OperatorCapability`] token exactly like
-    /// `GuardConfig::platform`, so the external boundary is unchanged: an external
-    /// crate can NAME [`TrustProfile::Platform`](crate::model::policy::TrustProfile::Platform)
-    /// (it is not fielded), but it can only reach a Platform executor by holding
-    /// the token — minted through the engine's named production seam
+    /// This is the public, token-gated seam an operator-side host uses to build a
+    /// Platform-trust executor from an explicitly composed policy. An external
+    /// crate can name [`TrustProfile::Platform`](crate::model::policy::TrustProfile::Platform)
+    /// (it is not fielded), but it can only reach this executor seam by holding
+    /// the token minted through the engine's named production seam
     /// [`OperatorCapability::new`](crate::model::capability::OperatorCapability::new).
     ///
     /// The napi host path is NOT the only legitimate Platform-apply producer: an
     /// operator-side native host (e.g. the platform's own migrate binary) applies
     /// its own trusted infra schema through this seam over an injected
-    /// [`SqlSession`](crate::driver::SqlSession). Making this `pub` closes the
-    /// asymmetry the guard-crate side never had — `GuardConfig::platform` was
-    /// always reachable, so LOWER could reach Platform trust externally while
-    /// APPLY could not; both halves now share one token-gated public posture.
+    /// [`SqlSession`](crate::driver::SqlSession).
     #[must_use]
     pub fn platform(
         _cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
-        schemas: Vec<String>,
-        extensions: Vec<String>,
+        effective: zero_migrate_policy::EffectivePolicy,
     ) -> Self {
-        let mut cfg = Self::new(project_id, project_schema);
-        cfg.effective = crate::model::table_shape::operator_no_inject_policy(&schemas, &extensions)
-            .expect("operator no-inject policy composes");
-        cfg
+        Self::new(project_id, project_schema, effective)
     }
 
     /// Build a **Trusted** executor config — the public dbmate-like posture.
@@ -305,13 +288,12 @@ impl ExecutorConfig {
         _cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
+        effective: zero_migrate_policy::EffectivePolicy,
     ) -> Self {
-        let mut cfg = Self::new(project_id, project_schema);
-        // The trusted policy grants every vendor capability + ⊤ cross-schema. The
-        // belt-skip is NOT a grant — it is the root/host-set `GuardMode::Off` stamped
-        // here, which `guard_config()` threads into every guard this config builds.
-        cfg.effective = crate::model::table_shape::trusted_no_inject_policy()
-            .expect("trusted no-inject policy composes");
+        let mut cfg = Self::new(project_id, project_schema, effective);
+        // The belt-skip is not a grant. It is the root/host-set `GuardMode::Off`
+        // stamped here, which `guard_config()` threads into every guard this config
+        // builds.
         cfg.guard_mode = crate::guard::GuardMode::Off;
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
         // connecting role, exactly like Platform's admin (no `SET ROLE`).

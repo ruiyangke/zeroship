@@ -20,7 +20,7 @@ use zero_migrate::model::load::load_ir_document;
 use zero_migrate::model::validate::Dialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
-    effective_policy_from_ceiling_toml, render_artifacts, render_artifacts_from_descriptors,
+    effective_policy_from_charter_layers, render_artifacts, render_artifacts_from_descriptors,
     EffectivePolicy, SchemaScope, DEFAULT_PROJECT_SCHEMA,
 };
 
@@ -59,7 +59,7 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
 /// Returns a [`LoadVerifyReply`]; a malformed document / failed validation / failed
 /// ownership yields `ok: false` with the message, never a panic. This validation-only
 /// entry pins an explicit single-schema confinement scope; table-shape injection is
-/// resolved later by APIs that require a policy ceiling.
+/// resolved later by APIs that require a policy charter.
 #[must_use]
 pub fn load_verify(
     envelope_json: &str,
@@ -96,16 +96,15 @@ pub fn load_verify(
     }
 }
 
-/// Compose the schema-emit [`EffectivePolicy`] from the host's `RootCeiling`
-/// document (TOML) — the SAME `policy_ceiling_toml` input the apply path
-/// (`lower_envelope_to_migrations`) threads. There is no omitted-policy path: the
-/// caller explicitly supplies either an injecting ceiling or a no-inject ceiling.
+/// Compose the schema-emit [`EffectivePolicy`] from the host's ordered charter
+/// documents (TOML), the same `charter_layers` input the apply path threads. The
+/// first document is the root bound and each subsequent document narrows it.
 /// Its `injects_for(object)` result drives the covered column/index/PK injection.
 ///
 /// # Errors
-/// A human-readable message on a malformed ceiling / composition failure.
-fn schema_emit_policy(policy_ceiling_toml: &str) -> Result<EffectivePolicy, String> {
-    effective_policy_from_ceiling_toml(policy_ceiling_toml)
+/// A human-readable message on a malformed charter / composition failure.
+fn schema_emit_policy(charter_layers: &[&str]) -> Result<EffectivePolicy, String> {
+    effective_policy_from_charter_layers(charter_layers)
 }
 
 /// Render the two schema artifacts from the GENERATED source: a set of IR
@@ -118,26 +117,26 @@ fn schema_emit_policy(policy_ceiling_toml: &str) -> Result<EffectivePolicy, Stri
 /// The pure-JS recorder emits RAW, author-only `createTable` ops — it drains ONLY
 /// the author-declared columns; every policy-managed column, primary key, and
 /// index is injected by the shared [`render_artifacts`] tail under the
-/// caller-supplied **confined policy ceiling**, not by the JS DSL (the same policy
+/// caller-supplied **confined policy charter**, not by the JS DSL (the same policy
 /// resolution the apply-side lower performs). The engine bakes in no confined
-/// preset: `policy_ceiling_toml` carries the host's `RootCeiling`. Both generated
+/// preset: `charter_layers` carries the host's ordered layers. Both generated
 /// and manual inputs therefore reach the same renderer with the same explicit
 /// [`EffectivePolicy`]; already-resolved descriptor ops remain safe because table
 /// resolution is idempotent.
 ///
 /// Returns a [`GenArtifactsReply`]; a malformed envelope / a malformed policy
-/// ceiling / a table-shape resolve failure / an incoherent op stream yields
+/// charter / a table-shape resolve failure / an incoherent op stream yields
 /// `ok: false` with the message, never a panic.
 #[must_use]
 pub fn gen_artifacts_from_envelopes(
     envelopes: &[serde_json::Value],
     project_schema: Option<&str>,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
-    let effective = match schema_emit_policy(policy_ceiling_toml) {
+    let effective = match schema_emit_policy(charter_layers) {
         Ok(p) => p,
-        Err(e) => return gen_err(format!("schema-emit policy ceiling failed to load: {e}")),
+        Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
     let mut ops: Vec<Op> = Vec::new();
     for (i, env) in envelopes.iter().enumerate() {
@@ -160,26 +159,26 @@ pub fn gen_artifacts_from_envelopes(
 /// Render the two schema artifacts from the MANUAL source: a declared
 /// `CollectionDescriptor` set. The descriptors are turned into `createTable` ops via
 /// the producer — which injects the policy-selected shape under the caller-supplied
-/// `policy_ceiling_toml` ceiling — and folded through the SAME renderer tail, so the
+/// `charter_layers` stack, then folded through the SAME renderer tail, so the
 /// manual output is byte-identical to the generated output for an equivalent schema
-/// (both driven by the SAME ceiling).
+/// (both driven by the SAME charter).
 ///
 /// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`. The engine
-/// constructs no default ceiling: the caller must explicitly provide a no-inject
-/// ceiling when the author-owned shape should pass through.
+/// constructs no default charter: the caller must explicitly provide a no-inject
+/// charter when the author-owned shape should pass through.
 ///
-/// Returns a [`GenArtifactsReply`]; a malformed policy ceiling / a descriptor set the
+/// Returns a [`GenArtifactsReply`]; a malformed policy charter / a descriptor set the
 /// producer/fold refuses yields `ok: false` with the message, never a panic.
 #[must_use]
 pub fn gen_artifacts_from_descriptors(
     descriptors: &[CollectionDescriptor],
     project_schema: Option<&str>,
-    policy_ceiling_toml: &str,
+    charter_layers: &[&str],
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
-    let effective = match schema_emit_policy(policy_ceiling_toml) {
+    let effective = match schema_emit_policy(charter_layers) {
         Ok(p) => p,
-        Err(e) => return gen_err(format!("schema-emit policy ceiling failed to load: {e}")),
+        Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
     match render_artifacts_from_descriptors(descriptors, schema, &effective) {
         Ok(a) => gen_ok(a),
@@ -217,6 +216,7 @@ fn err_report(msg: impl Into<String>) -> LoadVerifyReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{confined_charter, CONFINED_CHARTER_TOML};
 
     #[test]
     fn current_ir_version_is_the_core_floor() {
@@ -295,11 +295,7 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(
-            &[envelope],
-            None,
-            zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML,
-        );
+        let reply = gen_artifacts_from_envelopes(&[envelope], None, &[CONFINED_CHARTER_TOML]);
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let ts = reply.env_db_ts.expect("env.db.ts");
@@ -337,16 +333,12 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(
-            &[envelope],
-            None,
-            zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML,
-        );
+        let reply = gen_artifacts_from_envelopes(&[envelope], None, &[CONFINED_CHARTER_TOML]);
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let v: serde_json::Value = serde_json::from_str(&runtime).expect("runtime json parses");
 
-        let effective = zero_migrate::zeroship_confined_ceiling();
+        let effective = confined_charter();
         let inject =
             zero_migrate::ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "widgets")
                 .expect("confined inject shape");
@@ -374,7 +366,7 @@ mod tests {
         for index in inject.indexes() {
             for element in &index.columns {
                 let zero_migrate::model::ir::IndexElement::Column { name, .. } = element else {
-                    panic!("test ceiling inject index must use columns: {element:?}");
+                    panic!("test charter inject index must use columns: {element:?}");
                 };
                 assert!(
                     idx_fields.iter().any(|field| field == name),
@@ -387,11 +379,7 @@ mod tests {
     #[test]
     fn gen_artifacts_from_a_malformed_envelope_fails_soft() {
         let bad = serde_json::json!({ "ir_version": current_ir_version(), "ops": "not-an-array" });
-        let reply = gen_artifacts_from_envelopes(
-            &[bad],
-            None,
-            zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML,
-        );
+        let reply = gen_artifacts_from_envelopes(&[bad], None, &[CONFINED_CHARTER_TOML]);
         assert!(!reply.ok);
         assert!(reply.error.is_some());
         assert!(reply.runtime_json.is_none());
@@ -411,11 +399,7 @@ mod tests {
             indexes: Vec::new(),
             runtime_options: Default::default(),
         };
-        let reply = gen_artifacts_from_descriptors(
-            &[descriptor],
-            None,
-            zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML,
-        );
+        let reply = gen_artifacts_from_descriptors(&[descriptor], None, &[CONFINED_CHARTER_TOML]);
         assert!(reply.ok, "render ok: {:?}", reply.error);
         assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
         assert!(reply.env_db_ts.unwrap().contains("label: t.text(),"));

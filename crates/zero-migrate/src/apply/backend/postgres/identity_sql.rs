@@ -490,7 +490,11 @@ mod tests {
     }
 
     fn cfg() -> ExecutorConfig {
-        let mut cfg = ExecutorConfig::new("identity_project", "app");
+        let mut cfg = ExecutorConfig::new(
+            "identity_project",
+            "app",
+            crate::test_fixtures::no_inject("app"),
+        );
         cfg.pg.meta_schema = "meta".into();
         cfg
     }

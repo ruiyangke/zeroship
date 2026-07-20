@@ -10,6 +10,8 @@
 //! `rebuild_one`, with no `pending_contract` partition (a `SQLite` rebuild is one
 //! atomic offline step).
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -51,11 +53,11 @@ fn sqlite_author() -> DeclarativeAuthor {
 }
 
 fn exec_cfg() -> ExecutorConfig {
-    ExecutorConfig::new(PROJECT, PROJECT)
+    ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_snapshot(

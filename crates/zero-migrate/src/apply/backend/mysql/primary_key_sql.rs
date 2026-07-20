@@ -1186,7 +1186,11 @@ mod tests {
     }
 
     fn cfg() -> ExecutorConfig {
-        ExecutorConfig::new("prj_pk", "pk_meta")
+        ExecutorConfig::new(
+            "prj_pk",
+            "pk_meta",
+            crate::test_fixtures::no_inject("pk_meta"),
+        )
     }
 
     fn assert_session_restored_after(rec: &RecordingSession, operation_marker: &str) {

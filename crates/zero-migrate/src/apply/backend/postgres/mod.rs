@@ -921,7 +921,7 @@ mod recording_session_genericity {
                 approval,
                 scope,
                 &backend,
-                &ExecutorConfig::new("prj_x", "proj_x"),
+                &ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x")),
                 "tester",
                 LockMode::Acquire,
                 None,
@@ -1153,7 +1153,7 @@ mod recording_session_genericity {
                 &[],
                 Approval::None,
                 &backend,
-                &ExecutorConfig::new("prj_x", "proj_x"),
+                &ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x")),
                 "tester",
                 LockMode::Acquire,
             )
@@ -1191,7 +1191,7 @@ mod recording_session_genericity {
             "generic D has no PgShadow harness"
         );
 
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         // Lock acquire/release + RESET ROLE — all write/DDL verbs, run through the
         // generic MigrationBackend surface, recorded by the non-compio driver.
@@ -1239,7 +1239,7 @@ mod recording_session_genericity {
         let rec =
             RecordingSession::with_canned_journal(vec![canned_journal_row("mig_0001", "deadbeef")]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let applied = backend.applied(&cfg).await.expect("applied read runs");
         assert_eq!(applied.len(), 1, "one canned journal row decoded");
@@ -1268,7 +1268,7 @@ mod recording_session_genericity {
             true,
         );
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let progress = backend
             .backfill_progress(&cfg)
@@ -1310,7 +1310,7 @@ mod recording_session_genericity {
         let rec =
             RecordingSession::with_canned_journal(vec![canned_journal_row("mig_0001", "cafef00d")]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         // 1. WRITE / DDL — journal bootstrap: CREATE SCHEMA + the append-only events
         //    table + the immutability trigger, all through `batch`.

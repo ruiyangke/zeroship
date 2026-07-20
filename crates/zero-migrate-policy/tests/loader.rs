@@ -1,6 +1,6 @@
 //! Document-loader legality-gate suite (Phase 1b-i). Per gate: one ACCEPT + one
 //! REJECT asserting the exact `LoadError` variant. Plus registry-digest stability,
-//! the doc's II.3 example TOML loading legally as a root ceiling, and the II.2.7
+//! the doc's II.3 example TOML loading legally as a root charter, and the II.2.7
 //! name-normalization cases. No composition (Phase 1b-ii).
 
 use zero_migrate_policy::{
@@ -77,7 +77,7 @@ fn registry() -> PolicyRegistry {
             ),
             def(
                 "runtime.lock_timeout_ms",
-                KnobKind::UintCeiling { hard_floor: 1 },
+                KnobKind::UintCharter { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
                 ObjectModel::PerTable,
@@ -88,7 +88,7 @@ fn registry() -> PolicyRegistry {
 }
 
 fn load_root(toml: &str) -> Result<PolicyDoc, LoadError> {
-    PolicyDoc::parse_toml(toml, &registry(), LoadContext::RootCeiling)
+    PolicyDoc::parse_toml(toml, &registry(), LoadContext::RootCharter)
 }
 
 fn load_draft(toml: &str) -> Result<PolicyDoc, LoadError> {
@@ -223,7 +223,7 @@ scope = { include = ["app_*"] }
 // ── gate: knob value validity (kind + hard floor) ────────────────────────────────
 
 #[test]
-fn valid_uint_ceiling_accepts() {
+fn valid_uint_charter_accepts() {
     assert!(load_root(
         r#"policy_version = 1
 [[grant]]
@@ -253,7 +253,7 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn value_wrong_type_rejects() {
-    // Bool value for a UintCeiling knob.
+    // Bool value for a UintCharter knob.
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
@@ -704,10 +704,10 @@ fn registry_digest_changes_on_object_model() {
     assert_ne!(r1.digest(), r2.digest());
 }
 
-// ── the doc's II.3 example TOML loads legally as a root ceiling ───────────────────
+// ── the doc's II.3 example TOML loads legally as a root charter ───────────────────
 
 #[test]
-fn doc_example_loads_as_root_ceiling() {
+fn doc_example_loads_as_root_charter() {
     let example = r#"policy_version = 1
 
 [default_scope]
@@ -790,7 +790,7 @@ fn json_front_end_loads() {
         "grant": [ { "key": "sql.raw", "value": true, "scope": { "include": ["app_main"] } } ],
         "validate": [ { "scope": { "include": ["app_*"] }, "predicate": { "kind": "has_primary_key" } } ]
     }"#;
-    let doc = PolicyDoc::parse_json(json, &registry(), LoadContext::RootCeiling).unwrap();
+    let doc = PolicyDoc::parse_json(json, &registry(), LoadContext::RootCharter).unwrap();
     assert_eq!(doc.rules.len(), 2);
 }
 
@@ -987,7 +987,7 @@ fn extends_without_catalog_is_unknown_base() {
     let err = PolicyDoc::parse_toml(
         "policy_version = 1\nextends = \"base\"\n",
         &registry(),
-        LoadContext::RootCeiling,
+        LoadContext::RootCharter,
     )
     .unwrap_err();
     assert!(

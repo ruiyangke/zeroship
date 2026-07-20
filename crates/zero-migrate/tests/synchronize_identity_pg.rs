@@ -28,6 +28,7 @@ fn cfg_for(token: &str) -> ExecutorConfig {
     let mut cfg = ExecutorConfig::new(
         format!("identity_project_{token}"),
         format!("identity_app_{token}"),
+        support::no_inject(&format!("identity_app_{token}")),
     );
     cfg.pg.meta_schema = format!("identity_meta_{token}");
     cfg

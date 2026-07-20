@@ -12,7 +12,7 @@ const REPO_ROOT = resolve(HERE, '../../..');
 const AUTHORING_ROOT = join(REPO_ROOT, 'packages/zero-migrate');
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
-const NO_INJECT_CEILING_TOML = 'policy_version = 1\n';
+const NO_INJECT_CHARTER_TOML = 'policy_version = 1\n';
 
 function assert(cond, msg) {
   if (!cond) {
@@ -156,7 +156,7 @@ const envelope = {
 
 const reply = addon.genArtifacts({
   envelopes: [envelope],
-  policyCeilingToml: NO_INJECT_CEILING_TOML,
+  charterLayers: [NO_INJECT_CHARTER_TOML],
 });
 assert(reply.ok, `genArtifacts succeeds: ${reply.error ?? 'unknown error'}`);
 const source = reply.envDbTs;

@@ -1,6 +1,6 @@
 //! The COMPOSITION ORACLE — the correctness proof for the security crown jewel.
 //!
-//! The composition algebra (`admit`/`restrict`/`overlay`/`finalize_ceiling`) is what
+//! The composition algebra (`admit`/`restrict`/`overlay`/`finalize_charter`) is what
 //! prevents privilege escalation. Prose review of it cannot be trusted (exactly as
 //! with the scope lattice, which the Phase-1a oracle settled). So this suite proves it
 //! by brute force over a bounded universe of concrete object names, with GROUND-TRUTH
@@ -9,9 +9,9 @@
 //! - **`restrict`** is the exact pointwise MEET of two trusted docs.
 //! - **`overlay`** is total, per-scalar-knob presence-based last-wins, rule-lists
 //!   union (base-then-over).
-//! - **`admit`** is CEILING-INHERITED: `Ok` IFF every draft grant that raises above
-//!   default is `⊑` the ceiling pointwise; the effective grant = presence-override +
-//!   inherit; and — the no-escalation invariant — **`effective ⊑ ceiling` for EVERY
+//! - **`admit`** is CHARTER-INHERITED: `Ok` IFF every draft grant that raises above
+//!   default is `⊑` the charter pointwise; the effective grant = presence-override +
+//!   inherit; and — the no-escalation invariant — **`effective ⊑ charter` for EVERY
 //!   key/object** over the whole universe (all three arms: silent-inherit,
 //!   narrow-to-default, narrow-above-default). Obligations union-up survive.
 //! - It PINS the critic's C-1 escalation counterexample (must REJECT), the layered
@@ -20,8 +20,8 @@
 //! The value maps are the ground truth; the composer is the code under test.
 
 use zero_migrate_policy::{
-    admit, finalize_ceiling, overlay, restrict, ComposeError, Enforcement, KnobDef, KnobKey,
-    KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCeiling, RuleKind,
+    admit, finalize_charter, overlay, restrict, ComposeError, Enforcement, KnobDef, KnobKey,
+    KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCharter, RuleKind,
     TrustedDoc,
 };
 
@@ -30,7 +30,7 @@ use zero_migrate_policy::{
 // ══════════════════════════════════════════════════════════════════════════════
 
 const BOOL_KEY: &str = "sql.raw"; // Bool grant, PerTable, default false
-const UINT_KEY: &str = "runtime.lock_timeout_ms"; // UintCeiling grant, PerTable, default 1
+const UINT_KEY: &str = "runtime.lock_timeout_ms"; // UintCharter grant, PerTable, default 1
 const CREATE_KEY: &str = "schema.create_table"; // Bool grant, PerTable, default false
 
 fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> KnobDef {
@@ -58,7 +58,7 @@ fn registry() -> PolicyRegistry {
             ),
             def(
                 UINT_KEY,
-                KnobKind::UintCeiling { hard_floor: 1 },
+                KnobKind::UintCharter { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
@@ -130,7 +130,7 @@ fn covers_gt(doc: &PolicyDoc, key: &str, o: &ObjectName) -> bool {
 fn join_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
     match (kind, a, b) {
         (KnobKind::Bool, KnobValue::Bool(x), KnobValue::Bool(y)) => KnobValue::Bool(*x || *y),
-        (KnobKind::UintCeiling { .. }, KnobValue::Uint(x), KnobValue::Uint(y)) => {
+        (KnobKind::UintCharter { .. }, KnobValue::Uint(x), KnobValue::Uint(y)) => {
             KnobValue::Uint((*x).max(*y))
         }
         _ => panic!("oracle join over unexpected shapes: {a:?} {b:?}"),
@@ -150,7 +150,7 @@ fn leq_gt(a: &KnobValue, b: &KnobValue) -> bool {
 fn meet_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
     match (kind, a, b) {
         (KnobKind::Bool, KnobValue::Bool(x), KnobValue::Bool(y)) => KnobValue::Bool(*x && *y),
-        (KnobKind::UintCeiling { .. }, KnobValue::Uint(x), KnobValue::Uint(y)) => {
+        (KnobKind::UintCharter { .. }, KnobValue::Uint(x), KnobValue::Uint(y)) => {
             KnobValue::Uint((*x).min(*y))
         }
         _ => panic!("oracle meet over unexpected shapes: {a:?} {b:?}"),
@@ -163,19 +163,19 @@ fn materialized_keys() -> Vec<(&'static str, KnobKind, KnobValue)> {
         (BOOL_KEY, KnobKind::Bool, KnobValue::Bool(false)),
         (
             UINT_KEY,
-            KnobKind::UintCeiling { hard_floor: 1 },
+            KnobKind::UintCharter { hard_floor: 1 },
             KnobValue::Uint(1),
         ),
     ]
 }
 
-/// Ground-truth ACCEPT predicate for `admit(ceiling, draft)`: for every materialized
+/// Ground-truth ACCEPT predicate for `admit(charter, draft)`: for every materialized
 /// key and object where the DRAFT raises above default, the draft's value ⊑ the
-/// ceiling's effective value. (Grants only — the generated docs carry no
-/// require/inject/validate.) `ceiling_value` computes the ceiling's EFFECTIVE value at
+/// charter's effective value. (Grants only — the generated docs carry no
+/// require/inject/validate.) `charter_value` computes the charter's EFFECTIVE value at
 /// `(k,o)`.
 fn gt_admissible(
-    ceiling_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
+    charter_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
     draft: &PolicyDoc,
     univ: &[ObjectName],
 ) -> bool {
@@ -186,7 +186,7 @@ fn gt_admissible(
             if leq_gt(&dv, &default) {
                 continue;
             }
-            let cv = ceiling_value(key, &kind, &default, o);
+            let cv = charter_value(key, &kind, &default, o);
             if !leq_gt(&dv, &cv) {
                 return false;
             }
@@ -195,11 +195,11 @@ fn gt_admissible(
     true
 }
 
-/// Ground-truth EFFECTIVE value of `admit(ceiling, draft)` at `(k,o)`: presence-based
-/// override — the draft's value if the draft covers `(k,o)`, else the ceiling's
+/// Ground-truth EFFECTIVE value of `admit(charter, draft)` at `(k,o)`: presence-based
+/// override — the draft's value if the draft covers `(k,o)`, else the charter's
 /// effective value (inherit).
 fn gt_effective(
-    ceiling_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
+    charter_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
     draft: &PolicyDoc,
     key: &str,
     kind: &KnobKind,
@@ -209,7 +209,7 @@ fn gt_effective(
     if covers_gt(draft, key, o) {
         value_gt(draft, kind, default, key, o)
     } else {
-        ceiling_value(key, kind, default, o)
+        charter_value(key, kind, default, o)
     }
 }
 
@@ -271,9 +271,9 @@ fn parse_draft(gens: &[Gen]) -> PolicyDoc {
     .unwrap_or_else(|e| panic!("draft parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
-/// Parse a generated doc as a root ceiling.
-fn parse_root(gens: &[Gen]) -> RootCeiling {
-    RootCeiling::parse_toml(&doc_toml(gens), &registry())
+/// Parse a generated doc as a root charter.
+fn parse_root(gens: &[Gen]) -> RootCharter {
+    RootCharter::parse_toml(&doc_toml(gens), &registry())
         .unwrap_or_else(|e| panic!("root parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
@@ -284,11 +284,11 @@ fn parse_trusted(gens: &[Gen]) -> TrustedDoc {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// THE CORE PROPERTY (admit): Ok ⟺ pointwise draft ⊑ ceiling + effective ⊑ ceiling
+// THE CORE PROPERTY (admit): Ok ⟺ pointwise draft ⊑ charter + effective ⊑ charter
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
+fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_charter() {
     let univ = universe();
     let reg = registry();
 
@@ -304,7 +304,7 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
         for &cpat2 in &pats {
             for cbool in bool_vals {
                 for cuint in uint_vals {
-                    let ceiling_gens = vec![
+                    let charter_gens = vec![
                         Gen {
                             key: BOOL_KEY,
                             pat: cpat,
@@ -316,11 +316,11 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
                             value: cuint,
                         },
                     ];
-                    let ceiling_doc = parse_draft(&ceiling_gens);
-                    let root = parse_root(&ceiling_gens);
-                    // The ceiling's effective value = the root doc's grant value.
+                    let charter_doc = parse_draft(&charter_gens);
+                    let root = parse_root(&charter_gens);
+                    // The charter's effective value = the root doc's grant value.
                     let cval = |key: &str, kind: &KnobKind, default: &KnobValue, o: &ObjectName| {
-                        value_gt(&ceiling_doc, kind, default, key, o)
+                        value_gt(&charter_doc, kind, default, key, o)
                     };
 
                     for &dpat in &pats {
@@ -350,11 +350,11 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
                                         (Err(_), false) => rejected += 1,
                                         (Ok(ep), false) => panic!(
                                             "FALSE ACCEPT (escalation slipped through)!\n\
-                                             ceiling={ceiling_gens:?}\n draft={draft_gens:?}\n{ep:?}"
+                                             charter={charter_gens:?}\n draft={draft_gens:?}\n{ep:?}"
                                         ),
                                         (Err(e), true) => panic!(
                                             "FALSE REJECT (should have composed)!\n\
-                                             ceiling={ceiling_gens:?}\n draft={draft_gens:?}\n err={e:?}"
+                                             charter={charter_gens:?}\n draft={draft_gens:?}\n err={e:?}"
                                         ),
                                     }
 
@@ -372,12 +372,12 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
                                                     "effective value mismatch at {o:?} key {key}"
                                                 );
                                                 // (b) THE NO-ESCALATION INVARIANT:
-                                                //     effective ⊑ ceiling everywhere.
+                                                //     effective ⊑ charter everywhere.
                                                 let cv = cval(key, &kind, &default, o);
                                                 assert!(
                                                     leq_gt(&got_v, &cv),
-                                                    "effective ⋢ ceiling at {o:?} key {key}: \
-                                                     eff={got_v:?} ceiling={cv:?}"
+                                                    "effective ⋢ charter at {o:?} key {key}: \
+                                                     eff={got_v:?} charter={cv:?}"
                                                 );
                                             }
                                         }
@@ -412,8 +412,8 @@ impl std::fmt::Debug for Gen {
 
 #[test]
 fn pinned_value_blind_escalation_rejects() {
-    // Ceiling: { timeout 60s @ app_* , 600s @ staging }.  Draft: { timeout 600s @ app_* }.
-    // At app_main.t: value(ceiling)=60, value(draft)=600 → REJECT.
+    // Charter: { timeout 60s @ app_* , 600s @ staging }.  Draft: { timeout 600s @ app_* }.
+    // At app_main.t: value(charter)=60, value(draft)=600 → REJECT.
     let reg = registry();
     let root = parse_root(&[
         Gen {
@@ -434,15 +434,15 @@ fn pinned_value_blind_escalation_rejects() {
     }]);
     let got = admit(&root, &draft, &reg);
     assert!(
-        matches!(got, Err(ComposeError::GrantExceedsCeiling { .. })),
+        matches!(got, Err(ComposeError::GrantExceedsCharter { .. })),
         "value-blind escalation must REJECT, got {got:?}"
     );
 }
 
 #[test]
 fn pinned_exclude_escalation_rejects() {
-    // Ceiling grant @ { app_* exclude app_tmp_* } = true. Draft grant @ { app_* } = true.
-    // The draft grants at app_tmp_x, which the ceiling excludes → REJECT.
+    // Charter grant @ { app_* exclude app_tmp_* } = true. Draft grant @ { app_* } = true.
+    // The draft grants at app_tmp_x, which the charter excludes → REJECT.
     let reg = registry();
     let root = parse_root(&[Gen {
         key: BOOL_KEY,
@@ -458,7 +458,7 @@ fn pinned_exclude_escalation_rejects() {
     assert!(
         matches!(
             got,
-            Err(ComposeError::GrantExceedsCeiling { .. })
+            Err(ComposeError::GrantExceedsCharter { .. })
                 | Err(ComposeError::UncoveredRegionNotRepresentable { .. })
         ),
         "exclude escalation must REJECT, got {got:?}"
@@ -467,7 +467,7 @@ fn pinned_exclude_escalation_rejects() {
 
 #[test]
 fn pinned_strictly_inside_accepts() {
-    // Ceiling grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 → ACCEPT.
+    // Charter grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 → ACCEPT.
     let reg = registry();
     let root = parse_root(&[
         Gen {
@@ -499,15 +499,15 @@ fn pinned_strictly_inside_accepts() {
     );
 }
 
-/// **THE C-1 COUNTEREXAMPLE.** Ceiling grants `raw_sql` on `Of{[app_*],
+/// **THE C-1 COUNTEREXAMPLE.** Charter grants `raw_sql` on `Of{[app_*],
 /// exclude=[app_secret]}` PLUS a disjoint `Of{[reports]}`; draft `raw_sql@app_secret`
-/// → admit REJECTS. A `⊔`-materialized ceiling side would DROP the `app_secret`
-/// exclude (folding the two ceiling rules), compute `app_secret` as covered, and
+/// → admit REJECTS. A `⊔`-materialized charter side would DROP the `app_secret`
+/// exclude (folding the two charter rules), compute `app_secret` as covered, and
 /// wrongly ACCEPT. The iterated-per-rule-∖ path keeps the exclude → reject.
 #[test]
 fn pinned_c1_disjoint_exclude_escalation_rejects() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "sql.raw"
@@ -537,22 +537,22 @@ scope = { include = ["app_secret"] }
     assert!(
         matches!(
             got,
-            Err(ComposeError::GrantExceedsCeiling { .. })
+            Err(ComposeError::GrantExceedsCharter { .. })
                 | Err(ComposeError::UncoveredRegionNotRepresentable { .. })
         ),
-        "C-1 disjoint-exclude escalation MUST reject (a ⊔-materialized ceiling would \
+        "C-1 disjoint-exclude escalation MUST reject (a ⊔-materialized charter would \
          have wrongly ACCEPTED), got {got:?}"
     );
 
-    // Sanity: the OLD ⊔-materialized formula (fold the two ceiling rules into one
+    // Sanity: the OLD ⊔-materialized formula (fold the two charter rules into one
     // scope via join, dropping the exclude) WOULD compute app_secret as covered.
-    // We assert the ground truth is a reject: at app_secret.t the ceiling's effective
+    // We assert the ground truth is a reject: at app_secret.t the charter's effective
     // raw_sql is FALSE (app_* grants it but the exclude removes app_secret; reports is
     // disjoint), while the draft raises it to TRUE → true ⋢ false → escalation.
     let secret = ObjectName::table(b"app_secret".to_vec(), b"t".to_vec());
-    let ceiling_doc = root.doc();
+    let charter_doc = root.doc();
     let cv = value_gt(
-        ceiling_doc,
+        charter_doc,
         &KnobKind::Bool,
         &KnobValue::Bool(false),
         BOOL_KEY,
@@ -561,19 +561,19 @@ scope = { include = ["app_secret"] }
     assert_eq!(
         cv,
         KnobValue::Bool(false),
-        "ceiling denies app_secret (exclude honored)"
+        "charter denies app_secret (exclude honored)"
     );
 }
 
-/// **PIN the layered override.** Draft `timeout=10000@app_*` over ceiling
+/// **PIN the layered override.** Draft `timeout=10000@app_*` over charter
 /// `timeout=30000@All` → `grants(timeout, app_main.t) == 10000` (draft narrows),
-/// `grants(timeout, other.t) == 30000` (inherited from the ceiling). The flat
+/// `grants(timeout, other.t) == 30000` (inherited from the charter). The flat
 /// loosest-covering formula could not represent this (it would return 30000 at
 /// app_main.t, discarding the narrower draft value).
 #[test]
 fn pinned_layered_override_narrow_region() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "runtime.lock_timeout_ms"
@@ -607,17 +607,17 @@ scope = { include = ["app_*"] }
     assert_eq!(
         ep.grants(&pk, &other_t),
         Some(KnobValue::Uint(30000)),
-        "outside app_*, the ceiling's timeout is inherited"
+        "outside app_*, the charter's timeout is inherited"
     );
 }
 
-/// **PIN narrow-to-default.** Draft `raw_sql=false@app_*` over ceiling `raw_sql=true@All`
+/// **PIN narrow-to-default.** Draft `raw_sql=false@app_*` over charter `raw_sql=true@All`
 /// → effective false in app_* (the creator asked for less and gets less; presence, not
 /// raises-above-default, is the override trigger). Inherited true elsewhere.
 #[test]
 fn pinned_narrow_to_default_wins() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "sql.raw"
@@ -651,15 +651,15 @@ scope = { include = ["app_*"] }
     assert_eq!(
         ep.grants(&pk, &other_t),
         Some(KnobValue::Bool(true)),
-        "outside app_*, the ceiling's true is inherited"
+        "outside app_*, the charter's true is inherited"
     );
 }
 
-/// **PIN silent-inherit.** A draft SILENT on a key inherits the ceiling's grant
+/// **PIN silent-inherit.** A draft SILENT on a key inherits the charter's grant
 /// (inherit-then-narrow, not draft-authoritative). A draft that omits a grant the
-/// ceiling allows KEEPS it.
+/// charter allows KEEPS it.
 #[test]
-fn pinned_silent_draft_inherits_ceiling_grant() {
+fn pinned_silent_draft_inherits_charter_grant() {
     let reg = registry();
     let root = parse_root(&[Gen {
         key: BOOL_KEY,
@@ -679,7 +679,7 @@ fn pinned_silent_draft_inherits_ceiling_grant() {
     assert_eq!(
         ep.grants(&pk, &app_main_t),
         Some(KnobValue::Bool(true)),
-        "silent draft INHERITS the ceiling's grant"
+        "silent draft INHERITS the charter's grant"
     );
 }
 
@@ -716,16 +716,16 @@ fn oracle_restrict_is_exact_pointwise_meet() {
                     let a_doc = parse_draft(&a_gens);
                     let b_doc = parse_draft(&b_gens);
 
-                    // restrict → finalize → admit(empty draft) to read the ceiling value.
+                    // restrict → finalize → admit(empty draft) to read the charter value.
                     let restricted = restrict(&a, &b, &reg).unwrap();
-                    let ceiling = finalize_ceiling(restricted).unwrap();
+                    let charter = finalize_charter(restricted).unwrap();
                     let empty = PolicyDoc::parse_toml(
                         "policy_version = 1\n",
                         &reg,
                         zero_migrate_policy::LoadContext::NonRootLayer,
                     )
                     .unwrap();
-                    let ep = admit(&ceiling, &empty, &reg).unwrap();
+                    let ep = admit(&charter, &empty, &reg).unwrap();
 
                     for (key, kind, default) in materialized_keys() {
                         let pk = KnobKey::parse(key).unwrap();
@@ -780,8 +780,8 @@ fn oracle_restrict_commutative() {
                         value: val_b,
                     }]);
 
-                    let ab = finalize_ceiling(restrict(&doc_a, &doc_b, &reg).unwrap()).unwrap();
-                    let ba = finalize_ceiling(restrict(&doc_b, &doc_a, &reg).unwrap()).unwrap();
+                    let ab = finalize_charter(restrict(&doc_a, &doc_b, &reg).unwrap()).unwrap();
+                    let ba = finalize_charter(restrict(&doc_b, &doc_a, &reg).unwrap()).unwrap();
                     let ep_ab = admit(&ab, &empty, &reg).unwrap();
                     let ep_ba = admit(&ba, &empty, &reg).unwrap();
 
@@ -839,16 +839,16 @@ fn oracle_overlay_is_presence_last_wins() {
                     let over_doc = parse_draft(&over_gens);
 
                     let assembled = overlay(&base, &over, &reg).unwrap();
-                    let ceiling = finalize_ceiling(assembled).unwrap();
+                    let charter = finalize_charter(assembled).unwrap();
                     let empty = PolicyDoc::parse_toml(
                         "policy_version = 1\n",
                         &reg,
                         zero_migrate_policy::LoadContext::NonRootLayer,
                     )
                     .unwrap();
-                    let ep = admit(&ceiling, &empty, &reg).unwrap();
+                    let ep = admit(&charter, &empty, &reg).unwrap();
 
-                    let kind = KnobKind::UintCeiling { hard_floor: 1 };
+                    let kind = KnobKind::UintCharter { hard_floor: 1 };
                     let default = KnobValue::Uint(1);
                     let pk = KnobKey::parse(UINT_KEY).unwrap();
                     for o in &univ {
@@ -901,14 +901,14 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
 
-    let ceiling = finalize_ceiling(overlay(&base, &over, &reg).unwrap()).unwrap();
+    let charter = finalize_charter(overlay(&base, &over, &reg).unwrap()).unwrap();
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let ep = admit(&ceiling, &empty, &reg).unwrap();
+    let ep = admit(&charter, &empty, &reg).unwrap();
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let staging_t = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
@@ -946,7 +946,7 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Union-up: every ceiling require/inject/validate survives admit
+// Union-up: every charter require/inject/validate survives admit
 // ══════════════════════════════════════════════════════════════════════════════
 
 fn registry_with_require() -> PolicyRegistry {
@@ -961,7 +961,7 @@ fn registry_with_require() -> PolicyRegistry {
 }
 
 #[test]
-fn union_up_ceiling_obligations_and_injects_and_validates_survive() {
+fn union_up_charter_obligations_and_injects_and_validates_survive() {
     let reg = registry_with_require();
     let root_toml = r#"policy_version = 1
 [[require]]
@@ -984,7 +984,7 @@ key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#;
-    let root = RootCeiling::parse_toml(root_toml, &reg).unwrap();
+    let root = RootCharter::parse_toml(root_toml, &reg).unwrap();
 
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
@@ -1005,13 +1005,13 @@ scope = { include = ["staging"] }
     assert!(
         obs.iter()
             .any(|(k, v)| k.as_str() == "safety.require_rls" && *v == KnobValue::Bool(true)),
-        "ceiling require dropped: {obs:?}"
+        "charter require dropped: {obs:?}"
     );
     let injs = ep.injects_for(&app_t);
-    assert_eq!(injs.len(), 1, "ceiling inject dropped");
+    assert_eq!(injs.len(), 1, "charter inject dropped");
     assert_eq!(injs[0].columns[0].name, "created_at");
     let vals = ep.validates_for(&app_t);
-    assert!(!vals.is_empty(), "ceiling validate dropped");
+    assert!(!vals.is_empty(), "charter validate dropped");
 }
 
 /// An `OrderedEnum` `Require` obligation modelled on `sec.require_approval`
@@ -1032,7 +1032,7 @@ fn registry_with_require_approval() -> PolicyRegistry {
 #[test]
 fn require_approval_composes_union_up_operator_always_beats_creator_never() {
     let reg = registry_with_require_approval();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[require]]
 key = "sec.require_approval"
@@ -1085,13 +1085,13 @@ scope = { include = ["app_*"] }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Compose-time collision blame (admit: draft-vs-ceiling)
+// Compose-time collision blame (admit: draft-vs-charter)
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn draft_inject_colliding_ceiling_inject_rejects_at_compose() {
+fn draft_inject_colliding_charter_inject_rejects_at_compose() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -1112,15 +1112,15 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
     .unwrap();
     let got = admit(&root, &draft, &reg);
     assert!(
-        matches!(got, Err(ComposeError::DraftInjectCollidesCeiling { .. })),
-        "draft-vs-ceiling inject collision must REJECT at compose, got {got:?}"
+        matches!(got, Err(ComposeError::DraftInjectCollidesCharter { .. })),
+        "draft-vs-charter inject collision must REJECT at compose, got {got:?}"
     );
 }
 
 #[test]
-fn draft_validate_contradicting_ceiling_inject_rejects_at_compose() {
+fn draft_validate_contradicting_charter_inject_rejects_at_compose() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -1143,18 +1143,18 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
     assert!(
         matches!(
             got,
-            Err(ComposeError::DraftValidateContradictsCeilingInject { .. })
+            Err(ComposeError::DraftValidateContradictsCharterInject { .. })
         ),
-        "draft validate contradicting ceiling inject must REJECT, got {got:?}"
+        "draft validate contradicting charter inject must REJECT, got {got:?}"
     );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// finalize_ceiling: ceiling-vs-ceiling conflicts + creatable-escape
+// finalize_charter: charter-vs-charter conflicts + creatable-escape
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn ceiling_vs_ceiling_inject_collision_rejects_at_finalize() {
+fn charter_vs_charter_inject_collision_rejects_at_finalize() {
     use zero_migrate_policy::FinalizeError;
     let reg = registry();
     let a = TrustedDoc::register_catalog_entry(
@@ -1176,10 +1176,10 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
     )
     .unwrap();
     let assembled = restrict(&a, &b, &reg).unwrap(); // TOTAL — does NOT reject.
-    let got = finalize_ceiling(assembled);
+    let got = finalize_charter(assembled);
     assert!(
-        matches!(got, Err(FinalizeError::CeilingInjectColumnConflict { .. })),
-        "ceiling-vs-ceiling inject collision must be a loud FINALIZE error, got {got:?}"
+        matches!(got, Err(FinalizeError::CharterInjectColumnConflict { .. })),
+        "charter-vs-charter inject collision must be a loud FINALIZE error, got {got:?}"
     );
 }
 
@@ -1187,10 +1187,10 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
 fn creatable_escaping_mandatory_inject_rejects_at_finalize() {
     use zero_migrate_policy::FinalizeError;
     let reg = registry();
-    // A single root ceiling: mandatory inject on app_* only, but create_table @ all.
+    // A single root charter: mandatory inject on app_* only, but create_table @ all.
     // Assemble it via restrict(root_as_trusted, empty_trusted) so it flows through
     // finalize; the creatable-escape must be caught.
-    let ceiling_doc = r#"policy_version = 1
+    let charter_doc = r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
 mandatory = true
@@ -1200,25 +1200,25 @@ key = "schema.create_table"
 value = true
 scope = "all"
 "#;
-    // A RootCeiling carries the mandatory inject; to run it through finalize we take
+    // A RootCharter carries the mandatory inject; to run it through finalize we take
     // its layers via admit-less path: restrict with an empty trusted doc keeps the
     // mandatory inject and the create grant, then finalize lints the escape.
-    let root = RootCeiling::parse_toml(ceiling_doc, &reg).unwrap();
+    let root = RootCharter::parse_toml(charter_doc, &reg).unwrap();
     // Wrap the SAME source as a trusted "base" is illegal (mandatory on non-root), so
     // we assert the finalize lint via the root's own finalize path: build an assembled
-    // ceiling from the root's TrustedDoc is not possible (mandatory), so instead we
-    // check the lint fires for a NON-mandatory-equivalent assembled ceiling below and
+    // charter from the root's TrustedDoc is not possible (mandatory), so instead we
+    // check the lint fires for a NON-mandatory-equivalent assembled charter below and
     // rely on admit's transitive bound for the root case.
     let _ = root;
 
-    // Assembled (non-root) ceiling reproducing the escape shape WITHOUT `mandatory`
+    // Assembled (non-root) charter reproducing the escape shape WITHOUT `mandatory`
     // is not an escape (only mandatory injects gate). So we exercise the finalize lint
     // through restrict of two trusted docs where one pins a mandatory-like inject is
     // impossible on non-root. The creatable-escape lint is therefore proven on the
     // ROOT path: a root whose create grant escapes its mandatory inject must fail when
     // finalized. We finalize the root by re-parsing it as the sole layer:
     let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
-    let got = finalize_ceiling(assembled);
+    let got = finalize_charter(assembled);
     assert!(
         matches!(
             got,
@@ -1231,7 +1231,7 @@ scope = "all"
 #[test]
 fn creatable_within_mandatory_inject_accepts_at_finalize() {
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -1247,7 +1247,7 @@ scope = { include = ["app_*"] }
     .unwrap();
     let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
     assert!(
-        finalize_ceiling(assembled).is_ok(),
+        finalize_charter(assembled).is_ok(),
         "creatable within mandatory inject must finalize"
     );
 }
@@ -1260,7 +1260,7 @@ scope = { include = ["app_*"] }
 fn is_injected_shape_name_matches_covering_inject() {
     use zero_migrate_policy::ShapeElement;
     let reg = registry();
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -1322,7 +1322,7 @@ fn effective_policy_only_via_admit_or_deny_all() {
         Some(KnobValue::Bool(true))
     );
 
-    // A finalized restrict ceiling, then admitted.
+    // A finalized restrict charter, then admitted.
     let a = parse_trusted(&[Gen {
         key: BOOL_KEY,
         pat: Pat::AppStar,
@@ -1333,16 +1333,16 @@ fn effective_policy_only_via_admit_or_deny_all() {
         pat: Pat::AppStar,
         value: "true",
     }]);
-    let ceiling = finalize_ceiling(restrict(&a, &b, &reg).unwrap()).unwrap();
-    let _ep2 = admit(&ceiling, &draft, &reg).unwrap();
+    let charter = finalize_charter(restrict(&a, &b, &reg).unwrap()).unwrap();
+    let _ep2 = admit(&charter, &draft, &reg).unwrap();
 
     // There is deliberately NO other constructor: no Default, no Deserialize, no
-    // public `new`. And an AssembledCeiling is NOT an AdmitCeiling — it cannot reach
+    // public `new`. And an AssembledCharter is NOT an AdmitCharter — it cannot reach
     // admit until finalized. This test compiling is the proof the surface is closed.
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// inherit = false — a SILENT draft does NOT inherit a power-grant from the ceiling
+// inherit = false — a SILENT draft does NOT inherit a power-grant from the charter
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// A registry whose one grant knob is a POWER GRANT (`inherit = false`), plus an
@@ -1378,8 +1378,8 @@ fn silent_draft_does_not_inherit_noninherit_grant() {
     let power_key = KnobKey::parse("schema.alter_injected").unwrap();
     let bool_key = KnobKey::parse(BOOL_KEY).unwrap();
 
-    // Ceiling GRANTS the power knob (and the ordinary knob) over app_*.
-    let root = RootCeiling::parse_toml(
+    // Charter GRANTS the power knob (and the ordinary knob) over app_*.
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "schema.alter_injected"
@@ -1406,29 +1406,29 @@ scope = { include = ["app_*"] }
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
 
     // The power grant is NOT inherited by the silent draft → it reads the DEFAULT
-    // (deny), NOT the ceiling's granted `true`.
+    // (deny), NOT the charter's granted `true`.
     assert_eq!(
         ep.grants(&power_key, &app_t),
         Some(KnobValue::Bool(false)),
         "an inherit=false grant must NOT flow to a silent draft"
     );
-    // The ordinary (inheritable) grant IS inherited — the ceiling's `true` shows through.
+    // The ordinary (inheritable) grant IS inherited — the charter's `true` shows through.
     assert_eq!(
         ep.grants(&bool_key, &app_t),
         Some(KnobValue::Bool(true)),
-        "an ordinary grant is still ceiling-inherited by a silent draft"
+        "an ordinary grant is still charter-inherited by a silent draft"
     );
 }
 
 #[test]
-fn explicit_draft_may_still_earn_a_noninherit_grant_within_ceiling() {
+fn explicit_draft_may_still_earn_a_noninherit_grant_within_charter() {
     // inherit=false only blocks INHERITANCE-BY-OMISSION; a draft that EXPLICITLY
-    // grants the power knob (⊑ the ceiling) still gets it — the normal escalation
+    // grants the power knob (⊑ the charter) still gets it — the normal escalation
     // check governs.
     let reg = registry_with_noninherit();
     let power_key = KnobKey::parse("schema.alter_injected").unwrap();
 
-    let root = RootCeiling::parse_toml(
+    let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "schema.alter_injected"
@@ -1459,7 +1459,7 @@ scope = { include = ["app_main"] }
         ep.grants(&power_key, &app_main_t),
         Some(KnobValue::Bool(true))
     );
-    // Where it stayed silent (app_tmp_x, still under the ceiling's app_*), it does
+    // Where it stayed silent (app_tmp_x, still under the charter's app_*), it does
     // NOT inherit — default deny.
     assert_eq!(
         ep.grants(&power_key, &app_other_t),

@@ -91,7 +91,7 @@ fn lower_create_for_schema(dialect: SqlDialect, schema: &str, ir: &MigrationIr) 
         schema,
         "app_ulid_samples",
         dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(ir, &LiveSchema::default())
     .expect("value-format create table must lower");
@@ -121,7 +121,7 @@ fn lower_add(dialect: SqlDialect, table: &str) -> String {
         "app",
         "app_ulid_samples",
         dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("ULID add column must lower");

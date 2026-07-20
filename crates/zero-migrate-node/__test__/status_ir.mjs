@@ -4,7 +4,7 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
-const NO_INJECT_CEILING_TOML = `policy_version = 1
+const NO_INJECT_CHARTER_TOML = `policy_version = 1
 
 [[grant]]
 key = "schema.cross_schema"
@@ -113,7 +113,7 @@ const status = await addon.statusIr(hostDriver, {
   dialect: 'postgres',
   registry: {},
   envelopes: [],
-  policyCeiling: NO_INJECT_CEILING_TOML,
+  charterLayers: [NO_INJECT_CHARTER_TOML],
 });
 
 function assert(condition, message) {
@@ -142,7 +142,7 @@ const orderedStatus = await addon.statusIr(hostDriver, {
   projectSchema: 'app_status_ordered',
   dialect: 'postgres',
   registry: {},
-  policyCeiling: NO_INJECT_CEILING_TOML,
+  charterLayers: [NO_INJECT_CHARTER_TOML],
   envelopes: [
     {
       ir_version: addon.irVersion(),

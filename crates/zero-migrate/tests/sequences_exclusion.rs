@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::BTreeSet;
 
 use serde_json::json;
@@ -36,12 +38,7 @@ fn lower(
     dialect: SqlDialect,
     live: &BTreeSet<String>,
 ) -> Vec<zero_migrate::Migration> {
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
     author
         .lower(&ir(ops), &LiveSchema::from(live))
         .expect("lower")
@@ -279,7 +276,7 @@ fn fold_tracks_sequence_existence_and_drop() {
         &[create_sequence_op()],
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold create");
     assert!(created.sequences.contains_key("invoice_seq"));
@@ -295,7 +292,7 @@ fn fold_tracks_sequence_existence_and_drop() {
         ],
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold drop");
     assert!(!dropped.sequences.contains_key("invoice_seq"));
@@ -437,7 +434,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         &set_ops,
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold set comments");
     let users = folded.tables.get("users").expect("users table");
@@ -471,7 +468,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         &cleared_ops,
         SqlDialect::Postgres,
         SCHEMA,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("fold clear comments");
     let users = cleared.tables.get("users").expect("users table");

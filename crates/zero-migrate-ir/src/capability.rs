@@ -27,15 +27,12 @@ use crate::policy::{SchemaScope, TrustProfile};
 /// A zero-sized operator capability token.
 ///
 /// The token type lives with the capability model (in the `zero-migrate-ir` leaf)
-/// so the guard config and the engine executor config can both name it without
-/// depending on each other or on the operator runner. The token has a PRIVATE
-/// `()` field, so an external crate can name the type but cannot construct one:
-/// the real external seal is that the privileged constructors that CONSUME it
-/// ([`crate::policy`]'s `GuardConfig::platform`/`trusted` in the guard crate and
-/// `ExecutorConfig::platform`/`trusted` in the engine) are `pub(crate)` to their
-/// own crates. Production code mints it through the named engine runner seam
-/// ([`OperatorCapability::new`]); tests mint it via the `test-support`-gated
-/// [`OperatorCapability::for_test`].
+/// so operator-side engine seams can name it without depending on the runner. The
+/// token has a PRIVATE `()` field, so an external crate can name the type but cannot
+/// construct one. Production code mints it through the named engine runner seam
+/// ([`OperatorCapability::new`]); engine tests mint it via the `test-support`-gated
+/// [`OperatorCapability::for_test`]. Guard policies are always supplied explicitly
+/// as composed `EffectivePolicy` values and do not use this token to select a preset.
 #[derive(Debug, Clone)]
 pub struct OperatorCapability(());
 
@@ -47,17 +44,15 @@ pub type SealApplier = OperatorCapability;
 
 impl OperatorCapability {
     /// The production mint. Reachable across the crate graph (the engine runner
-    /// is the single production caller); external crates cannot call it usefully
-    /// because there is no `pub` API that accepts the token except the
-    /// `pub(crate)` privileged constructors in the guard/engine crates.
+    /// is the single production caller). The token does not select or construct a
+    /// policy; policy-bearing APIs require an explicit composed policy.
     #[must_use]
     pub const fn new() -> Self {
         Self(())
     }
 
-    /// **Test-support seam.** Lets the guard-crate and engine-crate test suites
-    /// exercise the operator-gated profiles. Gated behind the `test-support`
-    /// feature (enabled only by the guard/engine `[dev-dependencies]`), so it
+    /// **Test-support seam.** Lets the engine-crate test suite exercise
+    /// operator-gated entry points. Gated behind the `test-support` feature, so it
     /// never reaches a production build.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -264,9 +259,8 @@ impl VendorCapabilities {
     }
 
     /// Derive the capability set from the validate-layer
-    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads. The scope is
-    /// produced ONLY by the operator-gated `GuardConfig` ctors,
-    /// so it is a faithful, non-spoofable trust signal:
+    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads. Guarded paths
+    /// derive this scope from the caller-supplied effective policy:
     /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).
     /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).
     /// - `Some(Allowlist(list))` ⇒ **Platform** ⇒ [`operator`](Self::operator) with
@@ -275,9 +269,8 @@ impl VendorCapabilities {
     ///   validate-time cross-schema confinement.
     ///
     /// `None` is intentionally least-privilege so future public callers cannot
-    /// accidentally enable vendor ops by omitting a capability. Operator paths get
-    /// `Allowlist`/`Unconfined` from `GuardConfig` constructors that require an
-    /// [`OperatorCapability`] token.
+    /// accidentally enable vendor ops by omitting a capability. Wider scopes must
+    /// come from an explicitly authored policy on guarded paths.
     #[must_use]
     pub fn from_scope(scope: Option<&SchemaScope>) -> Self {
         match scope {

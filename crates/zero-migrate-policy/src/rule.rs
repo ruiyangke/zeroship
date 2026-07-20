@@ -29,7 +29,7 @@ pub enum RuleKind {
     /// Obligation — references a `Require`-polarity knob. Composes UP (un-droppable).
     Require { key: KnobKey, value: KnobValue },
     /// Content rule: columns/indexes/PK to add to matching `createTable` ops.
-    /// Composes UP (obligation polarity) — a ceiling injection is un-droppable.
+    /// Composes UP (obligation polarity) — a charter injection is un-droppable.
     Inject { spec: InjectSpec },
     /// Content rule: a structural predicate a matching table/op must satisfy.
     Validate { pred: ValidatePredicate },
@@ -60,7 +60,7 @@ pub struct InjectSpec {
     pub primary_key: Option<Vec<String>>,
     /// How an author-declared PK interacts with a pinned PK (II.4.3).
     pub author_primary_key: AuthorPkPolicy,
-    /// Root-ceiling-only: when true the composer enforces creatable ⊑ inject
+    /// Root-charter-only: when true the composer enforces creatable ⊑ inject
     /// (II.2.6a). `mandatory = true` on a NON-root layer is a hard load error
     /// (`MandatoryInjectOnNonRootLayer`).
     pub mandatory: bool,

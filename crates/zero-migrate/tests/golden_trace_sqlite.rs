@@ -15,6 +15,8 @@
 //! Real temp-file `SQLite` throughout. The (b) capture is frozen into an immutable
 //! committed fixture under `tests/golden-traces/`.
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -23,17 +25,17 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    zeroship_confined_ceiling, Approval, ApprovalScope, CollectionDescriptor,
-    DeclarativeApplyError, DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan,
-    EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend,
-    MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
+    Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
+    DeclarativeDeployOutcome, DeclarativeDeployPlan, EffectivePolicy, EngineError, ExecutorConfig,
+    FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
+    SqliteBackend,
 };
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";
 
 fn effective_policy() -> EffectivePolicy {
-    zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_snapshot(
@@ -75,11 +77,11 @@ fn sqlite_author() -> DeclarativeAuthor {
 }
 
 fn exec_cfg() -> ExecutorConfig {
-    ExecutorConfig::new(PROJECT, PROJECT)
+    ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::confined_sqlite(PROJECT)
+    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite)
 }
 
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {

@@ -60,7 +60,7 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
         "main",
         "app_uuid_samples",
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("lower SQLite UUIDv4 default");
@@ -96,7 +96,7 @@ fn mysql_uuid_v4_default_uses_exact_random_bytes_expression() {
         "app",
         "app_uuid_samples",
         SqlDialect::Mysql,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("lower MySQL UUIDv4 default");
@@ -149,8 +149,7 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
             &schema,
             "app_uuid_samples",
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("UUID no-inject policy composes"),
+            &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
         .expect("lower PostgreSQL UUIDv4 default");

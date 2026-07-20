@@ -45,7 +45,7 @@ use crate::apply::backend::MigrationBackend;
 use crate::apply::executor::ApplyError;
 use crate::apply::journal::{JournalError, Phase};
 use crate::conn::ExecutorConfig;
-use crate::guard::{guard_for, GuardConfig, GuardError};
+use crate::guard::{guard_for, GuardError};
 use crate::model::migration::Migration;
 
 /// What [`squash`] did.
@@ -188,9 +188,7 @@ pub async fn squash<B: MigrationBackend>(
     // dialect-correct guard is selected from the backend's dialect: PG runs
     // the libpg_query deny-list (`SqlGuard::new(confined(project_schema))`); a
     // non-PG engine runs its own dialect's guard.
-    let guard = guard_for(
-        &GuardConfig::confined(cfg.project_schema.clone()).for_dialect(backend.dialect()),
-    );
+    let guard = guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
     guard
         .check(&squash_migration.up)
         .map_err(|source| SquashError::Guard {

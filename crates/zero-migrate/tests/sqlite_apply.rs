@@ -1,6 +1,8 @@
 //! Journal + atomic-apply + idempotency proofs for the `SQLite` migration backend.
 //! Real temp-file `SQLite` throughout.
 
+mod support;
+
 use std::path::PathBuf;
 
 use tempfile::TempDir;
@@ -67,7 +69,7 @@ fn mig_named(name: &str, up: &str) -> Migration {
 
 /// A throwaway `ExecutorConfig` (the `SQLite` backend ignores PG-shaped fields).
 fn cfg() -> ExecutorConfig {
-    ExecutorConfig::new("prj_test", "app")
+    ExecutorConfig::new("prj_test", "app", support::no_inject("app"))
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +144,7 @@ async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
         "app",
         "app_test",
         zero_migrate::SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_plan(&ir, &zero_migrate::LiveSchema::default())
     .expect("empty IR lowers to a journal anchor");

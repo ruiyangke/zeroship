@@ -123,8 +123,8 @@ interface Args {
   dialect?: "postgres" | "mysql" | "sqlite";
   /** Path to the trusted JSON table-ownership registry. */
   registryPath?: string;
-  /** Path to the required trusted table-shape policy ceiling. */
-  policyCeilingPath?: string;
+  /** Ordered paths to table-shape policy files. The first path is the root. */
+  policyPaths: string[];
   ownerApp: string;
   projectSchema: string;
   /** `--json` — machine-readable output where a verb supports it. */
@@ -145,6 +145,7 @@ function parseArgs(argv: string[]): Args {
     dir: DEFAULT_DIR,
     ownerApp: process.env.ZERO_MIGRATE_OWNER_APP ?? DEFAULT_OWNER_APP,
     projectSchema: process.env.ZERO_MIGRATE_SCHEMA ?? DEFAULT_SCHEMA,
+    policyPaths: [],
     json: false,
     approved: false,
     resolveApply: false,
@@ -196,8 +197,8 @@ function parseArgs(argv: string[]): Args {
       case "registry":
         args.registryPath = takeVal();
         break;
-      case "policy-ceiling":
-        args.policyCeilingPath = takeVal();
+      case "policy":
+        args.policyPaths.push(takeVal());
         break;
       case "owner-app":
         args.ownerApp = takeVal();
@@ -270,11 +271,15 @@ function parseArgs(argv: string[]): Args {
     throw new CliError("flag --registry is only valid with plan, apply, or status");
   }
   if (
-    args.policyCeilingPath !== undefined &&
+    args.policyPaths.length > 0 &&
     args.command !== "apply" &&
-    args.command !== "status"
+    args.command !== "status" &&
+    args.command !== "history" &&
+    args.command !== "resolve-pending"
   ) {
-    throw new CliError("flag --policy-ceiling is only valid with apply or status");
+    throw new CliError(
+      "flag --policy is only valid with apply, status, history, or resolve-pending",
+    );
   }
   if (args.journalPath !== undefined && args.command !== "apply") {
     throw new CliError("flag --journal is only valid with apply");
@@ -333,27 +338,33 @@ async function loadRegistry(path: string | undefined): Promise<Record<string, st
   return registry;
 }
 
-/** Read the operator-controlled policy document required by apply and plan-aware
- * status. The bytes are passed through unchanged for Rust to parse and compose. */
-async function loadPolicyCeiling(path: string | undefined): Promise<string> {
-  if (path === undefined) {
+/** Read the ordered operator-controlled policy documents required by
+ * database-backed commands. The bytes and occurrence order pass through
+ * unchanged for Rust to parse and compose. */
+async function loadPolicyFiles(paths: readonly string[]): Promise<string[]> {
+  if (paths.length === 0) {
     throw new CliError(
-      "missing policy ceiling (pass --policy-ceiling <file> with an injecting or explicit no-inject policy)",
+      "missing policy (pass --policy <file> with an injecting or explicit no-inject policy)",
     );
   }
-  if (path.length === 0) {
-    throw new CliError("flag --policy-ceiling needs a non-empty file path");
-  }
-  try {
-    const source = await readFile(path, "utf8");
-    if (source.length === 0) {
-      throw new CliError(`policy ceiling file ${path} is empty`);
+
+  const charterLayers: string[] = [];
+  for (const path of paths) {
+    if (path.length === 0) {
+      throw new CliError("flag --policy needs a non-empty file path");
     }
-    return source;
-  } catch (error) {
-    if (error instanceof CliError) throw error;
-    throw new CliError(`read policy ceiling file ${path}: ${(error as Error).message}`);
+    try {
+      const source = await readFile(path, "utf8");
+      if (source.length === 0) {
+        throw new CliError(`policy file ${path} is empty`);
+      }
+      charterLayers.push(source);
+    } catch (error) {
+      if (error instanceof CliError) throw error;
+      throw new CliError(`read policy file ${path}: ${(error as Error).message}`);
+    }
   }
+  return charterLayers;
 }
 
 /** Derive the separate SQLite migration-journal filename next to the app DB. */
@@ -560,7 +571,7 @@ async function runApply(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl, args.journalPath);
-  const policyCeiling = await loadPolicyCeiling(args.policyCeilingPath);
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
@@ -577,7 +588,7 @@ async function runApply(args: Args): Promise<number> {
       projectSchema: args.projectSchema,
       driver,
       registry,
-      policyCeiling,
+      policy: charterLayers,
       nameFallback: file.label,
       approved: args.approved,
     });
@@ -595,7 +606,7 @@ async function runStatus(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl);
-  const policyCeiling = await loadPolicyCeiling(args.policyCeilingPath);
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
@@ -606,7 +617,7 @@ async function runStatus(args: Args): Promise<number> {
     projectSchema: args.projectSchema,
     driver,
     registry,
-    policyCeiling,
+    policy: charterLayers,
     migrations,
     nameFallbacks: files.map((file) => file.label),
   });
@@ -639,6 +650,7 @@ async function runResolvePending(args: Args): Promise<number> {
   if (driver.kind !== "postgres") {
     throw new CliError("resolve-pending supports only PostgreSQL online renames");
   }
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
   const outcome = await resolvePending({
     ownerApp: args.ownerApp,
     projectSchema: args.projectSchema,
@@ -646,6 +658,7 @@ async function runResolvePending(args: Args): Promise<number> {
     action: args.resolveApply ? "apply" : "abort",
     driver,
     approved: true,
+    policy: charterLayers,
     appliedBy: "cli",
   });
   process.stdout.write(`resolve-pending ${pendingVersion}: ${JSON.stringify(outcome)}\n`);
@@ -662,10 +675,12 @@ async function runHistory(args: Args): Promise<number> {
   if (driver.kind !== "postgres") {
     throw new CliError("history supports only PostgreSQL");
   }
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
   const reply = await history({
     ownerApp: args.ownerApp,
     projectSchema: args.projectSchema,
     driver,
+    policy: charterLayers,
   });
   if (args.json) {
     process.stdout.write(
@@ -689,10 +704,10 @@ Usage:
   zero-migrate new <name> [--dir <dir>]
   zero-migrate plan    [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate preview [--dir <dir>] [--json]
-  zero-migrate apply   [--dir <dir>] --database-url <url> --policy-ceiling <file> [--journal <path>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
-  zero-migrate status  [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
-  zero-migrate history [--database-url <url>] [--owner-app <app>] [--schema <schema>] [--json]
-  zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
+  zero-migrate apply   [--dir <dir>] --database-url <url> --policy <file> [--policy <file> ...] [--journal <path>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+  zero-migrate status  [--dir <dir>] --database-url <url> --policy <file> [--policy <file> ...] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate history --database-url <url> --policy <file> [--policy <file> ...] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> --policy <file> [--policy <file> ...] [--owner-app <app>] [--schema <schema>]
   zero-migrate --version
 
 Flags:
@@ -701,8 +716,9 @@ Flags:
   --journal <path>      SQLite journal override (default: <app>.migrations.<ext>)
   --dialect <name>      plan dialect: postgres, mysql, or sqlite (default postgres)
   --registry <file>     Trusted JSON map of table names to owner app IDs
-  --policy-ceiling <file>
-                        Required trusted TOML policy for apply/status
+  --policy <file>
+                        Repeatable ordered TOML policy layer; first is the root/bound
+                        Later layers may only narrow; only root may use mandatory injects
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
   --approve             Approve reviewed destructive changes and backfills

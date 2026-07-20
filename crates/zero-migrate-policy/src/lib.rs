@@ -38,23 +38,23 @@
 //!
 //! - [`value_order`] — the per-knob VALUE lattice (`⊑_value`/`⊔_value`/`⊓_value`),
 //!   derived from each [`knob::KnobKind`] so no facet-specific meet can drift.
-//! - [`compose`] — [`RootCeiling`] (the only trust anchor), [`restrict`] (meet of two
-//!   trusted ceilings — associative, total), and the UNFORGEABLE [`EffectivePolicy`]
+//! - [`compose`] — [`RootCharter`] (the only trust anchor), [`restrict`] (meet of two
+//!   trusted charters — associative, total), and the UNFORGEABLE [`EffectivePolicy`]
 //!   with its decision-query API
 //!   (`grants`/`obligations`/`injects_for`/`validates_for`/`is_injected_shape`). All
 //!   scope resolution lives here; the guard holds no `Scope`.
-//! - [`boundary`] — [`admit`] (untrusted-draft ingress: pointwise `draft ⊑ ceiling`
+//! - [`boundary`] — [`admit`] (untrusted-draft ingress: pointwise `draft ⊑ charter`
 //!   grants + union-up require/inject/validate + compose-time collision blame + the
 //!   creatable-scope lint), the SOLE untrusted trust-boundary crossing, deliberately
 //!   apart from the trusted combinators.
 //! - [`seal`] — [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
 //!   the sealed inject total order) ‖ registry digest ‖ `(dialect, matcher_version)`
-//!   ‖ `ceiling_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
+//!   ‖ `charter_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
 //!   tamper or binding mismatch.
 //!
 //! The pointwise-grant admissibility check is proven by a brute-force COMPOSITION
 //! ORACLE (`tests/compose_oracle.rs`): `admit` is `Ok` IFF the draft is
-//! pointwise `⊑` the ceiling at every object and key. Where prose review of the
+//! pointwise `⊑` the charter at every object and key. Where prose review of the
 //! escalation check could not be trusted, the oracle-green code is authoritative.
 
 pub mod boundary;
@@ -69,8 +69,8 @@ pub mod value_order;
 
 pub use boundary::admit;
 pub use compose::{
-    finalize_ceiling, overlay, restrict, AdmitCeiling, AssembledCeiling, Ceiling, ComposeError,
-    EffectivePolicy, FinalizeError, GrantRegion, RootCeiling, ShapeElement, TrustedDoc,
+    finalize_charter, overlay, restrict, AdmitCharter, AssembledCharter, Charter, ComposeError,
+    EffectivePolicy, FinalizeError, GrantRegion, RootCharter, ShapeElement, TrustedDoc,
 };
 pub use document::{
     LoadContext, LoadError, LoadWarning, PolicyDoc, ProfileCatalog, SUPPORTED_POLICY_VERSION,

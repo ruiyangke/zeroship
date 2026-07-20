@@ -4,14 +4,14 @@
 //! order is *derived* from the kind, uniformly, so no facet can drift.
 //!
 //! For a grant key the security-relevant relation is **`⊑_value`** ("the draft's
-//! value is no looser than the ceiling's"): the composer accepts a draft grant at an
-//! object only when `draft_value ⊑_value ceiling_value` there (II.3.2). The dual
+//! value is no looser than the charter's"): the composer accepts a draft grant at an
+//! object only when `draft_value ⊑_value charter_value` there (II.3.2). The dual
 //! operations are:
 //!
 //! - **`join_value` (`⊔_value`, the LOOSEST):** aggregates several covering grant
 //!   rules within ONE layer — more rules on a key can only loosen (II.3.2). Bool OR,
 //!   StrSet ∪, Uint max, OrderedEnum rank-max.
-//! - **`meet_value` (`⊓_value`, the TIGHTEST):** clamps two trusted ceilings
+//! - **`meet_value` (`⊓_value`, the TIGHTEST):** clamps two trusted charters
 //!   pointwise (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min,
 //!   OrderedEnum rank-min.
 //! - **`leq_value` (`⊑_value`):** the polarity order — Bool implication
@@ -39,7 +39,7 @@ use crate::knob::{KnobKind, KnobValue};
 /// panicking or silently guessing an order.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ValueOrderError {
-    /// The value's shape does not match the kind (e.g. a `Bool` under a `UintCeiling`).
+    /// The value's shape does not match the kind (e.g. a `Bool` under a `UintCharter`).
     ShapeMismatch,
     /// An `OrderedEnum` value naming a variant the kind does not declare — it has no
     /// rank, so it cannot be ordered.
@@ -47,11 +47,11 @@ pub enum ValueOrderError {
 }
 
 /// `a ⊑_value b` under `kind` — is `a` no LOOSER than `b`? (The security direction:
-/// a draft value `a` is admissible against a ceiling value `b` iff `a ⊑ b`.)
+/// a draft value `a` is admissible against a charter value `b` iff `a ⊑ b`.)
 ///
 /// - `Bool`: `false ⊑ true` and reflexive; `true ⊑ false` is false (implication).
 /// - `StrSet`: subset.
-/// - `UintCeiling`: `≤`.
+/// - `UintCharter`: `≤`.
 /// - `OrderedEnum`: rank `≤` (tightest→loosest variant order).
 /// - `Digest`: equality (opaque, no order).
 pub fn leq_value(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> Result<bool, ValueOrderError> {
@@ -65,7 +65,7 @@ pub fn leq_value(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> Result<bool, 
             let (x, y) = (as_strset(a)?, as_strset(b)?);
             Ok(x.is_subset(&y))
         }
-        KnobKind::UintCeiling { .. } => {
+        KnobKind::UintCharter { .. } => {
             let (x, y) = (as_uint(a)?, as_uint(b)?);
             Ok(x <= y)
         }
@@ -93,7 +93,7 @@ pub fn join_value(
             u.extend(as_strset(b)?);
             Ok(KnobValue::StrSet(sorted(u)))
         }
-        KnobKind::UintCeiling { .. } => Ok(KnobValue::Uint(as_uint(a)?.max(as_uint(b)?))),
+        KnobKind::UintCharter { .. } => Ok(KnobValue::Uint(as_uint(a)?.max(as_uint(b)?))),
         KnobKind::OrderedEnum { variants } => {
             let (ra, rb) = (rank(variants, a)?, rank(variants, b)?);
             Ok(a_or_b_by_rank(a, b, ra, rb, ra >= rb))
@@ -108,7 +108,7 @@ pub fn join_value(
     }
 }
 
-/// `a ⊓_value b` under `kind` — the TIGHTEST (greatest lower bound): the ceiling
+/// `a ⊓_value b` under `kind` — the TIGHTEST (greatest lower bound): the charter
 /// clamp (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min, OrderedEnum
 /// rank-min. `Digest` only when equal (opaque).
 pub fn meet_value(
@@ -124,7 +124,7 @@ pub fn meet_value(
                 x.intersection(&y).cloned().collect(),
             )))
         }
-        KnobKind::UintCeiling { .. } => Ok(KnobValue::Uint(as_uint(a)?.min(as_uint(b)?))),
+        KnobKind::UintCharter { .. } => Ok(KnobValue::Uint(as_uint(a)?.min(as_uint(b)?))),
         KnobKind::OrderedEnum { variants } => {
             let (ra, rb) = (rank(variants, a)?, rank(variants, b)?);
             Ok(a_or_b_by_rank(a, b, ra, rb, ra <= rb))
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn uint_order() {
-        let k = KnobKind::UintCeiling { hard_floor: 1 };
+        let k = KnobKind::UintCharter { hard_floor: 1 };
         assert!(leq_value(&k, &KnobValue::Uint(60), &KnobValue::Uint(600)).unwrap());
         assert!(!leq_value(&k, &KnobValue::Uint(600), &KnobValue::Uint(60)).unwrap());
         assert_eq!(
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn leq_agrees_with_join_meet_identities() {
         // a ⊑ b ⟺ join(a,b) == b ⟺ meet(a,b) == a, over a small Uint domain.
-        let k = KnobKind::UintCeiling { hard_floor: 1 };
+        let k = KnobKind::UintCharter { hard_floor: 1 };
         for a in 1u64..=6 {
             for b in 1u64..=6 {
                 let (va, vb) = (KnobValue::Uint(a), KnobValue::Uint(b));

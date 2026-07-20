@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -31,7 +33,7 @@ fn backend(paths: &Paths) -> SqliteBackend {
 }
 
 fn cfg() -> ExecutorConfig {
-    ExecutorConfig::new("pk-tests", "app")
+    ExecutorConfig::new("pk-tests", "app", support::no_inject("app"))
 }
 
 fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
@@ -50,7 +52,7 @@ fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
         "app",
         "app_test",
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())
     .expect("primary-key IR lowers");

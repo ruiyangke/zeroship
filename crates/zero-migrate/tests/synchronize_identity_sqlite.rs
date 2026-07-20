@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -30,7 +32,7 @@ fn backend(paths: &Paths) -> SqliteBackend {
 }
 
 fn cfg() -> ExecutorConfig {
-    ExecutorConfig::new("identity-tests", "app")
+    ExecutorConfig::new("identity-tests", "app", support::no_inject("app"))
 }
 
 fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
@@ -50,7 +52,7 @@ fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
         "app",
         "app_test",
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())
     .expect("synchronizeIdentity IR lowers");

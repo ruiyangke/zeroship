@@ -6,6 +6,7 @@ import {
   MYSQL_SESSION_SQL_MODE_PIN,
 } from "../../src/driver-mysql2.js";
 import { history } from "../../src/index.js";
+import { NO_INJECT_POLICY } from "./policy.js";
 
 test("MySQL exact integers remain numeric parameters", () => {
   const values = cellsToParams([
@@ -38,6 +39,7 @@ test("history rejects MySQL locally without opening a connection", async () => {
       ownerApp: "app_history_test",
       projectSchema: "history_test",
       driver: { kind: "mysql", url: secretUrl },
+      policy: [NO_INJECT_POLICY],
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);

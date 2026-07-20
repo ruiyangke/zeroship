@@ -1116,7 +1116,7 @@ mod tests {
         let step = replacement_step(&["id"]);
         let ran = apply(
             &session,
-            &ExecutorConfig::new("project", "app"),
+            &ExecutorConfig::new("project", "app", crate::test_fixtures::no_inject("app")),
             &step,
             Approval::Approved,
             &ApprovalScope::All,
@@ -1159,7 +1159,7 @@ mod tests {
         let step = replacement_step(&["tenant_id", "id"]);
         let error = apply(
             &session,
-            &ExecutorConfig::new("project", "app"),
+            &ExecutorConfig::new("project", "app", crate::test_fixtures::no_inject("app")),
             &step,
             Approval::Approved,
             &ApprovalScope::All,

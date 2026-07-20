@@ -8331,7 +8331,7 @@ mod tests {
 
         let err = crate::model::table_shape::resolve_create_table_policy(
             &ir,
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             "app",
         )
         .expect_err("a mandatory-inject scope must refuse an author-owned createTable primaryKey");
@@ -8359,7 +8359,7 @@ mod tests {
         )]);
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             "app",
         )
         .expect("confined table-shape resolution succeeds");
@@ -8834,7 +8834,7 @@ mod tests {
         }]);
         let ir = crate::model::table_shape::resolve_create_table_policy(
             &ir,
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             "app",
         )
         .expect("resolve confined table shape");

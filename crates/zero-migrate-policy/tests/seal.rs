@@ -1,6 +1,6 @@
 //! Seal round-trip + tamper-detection suite (§II.7). Proves the seal binds the
 //! resolved rule set, the registry digest, the `(dialect, matcher_version)` matcher
-//! semantics, and the ceiling version — and HARD-FAILS on any mismatch.
+//! semantics, and the charter version — and HARD-FAILS on any mismatch.
 //!
 //! The seal MACs a FRESHLY-composed [`EffectivePolicy`]; "tampering" means presenting
 //! a DIFFERENT composed policy (a mutated rule/scope) to `verify`, which must fail
@@ -9,14 +9,14 @@
 //! present.
 
 use zero_migrate_policy::{
-    admit, finalize_ceiling, overlay, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue,
-    Polarity, PolicyDoc, PolicyRegistry, RootCeiling, SealError, TrustedDoc,
+    admit, finalize_charter, overlay, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue,
+    Polarity, PolicyDoc, PolicyRegistry, RootCharter, SealError, TrustedDoc,
 };
 
 const MAC_KEY: &[u8] = b"a-shared-fleet-mac-key-32-bytes!!";
 const DIALECT: &str = "postgres";
 const MATCHER: u32 = 1;
-const CEILING_VER: u64 = 7;
+const CHARTER_VER: u64 = 7;
 
 fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> KnobDef {
     KnobDef {
@@ -43,7 +43,7 @@ fn registry() -> PolicyRegistry {
             ),
             def(
                 "runtime.lock_timeout_ms",
-                KnobKind::UintCeiling { hard_floor: 1 },
+                KnobKind::UintCharter { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
@@ -74,7 +74,7 @@ fn registry_flipped_privilege() -> PolicyRegistry {
             },
             def(
                 "runtime.lock_timeout_ms",
-                KnobKind::UintCeiling { hard_floor: 1 },
+                KnobKind::UintCharter { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
@@ -109,10 +109,10 @@ scope = { include = ["app_*"] }
 predicate = { kind = "has_primary_key" }
 "#;
 
-/// Compose the reference policy: the root ceiling against an empty draft (all ceiling
+/// Compose the reference policy: the root charter against an empty draft (all charter
 /// rules survive union-up; the draft adds no grants so nothing escalates).
 fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolicy {
-    let root = RootCeiling::parse_toml(ROOT_TOML, reg).unwrap();
+    let root = RootCharter::parse_toml(ROOT_TOML, reg).unwrap();
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         reg,
@@ -130,7 +130,7 @@ fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolic
 fn good_seal_round_trips() {
     let reg = registry();
     let policy = reference_policy(&reg);
-    let sealed = seal(&policy, MAC_KEY, [7u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(&policy, MAC_KEY, [7u8; 16], DIALECT, MATCHER, CHARTER_VER);
 
     // A freshly-composed identical policy verifies.
     let fresh = reference_policy(&reg);
@@ -141,7 +141,7 @@ fn good_seal_round_trips() {
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Ok(())
     );
@@ -151,7 +151,7 @@ fn good_seal_round_trips() {
 fn wrong_mac_key_fails() {
     let reg = registry();
     let policy = reference_policy(&reg);
-    let sealed = seal(&policy, MAC_KEY, [7u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(&policy, MAC_KEY, [7u8; 16], DIALECT, MATCHER, CHARTER_VER);
     let fresh = reference_policy(&reg);
     assert_eq!(
         sealed.verify(
@@ -160,7 +160,7 @@ fn wrong_mac_key_fails() {
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::TagMismatch)
     );
@@ -173,11 +173,11 @@ fn wrong_mac_key_fails() {
 #[test]
 fn tampered_grant_value_fails() {
     // The effective grant map in strict ingress is the DRAFT's (bounded by the
-    // ceiling). So a grant-value tamper means the DRAFT carries a different value.
+    // charter). So a grant-value tamper means the DRAFT carries a different value.
     let reg = registry();
-    let root = RootCeiling::parse_toml(ROOT_TOML, &reg).unwrap();
+    let root = RootCharter::parse_toml(ROOT_TOML, &reg).unwrap();
 
-    // Draft grants timeout 600 @ app_* (within the ceiling's 600 @ app_*) → seal it.
+    // Draft grants timeout 600 @ app_* (within the charter's 600 @ app_*) → seal it.
     let draft_600 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
@@ -196,7 +196,7 @@ scope = { include = ["app_*"] }
         [1u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
 
     // A tightened tamper: draft 60 @ app_* — a DIFFERENT effective grant map.
@@ -220,7 +220,7 @@ scope = { include = ["app_*"] }
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::TagMismatch)
     );
@@ -228,7 +228,7 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn tampered_scope_fails() {
-    // Tamper a UNION-UP (ceiling-sourced) rule's scope: the inject scope. It flows
+    // Tamper a UNION-UP (charter-sourced) rule's scope: the inject scope. It flows
     // into the sealed rule set verbatim, so narrowing it changes the canonical bytes.
     let reg = registry();
     let sealed = seal(
@@ -237,7 +237,7 @@ fn tampered_scope_fails() {
         [2u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
 
     // Narrow ONLY the inject scope (app_* → app_main). The [[inject]] block is the
@@ -250,7 +250,7 @@ fn tampered_scope_fails() {
         tampered_root, ROOT_TOML,
         "the inject-scope rewrite must land"
     );
-    let root = RootCeiling::parse_toml(&tampered_root, &reg).unwrap();
+    let root = RootCharter::parse_toml(&tampered_root, &reg).unwrap();
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
@@ -266,7 +266,7 @@ fn tampered_scope_fails() {
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::TagMismatch)
     );
@@ -281,12 +281,12 @@ fn tampered_inject_column_fails() {
         [3u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
 
     // Inject a differently-typed column — a different rule set.
     let tampered_root = ROOT_TOML.replace("timestamptz", "text");
-    let root = RootCeiling::parse_toml(&tampered_root, &reg).unwrap();
+    let root = RootCharter::parse_toml(&tampered_root, &reg).unwrap();
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
@@ -302,14 +302,14 @@ fn tampered_inject_column_fails() {
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::TagMismatch)
     );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// binding: registry digest / dialect / matcher / ceiling version
+// binding: registry digest / dialect / matcher / charter version
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -321,7 +321,7 @@ fn wrong_registry_digest_fails() {
         [4u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
 
     // Verify presenting a DIFFERENT registry digest (a flipped requires_db_privilege
@@ -335,7 +335,7 @@ fn wrong_registry_digest_fails() {
             &flipped.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::RegistryDigestMismatch)
     );
@@ -352,7 +352,7 @@ fn wrong_dialect_fails() {
         [5u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
     let fresh = reference_policy(&reg);
     assert_eq!(
@@ -362,7 +362,7 @@ fn wrong_dialect_fails() {
             &reg.digest(),
             "mysql",
             MATCHER,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::DialectMismatch)
     );
@@ -377,7 +377,7 @@ fn wrong_matcher_version_fails() {
         [6u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
     let fresh = reference_policy(&reg);
     assert_eq!(
@@ -387,14 +387,14 @@ fn wrong_matcher_version_fails() {
             &reg.digest(),
             DIALECT,
             MATCHER + 1,
-            CEILING_VER
+            CHARTER_VER
         ),
         Err(SealError::MatcherVersionMismatch)
     );
 }
 
 #[test]
-fn wrong_ceiling_version_fails() {
+fn wrong_charter_version_fails() {
     let reg = registry();
     let sealed = seal(
         &reference_policy(&reg),
@@ -402,7 +402,7 @@ fn wrong_ceiling_version_fails() {
         [8u8; 16],
         DIALECT,
         MATCHER,
-        CEILING_VER,
+        CHARTER_VER,
     );
     let fresh = reference_policy(&reg);
     assert_eq!(
@@ -412,9 +412,9 @@ fn wrong_ceiling_version_fails() {
             &reg.digest(),
             DIALECT,
             MATCHER,
-            CEILING_VER + 1
+            CHARTER_VER + 1
         ),
-        Err(SealError::CeilingVersionMismatch)
+        Err(SealError::CharterVersionMismatch)
     );
 }
 
@@ -422,8 +422,8 @@ fn wrong_ceiling_version_fails() {
 fn nonce_swap_invalidates_tag() {
     let reg = registry();
     let policy = reference_policy(&reg);
-    let s1 = seal(&policy, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CEILING_VER);
-    let s2 = seal(&policy, MAC_KEY, [2u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let s1 = seal(&policy, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CHARTER_VER);
+    let s2 = seal(&policy, MAC_KEY, [2u8; 16], DIALECT, MATCHER, CHARTER_VER);
     // Same policy + binding, different nonce → different tags (nonce is MAC'd).
     assert_ne!(s1, s2);
 }
@@ -461,31 +461,31 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     .unwrap();
 
     let pa = admit(
-        &RootCeiling::parse_toml(a_toml, &reg).unwrap(),
+        &RootCharter::parse_toml(a_toml, &reg).unwrap(),
         &empty,
         &reg,
     )
     .unwrap();
     let pb = admit(
-        &RootCeiling::parse_toml(b_toml, &reg).unwrap(),
+        &RootCharter::parse_toml(b_toml, &reg).unwrap(),
         &empty,
         &reg,
     )
     .unwrap();
 
-    let sa = seal(&pa, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sa = seal(&pa, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CHARTER_VER);
     // The seal minted over order-A must NOT verify against order-B's policy.
     assert_eq!(
-        sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CHARTER_VER),
         Err(SealError::TagMismatch)
     );
 }
 
 /// **The seal binds LAYER BOUNDARIES (H-4 / II.7).** Two policies with the SAME
 /// flattened grant set but DIFFERENT layer stacks encode differently, so a re-flatten
-/// tamper fails the MAC. Policy A is a 2-layer ceiling `overlay(base, env)` (env grants
+/// tamper fails the MAC. Policy A is a 2-layer charter `overlay(base, env)` (env grants
 /// raw_sql@staging, base grants raw_sql@app_*) admitted with an empty draft → a stack
-/// `[draft(empty)] over [env] over [base]`. Policy B is a SINGLE-layer root ceiling
+/// `[draft(empty)] over [env] over [base]`. Policy B is a SINGLE-layer root charter
 /// carrying the SAME two grant rules flattened into one layer → `[draft(empty)] over
 /// [base(both rules)]`. Their flattened grant sets are identical; only the layering
 /// differs. The seal from A must NOT verify against B.
@@ -514,17 +514,17 @@ scope = { include = ["staging"] }
         &reg,
     )
     .unwrap();
-    let ceiling_a = finalize_ceiling(overlay(&base, &env, &reg).unwrap()).unwrap();
+    let charter_a = finalize_charter(overlay(&base, &env, &reg).unwrap()).unwrap();
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let pa = admit(&ceiling_a, &empty, &reg).unwrap();
+    let pa = admit(&charter_a, &empty, &reg).unwrap();
 
     // Policy B: a SINGLE root layer carrying BOTH grant rules — same flattened set.
-    let flat_root = RootCeiling::parse_toml(
+    let flat_root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]
 key = "sql.raw"
@@ -548,14 +548,14 @@ scope = { include = ["staging"] }
     assert_eq!(pa.grants(&rk, &app_t), pb.grants(&rk, &app_t));
 
     // But the seal binds the layer boundaries: A's seal must NOT verify against B.
-    let sa = seal(&pa, MAC_KEY, [3u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sa = seal(&pa, MAC_KEY, [3u8; 16], DIALECT, MATCHER, CHARTER_VER);
     assert_eq!(
-        sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CHARTER_VER),
         Err(SealError::TagMismatch),
         "a re-flattened layer stack must FAIL the MAC (layer boundaries are bound)"
     );
     // A verifies against itself (round-trip sanity).
     assert!(sa
-        .verify(MAC_KEY, &pa, &reg.digest(), DIALECT, MATCHER, CEILING_VER)
+        .verify(MAC_KEY, &pa, &reg.digest(), DIALECT, MATCHER, CHARTER_VER)
         .is_ok());
 }

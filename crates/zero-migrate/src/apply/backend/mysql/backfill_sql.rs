@@ -3319,7 +3319,7 @@ mod tests {
 
         let error = mark_durable_complete(
             &rec,
-            &ExecutorConfig::new("prj_x", "app"),
+            &ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app")),
             version.as_str(),
             &checksum,
             "`app`.`events`",
@@ -3361,7 +3361,7 @@ mod tests {
 
         let error = initialize_obligation(
             &rec,
-            &ExecutorConfig::new("prj_x", "app"),
+            &ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app")),
             version.as_str(),
             &checksum,
             &spec,
@@ -3408,7 +3408,7 @@ mod tests {
         rec.managed(&descriptor);
         ensure_guard_installed(
             &rec,
-            &ExecutorConfig::new("prj_x", "app"),
+            &ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app")),
             version.as_str(),
             &checksum,
             &spec,
@@ -3440,7 +3440,7 @@ mod tests {
             .count();
         ensure_guard_installed(
             &rec,
-            &ExecutorConfig::new("prj_x", "app"),
+            &ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app")),
             version.as_str(),
             &checksum,
             &spec,
@@ -3460,7 +3460,7 @@ mod tests {
 
         cleanup_guard(
             &rec,
-            &ExecutorConfig::new("prj_x", "app"),
+            &ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app")),
             version.as_str(),
             &checksum,
             &spec,
@@ -3531,7 +3531,7 @@ mod tests {
                 vec![Value::Text("2".into()), Value::Text("z\0x".into())],
             ),
         ];
-        let cfg = ExecutorConfig::new("prj_x", "app");
+        let cfg = ExecutorConfig::new("prj_x", "app", crate::test_fixtures::no_inject("app"));
         let checksum = checksum("atomic tuple plan");
         let end = tuple(9, "zz");
         rec.batch("START TRANSACTION").await.unwrap();

@@ -37,8 +37,8 @@ export interface ApplyIrSqliteRequest {
   projectSchema: string
   /** The project's `{ table: owner_app }` ownership registry. */
   registry: Record<string, string>
-  /** The host's required `RootCeiling` policy document (TOML). */
-  policyCeilingToml: string
+  /** Ordered policy charter documents (TOML), starting with the root bound. */
+  charterLayers: Array<string>
   /** Whether destructive changes are pre-approved. */
   approved: boolean
   /** Ordered authored migration IR envelopes as real JavaScript values. */
@@ -108,11 +108,10 @@ export interface ApplyRequest {
    */
   priorEnvelopes?: Array<JsonValue>
   /**
-   * The **policy input**: the host's `RootCeiling` document (TOML) that drives
-   * table-shape injection. This is required: callers that want author-owned
-   * shape must explicitly supply a no-inject ceiling.
+   * The **policy input**: an ordered list of policy charter documents (TOML).
+   * The first document is the root bound; each subsequent document narrows it.
    */
-  policyCeiling: string
+  charterLayers: Array<string>
   /** Whether destructive changes are pre-approved. */
   approved: boolean
   /** The audit `applied_by` label recorded in the journal. */
@@ -210,13 +209,13 @@ export interface FieldDescriptorDto {
  * `CollectionDescriptor` set — the manual source) into the two co-emitted
  * artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
  * renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
- * same `policyCeilingToml` drives both (the confined system-shape injection is
+ * same ordered `charterLayers` stack drives both (the confined system-shape injection is
  * policy-driven, not a baked-in engine preset; the caller supplies the confined
- * ceiling).
+ * charter).
  *
  * Runs inline on the napi call thread (no DB, no host driver). Returns a typed
  * [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
- * malformed policy ceiling (never a throw). Exactly one of `envelopes`/`descriptors`
+ * malformed policy charter (never a throw). Exactly one of `envelopes`/`descriptors`
  * must be populated.
  */
 export declare function genArtifacts(source: GenArtifactsSource): GenArtifactsReply
@@ -272,14 +271,12 @@ export interface GenArtifactsSource {
    */
   projectSchema?: string
   /**
-   * The **policy input**: the host's `RootCeiling` document (TOML) that drives
-   * the confined system-shape injection — the SAME shape the apply path's
-   * `policyCeilingToml` uses. This is required: callers explicitly supply either
-   * an injecting ceiling or a no-inject ceiling. Its `injects_for` supplies each
-   * covered table's columns, pinned primary key, and indexes (applied identically
-   * on the envelope and descriptor sides, so the two stay byte-identical).
+   * The **policy input**: ordered charter documents (TOML) that drive the
+   * confined system-shape injection. The first document is the root bound and
+   * each subsequent document is an untrusted narrowing layer. The composed
+   * policy is applied identically on the envelope and descriptor sides.
    */
-  policyCeilingToml: string
+  charterLayers: Array<string>
 }
 
 /**
@@ -321,6 +318,11 @@ export interface HistoryRequest {
   projectId: string
   /** The confined project schema. */
   projectSchema: string
+  /**
+   * Ordered policy charter documents (TOML), starting with the root bound and
+   * used by the executor's guard.
+   */
+  charterLayers: Array<string>
 }
 
 /** One declared named index of a collection (the `_indexes` array entry). */
@@ -510,6 +512,11 @@ export interface ResolvePendingRequest {
   approved: boolean
   /** Audit label recorded with the cleanup and resolution. */
   appliedBy: string
+  /**
+   * Ordered policy charter documents (TOML), starting with the root bound and
+   * used by the executor's guard.
+   */
+  charterLayers: Array<string>
 }
 
 /** Per-collection runtime options that do not round-trip through catalog state. */
@@ -561,8 +568,8 @@ export interface StatusIrRequest {
   registry: Record<string, string>
   /** Ordered authored migration envelopes to reconcile. */
   envelopes: Array<JsonValue>
-  /** Required policy ceiling, identical to the `applyIr` lowering input. */
-  policyCeiling: string
+  /** Required ordered policy charters, identical to the `applyIr` lowering input. */
+  charterLayers: Array<string>
 }
 
 /** The typed reply for `status` (the projected `MigrationStatus`). */
@@ -603,6 +610,11 @@ export interface StatusRequest {
    * `Migration` as a JS value (empty array for the read/empty-journal flow).
    */
   migrations: Array<JsonValue>
+  /**
+   * Ordered policy charter documents (TOML), starting with the root bound and
+   * used by the executor's guard.
+   */
+  charterLayers: Array<string>
 }
 
 /** One journal identity absent from every supplied plan manifest. */

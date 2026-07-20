@@ -23,6 +23,8 @@
 //! SURVIVES descriptors → ops → fold and reappears on the recovered `FieldDef`. (The
 //! live-PG `zero-migrate:mask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
 
+mod support;
+
 use zero_migrate::render::declarative::{
     descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,
 };
@@ -58,7 +60,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     );
 
     // GENERATED side: produce ops + fold-and-recover.
-    let effective = zero_migrate::zeroship_confined_ceiling();
+    let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
     let generated =
         fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");

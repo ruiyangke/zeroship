@@ -20,13 +20,15 @@
 //! Regenerate the goldens with `UPDATE_PREVIEW_GOLDENS=1 cargo test -p zero-migrate
 //! --test sql_preview`.
 
+mod support;
+
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::render::sql_preview::{
     render_ir_envelope_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::PlanStep;
-use zero_migrate::{resolve_create_table_policy, zeroship_confined_ceiling, MigrationIr};
+use zero_migrate::{resolve_create_table_policy, MigrationIr};
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, and an online rename
@@ -113,7 +115,7 @@ fn opts() -> PreviewOpts {
     PreviewOpts {
         default_schema: "public".to_string(),
         owner_app: "app_preview".to_string(),
-        effective_policy: zeroship_confined_ceiling(),
+        effective_policy: support::confined_charter(),
     }
 }
 
@@ -130,7 +132,7 @@ fn render_representative(dialect: SqlDialect) -> String {
 
 fn resolve_envelope_json(ir: &str) -> String {
     let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
-    let resolved = resolve_create_table_policy(&raw, &zeroship_confined_ceiling(), "public")
+    let resolved = resolve_create_table_policy(&raw, &support::confined_charter(), "public")
         .expect("preview fixture IR resolves");
     serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
@@ -214,7 +216,7 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
         "public",
         "app_preview",
         dialect,
-        &zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
@@ -458,8 +460,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
         "public",
         "app_preview",
         SqlDialect::Postgres,
-        &zero_migrate::confined_no_inject_policy("public")
-            .expect("preview no-inject policy composes"),
+        &support::no_inject("public"),
     );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
@@ -528,8 +529,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
         "public",
         "app_preview",
         SqlDialect::Postgres,
-        &zero_migrate::confined_no_inject_policy("public")
-            .expect("preview no-inject policy composes"),
+        &support::no_inject("public"),
     );
     let mut plan = author
         .lower_plan(&seed, &LiveSchema::default())
@@ -612,8 +612,7 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
         "public",
         "app_preview",
         SqlDialect::Postgres,
-        &zero_migrate::confined_no_inject_policy("public")
-            .expect("preview no-inject policy composes"),
+        &support::no_inject("public"),
     );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())

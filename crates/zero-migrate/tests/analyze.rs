@@ -5,9 +5,11 @@
 //! asserts the analyzers are **advisory only** — a migration with advisories
 //! still passes the guard and is NOT denied (security denials are separate).
 
+mod support;
+
 use zero_migrate::analyze::{analyze, rule, Severity};
 use zero_migrate::guard::{GuardConfig, SqlGuard};
-use zero_migrate::{analyze_migration, Advisory};
+use zero_migrate::{analyze_migration, Advisory, SqlDialect};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -516,7 +518,7 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::confined("proj_acme")
+    GuardConfig::from_policy(support::no_inject("proj_acme"), SqlDialect::Postgres)
 }
 
 #[test]
@@ -584,7 +586,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
     use zero_migrate::{Column, MigrationAuthor, RawSqlAuthor};
     // Author a destructive drop the way the differ / RawSqlAuthor would, then
     // run the analyzer seam over it.
-    let drop = RawSqlAuthor::new("proj_acme", "app_acme")
+    let drop = RawSqlAuthor::new("app_acme", support::no_inject("proj_acme"))
         .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
         .unwrap();
     let advisories = analyze_migration(&drop);

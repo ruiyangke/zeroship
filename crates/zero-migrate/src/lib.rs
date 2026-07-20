@@ -110,6 +110,8 @@ pub mod schema;
 // the guard through the engine's `render::lower` / `conn` internals.
 #[cfg(test)]
 mod guard_vendor_lower_tests;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 
 pub use analysis::{analyze, classify};
 
@@ -192,17 +194,13 @@ pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // is deleted; the surviving seal is the `zero-migrate-policy` HMAC over a composed
 // `EffectivePolicy`).
 pub use model::table_shape::{
-    confined_no_inject_policy, effective_policy_from_ceiling_toml, resolve_create_table_policy,
-    ResolvedInject, TableShapeError,
+    effective_policy_from_charter_layers, effective_policy_from_charter_toml,
+    resolve_create_table_policy, ResolvedInject, TableShapeError,
 };
 pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
-#[cfg(any(test, feature = "test-support"))]
-pub use model::table_shape::{
-    zeroship_confined_ceiling, zeroship_no_inject_ceiling, ZEROSHIP_CONFINED_CEILING_TOML,
-};
 pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_ops_onto, fold_to_field_defs, recover_check_facet,
     FoldError, ProduceError, RecoveredCheck,

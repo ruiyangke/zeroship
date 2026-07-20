@@ -1,12 +1,13 @@
 //! Applies the JS-authored HR migration set, captured as preview IR, to real SQLite.
 
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::{
-    confined_no_inject_policy, Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr,
-    SqlDialect, SqliteBackend,
+    Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "app_hr";
@@ -76,9 +77,9 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
     let paths = paths();
     let backend =
         SqliteBackend::open(&paths.app, &paths.journal).expect("open hardened SQLite backend");
-    let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT);
+    let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
     let registry = registry();
-    let no_inject = confined_no_inject_policy(PROJECT).expect("author-owned table policy");
+    let no_inject = support::no_inject(PROJECT);
     let engine = MigrationEngine::new();
 
     let envelopes: Vec<MigrationIr> =

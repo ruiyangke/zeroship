@@ -9400,7 +9400,7 @@ mod tests {
         owner_app: impl Into<String>,
         dialect: SqlDialect,
     ) -> IrAuthor {
-        let effective = crate::zeroship_confined_ceiling();
+        let effective = crate::test_fixtures::confined_charter();
         IrAuthor::new(project_schema, owner_app, dialect, &effective)
     }
     use std::collections::BTreeMap;
@@ -10204,8 +10204,15 @@ mod tests {
     }
 
     fn platform_guard() -> GuardConfig {
-        let cap = crate::model::capability::OperatorCapability::for_test();
-        GuardConfig::platform(&cap, vec!["zero_migrate".into(), "public".into()], vec![])
+        GuardConfig::from_policy(
+            crate::test_fixtures::operator_with_data_security(
+                &["zero_migrate", "public"],
+                &[],
+                false,
+                crate::model::policy::DestructiveOps::Allow,
+            ),
+            SqlDialect::Postgres,
+        )
     }
 
     fn platform_author(owner: &str, guard: &GuardConfig) -> IrAuthor {
@@ -10881,7 +10888,7 @@ mod tests {
         };
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             "app",
         )
         .expect("confined createTable resolves to explicit system shape");
@@ -11888,7 +11895,7 @@ mod tests {
     fn guarded_forward_fk_keeps_fragment_and_noncontiguous_span_on_child_op() {
         let ir = child_before_parent_composite_ir(true);
         for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
-            let guard = GuardConfig::confined("app").for_dialect(dialect);
+            let guard = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), dialect);
             let (steps, fragments, spans) = test_ir_author("app", "app_a", dialect)
                 .lower_guarded_with_op_spans(&ir, &guard, &LiveSchema::default())
                 .unwrap_or_else(|error| panic!("{dialect:?} guarded forward FK lowers: {error}"));
@@ -12009,7 +12016,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg = GuardConfig::confined("app".to_string());
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
@@ -12073,7 +12081,10 @@ mod tests {
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
         // cross-schema reference the Confined guard denies.
-        let guard_cfg = GuardConfig::confined("other".to_string());
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("other"),
+            SqlDialect::Postgres,
+        );
         let err = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect_err("a fragment outside the confined schema must be denied");
@@ -12110,7 +12121,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Sqlite);
-        let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Sqlite);
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
@@ -12164,7 +12176,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg = GuardConfig::confined("app".to_string());
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
 
         // The whole-up `lower` is the canonical reference (the parity leg).
         let whole = author
@@ -12326,7 +12339,7 @@ mod tests {
     fn ir_author_encrypted_addcolumn_snapshot_is_byte_equal_to_differ_pg() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let author = test_ir_author("app", "app_a", dialect);
-            let effective = crate::zeroship_confined_ceiling();
+            let effective = crate::test_fixtures::confined_charter();
 
             // IrAuthor's snapshot for the encrypted column (its real lowering seam).
             let ir_col = author
@@ -12386,7 +12399,7 @@ mod tests {
 
     #[test]
     fn add_column_snapshot_resolves_inject_against_the_effective_schema() {
-        let effective = crate::model::table_shape::effective_policy_from_ceiling_toml(
+        let effective = crate::model::table_shape::effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -12451,7 +12464,7 @@ columns = [
     fn ir_author_createtable_snapshot_injects_system_fields_byte_equal_to_differ() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let author = test_ir_author("app", "app_a", dialect);
-            let effective = crate::zeroship_confined_ceiling();
+            let effective = crate::test_fixtures::confined_charter();
             let user_cols = vec![TIrColumn {
                 name: "title".into(),
                 ty: ColType::Text,
@@ -13161,7 +13174,7 @@ columns = [
             }],
             runtime_options: Default::default(),
         };
-        let effective = crate::zeroship_confined_ceiling();
+        let effective = crate::test_fixtures::confined_charter();
         let live = LiveSchema::for_sqlite_descriptors("prj", "app_a", &[desc], &effective)
             .expect("build SQLite live schema from descriptors");
         assert!(
@@ -13305,7 +13318,10 @@ columns = [
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `"app".…` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
-        let guard_cfg = GuardConfig::confined("other".to_string());
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("other"),
+            SqlDialect::Postgres,
+        );
         let err = author
             .load_and_lower_guarded(
                 bytes,
@@ -13337,7 +13353,8 @@ columns = [
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg = GuardConfig::confined("app".to_string());
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
         let out = author
             .load_and_lower_guarded(
                 bytes,

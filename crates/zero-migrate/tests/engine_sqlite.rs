@@ -18,6 +18,8 @@
 //! - the destructive/approval gate is intact: a rebuild without `Approval::Approved`
 //!   is refused (not auto-approved — the dev-relaxed posture is handled separately).
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -29,10 +31,9 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    zeroship_confined_ceiling, Approval, CollectionDescriptor, DeclarativeApplyError,
-    DeclarativeAuthor, DryRunError, EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor,
-    GuardConfig, IndexDescriptor, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
-    ShadowConfig, SqliteBackend,
+    Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor, DryRunError,
+    EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
+    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -66,15 +67,15 @@ fn sqlite_author() -> DeclarativeAuthor {
 fn exec_cfg() -> ExecutorConfig {
     // SQLite ignores the schema strings (lock is a single-actor no-op, the journal
     // lives in the `_mig` attached file); the engine still needs a config to thread.
-    ExecutorConfig::new(PROJECT, PROJECT)
+    ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::confined_sqlite(PROJECT)
+    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite)
 }
 
 fn effective_policy() -> EffectivePolicy {
-    zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_snapshot(

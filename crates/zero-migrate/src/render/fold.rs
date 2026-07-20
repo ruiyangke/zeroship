@@ -4123,8 +4123,7 @@ mod tests {
     use crate::model::snapshot::IdDefaultSnapshot;
 
     use crate::model::table_shape::{
-        effective_policy_from_ceiling_toml, resolve_create_table_policy, zeroship_confined_ceiling,
-        zeroship_no_inject_ceiling,
+        effective_policy_from_charter_toml, resolve_create_table_policy,
     };
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
@@ -4135,7 +4134,7 @@ mod tests {
             ops,
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
     }
 
@@ -4211,7 +4210,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        resolve_create_table_policy(&ir, &zeroship_confined_ceiling(), "app")
+        resolve_create_table_policy(&ir, &crate::test_fixtures::confined_charter(), "app")
             .expect("test createTable resolves")
             .ops
             .into_iter()
@@ -4258,7 +4257,7 @@ mod tests {
             &[op],
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("no-inject create folds verbatim");
         let events = &snap.tables["events"];
@@ -4314,7 +4313,7 @@ mod tests {
             &[create_with_id, create_then_add, add_id],
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("no-inject UUID ids fold verbatim");
 
@@ -4330,7 +4329,7 @@ mod tests {
 
     #[test]
     fn schema_qualified_create_uses_the_same_scoped_inject_for_fold_and_recovery() {
-        let effective = effective_policy_from_ceiling_toml(
+        let effective = effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -4420,7 +4419,7 @@ columns = [
             &tail,
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("tail projects onto catalog base");
         let expected = fold(&std::iter::once(create_op).chain(tail).collect::<Vec<_>>())
@@ -4453,8 +4452,13 @@ columns = [
                     existence_guard: None,
                 },
             ];
-            let snapshot = fold_ops(&ops, dialect, SCHEMA, &zeroship_confined_ceiling())
-                .expect("UUID history folds");
+            let snapshot = fold_ops(
+                &ops,
+                dialect,
+                SCHEMA,
+                &crate::test_fixtures::confined_charter(),
+            )
+            .expect("UUID history folds");
             let member_key = snapshot.tables["members"]
                 .columns
                 .iter()
@@ -4488,7 +4492,7 @@ columns = [
             ],
             SqlDialect::Mysql,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("MySQL TypeID history folds");
         let type_key = mysql.tables["type_keys"]
@@ -4519,7 +4523,7 @@ columns = [
                 std::slice::from_ref(&synchronize),
                 dialect,
                 SCHEMA,
-                &zeroship_confined_ceiling(),
+                &crate::test_fixtures::confined_charter(),
             )
             .expect("synchronization target validates");
             assert_eq!(
@@ -4540,7 +4544,7 @@ columns = [
                 &[missing],
                 SqlDialect::Postgres,
                 SCHEMA,
-                &zeroship_confined_ceiling(),
+                &crate::test_fixtures::confined_charter(),
             ),
             Err(FoldError::MissingColumn { .. })
         ));
@@ -4562,7 +4566,7 @@ columns = [
             )],
             SqlDialect::Mysql,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("MySQL decimal create should fold");
         let amount = snap.tables["ledger"]
@@ -4587,7 +4591,7 @@ columns = [
             )],
             SqlDialect::Sqlite,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("SQLite decimal create should fold");
         let amount = sqlite.tables["ledger"]
@@ -5892,7 +5896,7 @@ columns = [
             ],
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("PostgreSQL identity remains valid inside a composite key");
         assert!(pg_composite.tables["orders"]
@@ -5924,7 +5928,7 @@ columns = [
             &sqlite_ops,
             SqlDialect::Sqlite,
             SCHEMA,
-            &zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("SQLite plain INTEGER PRIMARY KEY is a generated rowid contract");
         assert!(sqlite.tables["orders"]
@@ -5948,7 +5952,7 @@ columns = [
                 &missing_drop,
                 SqlDialect::Sqlite,
                 SCHEMA,
-                &zeroship_no_inject_ceiling(),
+                &crate::test_fixtures::no_inject("app"),
             ),
             Err(FoldError::InvalidPrimaryKeyIdentityTransition { .. })
         ));
@@ -6316,7 +6320,7 @@ columns = [
             &ops,
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("fold runs with no DB connection or async runtime");
         assert!(snap.tables.contains_key("a"));
@@ -6481,7 +6485,7 @@ columns = [
             &ops,
             SqlDialect::Sqlite,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .expect("table-level FK folds on SQLite");
         let memberships = &sqlite.tables["memberships"];
@@ -6589,7 +6593,7 @@ columns = [
             SCHEMA,
             &desc,
             SqlDialect::Postgres,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .unwrap()
         .columns
@@ -6819,7 +6823,7 @@ columns = [
             ops,
             SqlDialect::Postgres,
             SCHEMA,
-            &zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
         )
         .unwrap()
     }
@@ -7248,7 +7252,7 @@ columns = [
     }
 
     fn custom_nonlegacy_inject_policy() -> EffectivePolicy {
-        effective_policy_from_ceiling_toml(
+        effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -7266,7 +7270,7 @@ indexes = [
 ]
 "#,
         )
-        .expect("custom non-legacy inject ceiling composes")
+        .expect("custom non-legacy inject charter composes")
     }
 
     #[test]
@@ -7352,7 +7356,7 @@ indexes = [
 
     #[test]
     fn no_inject_snapshot_preserves_author_order_and_converges_with_resolved_fold() {
-        let effective = zeroship_no_inject_ceiling();
+        let effective = crate::test_fixtures::no_inject("app");
         let authored = descriptor(
             "events",
             vec![
@@ -7471,7 +7475,8 @@ indexes = [
                 ..Default::default()
             }],
         );
-        let ops = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+            .unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("expected a createTable")
         };
@@ -7519,7 +7524,8 @@ indexes = [
                 },
             ],
         );
-        let ops = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+            .unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -7553,7 +7559,7 @@ indexes = [
     fn producer_preserves_column_order_through_fold() {
         // The reconstructed FieldDef map must preserve the descriptor's declared
         // column order (the round-trip compares serialized maps).
-        let effective = zeroship_confined_ceiling();
+        let effective = crate::test_fixtures::confined_charter();
         let inject =
             ResolvedInject::for_table(&effective, "app", "t").expect("confined injection resolves");
         let d = descriptor(
@@ -7630,7 +7636,7 @@ indexes = [
 
     #[test]
     fn recovery_recognizes_injected_prefix_from_active_policy() {
-        let effective = effective_policy_from_ceiling_toml(
+        let effective = effective_policy_from_charter_toml(
             r#"policy_version = 1
 
 [[inject]]
@@ -7644,7 +7650,7 @@ columns = [
 ]
 "#,
         )
-        .expect("custom inject ceiling composes");
+        .expect("custom inject charter composes");
         let d = descriptor(
             "entries",
             vec![
@@ -7709,8 +7715,12 @@ columns = [
             },
         ];
 
-        let ops =
-            descriptors_to_create_ops(&[d.clone()], "app", &zeroship_confined_ceiling()).unwrap();
+        let ops = descriptors_to_create_ops(
+            &[d.clone()],
+            "app",
+            &crate::test_fixtures::confined_charter(),
+        )
+        .unwrap();
         let Op::CreateTable { indexes, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -7748,9 +7758,12 @@ columns = [
         );
 
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
-        let artifacts =
-            crate::render_artifacts_from_descriptors(&[d], SCHEMA, &zeroship_confined_ceiling())
-                .unwrap();
+        let artifacts = crate::render_artifacts_from_descriptors(
+            &[d],
+            SCHEMA,
+            &crate::test_fixtures::confined_charter(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
         let idx_names: Vec<String> = v["collections"]["articles"]["indexes"]
             .as_array()
@@ -7778,7 +7791,8 @@ columns = [
                 ..Default::default()
             }],
         );
-        let err = descriptors_to_create_ops(&[d], "app", &zeroship_confined_ceiling()).unwrap_err();
+        let err = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+            .unwrap_err();
         assert!(
             matches!(err, ProduceError::UnknownType { .. }),
             "unmappable token fails closed"

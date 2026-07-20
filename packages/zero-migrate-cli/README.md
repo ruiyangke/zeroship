@@ -32,19 +32,25 @@ zero-migrate --version
 ```
 
 `apply`, `status`, `history`, and `resolve-pending` read `--database-url` or the
-`DATABASE_URL` environment variable. `apply` and `status` also require an
-operator-controlled table-shape policy file through `--policy-ceiling`; there
-is no embedded default. Destructive steps (deletes, backfills) require
-`--approve`.
+`DATABASE_URL` environment variable. All four also require at least one
+operator-controlled table-shape policy file through `--policy`; there is
+no embedded default. Repeat the flag to compose an ordered policy stack. The first
+occurrence is the trusted root charter and bound. Each later occurrence is an
+untrusted narrowing layer, and only the root may declare mandatory injects. A
+later grant that exceeds the bound is rejected instead of clipped. Destructive
+steps (deletes, backfills) require `--approve`.
 
 ```
 DATABASE_URL=postgres://... zero-migrate apply \
-  --policy-ceiling ./policy.toml \
+  --policy ./platform-policy.toml \
+  --policy ./org-policy.toml \
   --approve
 ```
 
-An explicit no-inject ceiling is `policy_version = 1`; save those bytes in the
-file when every table column is author-owned.
+Flag order is preserved: `platform-policy.toml` is the root/bound above, and
+`org-policy.toml` narrows it. An explicit no-inject root charter is
+`policy_version = 1`; save those bytes in the first file when every table column
+is author-owned.
 
 ## Programmatic
 
@@ -53,14 +59,17 @@ import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_orders.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = await Promise.all([
+  readFile("./platform-policy.toml", "utf8"),
+  readFile("./org-policy.toml", "utf8"),
+]);
 
 await apply({
   migration,
   ownerApp: "app_orders",
   projectSchema: "app_orders",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
-  policyCeiling,
+  policy,
   approved: false,
 });
 ```

@@ -2162,7 +2162,11 @@ mod order_tests {
                 .to_string();
         repeatable.flags.repeatable = true;
         repeatable.down = None;
-        let cfg = ExecutorConfig::new("project_acme", "project_acme");
+        let cfg = ExecutorConfig::new(
+            "project_acme",
+            "project_acme",
+            crate::test_fixtures::no_inject("project_acme"),
+        );
 
         guard_repeatable_batch(
             &cfg,

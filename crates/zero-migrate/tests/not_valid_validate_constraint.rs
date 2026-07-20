@@ -11,6 +11,8 @@
 //!      the byte-stable REAL-recorder gate for `addForeignKey/addCheck { notValid }`
 //!      + `.constraint(name).validate()`; this file asserts the recorded golden shape.
 
+mod support;
+
 use std::path::PathBuf;
 
 use zero_migrate::model::expr::{BinaryOp, Expr};
@@ -40,7 +42,7 @@ fn pg_sql(op: Op) -> Vec<String> {
         "app",
         "app_nv",
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
     .expect("lower on Postgres")

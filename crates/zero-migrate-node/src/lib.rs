@@ -35,6 +35,9 @@ pub mod marshal;
 pub mod runtime;
 pub mod session;
 
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+
 /// Sync, DB-free API surface (plan / load-verify) — pure functions returning
 /// JSON strings, callable directly or through the napi entrypoints.
 pub mod api;

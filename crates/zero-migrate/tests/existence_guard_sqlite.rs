@@ -21,6 +21,8 @@
 //! every type (timestamp/jsonb/text/ref all fold to the `text` affinity and match),
 //! while a GENUINE affinity change (string→number, text↔real) still fails closed.
 
+mod support;
+
 use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::MigrationBackend;
@@ -33,7 +35,7 @@ use zero_migrate::model::ir::{
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::schema::query::SqlDialect;
-use zero_migrate::{resolve_create_table_policy, zeroship_confined_ceiling, SqliteBackend};
+use zero_migrate::{resolve_create_table_policy, SqliteBackend};
 
 struct Paths {
     _dir: TempDir,
@@ -57,7 +59,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn cfg() -> ExecutorConfig {
-    ExecutorConfig::new("prj_test", "main")
+    ExecutorConfig::new("prj_test", "main", support::no_inject("main"))
 }
 
 /// Lower a guarded IR op through the REAL `IrAuthor` (`SQLite` dialect). Returns the
@@ -80,13 +82,13 @@ fn lower(op: Op) -> Vec<Migration> {
         preconditions: vec![],
         checksum: None,
     };
-    let ir = resolve_create_table_policy(&ir, &zeroship_confined_ceiling(), "main")
+    let ir = resolve_create_table_policy(&ir, &support::confined_charter(), "main")
         .expect("guard test IR resolves");
     let author = IrAuthor::new(
         "main",
         "app_test",
         SqlDialect::Sqlite,
-        &zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     author
         .lower(&ir, &LiveSchema::default())

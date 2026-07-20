@@ -6,6 +6,31 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
+function noInjectCharterToml(schema) {
+  const scope = `{ include = [${JSON.stringify(schema)}] }`;
+  return `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = ${scope}
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = ${scope}
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = ${scope}
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`;
+}
 
 const recorded = [];
 // napi delivers the (request, done) tuple as a SINGLE array arg.
@@ -28,6 +53,7 @@ const status = await addon.status(hostDriver, {
   projectSchema: 'proj_js',
   dialect: 'postgres',
   migrations: [],
+  charterLayers: [noInjectCharterToml('proj_js')],
 });
 clearTimeout(watchdog);
 
@@ -83,6 +109,7 @@ const mysqlStatus = await addon.status(mysqlHostDriver, {
   projectSchema: 'proj_mysql_js',
   dialect: 'mysql',
   migrations: [],
+  charterLayers: [noInjectCharterToml('proj_mysql_js')],
 });
 const mysqlSql = mysqlRecorded.join('\n');
 check(mysqlRecorded.length > 0, 'MySQL status never reached the host driver');

@@ -28,8 +28,15 @@ import { dirname, join } from "node:path";
 
 import { table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
-import { currentIrVersion, apply, plan, resolvePending, status } from "zero-migrate-cli";
-import { NO_INJECT_POLICY_CEILING } from "./policy.js";
+import {
+  currentIrVersion,
+  apply,
+  history,
+  plan,
+  resolvePending,
+  status,
+} from "zero-migrate-cli";
+import { NO_INJECT_POLICY } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +52,7 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
   );
 }
 
-test("programmatic apply and plan-aware status require explicit policy bytes", async () => {
+test("programmatic executor verbs require explicit policy bytes", async () => {
   const driver = {
     kind: "postgres" as const,
     url: "postgres://127.0.0.1:1/never_connect",
@@ -57,7 +64,7 @@ test("programmatic apply and plan-aware status require explicit policy bytes", a
       projectSchema: "policy_required",
       driver,
     } as never),
-    /apply requires an explicit policyCeiling/,
+    /apply requires an explicit policy/,
   );
   await assert.rejects(
     status({
@@ -66,7 +73,34 @@ test("programmatic apply and plan-aware status require explicit policy bytes", a
       driver,
       migrations: [{ up() {} }],
     } as never),
-    /status requires an explicit policyCeiling/,
+    /status requires an explicit policy/,
+  );
+  await assert.rejects(
+    status({
+      ownerApp: "app_policy_required",
+      projectSchema: "policy_required",
+      driver,
+    } as never),
+    /status requires an explicit policy/,
+  );
+  await assert.rejects(
+    history({
+      ownerApp: "app_policy_required",
+      projectSchema: "policy_required",
+      driver,
+    } as never),
+    /history requires an explicit policy/,
+  );
+  await assert.rejects(
+    resolvePending({
+      ownerApp: "app_policy_required",
+      projectSchema: "policy_required",
+      pendingVersion: "mig_0000000000000000000001",
+      action: "apply",
+      driver,
+      approved: true,
+    } as never),
+    /resolvePending requires an explicit policy/,
   );
 });
 
@@ -173,7 +207,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
       registry: {},
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",
@@ -187,7 +221,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
     );
     assert.equal(tbl.rows[0].ex, true, "widgets table was created");
 
-    // The explicit no-inject ceiling preserves the author-owned table shape.
+    // The explicit no-inject policy preserves the author-owned table shape.
     const cols = await probe.query(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = 'widgets'`,
@@ -268,7 +302,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
         projectSchema: schema,
         driver,
         registry: { accounts: ownerApp, rename_items: ownerApp },
-        policyCeiling: NO_INJECT_POLICY_CEILING,
+        policy: [NO_INJECT_POLICY],
         approved: false,
         appliedBy: "test",
         nameFallback: "drop_unique_index",
@@ -287,7 +321,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: true,
       appliedBy: "test",
       nameFallback: "drop_unique_index",
@@ -303,7 +337,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: false,
       appliedBy: "test",
       nameFallback: "set_existing_default",
@@ -328,7 +362,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: true,
       appliedBy: "test",
       nameFallback: "rename_existing_column",
@@ -353,6 +387,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       action: "apply" as const,
       driver,
       approved: true as const,
+      policy: [NO_INJECT_POLICY],
       appliedBy: "test",
     };
     await probe.query(
@@ -400,7 +435,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { rename_items: ownerApp },
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       migrations: [renameMigration],
       nameFallbacks: ["rename_existing_column"],
     });
@@ -412,7 +447,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       projectSchema: schema,
       driver,
       registry: { accounts: ownerApp, rename_items: ownerApp },
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: true,
       appliedBy: "test",
       nameFallback: "rename_existing_column",

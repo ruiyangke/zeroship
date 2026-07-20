@@ -31,7 +31,7 @@ import { dirname, join } from "node:path";
 
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { table, t } from "zero-migrate";
-import { NO_INJECT_POLICY_CEILING } from "./policy.js";
+import { NO_INJECT_POLICY } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -108,7 +108,7 @@ async function applyAndAnchors(
       projectSchema: schema,
       driver: DRIVER,
       registry: {},
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       appliedBy: "deploy",
       nameFallback: "create_gadgets",
     });
@@ -147,7 +147,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       projectSchema: schema,
       driver: DRIVER,
       registry: {},
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_gadgets",
@@ -225,7 +225,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver: DRIVER,
-      policyCeiling: NO_INJECT_POLICY_CEILING,
+      policy: [NO_INJECT_POLICY],
       migrations: [mig as never],
       nameFallbacks: ["create_gadgets"],
     });
@@ -243,7 +243,12 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     assert.equal(st.rolledBack.length, 0, "status.rolledBack empty");
     assert.equal(st.currentVersion, st.plans?.[0]?.version, "currentVersion is the plan id");
 
-    const hist = await history({ ownerApp: OWNER_APP, projectSchema: schema, driver: DRIVER });
+    const hist = await history({
+      ownerApp: OWNER_APP,
+      projectSchema: schema,
+      driver: DRIVER,
+      policy: [NO_INJECT_POLICY],
+    });
     assert.equal(hist.events.length, journal.length, "history has one event per journal row");
     // Every history event is `applied`, its `eventSeq` a real bigint, monotonic, and
     // carries the same anchor checksum.

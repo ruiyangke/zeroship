@@ -2055,7 +2055,7 @@ mod render_tests {
             "ROW",
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let migration = trivial_migration();
         let authored_sql = migration.up.clone();
         let mut plan = crate::AppliedPlan::single_step(migration);
@@ -2201,7 +2201,7 @@ mod render_tests {
             ],
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let snapshot = backend
             .snapshot_schema(&cfg)
@@ -2477,7 +2477,11 @@ mod render_tests {
                 foreign_keys,
             );
             MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("MySQL FK catalog snapshot")
         };
@@ -2658,7 +2662,7 @@ mod render_tests {
             }],
             SqlDialect::Mysql,
             "proj_x",
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("portable ID table fold");
 
@@ -2670,7 +2674,11 @@ mod render_tests {
             checks(),
         );
         let snapshot = MysqlBackend::new_generic(&rec)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("ID-aware MySQL catalog snapshot");
         let ids = &snapshot.tables["ids"];
@@ -2748,7 +2756,11 @@ mod render_tests {
             ],
         );
         let altered_formats = MysqlBackend::new_generic(&altered_formats)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("altered format snapshot");
         let format_drift = diff_snapshots(&snapshot, &altered_formats);
@@ -2781,7 +2793,11 @@ mod render_tests {
             checks(),
         );
         let altered_defaults = MysqlBackend::new_generic(&altered_defaults)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("altered default snapshot");
         let default_drift = diff_snapshots(&snapshot, &altered_defaults);
@@ -2801,7 +2817,11 @@ mod render_tests {
             checks(),
         );
         let swapped_default = MysqlBackend::new_generic(&swapped_default)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("swapped default snapshot");
         let swapped_default_drift = diff_snapshots(&snapshot, &swapped_default);
@@ -2835,7 +2855,11 @@ mod render_tests {
         );
         let literal_generator_without_check =
             MysqlBackend::new_generic(&literal_generator_without_check)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("same-text literal UUID default without format CHECK");
         let marker_drift = diff_snapshots(&snapshot, &literal_generator_without_check);
@@ -2858,7 +2882,11 @@ mod render_tests {
                 checks(),
             );
             MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("literal UUID catalog snapshot")
         };
@@ -2947,7 +2975,7 @@ mod render_tests {
                 }],
                 SqlDialect::Mysql,
                 "proj_x",
-                &crate::model::table_shape::zeroship_no_inject_ceiling(),
+                &crate::test_fixtures::no_inject("app"),
             )
             .expect("identity probe must fold")
         };
@@ -2981,7 +3009,11 @@ mod render_tests {
                 Vec::new(),
             );
             MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("identity catalog snapshot")
         };
@@ -3061,7 +3093,7 @@ mod render_tests {
             &ir.ops,
             SqlDialect::Mysql,
             "proj_x",
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("typed-reference literal fixture must fold");
         let fk_name = expected.tables["children"]
@@ -3148,7 +3180,11 @@ mod render_tests {
             checks(),
         );
         let clean = MysqlBackend::new_generic(&clean_session)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("clean typed-reference literal snapshot");
         let child = clean.tables["children"]
@@ -3186,7 +3222,11 @@ mod render_tests {
                 checks(),
             );
             let actual = MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .unwrap_or_else(|error| panic!("{label} literal snapshot: {error}"));
             let drift = diff_snapshots(&expected, &actual);
@@ -3260,7 +3300,11 @@ mod render_tests {
                 foreign_keys(),
             );
             MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("typed-reference expression snapshot")
         };
@@ -3331,7 +3375,7 @@ mod render_tests {
             &ir.ops,
             SqlDialect::Mysql,
             "proj_x",
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("MySQL key-format fixture must fold");
         let type_check = crate::render::value_format::column_metadata(
@@ -3410,7 +3454,11 @@ mod render_tests {
                 checks,
             );
             MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+                .snapshot_schema(&ExecutorConfig::new(
+                    "prj_x",
+                    "proj_x",
+                    crate::test_fixtures::no_inject("proj_x"),
+                ))
                 .await
                 .expect("MySQL key-format catalog snapshot")
         };
@@ -3502,7 +3550,7 @@ mod render_tests {
             &ir.ops,
             SqlDialect::Mysql,
             "proj_x",
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("regrouped TypeID fixture must fold");
         let canonical =
@@ -3547,7 +3595,11 @@ mod render_tests {
             vec![catalog_check("ids", "ids_chk_1", true, &regrouped)],
         );
         let actual = MysqlBackend::new_generic(&session)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("regrouped TypeID snapshot");
         assert_eq!(
@@ -3590,7 +3642,7 @@ mod render_tests {
             )],
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let error = backend
             .snapshot_schema(&cfg)
@@ -3680,7 +3732,7 @@ mod render_tests {
             &ops,
             SqlDialect::Mysql,
             "proj_x",
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
+            &crate::test_fixtures::no_inject("app"),
         )
         .expect("named table UNIQUE and composite FK fold for MySQL");
 
@@ -3786,7 +3838,11 @@ mod render_tests {
             ],
         );
         let actual = MysqlBackend::new_generic(&rec)
-            .snapshot_schema(&ExecutorConfig::new("prj_x", "proj_x"))
+            .snapshot_schema(&ExecutorConfig::new(
+                "prj_x",
+                "proj_x",
+                crate::test_fixtures::no_inject("proj_x"),
+            ))
             .await
             .expect("equivalent MySQL catalog snapshot");
 
@@ -3874,7 +3930,7 @@ mod render_tests {
     async fn project_lock_uses_get_lock_release_lock_with_bound_name() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         backend
             .acquire_project_lock(&cfg)
@@ -3912,7 +3968,7 @@ mod render_tests {
     async fn snapshot_failure_aborts_before_author_sql_and_releases_lock() {
         let rec = RecordingSession::with_failure("@@SESSION.sql_mode");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let migration = trivial_migration();
 
         let result = crate::apply::executor::apply_with_lock_backend(
@@ -3944,7 +4000,7 @@ mod render_tests {
     async fn active_caller_transaction_is_rejected_before_autocommit_or_author_sql() {
         let rec = RecordingSession::with_in_transaction(1);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let migration = trivial_migration();
 
         let result = crate::apply::executor::apply_with_lock_backend(
@@ -3982,7 +4038,7 @@ mod render_tests {
     async fn successful_apply_surfaces_restore_failure_after_releasing_lock() {
         let rec = RecordingSession::with_failure("SET SESSION sql_mode = ?");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let migration = trivial_migration();
 
         let result = crate::apply::executor::apply_with_lock_backend(
@@ -4023,7 +4079,7 @@ mod render_tests {
     async fn ensure_journal_emits_mysql_dialect_ddl() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         backend
             .ensure_journal(&cfg)
@@ -4089,7 +4145,7 @@ mod render_tests {
     async fn journal_bootstrap_failure_releases_its_serialization_lock() {
         let rec = RecordingSession::with_failure("CREATE DATABASE IF NOT EXISTS");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let result = backend.ensure_journal(&cfg).await;
 
@@ -4117,7 +4173,7 @@ mod render_tests {
             edge_index_part(0, 2, Some("superseded_version"), None),
         ]);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         backend
             .ensure_journal(&cfg)
@@ -4140,7 +4196,7 @@ mod render_tests {
             edge_index_part(1, 2, Some("superseded_version"), None),
         ]);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let result = backend.ensure_journal(&cfg).await;
 
@@ -4155,7 +4211,7 @@ mod render_tests {
     async fn legacy_journal_identity_collations_are_upgraded_to_utf8mb4_bin() {
         let rec = RecordingSession::with_legacy_journal_collations();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         backend
             .ensure_journal(&cfg)
@@ -4191,7 +4247,7 @@ mod render_tests {
     async fn two_phase_apply_writes_journal_with_question_placeholders() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         let recovered = backend
@@ -4275,7 +4331,8 @@ mod render_tests {
         for field in ["name", "applied_by"] {
             let rec = RecordingSession::new();
             let backend = MysqlBackend::new_generic(&rec);
-            let cfg = ExecutorConfig::new("prj_x", "proj_x");
+            let cfg =
+                ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
             let mut migration = trivial_migration();
             let mut applied_by = "tester".to_string();
             if field == "name" {
@@ -4310,7 +4367,7 @@ mod render_tests {
             "INSERT INTO `proj_x_migrations`.schema_migrations_inflight",
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let migration = trivial_migration();
 
         let result = backend
@@ -4335,7 +4392,7 @@ mod render_tests {
     async fn repeatable_completion_keeps_the_repeatable_journal_kind() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let mut m = trivial_migration();
         m.flags.repeatable = true;
         m.down = None;
@@ -4362,7 +4419,7 @@ mod render_tests {
     async fn crashed_ddl_is_not_blindly_replayed() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         let result = backend
@@ -4390,7 +4447,7 @@ mod render_tests {
         let migration = trivial_migration();
         let rec = RecordingSession::with_inflight(&migration, "deploy-bot");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let outcome = backend
             .recover_inflight_ddl(
@@ -4445,7 +4502,7 @@ mod render_tests {
         let migration = trivial_migration();
         let rec = RecordingSession::with_inflight(&migration, "deploy-bot");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         backend
             .recover_inflight_ddl(
@@ -4478,7 +4535,7 @@ mod render_tests {
         let original = trivial_migration();
         let rec = RecordingSession::with_inflight(&original, "deploy-bot");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let mut edited = original.clone();
         edited.name = "different_reviewed_name".to_string();
 
@@ -4514,7 +4571,7 @@ mod render_tests {
     async fn completion_and_inflight_cleanup_share_one_transaction() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         backend
@@ -4558,7 +4615,7 @@ mod render_tests {
     async fn squash_completion_and_all_edges_commit_atomically() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         backend
@@ -4611,7 +4668,7 @@ mod render_tests {
             "INSERT IGNORE INTO `proj_x_migrations`.schema_migrations_supersedes",
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         let result = backend
@@ -4672,7 +4729,7 @@ mod render_tests {
     async fn rollback_runs_down_then_appends_rolled_back_event() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         backend
@@ -4720,7 +4777,7 @@ mod render_tests {
             true,
         );
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let progress = backend
             .backfill_progress(&cfg)
@@ -4751,7 +4808,7 @@ mod render_tests {
     async fn dml_step_binds_natively_and_journals_atomically() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("authoritative DML artifact");
         let hostile = "x'); DROP TABLE users; --";
@@ -4852,7 +4909,7 @@ mod render_tests {
     /// must stop before the row can be written.
     #[compio::test]
     async fn legacy_zero_import_is_preserved_or_rejected_before_dml() {
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("legacy zero import");
         let template = "INSERT INTO `proj_x`.`users` (`id`) VALUES (?)";
@@ -4947,7 +5004,7 @@ mod render_tests {
             None,
         )]);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("nonunique onConflict target");
         let target = vec!["group_id".to_string()];
@@ -5011,7 +5068,7 @@ mod render_tests {
     async fn mutating_dml_rejects_nontransactional_target_before_execution() {
         let rec = RecordingSession::with_table_engine("MyISAM");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("nontransactional target");
 
@@ -5062,7 +5119,7 @@ mod render_tests {
     async fn mutating_dml_rejects_unprovable_trigger_side_effects() {
         let rec = RecordingSession::with_trigger("users_audit");
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("triggered target");
 
@@ -5110,7 +5167,7 @@ mod render_tests {
     async fn destructive_dml_requires_approval_and_version_scope() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("destructive DML artifact");
 
@@ -5186,7 +5243,7 @@ mod render_tests {
     async fn whole_plan_preflight_refuses_delete_before_earlier_insert() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let (insert, _) = plan_dml_step("insert user", false);
         let (delete, delete_version) = plan_dml_step("delete user", true);
 
@@ -5229,7 +5286,7 @@ mod render_tests {
     async fn backfill_requires_approval_and_version_scope_before_io() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let version = MigrationId::generate();
         let checksum = step_checksum("backfill artifact");
         let spec = BackfillSpec {
@@ -5315,7 +5372,7 @@ mod render_tests {
         let checksum = step_checksum("delete DML artifact");
         let rec = RecordingSession::with_applied(version.as_str(), &checksum);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let ran = backend
             .run_dml_step(
@@ -5362,7 +5419,7 @@ mod render_tests {
         let expected = step_checksum("edited DML artifact");
         let rec = RecordingSession::with_applied(version.as_str(), &recorded);
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
         let result = backend
             .run_dml_step(
@@ -5413,7 +5470,7 @@ mod render_tests {
     async fn v1_capability_gaps_fail_closed() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         assert!(backend
@@ -5455,7 +5512,7 @@ mod render_tests {
     async fn checksum_drift_gate_runs_over_mysql_journal_read() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
         let m = trivial_migration();
 
         let report = backend

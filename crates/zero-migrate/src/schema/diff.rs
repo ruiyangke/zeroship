@@ -1584,7 +1584,7 @@ mod tests {
 
     fn confined_inject(app_id: &str, collection: &str) -> ResolvedInject {
         ResolvedInject::for_table(
-            &crate::model::table_shape::zeroship_confined_ceiling(),
+            &crate::test_fixtures::confined_charter(),
             app_id,
             collection,
         )
@@ -1592,12 +1592,8 @@ mod tests {
     }
 
     fn no_inject(app_id: &str, collection: &str) -> ResolvedInject {
-        ResolvedInject::for_table(
-            &crate::model::table_shape::zeroship_no_inject_ceiling(),
-            app_id,
-            collection,
-        )
-        .expect("no-inject test policy resolves")
+        ResolvedInject::for_table(&crate::test_fixtures::no_inject("app"), app_id, collection)
+            .expect("no-inject test policy resolves")
     }
 
     // Diff tests historically exercised the confined platform shape. Keep that

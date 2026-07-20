@@ -1,54 +1,28 @@
 //! Policy value types shared by model validation and the SQL guard.
 
-/// The trust posture of a guard. Set at the OPERATOR CALL SITE, never derived
-/// from SQL content.
+/// A shared trust-posture label used by capability and validation vocabulary.
 ///
-/// The EXTERNAL trust boundary is closed by construction, but NOT by enum
-/// un-nameability (`#[non_exhaustive]`
-/// only forbids *exhaustive matching* and *constructing fielded variants*
-/// externally; an external crate CAN still name the fieldless `Platform` /
-/// `Trusted` as a value). The real external lock is that [`GuardConfig`]'s
-/// fields are PRIVATE and [`GuardConfig::platform`] / [`GuardConfig::trusted`]
-/// are `pub(crate)` and require a `pub(crate)` [`OperatorCapability`] token: so
-/// naming `TrustProfile::Platform` / `TrustProfile::Trusted` externally is
-/// *harmless* — there is no `pub` API that accepts it and no way to build a
-/// privileged `GuardConfig`. Within the crate, `Platform`/`Trusted` are
-/// produced ONLY inside [`GuardConfig::platform`] / [`GuardConfig::trusted`] /
-/// [`crate::conn::ExecutorConfig::platform`] / [`crate::conn::ExecutorConfig::trusted`],
-/// each of which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
-/// cannot mint either without holding the token. `#[non_exhaustive]`
-/// remains valuable: it keeps the variant set evolvable and forces external
-/// matches to carry a wildcard.
-///
-/// [`GuardConfig`]: crate::guard::GuardConfig
-/// [`GuardConfig::platform`]: crate::guard::GuardConfig::platform
-/// [`GuardConfig::trusted`]: crate::guard::GuardConfig::trusted
-/// [`OperatorCapability`]: crate::capability::OperatorCapability
+/// This enum never selects or constructs an effective policy. Guard and executor
+/// APIs receive a caller-composed policy explicitly, and the host selects any
+/// non-policy guard mode independently. `#[non_exhaustive]` keeps the label set
+/// evolvable and requires external matches to include a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {
     /// Untrusted creator/AI SQL. The full deny-list (today's behaviour).
     Confined,
-    /// Trusted operator SQL for the platform's own schemas — the WIDENED
-    /// deny-list (role/grant/policy/schema management admitted against a fixed
-    /// schema allowlist). Constructed ONLY by `GuardConfig::platform` /
-    /// `ExecutorConfig::platform`, which require an [`OperatorCapability`] token.
-    ///
-    /// [`OperatorCapability`]: crate::capability::OperatorCapability
+    /// Trusted operator SQL for the platform's own schemas. Its grants and schema
+    /// allowlist come from the explicitly authored policy.
     Platform,
     /// **No untrusted boundary at all** — the public dbmate-like CLI posture
     /// where the operator owns the database. The deny-list / cross-schema /
     /// body walks are SKIPPED entirely (arbitrary SQL applies as the connecting
     /// role: `CREATE ROLE`, touch any schema, etc. — dbmate parity). The
-    /// destructive/transactional/approval flags are STILL derived (via
-    /// `classify`/[`flags_for`], trust-independent) so the CLI's `--yes`
+    /// destructive/transactional/approval flags are STILL derived independently
+    /// of trust, so the CLI's `--yes`
     /// data-loss gate still applies; Trusted disables the deny-list, NOT the
-    /// destructive classification. Constructed ONLY by `GuardConfig::trusted` /
-    /// `ExecutorConfig::trusted`, which require an [`OperatorCapability`] token —
-    /// `submit_migration` and any external crate can NEVER reach it.
-    ///
-    /// [`OperatorCapability`]: crate::capability::OperatorCapability
-    /// [`flags_for`]: crate::guard::flags_for
+    /// destructive classification. A host that uses this label must still supply
+    /// the policy and belt-off guard mode explicitly.
     Trusted,
 }
 
@@ -128,7 +102,7 @@ impl DestructiveOps {
         }
     }
 
-    /// The tighter (more restrictive) of two postures (operator-ceiling meet).
+    /// The tighter (more restrictive) of two postures (operator-charter meet).
     #[must_use]
     pub const fn tightest(self, other: Self) -> Self {
         if self.rank() <= other.rank() {
@@ -138,9 +112,9 @@ impl DestructiveOps {
         }
     }
 
-    /// True if `self` is looser (less restrictive) than the `ceiling`.
+    /// True if `self` is looser (less restrictive) than the `charter`.
     #[must_use]
-    pub const fn is_looser_than(self, ceiling: Self) -> bool {
-        self.rank() > ceiling.rank()
+    pub const fn is_looser_than(self, charter: Self) -> bool {
+        self.rank() > charter.rank()
     }
 }

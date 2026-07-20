@@ -16,6 +16,8 @@
 //! - failure path: an aborting rebuild leaves no wedge (the next apply succeeds) and
 //!   `foreign_keys` is back ON.
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -59,7 +61,7 @@ fn sqlite_author() -> DeclarativeAuthor {
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_snapshot(
@@ -190,14 +192,9 @@ fn drop_composite_fk_ir() -> MigrationIr {
 }
 
 fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> SqliteRebuild {
-    let steps = IrAuthor::new(
-        PROJECT,
-        APP,
-        SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    )
-    .lower_steps(ir, live)
-    .expect("SQLite composite FK lifecycle lowers");
+    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
+        .lower_steps(ir, live)
+        .expect("SQLite composite FK lifecycle lowers");
     assert_eq!(steps.len(), 1, "one FK change is one atomic rebuild");
     match steps.into_iter().next().expect("one step") {
         PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => rebuild,

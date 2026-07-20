@@ -5,7 +5,7 @@
 // callback:
 //
 //   import { apply, plan, status, history, validate } from "zero-migrate-cli";
-//   await apply({ migration, ownerApp, projectSchema, policyCeiling, driver: { kind:"postgres", url } });
+//   await apply({ migration, ownerApp, projectSchema, policy, driver: { kind:"postgres", url } });
 //
 // The flow for `apply`:
 //   1. the pure-JS RECORDER (`zero-migrate/internal/recorder`, from the DSL package)
@@ -104,9 +104,9 @@ export interface HostApplyOptions {
   /** The project's `{ table: owner_app }` registry (ownership check).
    *  Defaults to `{}` (a fresh single-app project). */
   registry?: Record<string, string>;
-  /** Required trusted table-shape policy ceiling. Callers that want author-owned
-   *  shape must explicitly supply a no-inject ceiling. */
-  policyCeiling: string;
+  /** Required ordered table-shape policy documents. The first document is the
+   *  trusted root/bound; each later document is an untrusted narrowing layer. */
+  policy: readonly string[];
   /** The migrator role to `SET ROLE` under (least-privilege apply). Optional. */
   migratorRole?: string;
   /** Whether destructive changes are pre-approved. Default `false`. */
@@ -122,13 +122,17 @@ export type ApplyOutcome = ApplyReply;
 
 /** Fail fast at the JavaScript boundary too; TypeScript's required property does
  * not protect plain JavaScript callers. */
-function assertExplicitPolicyCeiling(
+function assertExplicitPolicy(
   value: unknown,
-  verb: "apply" | "status",
-): asserts value is string {
-  if (typeof value !== "string" || value.length === 0) {
+  verb: "apply" | "status" | "history" | "resolvePending",
+): asserts value is readonly string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((document) => typeof document !== "string" || document.length === 0)
+  ) {
     throw new Error(
-      `zero-migrate-cli: ${verb} requires an explicit policyCeiling (pass an injecting or no-inject policy document)`,
+      `zero-migrate-cli: ${verb} requires an explicit policy (a non-empty ordered array of policy documents)`,
     );
   }
 }
@@ -140,7 +144,7 @@ function assertExplicitPolicyCeiling(
  * typed `ApplyReply`. Network sessions are always closed (success or throw).
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
-  assertExplicitPolicyCeiling(opts.policyCeiling, "apply");
+  assertExplicitPolicy(opts.policy, "apply");
   const addon = loadAddon();
   const priorMigrations = opts.priorMigrations ?? [];
   if (
@@ -161,7 +165,7 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       ownerApp: opts.ownerApp,
       projectSchema: opts.projectSchema,
       registry: opts.registry ?? {},
-      policyCeilingToml: opts.policyCeiling,
+      charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
       envelopes: [...priorEnvelopes, envelope],
     });
@@ -179,7 +183,7 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       registry: opts.registry ?? {},
       priorEnvelopes,
       envelope,
-      policyCeiling: opts.policyCeiling,
+      charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
       appliedBy: opts.appliedBy ?? "host",
     });
@@ -204,6 +208,8 @@ export interface ResolvePendingOptions {
   approved: true;
   /** Optional least-privilege migration role. */
   migratorRole?: string;
+  /** Required ordered table-shape policy documents, root/bound first. */
+  policy: readonly string[];
   /** Audit label recorded in the migration journal. */
   appliedBy?: string;
 }
@@ -225,6 +231,7 @@ export async function resolvePending(
       "zero-migrate-cli: pending-contract resolution requires explicit approval",
     );
   }
+  assertExplicitPolicy(opts.policy, "resolvePending");
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
@@ -236,6 +243,7 @@ export async function resolvePending(
       action: opts.action,
       approved: true,
       appliedBy: opts.appliedBy ?? "host",
+      charterLayers: [...opts.policy],
     });
   } finally {
     await close();
@@ -316,10 +324,12 @@ interface HostStatusBaseOptions {
   projectSchema: string;
   driver: DriverConfig;
   registry?: Record<string, string>;
+  /** Required ordered table-shape policy documents, root/bound first. */
+  policy: readonly string[];
 }
 
 /** Plan-aware status reconciles authored migrations through the same explicit
- * policy ceiling used by {@link apply}. */
+ * policy documents used by {@link apply}. */
 export interface HostReconciledStatusOptions extends HostStatusBaseOptions {
   /** Ordered migration modules to reconcile as complete lowered plans. When
    *  present, `status` returns plan-aware reconciliation. */
@@ -327,18 +337,15 @@ export interface HostReconciledStatusOptions extends HostStatusBaseOptions {
   /** Optional filename-derived fallback name for each migration. Must be the
    *  same length as `migrations` when supplied. */
   nameFallbacks?: readonly string[];
-  /** Required trusted table-shape ceiling; use the same bytes as apply. */
-  policyCeiling: string;
   /** Legacy single fallback used when `nameFallbacks[index]` is absent. */
   nameFallback?: string;
 }
 
-/** Journal-only status does not lower authored migrations and therefore has no
- * table-shape policy input. */
+/** Journal-only status does not lower authored migrations, but still requires
+ * the executor's explicitly authored policy documents. */
 export interface HostJournalStatusOptions extends HostStatusBaseOptions {
   migrations?: undefined;
   nameFallbacks?: never;
-  policyCeiling?: never;
   nameFallback?: never;
 }
 
@@ -347,12 +354,14 @@ export type HostStatusOptions =
   | HostReconciledStatusOptions
   | HostJournalStatusOptions;
 
-/** Options for {@link history}; history reads the journal and does not lower a
- * migration set. */
+/** Options for {@link history}; history reads the journal through an executor
+ * configured with explicitly authored policy documents. */
 export interface HostHistoryOptions {
   ownerApp: string;
   projectSchema: string;
   driver: DriverConfig;
+  /** Required ordered table-shape policy documents, root/bound first. */
+  policy: readonly string[];
 }
 
 /**
@@ -370,9 +379,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
       "zero-migrate-cli: status is not available for SQLite; SQLite apply is supported",
     );
   }
-  if (opts.migrations !== undefined) {
-    assertExplicitPolicyCeiling(opts.policyCeiling, "status");
-  }
+  assertExplicitPolicy(opts.policy, "status");
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
@@ -398,7 +405,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
         dialect: dialectOf(opts.driver),
         registry: opts.registry ?? {},
         envelopes,
-        policyCeiling: opts.policyCeiling,
+        charterLayers: [...opts.policy],
       });
     }
     return await addon.status(hostDriver, {
@@ -406,6 +413,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
       projectSchema: opts.projectSchema,
       dialect: dialectOf(opts.driver),
       migrations: [], // the read path / empty-journal flow (see doc).
+      charterLayers: [...opts.policy],
     });
   } finally {
     await close();
@@ -418,12 +426,14 @@ export async function history(opts: HostHistoryOptions): Promise<HistoryReply> {
   if (opts.driver.kind !== "postgres") {
     throw new Error("zero-migrate-cli: history supports only PostgreSQL");
   }
+  assertExplicitPolicy(opts.policy, "history");
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
     return await addon.history(hostDriver, {
       projectId: opts.projectSchema,
       projectSchema: opts.projectSchema,
+      charterLayers: [...opts.policy],
     });
   } finally {
     await close();

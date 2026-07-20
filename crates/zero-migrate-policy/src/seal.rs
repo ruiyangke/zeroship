@@ -1,5 +1,5 @@
 //! The policy SEAL (§II.7) — an HMAC that binds an [`EffectivePolicy`] to the exact
-//! registry + matcher semantics + ceiling version that minted it. A seal is a
+//! registry + matcher semantics + charter version that minted it. A seal is a
 //! tamper-evidence + identity boundary: a verifier hard-fails a seal replayed against
 //! a different registry (a `key` string means nothing without the whole def it
 //! resolves to — II.2.1), a different dialect, a different matcher algorithm, or a
@@ -10,7 +10,7 @@
 //! `HMAC-SHA256( mac_key , canonical(resolved rule set)
 //!                       ‖ registry.digest()
 //!                       ‖ (dialect, matcher_version)
-//!                       ‖ ceiling_version )`
+//!                       ‖ charter_version )`
 //!
 //! plus the `nonce` (carried in the clear alongside the tag, and mixed into the MAC
 //! so a nonce swap invalidates it).
@@ -28,11 +28,11 @@
 //!   `dialect` selects the identifier fold, `matcher_version` the glob-lattice +
 //!   normalization algorithm. The same sealed `app_*` folds/decides differently
 //!   across either, so both bind.
-//! - **`ceiling_version`** is the operator's monotonic ceiling revision.
+//! - **`charter_version`** is the operator's monotonic charter revision.
 //!
 //! [`verify`](SealedPolicy::verify) recomputes the MAC from a freshly-composed
 //! [`EffectivePolicy`] + the expected registry digest + dialect + matcher version +
-//! ceiling version, and returns `Ok(())` only on an exact constant-time match.
+//! charter version, and returns `Ok(())` only on an exact constant-time match.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -61,8 +61,8 @@ pub struct SealedPolicy {
     dialect: String,
     /// The matcher-algorithm version (bound into the MAC).
     matcher_version: u32,
-    /// The operator's monotonic ceiling revision (bound into the MAC).
-    ceiling_version: u64,
+    /// The operator's monotonic charter revision (bound into the MAC).
+    charter_version: u64,
     /// The registry digest the policy was composed under (bound into the MAC).
     registry_digest: [u8; 32],
 }
@@ -82,8 +82,8 @@ pub enum SealError {
     /// The presented matcher_version differs from the sealed one (glob/normalization
     /// algorithm differs).
     MatcherVersionMismatch,
-    /// The presented ceiling_version differs from the sealed one.
-    CeilingVersionMismatch,
+    /// The presented charter_version differs from the sealed one.
+    CharterVersionMismatch,
 }
 
 impl SealedPolicy {
@@ -97,10 +97,10 @@ impl SealedPolicy {
     pub fn matcher_version(&self) -> u32 {
         self.matcher_version
     }
-    /// The bound ceiling version.
+    /// The bound charter version.
     #[must_use]
-    pub fn ceiling_version(&self) -> u64 {
-        self.ceiling_version
+    pub fn charter_version(&self) -> u64 {
+        self.charter_version
     }
     /// The bound registry digest.
     #[must_use]
@@ -110,7 +110,7 @@ impl SealedPolicy {
 
     /// Verify this seal against a freshly composed `policy` and the EXPECTED binding.
     /// HARD-FAILS on any mismatch: registry digest, dialect, matcher_version,
-    /// ceiling_version — checked BEFORE the MAC so a mismatch gets a precise error —
+    /// charter_version — checked BEFORE the MAC so a mismatch gets a precise error —
     /// then the MAC tag itself (constant-time). Returns `Ok(())` only when every
     /// binding matches AND the recomputed tag equals the sealed tag.
     pub fn verify(
@@ -120,7 +120,7 @@ impl SealedPolicy {
         expected_registry_digest: &[u8; 32],
         dialect: &str,
         matcher_version: u32,
-        ceiling_version: u64,
+        charter_version: u64,
     ) -> Result<(), SealError> {
         // Binding checks first (precise diagnostics; the MAC would fail anyway).
         if &self.registry_digest != expected_registry_digest {
@@ -132,8 +132,8 @@ impl SealedPolicy {
         if self.matcher_version != matcher_version {
             return Err(SealError::MatcherVersionMismatch);
         }
-        if self.ceiling_version != ceiling_version {
-            return Err(SealError::CeilingVersionMismatch);
+        if self.charter_version != charter_version {
+            return Err(SealError::CharterVersionMismatch);
         }
         // Recompute the MAC over the presented policy + the sealed binding + nonce.
         let expected = mac_tag(
@@ -142,7 +142,7 @@ impl SealedPolicy {
             expected_registry_digest,
             dialect,
             matcher_version,
-            ceiling_version,
+            charter_version,
             &self.nonce,
         );
         // Constant-time compare via the HMAC verify path.
@@ -156,7 +156,7 @@ impl SealedPolicy {
 
 /// Seal a composed `policy` (§II.7): compute the HMAC over the canonical resolved
 /// rule set (in the sealed inject total order) ‖ registry digest ‖
-/// `(dialect, matcher_version)` ‖ `ceiling_version`, mixing in `nonce`. The
+/// `(dialect, matcher_version)` ‖ `charter_version`, mixing in `nonce`. The
 /// `registry_digest` is taken from the policy's own registry so the seal is
 /// self-consistent; a verifier presents the digest it expects.
 #[must_use]
@@ -166,7 +166,7 @@ pub fn seal(
     nonce: [u8; 16],
     dialect: &str,
     matcher_version: u32,
-    ceiling_version: u64,
+    charter_version: u64,
 ) -> SealedPolicy {
     let registry_digest = policy.registry().digest();
     let tag = mac_tag(
@@ -175,7 +175,7 @@ pub fn seal(
         &registry_digest,
         dialect,
         matcher_version,
-        ceiling_version,
+        charter_version,
         &nonce,
     );
     SealedPolicy {
@@ -183,7 +183,7 @@ pub fn seal(
         nonce,
         dialect: dialect.to_string(),
         matcher_version,
-        ceiling_version,
+        charter_version,
         registry_digest,
     }
 }
@@ -196,7 +196,7 @@ fn mac_tag(
     registry_digest: &[u8; 32],
     dialect: &str,
     matcher_version: u32,
-    ceiling_version: u64,
+    charter_version: u64,
     nonce: &[u8; 16],
 ) -> [u8; 32] {
     let mut mac =
@@ -216,8 +216,8 @@ fn mac_tag(
     write_len_prefixed(&mut mac, dialect.as_bytes());
     mac.update(&matcher_version.to_be_bytes());
 
-    // (4) ceiling_version.
-    mac.update(&ceiling_version.to_be_bytes());
+    // (4) charter_version.
+    mac.update(&charter_version.to_be_bytes());
 
     // nonce (freshness) — mixed so a nonce swap invalidates the tag.
     mac.update(nonce);

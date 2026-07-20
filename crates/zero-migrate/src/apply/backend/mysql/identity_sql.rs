@@ -526,7 +526,11 @@ mod tests {
     }
 
     fn cfg() -> ExecutorConfig {
-        ExecutorConfig::new("prj_identity", "identity_meta")
+        ExecutorConfig::new(
+            "prj_identity",
+            "identity_meta",
+            crate::test_fixtures::no_inject("identity_meta"),
+        )
     }
 
     #[compio::test]

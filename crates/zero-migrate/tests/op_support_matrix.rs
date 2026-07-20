@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -178,7 +180,7 @@ fn lower_current(op: &Op, dialect: Dialect) -> bool {
         default_schema,
         "app_corpus",
         sql_dialect(dialect),
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .with_schema_scope(SchemaScope::Unconfined);
     author

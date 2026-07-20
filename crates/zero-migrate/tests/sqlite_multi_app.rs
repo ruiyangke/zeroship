@@ -23,6 +23,8 @@
 //! cross-app FK *target-missing* guard is already covered dialect-neutrally in
 //! `declarative_sqlite::sqlite_deferred_fk_is_typed_error`.
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -62,7 +64,7 @@ fn author_as(owner_app: &str) -> DeclarativeAuthor {
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn desired_snapshot(

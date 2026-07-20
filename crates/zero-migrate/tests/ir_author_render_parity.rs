@@ -15,6 +15,8 @@
 //! the test proves the single-source builder + the render seam agree. If a
 //! future change forks the two outputs, this fails.
 
+mod support;
+
 use std::collections::{BTreeSet, HashMap};
 
 use zero_migrate::model::ir::{
@@ -54,7 +56,7 @@ const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::zeroship_confined_ceiling()
+    support::confined_charter()
 }
 
 fn test_desired_snapshot(
@@ -130,14 +132,9 @@ fn ir_pairs_for(
         preconditions: vec![],
         checksum: None,
     };
-    let ir = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), SCHEMA)
+    let ir = resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("parity IR resolves");
-    let author = IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_confined_ceiling(),
-    );
+    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
     let migs = author
         .lower(&ir, &LiveSchema::from(live))
         .expect("ir lower");
@@ -694,14 +691,9 @@ fn ir_lower_one(
         preconditions: vec![],
         checksum: None,
     };
-    IrAuthor::new(
-        SCHEMA,
-        OWNER,
-        dialect,
-        &zero_migrate::zeroship_no_inject_ceiling(),
-    )
-    .lower(&ir, &LiveSchema::from(live))
-    .expect("ir lower")
+    IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"))
+        .lower(&ir, &LiveSchema::from(live))
+        .expect("ir lower")
 }
 
 #[test]
@@ -1190,7 +1182,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
         SCHEMA,
         OWNER,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     );
     let one = |op: Op| {
         let ir = MigrationIr {

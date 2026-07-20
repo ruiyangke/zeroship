@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -67,7 +69,7 @@ fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
         PROJECT,
         APP,
         SqlDialect::Postgres,
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .lower_steps(&pg_only_ir(), &LiveSchema::default())
     .expect("PG dialectal leg lowers");
@@ -82,14 +84,9 @@ fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
     );
 
     for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let steps = IrAuthor::new(
-            PROJECT,
-            APP,
-            dialect,
-            &zero_migrate::zeroship_no_inject_ceiling(),
-        )
-        .lower_steps(&pg_only_ir(), &LiveSchema::default())
-        .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
+        let steps = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
+            .lower_steps(&pg_only_ir(), &LiveSchema::default())
+            .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
         assert!(
             steps.is_empty(),
             "{dialect:?} should skip absent pg-only leg"
@@ -127,9 +124,8 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
-    let resolved =
-        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling(), PROJECT)
-            .expect("test IR resolves");
+    let resolved = resolve_create_table_policy(&ir, &support::confined_charter(), PROJECT)
+        .expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -150,7 +146,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
         PROJECT,
         APP,
         SqlDialect::Sqlite,
-        &zero_migrate::zeroship_confined_ceiling(),
+        &support::confined_charter(),
     );
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
@@ -162,7 +158,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
     );
 
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -173,7 +169,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
             &plan,
             Approval::None,
             &be,
-            &ExecutorConfig::new(PROJECT, PROJECT),
+            &ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT)),
             "deploy-dialectal",
         )
         .await

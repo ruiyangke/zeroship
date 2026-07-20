@@ -58,16 +58,39 @@ The example begins after your host has produced a reviewed `Vec<Migration>`:
 ```rust
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine,
-    PostgresBackend, SqlDialect, SqlSession, confined_no_inject_policy,
+    PostgresBackend, SqlDialect, SqlSession, effective_policy_from_charter_toml,
 };
+
+const POLICY_CHARTER: &str = r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app_demo"] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app_demo"] }
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = { include = ["app_demo"] }
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#;
 
 async fn apply_postgres<S: SqlSession>(
     session: &S,
     migrations: &[Migration],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let policy = confined_no_inject_policy("app_demo")
+    let policy = effective_policy_from_charter_toml(POLICY_CHARTER)
         .map_err(std::io::Error::other)?;
-    let guard = GuardConfig::from_policy(policy, SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
 
     let engine = MigrationEngine::new();
     let plan = engine.plan(migrations, &guard);
@@ -75,7 +98,7 @@ async fn apply_postgres<S: SqlSession>(
         return Err(format!("{} migrations denied", plan.denied.len()).into());
     }
 
-    let config = ExecutorConfig::new("project_demo", "app_demo")
+    let config = ExecutorConfig::new("project_demo", "app_demo", policy)
         .with_migrator_role("migrator_app_demo");
     let backend = PostgresBackend::new_generic(session);
 
@@ -205,26 +228,25 @@ Unsupported capabilities return an error; they are not silently approximated.
 
 ## Policy
 
-The simple confined policy is:
-
-```rust
-let policy = zero_migrate::confined_no_inject_policy("app_demo")
-    .map_err(std::io::Error::other)?;
-let guard =
-    zero_migrate::GuardConfig::from_policy(policy, zero_migrate::SqlDialect::Postgres);
-```
-
-To load a root ceiling:
+Policies are authored as root charter TOML and loaded explicitly:
 
 ```rust
 let policy =
-    zero_migrate::effective_policy_from_ceiling_toml(policy_toml)?;
+    zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
+let guard = zero_migrate::GuardConfig::from_policy(
+    policy.clone(),
+    zero_migrate::SqlDialect::Postgres,
+);
+let executor = zero_migrate::ExecutorConfig::new(
+    "project_demo",
+    "app_demo",
+    policy,
+);
 ```
 
 Use the same `EffectivePolicy` for table-shape resolution, planning, and host
-approval decisions. The current public executor configuration does not accept an
-arbitrary effective policy, so a fully custom apply posture needs a reviewed host
-integration. See [Policy model](policy.md) for the public policy types.
+approval decisions. The executor requires that policy explicitly and never selects
+one for the caller. See [Policy model](policy.md) for the public policy types.
 
 ## Plans and verified apply
 

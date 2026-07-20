@@ -2,6 +2,8 @@
 //! Real temp-file `SQLite` throughout — `snapshot_schema` over the live app
 //! file, checksum drift over the journal, sentinel recovery from `sqlite_master`.
 
+mod support;
+
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -66,7 +68,7 @@ fn mig(name: &str, up: &str) -> Migration {
 }
 
 fn cfg() -> ExecutorConfig {
-    ExecutorConfig::new("prj_test", "app")
+    ExecutorConfig::new("prj_test", "app", support::no_inject("app"))
 }
 
 fn lower_id_table_sql(
@@ -107,8 +109,7 @@ fn lower_id_table_sql(
         "main",
         "app_sqlite_drift",
         SqlDialect::Sqlite,
-        &zero_migrate::confined_no_inject_policy("main")
-            .expect("SQLite drift no-inject policy composes"),
+        &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("ID table must lower for SQLite");
@@ -724,15 +725,14 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
         &ir.ops,
         SqlDialect::Sqlite,
         "main",
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("portable SQLite ID fixture must fold");
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
         SqlDialect::Sqlite,
-        &zero_migrate::confined_no_inject_policy("main")
-            .expect("SQLite drift no-inject policy composes"),
+        &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("portable SQLite ID fixture must lower");
@@ -801,7 +801,7 @@ async fn catalog_seeded_fold_preserves_non_rowid_integer_primary_keys() {
         &[],
         SqlDialect::Sqlite,
         "main",
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("empty catalog-seeded fold");
     let drift = diff_snapshots(&live, &projected);
@@ -861,15 +861,14 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
         &ir.ops,
         SqlDialect::Sqlite,
         "main",
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("typed-reference literal fixture must fold");
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
         SqlDialect::Sqlite,
-        &zero_migrate::confined_no_inject_policy("main")
-            .expect("SQLite drift no-inject policy composes"),
+        &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("typed-reference literal fixture must lower");
@@ -1230,15 +1229,14 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
         &ir.ops,
         SqlDialect::Sqlite,
         "main",
-        &zero_migrate::zeroship_no_inject_ceiling(),
+        &support::no_inject("app"),
     )
     .expect("authored composite-reference fixture must fold");
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
         SqlDialect::Sqlite,
-        &zero_migrate::confined_no_inject_policy("main")
-            .expect("SQLite drift no-inject policy composes"),
+        &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("authored composite-reference fixture must lower");

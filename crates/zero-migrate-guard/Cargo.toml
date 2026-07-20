@@ -5,12 +5,6 @@ edition.workspace = true
 license.workspace = true
 description = "The zero-migrate SQL security layer: the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification, and operational advisories. Owns the ONLY C dependency on the non-SQLite path (libpg_query). Depends on the zero-migrate-ir wire contract (including its SqlDialect deploy-target enum); does NOT depend on the engine."
 
-[features]
-# Enables the `OperatorCapability::for_test` mint seam (via the ir leaf) so the
-# guard's OWN in-crate test suite can construct the operator-gated
-# Platform/Trusted profiles. Never enabled in a production build.
-test-support = ["zero-migrate-ir/test-support"]
-
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
 # guard sees exactly what Postgres would execute. A deny-list must not misparse
@@ -34,10 +28,6 @@ zero-migrate-ir = { workspace = true }
 # KnobValue vocabulary and the object model (ObjectName). The guard holds an
 # EffectivePolicy and asks it — it no longer reads a raw VendorCapabilities bit.
 zero-migrate-policy = { workspace = true }
-
-[dev-dependencies]
-# The guard's in-crate tests mint operator-gated profiles.
-zero-migrate-ir = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

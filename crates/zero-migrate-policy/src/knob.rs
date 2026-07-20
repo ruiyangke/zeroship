@@ -68,9 +68,9 @@ pub enum KnobKind {
     Bool,
     /// A set of strings (e.g. an allow-list of roles). Values: any string set.
     StrSet,
-    /// A monotone ceiling: a `u64` with a hard floor the value may not go below
+    /// A monotone charter: a `u64` with a hard floor the value may not go below
     /// (the engine's no-indefinite-lock invariant is `hard_floor: 1` — II.5).
-    UintCeiling { hard_floor: u64 },
+    UintCharter { hard_floor: u64 },
     /// A rank-ordered enum: the legal variants in tightest→loosest order (e.g.
     /// `["forbid", "warn", "allow"]`). A value must be one of the variants.
     OrderedEnum { variants: Vec<String> },
@@ -84,7 +84,7 @@ pub enum KnobKind {
 pub enum KnobValue {
     /// `Bool` value.
     Bool(bool),
-    /// `UintCeiling` value.
+    /// `UintCharter` value.
     Uint(u64),
     /// `StrSet` value (order-insensitive semantically; stored as authored).
     StrSet(Vec<String>),
@@ -95,9 +95,9 @@ pub enum KnobValue {
 /// Why a [`KnobValue`] is not legal for a given [`KnobKind`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KnobValueError {
-    /// The value's shape does not match the kind (e.g. a bool for a `UintCeiling`).
+    /// The value's shape does not match the kind (e.g. a bool for a `UintCharter`).
     TypeMismatch,
-    /// A `UintCeiling` value below the knob's `hard_floor`.
+    /// A `UintCharter` value below the knob's `hard_floor`.
     BelowHardFloor { value: u64, hard_floor: u64 },
     /// An `OrderedEnum` value naming a variant the kind does not declare.
     UnknownVariant,
@@ -110,7 +110,7 @@ impl KnobValue {
         match (kind, self) {
             (KnobKind::Bool, KnobValue::Bool(_)) => Ok(()),
             (KnobKind::StrSet, KnobValue::StrSet(_)) => Ok(()),
-            (KnobKind::UintCeiling { hard_floor }, KnobValue::Uint(v)) => {
+            (KnobKind::UintCharter { hard_floor }, KnobValue::Uint(v)) => {
                 if v < hard_floor {
                     Err(KnobValueError::BelowHardFloor {
                         value: *v,
@@ -137,12 +137,12 @@ impl KnobValue {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Polarity {
-    /// Grants tighten DOWNWARD: effective must satisfy `draft ⊑ ceiling`.
+    /// Grants tighten DOWNWARD: effective must satisfy `draft ⊑ charter`.
     Grant,
-    /// Obligations tighten UPWARD: `effective = join(ceiling, draft)`; ceiling
+    /// Obligations tighten UPWARD: `effective = join(charter, draft)`; charter
     /// requirements can never be removed.
     Require,
-    /// Opaque/pinned content: draft must equal ceiling unless the ceiling marks it
+    /// Opaque/pinned content: draft must equal charter unless the charter marks it
     /// delegable. Backs only the opaque `TableShapeTransform` digest (II.4.5).
     Pinned {
         /// Whether a draft may override the pinned value.
@@ -218,13 +218,13 @@ pub struct KnobDef {
     /// the least-privilege backing check, II.10.5). Enforcement-affecting → part of
     /// the sealed registry digest.
     pub requires_db_privilege: bool,
-    /// Whether a SILENT draft INHERITS this knob's grant from the ceiling at
+    /// Whether a SILENT draft INHERITS this knob's grant from the charter at
     /// `admit` (the default, `true`), or is instead pinned to the knob's DEFAULT
     /// (`false`). A `false` marks a POWER GRANT that must never be conferred by
     /// omission: a silent creator draft gets the tightest (default) value, not the
-    /// ceiling's. It changes ONLY the inheritance of a draft that is *silent* on the
+    /// charter's. It changes ONLY the inheritance of a draft that is *silent* on the
     /// knob — a draft that EXPLICITLY grants it is still bounded by the ordinary
-    /// `draft ⊑ ceiling` escalation check. Enforcement-affecting → part of the sealed
+    /// `draft ⊑ charter` escalation check. Enforcement-affecting → part of the sealed
     /// registry digest.
     pub inherit: bool,
     /// Human-facing documentation for the knob.
@@ -255,7 +255,7 @@ impl KnobDef {
         match &self.kind {
             KnobKind::Bool => b.push(0x00),
             KnobKind::StrSet => b.push(0x01),
-            KnobKind::UintCeiling { hard_floor } => {
+            KnobKind::UintCharter { hard_floor } => {
                 b.push(0x02);
                 b.extend_from_slice(&hard_floor.to_be_bytes());
             }
@@ -372,14 +372,14 @@ mod tests {
         assert!(KnobValue::Bool(true).validate_for(&KnobKind::Bool).is_ok());
         assert!(KnobValue::Uint(5).validate_for(&KnobKind::Bool).is_err());
         assert_eq!(
-            KnobValue::Uint(0).validate_for(&KnobKind::UintCeiling { hard_floor: 1 }),
+            KnobValue::Uint(0).validate_for(&KnobKind::UintCharter { hard_floor: 1 }),
             Err(KnobValueError::BelowHardFloor {
                 value: 0,
                 hard_floor: 1
             })
         );
         assert!(KnobValue::Uint(1)
-            .validate_for(&KnobKind::UintCeiling { hard_floor: 1 })
+            .validate_for(&KnobKind::UintCharter { hard_floor: 1 })
             .is_ok());
         let oe = KnobKind::OrderedEnum {
             variants: vec!["forbid".into(), "allow".into()],

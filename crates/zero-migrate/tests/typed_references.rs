@@ -19,8 +19,7 @@ const PROJECT_SCHEMA: &str = "app";
 const OWNER: &str = "app_typed_references";
 
 fn no_inject_policy() -> zero_migrate::EffectivePolicy {
-    zero_migrate::confined_no_inject_policy(PROJECT_SCHEMA)
-        .expect("typed-reference no-inject policy composes")
+    support::no_inject(PROJECT_SCHEMA)
 }
 
 fn ir(name: &str, ops: Vec<Value>) -> MigrationIr {
@@ -306,13 +305,8 @@ fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
     let ir = typed_reference_matrix_ir();
 
     for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
-        let snapshot = fold_ops(
-            &ir.ops,
-            dialect,
-            PROJECT_SCHEMA,
-            &zero_migrate::zeroship_no_inject_ceiling(),
-        )
-        .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
+        let snapshot = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA, &support::no_inject("app"))
+            .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
         let parent = snapshot.tables["uuid_parents"]
             .columns
             .iter()
@@ -850,8 +844,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
             &schema,
             OWNER,
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("cross-schema no-inject policy composes"),
+            &support::no_inject(&schema),
         )
             .lower(&targets, &LiveSchema::default())
             .map_err(|error| format!("lower formatted parent keys: {error}"))?;
@@ -911,8 +904,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
             &schema,
             OWNER,
             SqlDialect::Postgres,
-            &zero_migrate::confined_no_inject_policy(&schema)
-                .expect("cross-schema no-inject policy composes"),
+            &support::no_inject(&schema),
         )
             .lower(&children, &live)
             .map_err(|error| format!("lower typed child references from live catalog: {error}"))?;

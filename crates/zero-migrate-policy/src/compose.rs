@@ -24,17 +24,17 @@
 //!
 //! and `grantedScope(P,k) = ⊔ { r.scope : r ∈ grants(k), r.value ≠ default }`. We
 //! never enumerate objects: the `admit` grant check partitions the draft's
-//! granted scope by the ceiling's covering rules (via `⊓`) and compares values on
-//! each region, plus the uncovered region via `∖` (where the ceiling value is
+//! granted scope by the charter's covering rules (via `⊓`) and compares values on
+//! each region, plus the uncovered region via `∖` (where the charter value is
 //! `default`). See [`crate::boundary::admit`].
 //!
 //! # `admit` vs `restrict`
 //!
-//! - [`crate::boundary::admit`] ingests an UNTRUSTED draft against a trusted ceiling:
+//! - [`crate::boundary::admit`] ingests an UNTRUSTED draft against a trusted charter:
 //!   grants must be pointwise `⊑`; require/inject/validate union-up; collisions blamed
 //!   on the draft; the creatable-scope lint runs. NO clipping — strict reject.
-//! - [`restrict`] meets two TRUSTED ceilings (host→org→project): grants meet
-//!   pointwise; rule-sets union; ceiling-vs-ceiling collisions are a loud operator
+//! - [`restrict`] meets two TRUSTED charters (host→org→project): grants meet
+//!   pointwise; rule-sets union; charter-vs-charter collisions are a loud operator
 //!   error. Associative + total. Chains compose with `restrict`; the final untrusted
 //!   draft lands via `admit`.
 
@@ -51,7 +51,7 @@ use crate::{LoadContext, LoadError, PolicyDoc};
 
 /// The knob key of the scoped creation-gating grant that anchors mandatory injects
 /// (II.2.6a). The creatable-scope lint requires this grant's scope `⊑` every
-/// mandatory ceiling inject's scope.
+/// mandatory charter inject's scope.
 pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -59,7 +59,7 @@ pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// A policy document of HOST provenance (H-1). Constructible ONLY inside this crate,
-/// from a host-injected source — the [`RootCeiling`] and catalog entries registered
+/// from a host-injected source — the [`RootCharter`] and catalog entries registered
 /// at engine construction. There is **no** `PolicyDoc -> TrustedDoc` conversion and
 /// **no** public constructor: a creator-supplied `PolicyDoc` (a *draft*) can never
 /// become a `TrustedDoc`.
@@ -69,7 +69,7 @@ pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 /// The `extends`-laundering hole (a draft inheriting a trusted base into `overlay`)
 /// is closed by construction, not by a runtime provenance check.
 ///
-/// The single public mint site outside `RootCeiling::parse_*` is
+/// The single public mint site outside `RootCharter::parse_*` is
 /// [`TrustedDoc::register_catalog_entry`] — the `ProfileCatalog`-registration wrapper
 /// a host uses to turn a document IT authored into a catalog `TrustedDoc`. Passing a
 /// creator-editable file here would defeat H-1; that is construction-site discipline
@@ -82,7 +82,7 @@ impl TrustedDoc {
     /// Mint a catalog-entry `TrustedDoc` from a document the HOST authored
     /// (`ProfileCatalog` registration, II.5). Parses + validates as a NON-root layer
     /// (a catalog `env` fragment may not carry `mandatory = true` injects — that is
-    /// `RootCeiling`-only, M-5). The caller MUST supply a host-authored source; a
+    /// `RootCharter`-only, M-5). The caller MUST supply a host-authored source; a
     /// creator-editable document wired here would launder untrusted content into the
     /// trusted combinators (H-1 guidance).
     pub fn register_catalog_entry(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
@@ -120,7 +120,7 @@ impl TrustedDoc {
         )?))
     }
 
-    /// Crate-internal mint from an already-validated document (the `RootCeiling`
+    /// Crate-internal mint from an already-validated document (the `RootCharter`
     /// constructors, extends-resolution). No provenance is conferred by this call —
     /// the caller is responsible for the document being host-authored.
     pub(crate) fn from_validated(doc: PolicyDoc) -> Self {
@@ -134,42 +134,42 @@ impl TrustedDoc {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// RootCeiling — the ONLY trust anchor
+// RootCharter — the ONLY trust anchor
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// The host's ROOT CEILING — the single trust anchor of the whole policy system
-/// (II.5), and the outermost layer of every assembled ceiling (M-5). Wraps a
-/// [`TrustedDoc`] loaded with [`LoadContext::RootCeiling`] (the only layer allowed
+/// The host's ROOT CHARTER — the single trust anchor of the whole policy system
+/// (II.5), and the outermost layer of every assembled charter (M-5). Wraps a
+/// [`TrustedDoc`] loaded with [`LoadContext::RootCharter`] (the only layer allowed
 /// `mandatory = true` injects). Every [`EffectivePolicy`] descends from a
-/// `RootCeiling` through the finalized-[`Ceiling`] path into [`admit`](crate::boundary::admit);
-/// there is no other way in. A `RootCeiling` is itself a valid finalized ceiling (a
+/// `RootCharter` through the finalized-[`Charter`] path into [`admit`](crate::boundary::admit);
+/// there is no other way in. A `RootCharter` is itself a valid finalized charter (a
 /// single trusted layer whose conflicts are caught at load), so it implements
-/// [`AdmitCeiling`] and may be `admit`'s ceiling directly.
+/// [`AdmitCharter`] and may be `admit`'s charter directly.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct RootCeiling {
+pub struct RootCharter {
     doc: TrustedDoc,
 }
 
-impl RootCeiling {
-    /// Parse + validate a root-ceiling policy document from TOML. This is a thin
-    /// wrapper over [`PolicyDoc::parse_toml`] pinned to [`LoadContext::RootCeiling`]
+impl RootCharter {
+    /// Parse + validate a root-charter policy document from TOML. This is a thin
+    /// wrapper over [`PolicyDoc::parse_toml`] pinned to [`LoadContext::RootCharter`]
     /// — the only context under which a `mandatory` inject rule loads.
     pub fn parse_toml(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
-        let doc = PolicyDoc::parse_toml(src, registry, LoadContext::RootCeiling)?;
+        let doc = PolicyDoc::parse_toml(src, registry, LoadContext::RootCharter)?;
         Ok(Self {
             doc: TrustedDoc::from_validated(doc),
         })
     }
 
-    /// Parse + validate a root-ceiling policy document from JSON.
+    /// Parse + validate a root-charter policy document from JSON.
     pub fn parse_json(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
-        let doc = PolicyDoc::parse_json(src, registry, LoadContext::RootCeiling)?;
+        let doc = PolicyDoc::parse_json(src, registry, LoadContext::RootCharter)?;
         Ok(Self {
             doc: TrustedDoc::from_validated(doc),
         })
     }
 
-    /// Parse + validate a root ceiling that may `extends` a trusted catalog base
+    /// Parse + validate a root charter that may `extends` a trusted catalog base
     /// (II.7, H-1), resolving the base chain against `catalog` with cycle detection.
     pub fn parse_toml_with_catalog(
         src: &str,
@@ -177,7 +177,7 @@ impl RootCeiling {
         catalog: &dyn crate::document::ProfileCatalog,
     ) -> Result<Self, LoadError> {
         let doc =
-            PolicyDoc::parse_toml_with_catalog(src, registry, LoadContext::RootCeiling, catalog)?;
+            PolicyDoc::parse_toml_with_catalog(src, registry, LoadContext::RootCharter, catalog)?;
         Ok(Self {
             doc: TrustedDoc::from_validated(doc),
         })
@@ -203,50 +203,50 @@ impl RootCeiling {
 
 /// A `admit` / `restrict` failure. `admit` errors blame the
 /// UNTRUSTED draft; `restrict` errors are loud OPERATOR misconfigurations of
-/// two trusted ceilings.
+/// two trusted charters.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ComposeError {
-    /// A draft grant on `key` is LOOSER than the ceiling permits somewhere in the
+    /// A draft grant on `key` is LOOSER than the charter permits somewhere in the
     /// draft's granted scope — the value-blind / scope-blind escalation guard
     /// (II.3.2). `offending_pattern` renders the region the draft over-grants over.
-    GrantExceedsCeiling {
+    GrantExceedsCharter {
         /// The knob key whose grant escalated.
         key: KnobKey,
         /// A human-readable render of the offending object region (the uncovered
-        /// region, or a covered region where `draft_value ⋢ ceiling_value`).
+        /// region, or a covered region where `draft_value ⋢ charter_value`).
         offending_pattern: String,
     },
-    /// The draft's granted scope for `key` reaches OUTSIDE the ceiling's granted
+    /// The draft's granted scope for `key` reaches OUTSIDE the charter's granted
     /// scope, and that uncovered region is not cleanly representable by `∖`
     /// (II.3.1) — the sanctioned fail-closed conservative deny.
     UncoveredRegionNotRepresentable {
         /// The knob key whose uncovered region could not be represented.
         key: KnobKey,
     },
-    /// A draft `Inject` collides with a ceiling `Inject` on scope-overlapping
+    /// A draft `Inject` collides with a charter `Inject` on scope-overlapping
     /// objects (same column name, conflicting PK pin, `author_primary_key`
     /// Allow-vs-Forbid, or same index name) — blamed on the draft (II.4.4).
-    DraftInjectCollidesCeiling {
+    DraftInjectCollidesCharter {
         /// What collided (column/index name, or the pinned-PK conflict).
         detail: String,
     },
     /// A draft `Validate` (`ForbiddenColumns` / `TableNameForbidden`) contradicts a
-    /// ceiling `Inject` on overlapping scope (II.4.4).
-    DraftValidateContradictsCeilingInject {
+    /// charter `Inject` on overlapping scope (II.4.4).
+    DraftValidateContradictsCharterInject {
         /// What contradicts (the forbidden column / table name vs the injected one).
         detail: String,
     },
-    /// The draft's `core.create_table` granted scope is NOT `⊑` a mandatory ceiling
+    /// The draft's `core.create_table` granted scope is NOT `⊑` a mandatory charter
     /// inject's scope — a tenant could create an in-scope table escaping the
     /// mandatory injection (II.2.6a).
     CreatableEscapesMandatoryInject {
         /// A render of the mandatory inject scope the creatable grant escaped.
         inject_scope: String,
     },
-    /// Two TRUSTED ceilings inject conflicting shape on overlapping scope — a loud
+    /// Two TRUSTED charters inject conflicting shape on overlapping scope — a loud
     /// operator misconfiguration surfaced at `restrict` (II.4.4).
-    CeilingInjectCollision {
-        /// What collided across the two ceilings.
+    CharterInjectCollision {
+        /// What collided across the two charters.
         detail: String,
     },
     /// A knob referenced by a rule is absent from the registry the composer was
@@ -342,7 +342,7 @@ impl GrantKeyMap {
 /// The full pointwise grant model: one [`GrantKeyMap`] per key that has grant rules.
 /// A key with no grant rules is absent (its value is the knob default everywhere).
 ///
-/// Exposed (hidden) because the sealed [`Ceiling`] trait returns it; not part of the
+/// Exposed (hidden) because the sealed [`Charter`] trait returns it; not part of the
 /// stable API — construct/inspect only through the composition entry points.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
@@ -372,7 +372,7 @@ impl GrantModel {
         Ok(Self { keys })
     }
 
-    /// The keys present in either model (for iterating both ceiling and draft).
+    /// The keys present in either model (for iterating both charter and draft).
     pub(crate) fn key_union<'a>(&'a self, other: &'a GrantModel) -> Vec<&'a KnobKey> {
         let mut out: Vec<&KnobKey> = self.keys.keys().chain(other.keys.keys()).collect();
         out.sort();
@@ -392,7 +392,7 @@ impl GrantModel {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Layer — one resolved policy layer (H-4: the layered ceiling / effective policy)
+// Layer — one resolved policy layer (H-4: the layered charter / effective policy)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Which layer a resolved rule set occupies in a composed stack (H-4). The tag is
@@ -401,10 +401,10 @@ impl GrantModel {
 ///
 /// The cross-layer order, outermost → innermost, is `Base → Env → Draft`. `restrict`
 /// flattens a trusted meet into ONE `Base` layer; `overlay` produces `[Env] over
-/// [Base]`; `admit` places the untrusted `[Draft]` innermost over the ceiling layers.
+/// [Base]`; `admit` places the untrusted `[Draft]` innermost over the charter layers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LayerTag {
-    /// The outermost trusted layer — a `RootCeiling`/`restrict`-meet/`overlay` base.
+    /// The outermost trusted layer — a `RootCharter`/`restrict`-meet/`overlay` base.
     Base,
     /// A trusted `env` overlay layer (from [`overlay`]`(base, env)`), inside `Base`.
     Env,
@@ -413,10 +413,10 @@ pub(crate) enum LayerTag {
 }
 
 /// One resolved policy layer: its tag + the four resolved rule collections. A
-/// [`Ceiling`]/[`AssembledCeiling`]/[`EffectivePolicy`] is a STACK of these, queried
+/// [`Charter`]/[`AssembledCharter`]/[`EffectivePolicy`] is a STACK of these, queried
 /// top-first (innermost-first) with fall-through (II.3.2 / H-4).
 ///
-/// Exposed (hidden) because the sealed [`AdmitCeiling`] trait returns it; not part of
+/// Exposed (hidden) because the sealed [`AdmitCharter`] trait returns it; not part of
 /// the stable API — construct/inspect only through the composition entry points.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
@@ -446,13 +446,13 @@ impl Layer {
 }
 
 /// Pin `key` in `layer` so a SILENT region gets the knob DEFAULT, not an inherited
-/// ceiling value — by appending a synthetic default-valued grant rule over the whole
+/// charter value — by appending a synthetic default-valued grant rule over the whole
 /// universe (`Scope::All`) to the layer's grant map for `key`. Presence-override
 /// (II.3.2) then makes this layer WIN the top-down grant fall-through EVERYWHERE for
 /// `key`: at an object the draft covered with an EXPLICIT rule, the loosest-covering
 /// join within the layer keeps the draft's own (higher) value; at an object the draft
 /// left silent, only the synthetic default-valued rule covers, so the value is the
-/// knob default — the ceiling's grant below is never seen. Used by
+/// knob default — the charter's grant below is never seen. Used by
 /// [`admit`](crate::boundary::admit) to realize a `KnobDef.inherit == false` power
 /// grant: it is conferred only where the draft ASKED, never by inheritance-by-omission.
 /// `pub(crate)`: the boundary module is its sole caller.
@@ -484,8 +484,8 @@ pub(crate) fn pin_layer_key_to_default(
 /// The composed, UNFORGEABLE effective policy — the PDP surface the guard/engine
 /// query (II.3.2). Its fields are PRIVATE, it has NO `Deserialize` and NO public
 /// constructor: the ONLY ways to obtain one are [`admit`] / [`restrict`]
-/// from a [`RootCeiling`] (or [`EffectivePolicy::deny_all`], the engine-derived
-/// floor). Holding one is proof it was composed under the host's root ceiling — this
+/// from a [`RootCharter`] (or [`EffectivePolicy::deny_all`], the engine-derived
+/// floor). Holding one is proof it was composed under the host's root charter — this
 /// is the type-level boundary that replaces the old forgeable `OperatorCapability`
 /// token (E6).
 ///
@@ -500,7 +500,7 @@ pub(crate) fn pin_layer_key_to_default(
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectivePolicy {
     registry: PolicyRegistry,
-    /// The layer stack, TOP (innermost) first — `[draft]` over the ceiling layers
+    /// The layer stack, TOP (innermost) first — `[draft]` over the charter layers
     /// (`[env] over [base]` or a single flattened `restrict`/root `base`) (H-4). The
     /// grant query falls through top→down; obligations/injects/validates union across
     /// ALL layers (union-up). The seal binds the layer boundaries (II.7).
@@ -522,7 +522,7 @@ impl EffectivePolicy {
     }
 
     /// Crate-internal constructor from a LAYER STACK (top-first). Used by the
-    /// `boundary::admit` trust-crossing to mint the layered `[draft] over [ceiling]`
+    /// `boundary::admit` trust-crossing to mint the layered `[draft] over [charter]`
     /// [`EffectivePolicy`] (H-4). Not public: an `EffectivePolicy` is only obtainable
     /// through the composition entry points (unforgeability, E6).
     #[must_use]
@@ -577,7 +577,7 @@ impl EffectivePolicy {
     /// The effective granted region is derived from the LAYERED value (H-4): it is
     /// `All` only when the effective value is above default over the whole universe.
     /// Because `grants` falls through, an effective grant can differ from any single
-    /// layer's — a narrow-to-default draft over a ⊤ ceiling grant narrows the region.
+    /// layer's — a narrow-to-default draft over a ⊤ charter grant narrows the region.
     /// We compute it as the join of each layer's effective-above-default contribution,
     /// masked by the layers above (presence-override), which is a `⊒`-conservative
     /// estimate — sound for the ⊤ test (a false `Top` cannot arise: `Top` is only
@@ -668,7 +668,7 @@ impl EffectivePolicy {
 
     /// `obligations(object)` — every covering require rule's `(key, value)` at
     /// `object`, across ALL layers (union-up, II.3.2). The guard unions valued requires
-    /// per object. Ceiling obligations are never masked by the draft — they accumulate.
+    /// per object. Charter obligations are never masked by the draft — they accumulate.
     #[must_use]
     pub fn obligations(&self, object: &ObjectName) -> Vec<(KnobKey, KnobValue)> {
         self.layers
@@ -701,7 +701,7 @@ impl EffectivePolicy {
     }
 
     /// `validates_for(object)` — every covering validate predicate at `object`, across
-    /// ALL layers (union-up). A draft can add but never drop a ceiling predicate.
+    /// ALL layers (union-up). A draft can add but never drop a charter predicate.
     #[must_use]
     pub fn validates_for(&self, object: &ObjectName) -> Vec<&ValidatePredicate> {
         self.layers
@@ -809,12 +809,12 @@ impl LayerTag {
     }
 }
 
-// ── layered ceiling grant queries (crate-internal; consumed by boundary::admit) ──
+// ── layered charter grant queries (crate-internal; consumed by boundary::admit) ──
 
 /// `value(layers, k, o)` — the EFFECTIVE (top-down fall-through) grant value of a
 /// LAYER STACK at `o` (H-4). The first layer (top/innermost first) that COVERS `o`
 /// for `k` (presence) decides; else the knob default. Used by `admit` to read a
-/// (possibly multi-layer) ceiling's effective value at a witness object.
+/// (possibly multi-layer) charter's effective value at a witness object.
 pub(crate) fn layered_value_at(
     layers: &[Layer],
     default: &KnobValue,
@@ -832,11 +832,11 @@ pub(crate) fn layered_value_at(
 }
 
 /// The NON-DEFAULT grant rules of a LAYER STACK for `key` (H-4), each at its own
-/// `effective_scope` (excludes intact). These are the ceiling-side grant rules the
+/// `effective_scope` (excludes intact). These are the charter-side grant rules the
 /// `admit` escalation check subtracts, ONE AT A TIME (iterated per-rule `∖` — NEVER a
-/// `⊔`-materialized ceiling side, C-1). A default-valued rule grants nothing and is
+/// `⊔`-materialized charter side, C-1). A default-valued rule grants nothing and is
 /// dropped. Masking (an upper layer narrowing a lower grant to default) is handled
-/// NOT here but by the caller's covered-region value comparison against the ceiling's
+/// NOT here but by the caller's covered-region value comparison against the charter's
 /// LAYERED effective value ([`layered_value_at`]): in a masked region the effective
 /// value is `default`, so a non-default draft value there rejects on the value check
 /// even though the region was subtracted from the uncovered set. The two checks
@@ -884,125 +884,125 @@ pub enum ShapeElement<'a> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AdmitCeiling — the FINALIZED ceilings a draft may be admitted against
+// AdmitCharter — the FINALIZED charters a draft may be admitted against
 // ══════════════════════════════════════════════════════════════════════════════
 
 mod sealed {
-    /// Seals [`super::AdmitCeiling`]: only the finalized in-crate ceiling types
-    /// implement it, so no external crate can forge a ceiling — and, crucially, an
-    /// [`super::AssembledCeiling`] does NOT implement it, so an un-finalized ceiling
+    /// Seals [`super::AdmitCharter`]: only the finalized in-crate charter types
+    /// implement it, so no external crate can forge a charter — and, crucially, an
+    /// [`super::AssembledCharter`] does NOT implement it, so an un-finalized charter
     /// cannot reach `admit` at the type level (MED).
     pub trait Sealed {}
-    impl Sealed for super::RootCeiling {}
-    impl Sealed for super::Ceiling {}
+    impl Sealed for super::RootCharter {}
+    impl Sealed for super::Charter {}
     impl Sealed for super::EffectivePolicy {}
 }
 
-/// A FINALIZED ceiling a creator draft may be admitted against
-/// (`boundary::admit`): a [`RootCeiling`] (a single trusted layer, finalized by
-/// load), a [`Ceiling`] (the output of [`finalize_ceiling`]), or an already-composed
-/// [`EffectivePolicy`] used as a ceiling. Each yields its LAYER STACK (top/innermost
+/// A FINALIZED charter a creator draft may be admitted against
+/// (`boundary::admit`): a [`RootCharter`] (a single trusted layer, finalized by
+/// load), a [`Charter`] (the output of [`finalize_charter`]), or an already-composed
+/// [`EffectivePolicy`] used as a charter. Each yields its LAYER STACK (top/innermost
 /// first) to `admit`, which prepends the untrusted draft over it (H-4).
 ///
-/// SEALED. An [`AssembledCeiling`] — the un-finalized output of [`overlay`] /
+/// SEALED. An [`AssembledCharter`] — the un-finalized output of [`overlay`] /
 /// [`restrict`] — deliberately does **not** implement this trait: it must pass
-/// [`finalize_ceiling`] first, so "un-finalized ceiling reaches admit" is a TYPE
+/// [`finalize_charter`] first, so "un-finalized charter reaches admit" is a TYPE
 /// ERROR, not a runtime hazard (MED).
-pub trait AdmitCeiling: sealed::Sealed {
-    /// The ceiling's layer stack (top/innermost first), for `admit` to build
+pub trait AdmitCharter: sealed::Sealed {
+    /// The charter's layer stack (top/innermost first), for `admit` to build
     /// `[draft] over [these layers]` (H-4).
     #[doc(hidden)]
-    fn ceiling_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError>;
+    fn charter_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError>;
 }
 
-impl AdmitCeiling for RootCeiling {
-    fn ceiling_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
-        // A root ceiling is a single `Base` layer.
+impl AdmitCharter for RootCharter {
+    fn charter_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+        // A root charter is a single `Base` layer.
         Ok(vec![Layer::from_doc(LayerTag::Base, self.doc(), registry)?])
     }
 }
 
-impl AdmitCeiling for Ceiling {
-    fn ceiling_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+impl AdmitCharter for Charter {
+    fn charter_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
         Ok(self.layers.clone())
     }
 }
 
-impl AdmitCeiling for EffectivePolicy {
-    fn ceiling_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+impl AdmitCharter for EffectivePolicy {
+    fn charter_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
         Ok(self.layers.clone())
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AssembledCeiling / Ceiling — un-finalized vs finalized trusted ceilings (H-3)
+// AssembledCharter / Charter — un-finalized vs finalized trusted charters (H-3)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// An UN-FINALIZED trusted ceiling — the output of the total trusted combinators
+/// An UN-FINALIZED trusted charter — the output of the total trusted combinators
 /// [`overlay`] and [`restrict`] (II.3.2). It is a LAYER STACK (top/innermost first)
 /// that has NOT yet passed the conflict lints, so it deliberately does **not**
-/// implement [`AdmitCeiling`]: it cannot be `admit`'s ceiling until it clears
-/// [`finalize_ceiling`], which returns a [`Ceiling`] (MED — the un-finalized/finalized
+/// implement [`AdmitCharter`]: it cannot be `admit`'s charter until it clears
+/// [`finalize_charter`], which returns a [`Charter`] (MED — the un-finalized/finalized
 /// split is type-encoded). `overlay`/`restrict` are TOTAL (never reject); every
-/// ceiling *misconfiguration* (colliding injects, PK conflicts, creatable-escape)
-/// surfaces at the explicit `finalize_ceiling` gate (H-3).
+/// charter *misconfiguration* (colliding injects, PK conflicts, creatable-escape)
+/// surfaces at the explicit `finalize_charter` gate (H-3).
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct AssembledCeiling {
+pub struct AssembledCharter {
     registry: PolicyRegistry,
     layers: Vec<Layer>,
 }
 
-/// A FINALIZED trusted ceiling — an [`AssembledCeiling`] (or a `RootCeiling`) that has
-/// PASSED [`finalize_ceiling`]'s conflict lints (H-3). It implements [`AdmitCeiling`],
-/// so it — and only it, never an [`AssembledCeiling`] — may be `admit`'s ceiling
+/// A FINALIZED trusted charter — an [`AssembledCharter`] (or a `RootCharter`) that has
+/// PASSED [`finalize_charter`]'s conflict lints (H-3). It implements [`AdmitCharter`],
+/// so it — and only it, never an [`AssembledCharter`] — may be `admit`'s charter
 /// argument. It carries the same layer stack, now proven collision-free.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Ceiling {
+pub struct Charter {
     registry: PolicyRegistry,
     layers: Vec<Layer>,
 }
 
-impl Ceiling {
-    /// The registry this ceiling was composed under.
+impl Charter {
+    /// The registry this charter was composed under.
     #[must_use]
     pub fn registry(&self) -> &PolicyRegistry {
         &self.registry
     }
 }
 
-/// The `finalize_ceiling` conflict-lint failure (H-3) — a loud TRUSTED-SIDE operator
-/// misconfiguration of an assembled ceiling (NOT a trust crossing). Distinct from
+/// The `finalize_charter` conflict-lint failure (H-3) — a loud TRUSTED-SIDE operator
+/// misconfiguration of an assembled charter (NOT a trust crossing). Distinct from
 /// [`ComposeError`] (the draft-blame / admit errors) so the two failure classes never
 /// mix.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FinalizeError {
-    /// Two ceiling inject rules add a column of the same normalized name (with a
+    /// Two charter inject rules add a column of the same normalized name (with a
     /// divergent shape) on overlapping scope.
-    CeilingInjectColumnConflict {
+    CharterInjectColumnConflict {
         /// What collided (the column name + detail).
         detail: String,
     },
-    /// Two ceiling inject rules pin different primary keys, or conflicting
+    /// Two charter inject rules pin different primary keys, or conflicting
     /// `author_primary_key` policy, on overlapping scope.
-    CeilingPrimaryKeyConflict {
+    CharterPrimaryKeyConflict {
         /// The conflicting PK detail.
         detail: String,
     },
-    /// Two ceiling inject rules use the same index name (with divergent columns) on
+    /// Two charter inject rules use the same index name (with divergent columns) on
     /// overlapping scope.
-    CeilingIndexNameConflict {
+    CharterIndexNameConflict {
         /// The conflicting index detail.
         detail: String,
     },
-    /// A ceiling `Validate` (`ForbiddenColumns`) contradicts a ceiling `Inject` (an
+    /// A charter `Validate` (`ForbiddenColumns`) contradicts a charter `Inject` (an
     /// injected column can never satisfy the predicate) on overlapping scope.
-    CeilingInjectValidateContradiction {
+    CharterInjectValidateContradiction {
         /// The contradiction detail.
         detail: String,
     },
-    /// The ceiling's own `core.create_table` granted scope is NOT `⊑` a mandatory
-    /// ceiling inject's scope — the ceiling would let an in-scope table be created
-    /// escaping the mandatory injection (II.2.6a). Surfaced here (ceiling-side) so the
+    /// The charter's own `core.create_table` granted scope is NOT `⊑` a mandatory
+    /// charter inject's scope — the charter would let an in-scope table be created
+    /// escaping the mandatory injection (II.2.6a). Surfaced here (charter-side) so the
     /// misconfiguration is caught before any draft (MED).
     CreatableEscapesMandatoryInject {
         /// A render of the mandatory inject scope the creatable grant escaped.
@@ -1010,20 +1010,20 @@ pub enum FinalizeError {
     },
 }
 
-/// The ceiling-conflict gate (H-3). `overlay`/`restrict` are TOTAL so the algebra
-/// stays lawful; a trusted ceiling they assemble can still contain a
+/// The charter-conflict gate (H-3). `overlay`/`restrict` are TOTAL so the algebra
+/// stays lawful; a trusted charter they assemble can still contain a
 /// *misconfiguration* (colliding injects, PK conflicts, a duplicate index name, an
 /// inject-vs-validate self-contradiction, OR a creatable-escape). Those must surface
 /// **loudly** before enforcement — so they live here, in one explicit, fallible step,
 /// not inside the total combinators.
 ///
-/// Every [`AssembledCeiling`] MUST pass `finalize_ceiling` before it may be `admit`'s
-/// `ceiling` argument — and because `admit`'s ceiling type is the finalized
-/// [`Ceiling`] (or a `RootCeiling`), the type system discharges the "already
-/// collision-free" assumption. `finalize_ceiling` is idempotent and, being a pure
+/// Every [`AssembledCharter`] MUST pass `finalize_charter` before it may be `admit`'s
+/// `charter` argument — and because `admit`'s charter type is the finalized
+/// [`Charter`] (or a `RootCharter`), the type system discharges the "already
+/// collision-free" assumption. `finalize_charter` is idempotent and, being a pure
 /// lint pass, does not change the rule set on success.
-pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, FinalizeError> {
-    // Collect the ceiling's injects/validates/grants across all its layers. The lints
+pub fn finalize_charter(assembled: AssembledCharter) -> Result<Charter, FinalizeError> {
+    // Collect the charter's injects/validates/grants across all its layers. The lints
     // are over the WHOLE assembled rule set (all layer boundaries flattened for the
     // conflict scan; the layer boundaries are preserved for the query/seal).
     let injects: Vec<&Rule> = assembled
@@ -1050,13 +1050,13 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
                 continue;
             }
             if let Some(detail) = inject_column_conflict(sa, sb) {
-                return Err(FinalizeError::CeilingInjectColumnConflict { detail });
+                return Err(FinalizeError::CharterInjectColumnConflict { detail });
             }
             if let Some(detail) = inject_pk_conflict(sa, sb) {
-                return Err(FinalizeError::CeilingPrimaryKeyConflict { detail });
+                return Err(FinalizeError::CharterPrimaryKeyConflict { detail });
             }
             if let Some(detail) = inject_index_conflict(sa, sb) {
-                return Err(FinalizeError::CeilingIndexNameConflict { detail });
+                return Err(FinalizeError::CharterIndexNameConflict { detail });
             }
         }
     }
@@ -1077,9 +1077,9 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
                 for col in &spec.columns {
                     for forbidden in names {
                         if names_match(&col.name, forbidden) {
-                            return Err(FinalizeError::CeilingInjectValidateContradiction {
+                            return Err(FinalizeError::CharterInjectValidateContradiction {
                                 detail: format!(
-                                    "ceiling forbids column `{}` a ceiling inject contributes",
+                                    "charter forbids column `{}` a charter inject contributes",
                                     col.name
                                 ),
                             });
@@ -1090,26 +1090,26 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
         }
     }
 
-    // (3) creatable-escape: the ceiling's own create_table granted scope must be ⊑
-    //     every MANDATORY ceiling inject's scope (MED — moved here from admit). Because
-    //     admit later proves draft.create_table ⊑ ceiling.create_table, this ceiling-
+    // (3) creatable-escape: the charter's own create_table granted scope must be ⊑
+    //     every MANDATORY charter inject's scope (MED — moved here from admit). Because
+    //     admit later proves draft.create_table ⊑ charter.create_table, this charter-
     //     side bound transitively bounds every admitted draft's creatable region.
-    check_ceiling_creatable_lint(&assembled)?;
+    check_charter_creatable_lint(&assembled)?;
 
-    Ok(Ceiling {
+    Ok(Charter {
         registry: assembled.registry,
         layers: assembled.layers,
     })
 }
 
-/// The ceiling-side creatable-escape lint (II.2.6a, run at finalize). The ceiling's
+/// The charter-side creatable-escape lint (II.2.6a, run at finalize). The charter's
 /// EFFECTIVE `core.create_table` granted scope (across its layers) must be `⊑` every
-/// mandatory ceiling inject's scope.
-fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), FinalizeError> {
+/// mandatory charter inject's scope.
+fn check_charter_creatable_lint(assembled: &AssembledCharter) -> Result<(), FinalizeError> {
     let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else {
         return Ok(());
     };
-    // The ceiling's effective creatable scope: the ⊒-conservative join of each layer's
+    // The charter's effective creatable scope: the ⊒-conservative join of each layer's
     // granted create_table scope (over-approx is the fail-closed direction for a ⊑
     // containment check — it can only turn a pass into a reject).
     let mut creatable = Scope::Nothing;
@@ -1148,8 +1148,8 @@ fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), Fina
 // overlay — trusted config cascade (last-wins), TOTAL (H-1: TrustedDoc operands)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Assemble ONE operator's own ceiling from co-authored profile fragments
-/// (`base + env`, II.5) into an [`AssembledCeiling`]. Both operands are [`TrustedDoc`]
+/// Assemble ONE operator's own charter from co-authored profile fragments
+/// (`base + env`, II.5) into an [`AssembledCharter`]. Both operands are [`TrustedDoc`]
 /// (H-1: a creator draft cannot be an `overlay` operand — the type forbids it), so
 /// `overlay` is **total** and **never rejects**.
 ///
@@ -1161,18 +1161,18 @@ fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), Fina
 /// `base` exactly where `over` covers, and inherits `base` elsewhere; inject/validate
 /// lists union with `Base` (outermost) first, then `Env` — the M-3 base-then-over order.
 ///
-/// Ceiling misconfigurations (colliding injects across `base`/`env`, PK conflicts) are
-/// NOT rejected here (that would break totality); they surface at [`finalize_ceiling`]
-/// (H-3), which every assembled ceiling passes before it may be `admit`'s ceiling.
+/// Charter misconfigurations (colliding injects across `base`/`env`, PK conflicts) are
+/// NOT rejected here (that would break totality); they surface at [`finalize_charter`]
+/// (H-3), which every assembled charter passes before it may be `admit`'s charter.
 pub fn overlay(
     base: &TrustedDoc,
     over: &TrustedDoc,
     registry: &PolicyRegistry,
-) -> Result<AssembledCeiling, ComposeError> {
+) -> Result<AssembledCharter, ComposeError> {
     let base_layer = Layer::from_doc(LayerTag::Base, base.doc(), registry)?;
     let over_layer = Layer::from_doc(LayerTag::Env, over.doc(), registry)?;
     // Stack: TOP (innermost query-precedence) first → `[Env=over] over [Base=base]`.
-    Ok(AssembledCeiling {
+    Ok(AssembledCharter {
         registry: registry.clone(),
         layers: vec![over_layer, base_layer],
     })
@@ -1182,7 +1182,7 @@ pub fn overlay(
 // restrict — meet of two TRUSTED docs (H-1: TrustedDoc operands, TOTAL)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Meet two TRUSTED documents pointwise into an [`AssembledCeiling`] (II.3.2) — the
+/// Meet two TRUSTED documents pointwise into an [`AssembledCharter`] (II.3.2) — the
 /// trusted tightening gradient (host ⊒ org ⊒ project). Both operands are
 /// [`TrustedDoc`] (H-1: an untrusted draft cannot be a `restrict` operand — the type
 /// forbids it), so `restrict` is **total** and **never rejects**. It is a genuine
@@ -1190,15 +1190,15 @@ pub fn overlay(
 /// overlap); require/inject/validate rule-sets UNION (each at its own scope).
 ///
 /// The result is a SINGLE flattened `Base` layer — `restrict` flattens a trusted meet
-/// into one meet-layer (H-4). Ceiling-vs-ceiling inject/PK/index collisions are NOT
+/// into one meet-layer (H-4). Charter-vs-charter inject/PK/index collisions are NOT
 /// rejected here (that would break the meet's associativity); they surface at
-/// [`finalize_ceiling`] (H-3), which every assembled ceiling passes before it can be
-/// `admit`'s ceiling.
+/// [`finalize_charter`] (H-3), which every assembled charter passes before it can be
+/// `admit`'s charter.
 pub fn restrict(
     outer: &TrustedDoc,
     inner: &TrustedDoc,
     registry: &PolicyRegistry,
-) -> Result<AssembledCeiling, ComposeError> {
+) -> Result<AssembledCharter, ComposeError> {
     let og = GrantModel::build(&outer.doc().rules, registry)?;
     let ig = GrantModel::build(&inner.doc().rules, registry)?;
 
@@ -1239,7 +1239,7 @@ pub fn restrict(
         injects,
         validates,
     };
-    Ok(AssembledCeiling {
+    Ok(AssembledCharter {
         registry: registry.clone(),
         layers: vec![layer],
     })
@@ -1249,7 +1249,7 @@ pub fn restrict(
 /// grant rules obtained by intersecting each outer rule's scope with each inner rule's
 /// scope (via `⊓`) and meeting their values; empty-scope products drop out.
 ///
-/// A key present in only ONE ceiling meets against the OTHER's default (deny): the
+/// A key present in only ONE charter meets against the OTHER's default (deny): the
 /// meet of any value with the tightest default is the default → the clamped grant is
 /// empty on that key. So a one-sided key contributes NO grant rules (correct: the
 /// clamp of "granted" with "not granted" is "not granted").
@@ -1291,17 +1291,17 @@ fn clamp_grant_key(
 // collision detection (compose-time blame)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Compose-time DRAFT-vs-CEILING inject-collision check (`admit`). A ceiling inject
+/// Compose-time DRAFT-vs-CHARTER inject-collision check (`admit`). A charter inject
 /// colliding with a draft inject on scope-overlapping objects — same column name with
 /// divergent shape, conflicting `primary_key` pin, `author_primary_key`
 /// Allow-vs-Forbid, or same index name with divergent columns — is blamed on the
-/// draft. (Ceiling-vs-ceiling collisions are NOT checked here — they surface at
-/// [`finalize_ceiling`], H-3.)
+/// draft. (Charter-vs-charter collisions are NOT checked here — they surface at
+/// [`finalize_charter`], H-3.)
 pub(crate) fn check_inject_collisions(
-    ceiling_injects: &[Rule],
+    charter_injects: &[Rule],
     draft_injects: &[Rule],
 ) -> Result<(), ComposeError> {
-    for l in ceiling_injects {
+    for l in charter_injects {
         let RuleKind::Inject { spec: ls } = &l.kind else {
             continue;
         };
@@ -1314,7 +1314,7 @@ pub(crate) fn check_inject_collisions(
                 continue;
             }
             if let Some(detail) = inject_specs_collide(ls, rs) {
-                return Err(ComposeError::DraftInjectCollidesCeiling { detail });
+                return Err(ComposeError::DraftInjectCollidesCharter { detail });
             }
         }
     }
@@ -1373,7 +1373,7 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
 }
 
 // The three split conflict predicates the FINALIZE gate uses (they classify a
-// ceiling-vs-ceiling inject collision into its precise `FinalizeError` variant).
+// charter-vs-charter inject collision into its precise `FinalizeError` variant).
 
 /// Two injects share a column name with a DIVERGENT shape (type/nullable/default)?
 fn inject_column_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
@@ -1424,16 +1424,16 @@ fn inject_index_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
 }
 
 /// A draft `Validate` (`ForbiddenColumns` / `TableNameForbidden`) contradicting a
-/// ceiling `Inject` on overlapping scope (II.4.4): a forbidden column naming an
+/// charter `Inject` on overlapping scope (II.4.4): a forbidden column naming an
 /// injected column, or a forbidden table-name pattern matching would make the
-/// ceiling-injected table unsatisfiable. We flag the concrete column contradiction
+/// charter-injected table unsatisfiable. We flag the concrete column contradiction
 /// (name-match); table-name contradiction is left to resolve time (injects carry no
 /// table name here), matching the loader's single-doc gate.
 pub(crate) fn check_validate_vs_inject(
-    ceiling_injects: &[Rule],
+    charter_injects: &[Rule],
     draft_validates: &[Rule],
 ) -> Result<(), ComposeError> {
-    for inj in ceiling_injects {
+    for inj in charter_injects {
         let RuleKind::Inject { spec } = &inj.kind else {
             continue;
         };
@@ -1448,9 +1448,9 @@ pub(crate) fn check_validate_vs_inject(
                 for col in &spec.columns {
                     for forbidden in names {
                         if names_match(&col.name, forbidden) {
-                            return Err(ComposeError::DraftValidateContradictsCeilingInject {
+                            return Err(ComposeError::DraftValidateContradictsCharterInject {
                                 detail: format!(
-                                    "draft forbids column `{}` a ceiling inject contributes",
+                                    "draft forbids column `{}` a charter inject contributes",
                                     col.name
                                 ),
                             });

@@ -8,10 +8,66 @@
 //! cross-schema confinement, the string-literal extractor, and the analysis
 //! re-exports.
 
-use zero_migrate_guard::guard::{extract_string_literals, GuardConfig, GuardError, SqlGuard};
+mod support;
+
+use zero_migrate_guard::guard::{
+    check_raw_view_body_text, extract_string_literals, GuardConfig, GuardError, GuardMode, SqlGuard,
+};
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::policy::SchemaScope;
 
 fn confined() -> SqlGuard {
-    SqlGuard::new(GuardConfig::confined("app1"))
+    SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject("app1"),
+        SqlDialect::Postgres,
+    ))
+}
+
+#[test]
+fn explicit_confined_charter_fixture_composes() {
+    let cfg = GuardConfig::from_policy(support::confined_charter(), SqlDialect::Postgres);
+    assert_eq!(
+        cfg.schema_scope(),
+        Some(SchemaScope::Single("app".to_string()))
+    );
+}
+
+#[test]
+fn dialect_selection_preserves_policy_and_enforces_non_postgres_guard() {
+    let cfg = GuardConfig::from_policy_with_mode(
+        support::no_inject("app1"),
+        SqlDialect::Postgres,
+        GuardMode::Off,
+    );
+
+    let postgres = cfg.clone().for_dialect(SqlDialect::Postgres);
+    assert_eq!(postgres.guard_mode(), GuardMode::Off);
+    assert_eq!(
+        postgres.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
+    );
+
+    let sqlite = cfg.for_dialect(SqlDialect::Sqlite);
+    assert_eq!(sqlite.guard_mode(), GuardMode::Enforced);
+    assert_eq!(
+        sqlite.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
+    );
+}
+
+#[test]
+fn raw_view_scanner_evaluates_schema_scope_without_a_policy_fixture() {
+    let scope = SchemaScope::Single("app1".to_string());
+    check_raw_view_body_text("SELECT * FROM app1.widgets", "view body", Some(&scope))
+        .expect("the explicit scope admits its own schema");
+
+    let err = check_raw_view_body_text("SELECT * FROM other.widgets", "view body", Some(&scope))
+        .expect_err("the explicit scope rejects another schema");
+    assert!(matches!(err, GuardError::CrossSchema { .. }));
+
+    let err = check_raw_view_body_text("SELECT pg_read_file('/etc/passwd')", "view body", None)
+        .expect_err("the body deny-list remains active without schema confinement");
+    assert!(matches!(err, GuardError::Denied { .. }));
 }
 
 #[test]
