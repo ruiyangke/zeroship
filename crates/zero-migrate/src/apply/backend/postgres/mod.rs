@@ -166,6 +166,23 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         session::validate_non_txn_idempotent(m)
     }
 
+    async fn journal_exists(&self, cfg: &ExecutorConfig) -> Result<bool, JournalError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT 1 AS journal_exists
+                   FROM pg_catalog.pg_class AS c
+                   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                  WHERE n.nspname = $1
+                    AND c.relname = 'schema_migrations'
+                    AND c.relkind IN ('r', 'p')
+                  LIMIT 1",
+                &[cfg.pg.meta_schema.as_str().into()],
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
         journal::ensure_journal(self.conn, cfg).await
     }

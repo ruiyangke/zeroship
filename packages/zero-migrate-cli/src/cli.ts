@@ -1,17 +1,13 @@
 // `zero-migrate` — the command-line surface for the host runtime.
 //
-// A THIN arg-parser over the host verbs this package already exports
-// (`apply`/`plan`/`status`/`validate`) plus pure-JS `new` scaffolding — the engine
-// facade does the real work over the native addon and the `pg`/`mysql2` driver seam.
+// A thin arg-parser over the host runtime plus pure-JS `new` scaffolding. The
+// engine facade does the real work over the native addon and database drivers.
 //
 // Commands:
 //   new <name>          Scaffold a fresh `<14-digit-ts>_<name>.ts` op-DSL migration
 //                       (imports `{ table, t } from "zero-migrate"`). OFFLINE.
-//   plan   [dir]        DB-free load + structural/confinement/ownership VERIFY of every
-//                       migration in `dir` (the fast pre-apply gate). OFFLINE.
-//   preview [dir]       DB-free: print the authored `{ ir_version, name, ops }`
-//                       envelope for each migration (the op-IR the addon would lower).
-//                       OFFLINE.
+//   lint   [dir]        DB-free verification for every supported dialect. OFFLINE.
+//   plan   [dir]        Reconcile live status and render pending SQL without apply.
 //   apply  [dir]        Apply every migration in `dir` over the `--database-url`
 //                       driver (`pg`/`mysql2` seam) in filename order.
 //   status [dir]        Reconcile against the live journal over the `--database-url`
@@ -30,16 +26,19 @@ import { pathToFileURL } from "node:url";
 import {
   apply,
   history,
-  plan,
+  previewSql,
   resolvePending,
-  status,
+  statusEnvelopes,
   currentIrVersion,
   type DriverConfig,
 } from "./index.js";
+import { loadAddon, type StatusReply } from "./addon.js";
+import { resolveCliConfig, type CliConfigValues } from "./config.js";
 import {
   buildEnvelope,
   deriveNameFromPath,
   resolveMigrationName,
+  type IrEnvelope,
   type MigrationModule,
 } from "zero-migrate/internal/recorder";
 
@@ -49,6 +48,10 @@ const DEFAULT_DIR = "./migrations";
 const DEFAULT_SCHEMA = "public";
 /** The default deploying app id when none is given. */
 const DEFAULT_OWNER_APP = "app_cli";
+/** Offline fallback when lint is run without a configured charter. */
+const NO_INJECT_POLICY = "policy_version = 1\n";
+const ALL_DIALECTS = ["postgres", "mysql", "sqlite"] as const;
+type Dialect = (typeof ALL_DIALECTS)[number];
 
 /** This package's version, read from its own `package.json`. `new URL("../package.json",
  *  import.meta.url)` resolves to the package root whether the CLI runs from published
@@ -119,8 +122,8 @@ interface Args {
   databaseUrl?: string;
   /** Optional SQLite migration-journal file override. */
   journalPath?: string;
-  /** Dialect selected for offline plan validation. Defaults to PostgreSQL. */
-  dialect?: "postgres" | "mysql" | "sqlite";
+  /** Dialect selected for offline lint validation. Defaults to all dialects. */
+  dialect?: Dialect;
   /** Path to the trusted JSON table-ownership registry. */
   registryPath?: string;
   /** Ordered paths to table-shape policy files. The first path is the root. */
@@ -131,10 +134,21 @@ interface Args {
   json: boolean;
   /** `--approve` grants operator approval for reviewed destructive/data-rewrite steps. */
   approved: boolean;
+  /** `lint --explain` renders SQL for every selected dialect. */
+  explain: boolean;
+  /** `status --strict` fails on pending or dirty state. */
+  strict: boolean;
   /** Resolve the pending rename by keeping the new column. */
-  resolveApply: boolean;
+  resolveCommit: boolean;
   /** Resolve the pending rename by keeping the old column. */
-  resolveAbort: boolean;
+  resolveRollback: boolean;
+  /** Explicit config file and environment selectors. */
+  configPath?: string;
+  environment?: string;
+  /** True only when the URL came from `--database-url`. */
+  databaseUrlFromFlag: boolean;
+  /** Values whose flags were actually present, for config precedence. */
+  explicitConfig: CliConfigValues;
 }
 
 /** Parse value-taking flags, valueless boolean flags, and positionals. Unknown
@@ -143,13 +157,17 @@ function parseArgs(argv: string[]): Args {
   const args: Args = {
     command: "",
     dir: DEFAULT_DIR,
-    ownerApp: process.env.ZERO_MIGRATE_OWNER_APP ?? DEFAULT_OWNER_APP,
-    projectSchema: process.env.ZERO_MIGRATE_SCHEMA ?? DEFAULT_SCHEMA,
+    ownerApp: DEFAULT_OWNER_APP,
+    projectSchema: DEFAULT_SCHEMA,
     policyPaths: [],
     json: false,
     approved: false,
-    resolveApply: false,
-    resolveAbort: false,
+    explain: false,
+    strict: false,
+    resolveCommit: false,
+    resolveRollback: false,
+    databaseUrlFromFlag: false,
+    explicitConfig: {},
   };
   let helpRequested = false;
   let versionRequested = false;
@@ -177,9 +195,12 @@ function parseArgs(argv: string[]): Args {
     switch (key) {
       case "dir":
         args.dir = takeVal();
+        args.explicitConfig.dir = args.dir;
         break;
       case "database-url":
         args.databaseUrl = takeVal();
+        args.databaseUrlFromFlag = true;
+        args.explicitConfig.databaseUrl = args.databaseUrl;
         break;
       case "journal":
         args.journalPath = takeVal();
@@ -196,15 +217,26 @@ function parseArgs(argv: string[]): Args {
       }
       case "registry":
         args.registryPath = takeVal();
+        args.explicitConfig.registryPath = args.registryPath;
         break;
       case "policy":
+        args.explicitConfig.policyPaths ??= [];
         args.policyPaths.push(takeVal());
+        (args.explicitConfig.policyPaths as string[]).push(args.policyPaths.at(-1)!);
         break;
       case "owner-app":
         args.ownerApp = takeVal();
+        args.explicitConfig.ownerApp = args.ownerApp;
         break;
       case "schema":
         args.projectSchema = takeVal();
+        args.explicitConfig.projectSchema = args.projectSchema;
+        break;
+      case "config":
+        args.configPath = takeVal();
+        break;
+      case "env":
+        args.environment = takeVal();
         break;
       case "json":
         rejectInlineVal();
@@ -214,13 +246,21 @@ function parseArgs(argv: string[]): Args {
         rejectInlineVal();
         args.approved = true;
         break;
-      case "apply":
+      case "explain":
         rejectInlineVal();
-        args.resolveApply = true;
+        args.explain = true;
         break;
-      case "abort":
+      case "strict":
         rejectInlineVal();
-        args.resolveAbort = true;
+        args.strict = true;
+        break;
+      case "commit":
+        rejectInlineVal();
+        args.resolveCommit = true;
+        break;
+      case "rollback":
+        rejectInlineVal();
+        args.resolveRollback = true;
         break;
       case "version":
         rejectInlineVal();
@@ -249,51 +289,119 @@ function parseArgs(argv: string[]): Args {
   }
   if (
     args.command !== "new" &&
-    args.command !== "resolve-pending" &&
+    args.command !== "resolve" &&
     args.positional !== undefined
   ) {
     throw new CliError(
       `command ${JSON.stringify(args.command)} does not accept positional arguments; use --dir`,
     );
   }
-  if (args.dialect !== undefined && args.command !== "plan") {
-    throw new CliError("flag --dialect is only valid with the plan command");
+  if (args.dialect !== undefined && args.command !== "lint") {
+    throw new CliError("flag --dialect is only valid with the lint command");
   }
-  if ((args.resolveApply || args.resolveAbort) && args.command !== "resolve-pending") {
-    throw new CliError("flags --apply and --abort are only valid with resolve-pending");
+  if ((args.resolveCommit || args.resolveRollback) && args.command !== "resolve") {
+    throw new CliError("flags --commit and --rollback are only valid with resolve");
+  }
+  if (args.explain && args.command !== "lint") {
+    throw new CliError("flag --explain is only valid with lint");
+  }
+  if (args.strict && args.command !== "status") {
+    throw new CliError("flag --strict is only valid with status");
   }
   if (
     args.registryPath !== undefined &&
+    args.command !== "lint" &&
     args.command !== "plan" &&
     args.command !== "apply" &&
-    args.command !== "status"
+    args.command !== "status" &&
+    args.command !== "resolve"
   ) {
-    throw new CliError("flag --registry is only valid with plan, apply, or status");
+    throw new CliError(
+      "flag --registry is only valid with lint, plan, apply, status, or resolve",
+    );
   }
   if (
     args.policyPaths.length > 0 &&
+    args.command !== "lint" &&
+    args.command !== "plan" &&
     args.command !== "apply" &&
     args.command !== "status" &&
     args.command !== "history" &&
-    args.command !== "resolve-pending"
+    args.command !== "resolve"
   ) {
     throw new CliError(
-      "flag --policy is only valid with apply, status, history, or resolve-pending",
+      "flag --policy is only valid with lint, plan, apply, status, history, or resolve",
     );
   }
   if (args.journalPath !== undefined && args.command !== "apply") {
     throw new CliError("flag --journal is only valid with apply");
-  }
-  // Fall back only when the flag was absent. An explicitly empty flag is an error.
-  if (args.databaseUrl === undefined) {
-    const env = process.env.DATABASE_URL;
-    if (env && env.length > 0) args.databaseUrl = env;
   }
   return args;
 }
 
 /** A CLI-level failure with a clean message (mapped to a non-zero exit, no stack). */
 class CliError extends Error {}
+
+/** Apply config/environment/default precedence after raw flags have been parsed. */
+function resolveParsedArgs(args: Args): Args {
+  const resolved = resolveCliConfig({
+    explicit: args.explicitConfig,
+    configPath: args.configPath,
+    environment: args.environment,
+    defaults: {
+      dir: DEFAULT_DIR,
+      ownerApp: DEFAULT_OWNER_APP,
+      projectSchema: DEFAULT_SCHEMA,
+      policyPaths: [],
+    },
+  });
+  args.databaseUrl = resolved.databaseUrl;
+  args.dir = resolved.dir;
+  args.ownerApp = resolved.ownerApp;
+  args.projectSchema = resolved.projectSchema;
+  args.registryPath = resolved.registryPath;
+  args.policyPaths = resolved.policyPaths;
+  return args;
+}
+
+/** Detect credentials embedded in the authority of an explicit network URL. */
+export function hasInlinePassword(databaseUrl: string): boolean {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(databaseUrl.trim());
+  if (match === null) return false;
+  const at = match[1].lastIndexOf("@");
+  return at > 0 && match[1].slice(0, at).includes(":");
+}
+
+function redactUrlTokens(message: string): string {
+  return message.replace(
+    /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'()<>{}\[\]]+/gi,
+    "<redacted database URL>",
+  );
+}
+
+/** Keep connection failures useful without ever echoing the configured URL or
+ * its credentials. */
+function safeErrorMessage(error: unknown, databaseUrl: string | undefined): string {
+  let message = (error as Error).message ?? String(error);
+  if (databaseUrl === undefined || databaseUrl.length === 0) {
+    return redactUrlTokens(message);
+  }
+  message = message.split(databaseUrl).join("<redacted database URL>");
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(databaseUrl.trim())?.[1];
+  if (authority !== undefined) {
+    const at = authority.lastIndexOf("@");
+    if (at > 0) {
+      const credentials = authority.slice(0, at);
+      message = message.split(credentials).join("<redacted credentials>");
+      const colon = credentials.indexOf(":");
+      const username = colon === -1 ? credentials : credentials.slice(0, colon);
+      const password = colon === -1 ? "" : credentials.slice(colon + 1);
+      if (username.length >= 3) message = message.split(username).join("<redacted user>");
+      if (password.length > 0) message = message.split(password).join("<redacted password>");
+    }
+  }
+  return redactUrlTokens(message);
+}
 
 /** Read and validate an authoritative table-to-owner registry from JSON. */
 async function loadRegistry(path: string | undefined): Promise<Record<string, string>> {
@@ -365,6 +473,12 @@ async function loadPolicyFiles(paths: readonly string[]): Promise<string[]> {
     }
   }
   return charterLayers;
+}
+
+/** Lint remains usable without a config file; in that case preview rendering is
+ * shaped by an explicit in-memory no-inject charter. */
+async function loadLintPolicyFiles(paths: readonly string[]): Promise<string[]> {
+  return paths.length === 0 ? [NO_INJECT_POLICY] : await loadPolicyFiles(paths);
 }
 
 /** Derive the separate SQLite migration-journal filename next to the app DB. */
@@ -451,6 +565,18 @@ async function importMigrations(files: readonly MigrationFile[]): Promise<Loaded
   return loaded;
 }
 
+/** Record every trusted migration exactly once and keep file/module/envelope aligned. */
+function authorMigrations(
+  migrations: readonly LoadedMigration[],
+): Array<LoadedMigration & { envelope: IrEnvelope }> {
+  const irVersion = currentIrVersion();
+  return migrations.map(({ file, migration }) => ({
+    file,
+    migration,
+    envelope: buildEnvelope(migration, { irVersion, nameFallback: file.label }),
+  }));
+}
+
 /** Reject ambiguous plan identities before planning or opening a database session. */
 function assertUniqueMigrationNames(migrations: readonly LoadedMigration[]): void {
   const firstFileByName = new Map<string, MigrationFile>();
@@ -530,35 +656,190 @@ function timestamp14(now: Date): string {
   );
 }
 
-/** One `plan` verdict line. */
-interface PlanLine {
+/** One dialect-specific offline verification result. */
+interface LintDialectResult {
+  dialect: Dialect;
+  ok: boolean;
+  irVersion?: number;
+  opCount?: number;
+  error?: string;
+  sql?: string;
+}
+
+/** One aggregate `lint` verdict line. */
+interface LintLine {
   label: string;
   ok: boolean;
   opCount: number;
-  irVersion?: number;
-  error?: string;
+  dialects: LintDialectResult[];
 }
 
-/** `preview [dir]` — DB-free: print the authored op-IR envelope for each migration. */
-async function runPreview(args: Args): Promise<number> {
+/** `lint` verifies each authored envelope for all requested dialects and asks
+ * the policy-aware preview renderer to lower the same bytes. Rendering is
+ * isolated per envelope so a lowering failure remains a migration verdict. */
+async function runLint(args: Args): Promise<number> {
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
   await ensureTsLoader(files);
-  const irVersion = currentIrVersion();
-  const envelopes = [];
-  for (const f of files) {
-    const mod = await importMigration(f.path);
-    envelopes.push(buildEnvelope(mod, { irVersion, nameFallback: f.label }));
-  }
-  if (args.json) {
-    process.stdout.write(JSON.stringify(envelopes, null, 2) + "\n");
-  } else {
-    for (const env of envelopes) {
-      process.stdout.write(
-        `preview ${env.name}: ir_version=${env.ir_version} ops=${env.ops.length}\n`,
+  const registry = await loadRegistry(args.registryPath);
+  const charterLayers = await loadLintPolicyFiles(args.policyPaths);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  const authored = authorMigrations(migrations);
+  const envelopeJson = authored.map(({ envelope }) => JSON.stringify(envelope));
+  const selectedDialects: readonly Dialect[] = args.dialect
+    ? [args.dialect]
+    : ALL_DIALECTS;
+  const addon = loadAddon();
+
+  const reports: LintLine[] = authored.map(({ file, envelope }, index) => {
+    const dialects = selectedDialects.map((dialect): LintDialectResult => {
+      const verdict = addon.loadVerify(
+        envelopeJson[index],
+        args.ownerApp,
+        dialect,
+        registry,
+        args.projectSchema,
       );
-      process.stdout.write(JSON.stringify(env.ops, null, 2) + "\n");
+      let renderedSql: string | undefined;
+      let previewError: string | undefined;
+      try {
+        [renderedSql] = previewSql({
+          envelopes: [envelopeJson[index]],
+          dialect,
+          defaultSchema: args.projectSchema,
+          ownerApp: args.ownerApp,
+          charterLayers,
+        });
+      } catch (error) {
+        previewError = safeErrorMessage(error, undefined);
+      }
+      return {
+        dialect,
+        ok: verdict.ok && previewError === undefined,
+        irVersion: verdict.irVersion,
+        opCount: verdict.opCount,
+        error: verdict.error ?? previewError,
+        ...(args.explain && renderedSql !== undefined ? { sql: renderedSql } : {}),
+      };
+    });
+    return {
+      label: envelope.name || file.label,
+      ok: dialects.every((result) => result.ok),
+      opCount: envelope.ops.length,
+      dialects,
+    };
+  });
+
+  if (args.json) {
+    process.stdout.write(JSON.stringify(reports, null, 2) + "\n");
+  } else {
+    for (const report of reports) {
+      process.stdout.write(
+        `lint ${report.label}: ${report.ok ? "ok" : "fail"} (${report.opCount} ops)\n`,
+      );
+      for (const result of report.dialects) {
+        if (!result.ok) {
+          process.stdout.write(`  ${result.dialect}: ${result.error ?? "verification failed"}\n`);
+        }
+        if (args.explain) process.stdout.write(`${result.sql ?? ""}\n`);
+      }
     }
+  }
+  return reports.every((report) => report.ok) ? 0 : 1;
+}
+
+export interface PendingMigrationPreview {
+  version: string;
+  name: string;
+  envelope: IrEnvelope;
+}
+
+/** Correlate top-level pending logical plan IDs back to authored envelopes in
+ * source order. StatusIr always returns plan detail; fail closed if it does not. */
+export function pendingMigrationsForPlan(
+  reply: StatusReply,
+  envelopes: readonly IrEnvelope[],
+): PendingMigrationPreview[] {
+  const pending = new Set(reply.pending);
+  const plans = reply.plans ?? [];
+  const byName = new Map<string, (typeof plans)[number]>();
+  for (const plan of plans) {
+    if (byName.has(plan.name)) {
+      throw new CliError(`status returned ambiguous migration name ${JSON.stringify(plan.name)}`);
+    }
+    byName.set(plan.name, plan);
+  }
+  const result: PendingMigrationPreview[] = [];
+  for (const envelope of envelopes) {
+    const plan = byName.get(envelope.name);
+    if (plan !== undefined && pending.has(plan.version)) {
+      result.push({ version: plan.version, name: plan.name, envelope });
+    }
+  }
+  const correlated = new Set(result.map(({ version }) => version));
+  const missing = reply.pending.filter((version) => !correlated.has(version));
+  if (missing.length > 0) {
+    throw new CliError(
+      `status returned pending migration(s) that cannot be matched to source: ${missing.join(", ")}`,
+    );
+  }
+  return result;
+}
+
+/** `plan` connects only for status reconciliation, then renders pending envelope
+ * SQL offline. It never invokes apply or resolution. */
+async function runLivePlan(args: Args): Promise<number> {
+  if (!args.databaseUrl) {
+    throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
+  }
+  const driver = driverFor(args.databaseUrl);
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
+  const registry = await loadRegistry(args.registryPath);
+  const files = await discover(args.dir);
+  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  const authored = authorMigrations(migrations);
+  const envelopes = authored.map(({ envelope }) => envelope);
+  const reply = await statusEnvelopes({
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    driver,
+    registry,
+    policy: charterLayers,
+    envelopes,
+    readOnly: true,
+  });
+  const pending = pendingMigrationsForPlan(reply, envelopes);
+  const rendered = previewSql({
+    envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
+    dialect: driver.kind,
+    defaultSchema: args.projectSchema,
+    ownerApp: args.ownerApp,
+    charterLayers,
+  });
+
+  if (args.json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          count: pending.length,
+          pending: pending.map(({ version, name }, index) => ({
+            version,
+            name,
+            sql: rendered[index],
+          })),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+  } else {
+    const noun = pending.length === 1 ? "migration" : "migrations";
+    process.stdout.write(`would apply ${pending.length} ${noun}\n`);
+    for (const sql of rendered) process.stdout.write(`${sql}\n`);
   }
   return 0;
 }
@@ -597,8 +878,63 @@ async function runApply(args: Args): Promise<number> {
   return 0;
 }
 
-/** `status [dir]` — reconcile against the live journal over the `--database-url`
- *  driver. (Reads the journal; the migration set is discovered for the pending view.) */
+/** True when strict status should fail. */
+export function statusIsDirty(reply: StatusReply): boolean {
+  return (
+    reply.pending.length > 0 ||
+    reply.pendingContracts.length > 0 ||
+    reply.blocked.length > 0 ||
+    reply.unexpectedJournal.length > 0 ||
+    (reply.plans ?? []).some(
+      (plan) =>
+        plan.state === "drifted" || plan.steps.some((step) => step.state === "drifted"),
+    )
+  );
+}
+
+/** Status exit code policy, kept pure so CI semantics are host-testable. */
+export function statusExitCode(reply: StatusReply, strict: boolean): number {
+  return strict && statusIsDirty(reply) ? 1 : 0;
+}
+
+/** Preserve the addon's structured reply exactly for `status --json`. */
+export function formatStatusJson(reply: StatusReply): string {
+  return `${JSON.stringify(reply, null, 2)}\n`;
+}
+
+/** Human status with stable count, drift, and checksum-mismatch lines. */
+export function formatStatusHuman(reply: StatusReply): string {
+  const lines = [
+    `status: ${reply.applied.length} applied, ${reply.pending.length} pending`,
+  ];
+  for (const entry of reply.unexpectedJournal) {
+    lines.push(`drift: unexpected journal entry ${entry.version} (${entry.state})`);
+  }
+  for (const plan of reply.plans ?? []) {
+    const driftedSteps = plan.steps.filter((step) => step.state === "drifted");
+    if (driftedSteps.length === 0 && plan.state === "drifted") {
+      lines.push(`checksum mismatch: ${plan.name} (${plan.version})`);
+    }
+    for (const step of driftedSteps) {
+      lines.push(
+        `checksum mismatch: ${plan.name}, step ${step.name} (${step.version})`,
+      );
+    }
+  }
+  for (const contract of reply.pendingContracts) {
+    lines.push(
+      `pending online rename: ${contract.table} (${contract.pendingVersion})${contract.orphaned ? " [orphaned]" : ""}`,
+    );
+  }
+  for (const blocked of reply.blocked) {
+    lines.push(
+      `blocked: ${blocked.blocked} waits for ${blocked.dependency} (${blocked.pendingVersion})`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** `status [dir]` reconciles the authored set against the live journal. */
 async function runStatus(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError(
@@ -611,57 +947,115 @@ async function runStatus(args: Args): Promise<number> {
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
   await ensureTsLoader(files);
-  const migrations = await Promise.all(files.map((file) => importMigration(file.path)));
-  const reply = await status({
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  const envelopes = authorMigrations(migrations).map(({ envelope }) => envelope);
+  const reply = await statusEnvelopes({
     ownerApp: args.ownerApp,
     projectSchema: args.projectSchema,
     driver,
     registry,
     policy: charterLayers,
-    migrations,
-    nameFallbacks: files.map((file) => file.label),
+    envelopes,
+    readOnly: false,
   });
   if (args.json) {
-    process.stdout.write(JSON.stringify(reply, null, 2) + "\n");
+    process.stdout.write(formatStatusJson(reply));
   } else {
-    process.stdout.write(`status: ${JSON.stringify(reply)}\n`);
+    process.stdout.write(formatStatusHuman(reply));
   }
-  return 0;
+  return statusExitCode(reply, args.strict);
 }
 
-/** Complete or abort one outstanding PostgreSQL online rename. */
-async function runResolvePending(args: Args): Promise<number> {
-  const pendingVersion = args.positional;
-  if (!pendingVersion) {
+/** Map a migration name to exactly one outstanding online-rename obligation. */
+export function resolvePendingVersion(reply: StatusReply, migrationName: string): string {
+  const plans = (reply.plans ?? []).filter((plan) => plan.name === migrationName);
+  if (plans.length === 0) {
     throw new CliError(
-      "`resolve-pending` needs a pending version: zero-migrate resolve-pending <pending-version>",
+      `unknown pending online-rename migration ${JSON.stringify(migrationName)}`,
     );
   }
-  if (args.resolveApply === args.resolveAbort) {
-    throw new CliError("choose exactly one of --apply or --abort");
+  if (plans.length > 1) {
+    throw new CliError(
+      `ambiguous migration name ${JSON.stringify(migrationName)} in status reply`,
+    );
+  }
+  if (!reply.pending.includes(plans[0].version)) {
+    throw new CliError(
+      `migration ${JSON.stringify(migrationName)} is not pending`,
+    );
+  }
+  const stepVersions = new Set(plans[0].steps.map((step) => step.version));
+  const contracts = reply.pendingContracts.filter((contract) =>
+    stepVersions.has(contract.pendingVersion),
+  );
+  if (contracts.length === 0) {
+    throw new CliError(
+      `migration ${JSON.stringify(migrationName)} has no pending online rename`,
+    );
+  }
+  if (contracts.length > 1) {
+    throw new CliError(
+      `migration ${JSON.stringify(migrationName)} has multiple pending online renames; resolution is ambiguous`,
+    );
+  }
+  return contracts[0].pendingVersion;
+}
+
+/** Complete or roll back one outstanding PostgreSQL online rename by migration name. */
+async function runResolve(args: Args): Promise<number> {
+  const migrationName = args.positional;
+  if (!migrationName) {
+    throw new CliError("`resolve` needs a migration name: zero-migrate resolve <migration>");
+  }
+  if (args.resolveCommit === args.resolveRollback) {
+    throw new CliError("choose exactly one of --commit or --rollback");
   }
   if (!args.approved) {
-    throw new CliError("resolve-pending requires --approve after reviewing the column drop");
+    throw new CliError("resolve requires --approve after reviewing the column drop");
   }
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
   const driver = driverFor(args.databaseUrl);
   if (driver.kind !== "postgres") {
-    throw new CliError("resolve-pending supports only PostgreSQL online renames");
+    throw new CliError("resolve supports only PostgreSQL online renames");
   }
   const charterLayers = await loadPolicyFiles(args.policyPaths);
+  const registry = await loadRegistry(args.registryPath);
+  const files = await discover(args.dir);
+  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  const authored = authorMigrations(migrations);
+  const localMatches = authored.filter(({ envelope }) => envelope.name === migrationName);
+  if (localMatches.length === 0) {
+    throw new CliError(`unknown migration ${JSON.stringify(migrationName)} in ${args.dir}`);
+  }
+  if (localMatches.length > 1) {
+    throw new CliError(`ambiguous migration name ${JSON.stringify(migrationName)} in ${args.dir}`);
+  }
+  const reply = await statusEnvelopes({
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    driver,
+    registry,
+    policy: charterLayers,
+    envelopes: authored.map(({ envelope }) => envelope),
+  });
+  const pendingVersion = resolvePendingVersion(reply, migrationName);
   const outcome = await resolvePending({
     ownerApp: args.ownerApp,
     projectSchema: args.projectSchema,
     pendingVersion,
-    action: args.resolveApply ? "apply" : "abort",
+    action: args.resolveCommit ? "apply" : "abort",
     driver,
     approved: true,
     policy: charterLayers,
     appliedBy: "cli",
   });
-  process.stdout.write(`resolve-pending ${pendingVersion}: ${JSON.stringify(outcome)}\n`);
+  process.stdout.write(`resolve ${migrationName}: ${JSON.stringify(outcome)}\n`);
   return 0;
 }
 
@@ -702,19 +1096,19 @@ const USAGE = `zero-migrate: database migrations from JavaScript
 
 Usage:
   zero-migrate new <name> [--dir <dir>]
-  zero-migrate plan    [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
-  zero-migrate preview [--dir <dir>] [--json]
-  zero-migrate apply   [--dir <dir>] --database-url <url> --policy <file> [--policy <file> ...] [--journal <path>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
-  zero-migrate status  [--dir <dir>] --database-url <url> --policy <file> [--policy <file> ...] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
-  zero-migrate history --database-url <url> --policy <file> [--policy <file> ...] [--owner-app <app>] [--schema <schema>] [--json]
-  zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> --policy <file> [--policy <file> ...] [--owner-app <app>] [--schema <schema>]
+  zero-migrate lint [--dir <dir>] [--dialect <name>] [--explain] [--registry <file>] [--policy <file> ...] [--json]
+  zero-migrate plan [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--json]
+  zero-migrate apply [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--journal <path>] [--registry <file>] [--approve]
+  zero-migrate status [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--strict] [--json]
+  zero-migrate resolve <migration> (--commit | --rollback) --approve [--database-url <url>] [--policy <file> ...] [--registry <file>]
+  zero-migrate history [--database-url <url>] [--policy <file> ...] [--json]
   zero-migrate --version
 
 Flags:
   --dir <dir>           Migration directory (default ./migrations)
-  --database-url <url>  postgres:// or mysql:// DSN, or sqlite:<path> (or DATABASE_URL)
+  --database-url <url>  postgres:// or mysql:// DSN, or sqlite:<path>
   --journal <path>      SQLite journal override (default: <app>.migrations.<ext>)
-  --dialect <name>      plan dialect: postgres, mysql, or sqlite (default postgres)
+  --dialect <name>      lint only: postgres, mysql, or sqlite (default all three)
   --registry <file>     Trusted JSON map of table names to owner app IDs
   --policy <file>
                         Repeatable ordered TOML policy layer; first is the root/bound
@@ -722,16 +1116,21 @@ Flags:
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
   --approve             Approve reviewed destructive changes and backfills
-  --apply               Complete an online rename and keep the new column
-  --abort               Abort an online rename and keep the old column
+  --commit              Resolve an online rename and keep the new column
+  --rollback            Resolve an online rename and keep the old column
+  --explain             lint: include rendered SQL for selected dialects
+  --strict              status: fail if pending, drifted, or checksum-mismatched
   --json                Machine-readable output where supported
+  --config <path>       Use this zero-migrate.toml instead of upward discovery
+  --env <name>          Select [env.<name>] (default dev, or the sole block)
   --version             Print the zero-migrate version
   --help                This help
 
-new/plan/preview are offline and do not connect to a database. apply supports
-PostgreSQL, MySQL 8, and SQLite; status supports PostgreSQL and MySQL 8; history is
-PostgreSQL only. TypeScript (.ts) migrations load via tsx (an optional dependency)
--- install it, or run under "npx tsx" or Bun.
+Configuration precedence is flag, ZERO_MIGRATE_* environment variable, selected
+zero-migrate.toml environment, then default. DATABASE_URL remains the URL fallback.
+Only lint accepts --dialect; live commands derive it from the URL. lint is offline.
+plan and apply support PostgreSQL, MySQL 8, and SQLite; status supports PostgreSQL
+and MySQL 8; history and resolve are PostgreSQL-only. There is no down command and no clean command.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */
@@ -740,7 +1139,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     args = parseArgs(argv);
   } catch (e) {
-    process.stderr.write(`zero-migrate: ${(e as Error).message}\n`);
+    process.stderr.write(`zero-migrate: ${redactUrlTokens((e as Error).message)}\n`);
     return 1;
   }
   if (args.command === "version") {
@@ -752,66 +1151,40 @@ export async function main(argv: string[]): Promise<number> {
     return args.command === "" ? 1 : 0;
   }
   try {
+    if (
+      args.databaseUrlFromFlag &&
+      args.databaseUrl !== undefined &&
+      hasInlinePassword(args.databaseUrl)
+    ) {
+      process.stderr.write(
+        "WARNING: --database-url contains an inline password; prefer DATABASE_URL or an env: reference in zero-migrate.toml.\n",
+      );
+    }
+    args = resolveParsedArgs(args);
     switch (args.command) {
       case "new":
         return await runNew(args);
+      case "lint":
+        return await runLint(args);
       case "plan":
-        return await runPlanResolved(args);
-      case "preview":
-        return await runPreview(args);
+        return await runLivePlan(args);
       case "apply":
         return await runApply(args);
       case "status":
         return await runStatus(args);
       case "history":
         return await runHistory(args);
-      case "resolve-pending":
-        return await runResolvePending(args);
+      case "resolve":
+        return await runResolve(args);
       default:
-        process.stderr.write(`zero-migrate: unknown command ${JSON.stringify(args.command)}\n`);
+        process.stderr.write(
+          `zero-migrate: unknown command ${JSON.stringify(redactUrlTokens(args.command))}\n`,
+        );
         process.stdout.write(USAGE);
         return 1;
     }
   } catch (e) {
-    process.stderr.write(`zero-migrate: ${(e as Error).message}\n`);
+    process.stderr.write(`zero-migrate: ${safeErrorMessage(e, args.databaseUrl)}\n`);
     return 1;
   }
-}
-
-/** `plan` with the async import resolved (the discover→import→validate loop). */
-async function runPlanResolved(args: Args): Promise<number> {
-  const files = await discover(args.dir);
-  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
-  await ensureTsLoader(files);
-  const registry = await loadRegistry(args.registryPath);
-  const migrations = await importMigrations(files);
-  assertUniqueMigrationNames(migrations);
-  const reports: PlanLine[] = [];
-  for (const { file, migration } of migrations) {
-    const report = plan({
-      migration,
-      ownerApp: args.ownerApp,
-      projectSchema: args.projectSchema,
-      dialect: args.dialect ?? "postgres",
-      registry,
-      nameFallback: file.label,
-    });
-    reports.push({
-      label: report.envelope.name || file.label,
-      ok: report.ok,
-      opCount: report.op_count ?? report.envelope.ops.length,
-      irVersion: report.ir_version,
-      error: report.error,
-    });
-  }
-  if (args.json) {
-    process.stdout.write(JSON.stringify(reports, null, 2) + "\n");
-  } else {
-    for (const r of reports) {
-      const head = r.ok ? "ok" : "ERROR";
-      process.stdout.write(`plan ${r.label}: ${head} (${r.opCount} ops)\n`);
-      if (r.error) process.stdout.write(`  ${r.error}\n`);
-    }
-  }
-  return reports.every((r) => r.ok) ? 0 : 1;
 }

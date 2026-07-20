@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! 0. open the APP FILE as the connection's MAIN db (the creator `up` lands here)
-//! 0. ATTACH 'file:<journal>' AS "_mig" -- engine, BEFORE the authorizer
+//! 0. ATTACH an existing journal as `_mig`, or leave it unattached when absent
 //! 1. pin both databases to DELETE rollback journals + FULL synchronous;
 //!    PRAGMA foreign_keys = ON
 //! 2. conn.load_extension_disable -- real rusqlite API (not a DbConfig)
@@ -23,9 +23,10 @@
 //! 7. conn.authorizer(Some(callback)) -- LAST, before any creator SQL
 //! ```
 //!
-//! After step 7, ATTACH/DETACH are denied for life — cross-tenant is closed by
-//! construction. The ONLY two databases on this connection are `main`
-//! (the app file) and `_mig` (the journal file), each opened exactly once.
+//! After step 7, ATTACH/DETACH are denied for the connection's life. A fresh
+//! read-only status connection therefore has only `main`. Journal bootstrap
+//! replaces it with a newly hardened connection that attached `_mig` before its
+//! authorizer was installed. A connection never executes ATTACH after hardening.
 //!
 //! # Why `main` IS the app file (not `:memory:`, not a double-ATTACH)
 //!
@@ -154,6 +155,12 @@ enum Command {
         mode: Mode,
         reply: flume::Sender<Result<(), SqliteActorError>>,
     },
+    /// Reopen the hardened connection with the journal attached. The reopen is
+    /// the only way to preserve the invariant that `_mig` is attached before the
+    /// authorizer is installed while still avoiding creation on read-only opens.
+    EnsureJournalAttached {
+        reply: flume::Sender<Result<(), SqliteActorError>>,
+    },
     /// Report whether the connection is in autocommit mode (no open transaction).
     /// Used to detect a wedged connection after a failed `up` + ROLLBACK.
     IsAutocommit { reply: flume::Sender<bool> },
@@ -218,9 +225,11 @@ impl MigrationActor {
     /// Open the hardened migration connection for one tenant.
     ///
     /// `app_path` is opened as the connection's MAIN database (the creator `up`
-    /// lands here and persists). `journal_path` is ATTACHed as `"_mig"`, BEFORE the
-    /// authorizer is installed. The two files are constructed by the
-    /// engine from the authenticated `app_id`, never from creator input.
+    /// lands here and persists). An existing `journal_path` is attached as `_mig`
+    /// before the authorizer is installed. An absent journal is not attached or
+    /// created until journal bootstrap explicitly requests it. Both paths are
+    /// constructed by the engine from the authenticated `app_id`, never from
+    /// creator input.
     ///
     /// # Errors
     /// [`SqliteActorError::Open`] / [`SqliteActorError::UnsupportedVersion`] on a
@@ -237,13 +246,14 @@ impl MigrationActor {
             .spawn(move || {
                 // Build the hardened connection. Any failure is reported via the
                 // startup channel; the worker then exits without serving commands.
-                let conn = match open_hardened(&app_path, &journal_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = startup_tx.send(Err(e));
-                        return;
-                    }
-                };
+                let mut conn =
+                    match open_hardened(&app_path, &journal_path, JournalAttachment::IfPresent) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = startup_tx.send(Err(e));
+                            return;
+                        }
+                    };
                 let _ = startup_tx.send(Ok(()));
 
                 // Command loop. The single connection serializes every statement;
@@ -274,6 +284,24 @@ impl MigrationActor {
                             // see `HardenedConn`.
                             conn.flip_mode(mode);
                             let _ = reply.send(Ok(()));
+                        }
+                        Command::EnsureJournalAttached { reply } => {
+                            let result = if conn.journal_attached {
+                                Ok(())
+                            } else {
+                                match open_hardened(
+                                    &app_path,
+                                    &journal_path,
+                                    JournalAttachment::Required,
+                                ) {
+                                    Ok(reopened) => {
+                                        conn = reopened;
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            };
+                            let _ = reply.send(result);
                         }
                         Command::IsAutocommit { reply } => {
                             let _ = reply.send(conn.is_autocommit());
@@ -390,6 +418,18 @@ impl MigrationActor {
         recv(rx).await?
     }
 
+    /// Ensure the separate journal file is attached as `_mig`.
+    ///
+    /// A fresh actor deliberately starts without `_mig` when the journal file is
+    /// absent. Bootstrap calls this seam to reopen the connection and attach the
+    /// journal before installing the replacement connection's authorizer. Repeated
+    /// calls are no-ops.
+    pub(crate) async fn ensure_journal_attached(&self) -> Result<(), SqliteActorError> {
+        let (reply, rx) = flume::bounded(1);
+        self.send(Command::EnsureJournalAttached { reply }).await?;
+        recv(rx).await?
+    }
+
     /// Whether the connection is in autocommit mode (i.e. NO open transaction).
     /// After a failed `up` + ROLLBACK this MUST be `true`; a `false` means the
     /// transaction is still open and the long-lived connection is wedged.
@@ -469,6 +509,7 @@ async fn recv<T>(rx: flume::Receiver<T>) -> Result<T, SqliteActorError> {
 struct HardenedConn {
     conn: Connection,
     mode: AuthMode,
+    journal_attached: bool,
 }
 
 impl HardenedConn {
@@ -488,7 +529,17 @@ impl std::ops::Deref for HardenedConn {
 
 /// Open + harden the connection per (exact order). Returns the wrapper that
 /// keeps the [`AuthMode`] alive alongside the connection.
-fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, SqliteActorError> {
+#[derive(Clone, Copy)]
+enum JournalAttachment {
+    IfPresent,
+    Required,
+}
+
+fn open_hardened(
+    app_path: &Path,
+    journal_path: &Path,
+    journal_attachment: JournalAttachment,
+) -> Result<HardenedConn, SqliteActorError> {
     // Version floor — refuse to run below the supported SQLite.
     let v = rusqlite::version_number();
     if v < SQLITE_VERSION_FLOOR {
@@ -516,14 +567,25 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
     let conn = Connection::open(app_path)
         .map_err(|e| SqliteActorError::Open(format!("open main (app file): {e}")))?;
 
-    // ATTACH the journal AS "_mig" — BEFORE the authorizer. The path comes from the
-    // authenticated app_id, never creator input. Bind it as a parameter so the
-    // filename is never interpolated into SQL.
-    conn.execute(
-        &format!("ATTACH DATABASE ?1 AS \"{MIG_ALIAS}\""),
-        [path_str(journal_path)?],
-    )
-    .map_err(|e| SqliteActorError::Open(format!("attach _mig: {e}")))?;
+    let journal_attached = match journal_attachment {
+        JournalAttachment::Required => true,
+        JournalAttachment::IfPresent => journal_path.try_exists().map_err(|error| {
+            SqliteActorError::Open(format!(
+                "inspect journal path {}: {error}",
+                journal_path.display()
+            ))
+        })?,
+    };
+    if journal_attached {
+        // ATTACH the journal AS `_mig` BEFORE the authorizer. On a fresh backend
+        // the initial open skips this statement, because SQLite ATTACH would create
+        // an absent file. Journal bootstrap reopens through `Required` here.
+        conn.execute(
+            &format!("ATTACH DATABASE ?1 AS \"{MIG_ALIAS}\""),
+            [path_str(journal_path)?],
+        )
+        .map_err(|e| SqliteActorError::Open(format!("attach _mig: {e}")))?;
+    }
 
     // 1. Engine-set PRAGMAs, applied at open BEFORE the authorizer (which denies
     // PRAGMA for the connection's life). `busy_timeout` gives a bounded wait so a
@@ -541,7 +603,7 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
     // and FULL synchronous, then read the effective values back. Never trust the
     // assignment alone: SQLite returns the mode it actually achieved and can
     // silently retain an old mode when a change is unavailable.
-    enforce_atomic_attached_profile(&conn)?;
+    enforce_atomic_profile(&conn, journal_attached)?;
 
     // 2. Disable extension loading (real rusqlite API; not a DbConfig variant).
     conn.load_extension_disable()
@@ -564,39 +626,60 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
     conn.authorizer(Some(make_authorizer(mode.clone())))
         .map_err(|e| SqliteActorError::Open(format!("install authorizer: {e}")))?;
 
-    Ok(HardenedConn { conn, mode })
+    Ok(HardenedConn {
+        conn,
+        mode,
+        journal_attached,
+    })
 }
 
 /// Pin and verify the settings required for crash-atomic commits spanning
 /// `main` and the attached `_mig` journal.
+#[cfg(test)]
 fn enforce_atomic_attached_profile(conn: &Connection) -> Result<(), SqliteActorError> {
-    for schema in ["main", MIG_ALIAS] {
-        let sql = format!("PRAGMA \"{schema}\".journal_mode = DELETE");
-        let actual: String = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
-            SqliteActorError::Open(format!(
-                "set {schema}.journal_mode=DELETE for attached-DB atomicity: {e}"
-            ))
-        })?;
-        if !actual.eq_ignore_ascii_case("delete") {
-            return Err(SqliteActorError::Open(format!(
+    enforce_atomic_profile(conn, true)
+}
+
+fn enforce_atomic_profile(
+    conn: &Connection,
+    journal_attached: bool,
+) -> Result<(), SqliteActorError> {
+    enforce_atomic_profile_for_schema(conn, "main")?;
+    if journal_attached {
+        enforce_atomic_profile_for_schema(conn, MIG_ALIAS)?;
+    }
+    Ok(())
+}
+
+fn enforce_atomic_profile_for_schema(
+    conn: &Connection,
+    schema: &str,
+) -> Result<(), SqliteActorError> {
+    let sql = format!("PRAGMA \"{schema}\".journal_mode = DELETE");
+    let actual: String = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+        SqliteActorError::Open(format!(
+            "set {schema}.journal_mode=DELETE for attached-DB atomicity: {e}"
+        ))
+    })?;
+    if !actual.eq_ignore_ascii_case("delete") {
+        return Err(SqliteActorError::Open(format!(
                 "{schema}.journal_mode remained {actual:?}; DELETE rollback journaling is required for atomic app+journal commits"
             )));
-        }
+    }
 
-        conn.execute_batch(&format!("PRAGMA \"{schema}\".synchronous = FULL"))
-            .map_err(|e| SqliteActorError::Open(format!("set {schema}.synchronous=FULL: {e}")))?;
-        let synchronous: i64 = conn
-            .query_row(&format!("PRAGMA \"{schema}\".synchronous"), [], |row| {
-                row.get(0)
-            })
-            .map_err(|e| SqliteActorError::Open(format!("verify {schema}.synchronous: {e}")))?;
-        // SQLite's stable numeric value for FULL is 2. EXTRA (3) is stronger but
-        // not the pinned profile, so reject configuration drift in either direction.
-        if synchronous != 2 {
-            return Err(SqliteActorError::Open(format!(
+    conn.execute_batch(&format!("PRAGMA \"{schema}\".synchronous = FULL"))
+        .map_err(|e| SqliteActorError::Open(format!("set {schema}.synchronous=FULL: {e}")))?;
+    let synchronous: i64 = conn
+        .query_row(&format!("PRAGMA \"{schema}\".synchronous"), [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| SqliteActorError::Open(format!("verify {schema}.synchronous: {e}")))?;
+    // SQLite's stable numeric value for FULL is 2. EXTRA (3) is stronger but
+    // not the pinned profile, so reject configuration drift in either direction.
+    if synchronous != 2 {
+        return Err(SqliteActorError::Open(format!(
                 "{schema}.synchronous remained {synchronous}; FULL (2) is required for atomic app+journal commits"
             )));
-        }
     }
     Ok(())
 }

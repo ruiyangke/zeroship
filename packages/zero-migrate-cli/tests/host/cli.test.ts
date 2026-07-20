@@ -1,10 +1,29 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { driverFor } from "../../src/cli.js";
+import type { StatusReply } from "../../src/addon.js";
+import {
+  driverFor,
+  formatStatusJson,
+  formatStatusHuman,
+  hasInlinePassword,
+  pendingMigrationsForPlan,
+  resolvePendingVersion,
+  statusExitCode,
+  statusIsDirty,
+} from "../../src/cli.js";
+import {
+  loadZeroMigrateConfig,
+  resolveCliConfig,
+} from "../../src/config.js";
+import {
+  currentIrVersion,
+  previewSql,
+  type IrEnvelope,
+} from "../../src/index.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -13,27 +32,102 @@ const ADDON_PATH = resolve(
   HERE,
   `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
+const NO_INJECT_POLICY = "policy_version = 1\n";
 
-function runCli(...args: string[]) {
+const CONFIG_ENV_KEYS = [
+  "DATABASE_URL",
+  "ZERO_MIGRATE_URL",
+  "ZERO_MIGRATE_DIR",
+  "ZERO_MIGRATE_OWNER_APP",
+  "ZERO_MIGRATE_SCHEMA",
+  "ZERO_MIGRATE_REGISTRY",
+  "ZERO_MIGRATE_POLICY",
+  "ZERO_MIGRATE_CONFIG",
+  "ZERO_MIGRATE_ENV",
+] as const;
+
+function cleanEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of CONFIG_ENV_KEYS) delete env[key];
+  env.DATABASE_URL = "";
+  return { ...env, ...overrides };
+}
+
+function spawnCli(
+  args: readonly string[],
+  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
+) {
   return spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
     encoding: "utf8",
-    env: { ...process.env, DATABASE_URL: "" },
+    cwd: options.cwd,
+    env: cleanEnvironment(options.env),
   });
 }
 
+function runCli(...args: string[]) {
+  return spawnCli(args);
+}
+
 function runCliWithEnv(env: NodeJS.ProcessEnv, ...args: string[]) {
-  return spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
-    encoding: "utf8",
-    env: { ...process.env, ...env },
-  });
+  return spawnCli(args, { env });
+}
+
+function temporaryDirectory(prefix: string): string {
+  return mkdtempSync(join(HERE, prefix));
+}
+
+function writePolicy(dir: string, name = "policy.toml"): string {
+  const path = join(dir, name);
+  writeFileSync(path, NO_INJECT_POLICY);
+  return path;
+}
+
+function writeSimpleMigration(
+  dir: string,
+  options: {
+    filename?: string;
+    migrationName?: string;
+    tableName?: string;
+  } = {},
+): string {
+  const filename = options.filename ?? "20260715000000_create_widgets.mjs";
+  const migrationName = options.migrationName ?? "create_widgets";
+  const tableName = options.tableName ?? "widgets";
+  const path = join(dir, filename);
+  writeFileSync(
+    path,
+    `import { table, t } from "zero-migrate";
+export const name = ${JSON.stringify(migrationName)};
+export function up() {
+  table(${JSON.stringify(tableName)}).create({ columns: { id: t.int() } });
+}
+`,
+  );
+  return path;
+}
+
+function makeStatus(overrides: Partial<StatusReply> = {}): StatusReply {
+  return {
+    applied: [],
+    pending: [],
+    aborted: [],
+    rolledBack: [],
+    pendingContracts: [],
+    blocked: [],
+    unexpectedJournal: [],
+    plans: [],
+    ...overrides,
+  };
 }
 
 test("CLI valueless flags reject supplied values", () => {
   for (const invocation of [
     ["apply", "--approve=false"],
     ["apply", "--approve", "false"],
-    ["resolve-pending", "mig_0000000000000000000001", "--apply=false"],
-    ["resolve-pending", "mig_0000000000000000000001", "--abort=true"],
+    ["resolve", "rename_users", "--commit=false"],
+    ["resolve", "rename_users", "--rollback=true"],
+    ["status", "--strict=true"],
+    ["lint", "--explain=false"],
     ["help", "--json=true"],
     ["help", "--help=true"],
   ]) {
@@ -41,63 +135,109 @@ test("CLI valueless flags reject supplied values", () => {
     assert.equal(result.status, 1, `${invocation.join(" ")} must fail`);
     assert.match(
       result.stderr,
-      /flag --(?:approve|apply|abort|json|help) does not take a value|does not accept positional arguments/,
+      /flag --(?:approve|commit|rollback|strict|explain|json|help) does not take a value|does not accept positional arguments/,
     );
   }
 });
 
-test("CLI resolve-pending requires one action, approval, and PostgreSQL", () => {
-  const pending = "mig_0000000000000000000001";
+test("CLI resolve parses commit and rollback and enforces its guards", () => {
+  const url = "postgres://127.0.0.1:1/never_connect";
+
   const missingAction = runCli(
-    "resolve-pending",
-    pending,
+    "resolve",
+    "rename_users",
     "--approve",
-    "--database-url=postgres://127.0.0.1:1/never_connect",
+    `--database-url=${url}`,
   );
   assert.equal(missingAction.status, 1);
-  assert.match(missingAction.stderr, /choose exactly one of --apply or --abort/);
+  assert.match(missingAction.stderr, /choose exactly one of --commit or --rollback/);
 
   const bothActions = runCli(
-    "resolve-pending",
-    pending,
-    "--apply",
-    "--abort",
+    "resolve",
+    "rename_users",
+    "--commit",
+    "--rollback",
     "--approve",
-    "--database-url=postgres://127.0.0.1:1/never_connect",
+    `--database-url=${url}`,
   );
   assert.equal(bothActions.status, 1);
-  assert.match(bothActions.stderr, /choose exactly one of --apply or --abort/);
+  assert.match(bothActions.stderr, /choose exactly one of --commit or --rollback/);
 
   const missingApproval = runCli(
-    "resolve-pending",
-    pending,
-    "--apply",
-    "--database-url=postgres://127.0.0.1:1/never_connect",
+    "resolve",
+    "rename_users",
+    "--commit",
+    `--database-url=${url}`,
   );
   assert.equal(missingApproval.status, 1);
   assert.match(missingApproval.stderr, /requires --approve/);
 
   const mysql = runCli(
-    "resolve-pending",
-    pending,
-    "--apply",
+    "resolve",
+    "rename_users",
+    "--commit",
     "--approve",
     "--database-url=mysql://127.0.0.1:1/never_connect",
   );
   assert.equal(mysql.status, 1);
   assert.match(mysql.stderr, /only PostgreSQL online renames/);
   assert.doesNotMatch(mysql.stderr, /ECONNREFUSED/);
+
+  for (const action of ["--commit", "--rollback"]) {
+    const accepted = runCli(
+      "resolve",
+      "rename_users",
+      action,
+      "--approve",
+      `--database-url=${url}`,
+    );
+    assert.equal(accepted.status, 1);
+    assert.match(accepted.stderr, /missing policy.*--policy <file>/i);
+    assert.doesNotMatch(accepted.stderr, /unknown flag|ECONNREFUSED/i);
+  }
 });
 
-test("CLI rejects the unsupported mariadb URL scheme", () => {
-  const result = runCli(
-    "apply",
-    "--database-url=mariadb://private-user:secret-password@localhost/app.db",
-  );
+test("removed CLI verbs are unknown and absent from help", () => {
+  for (const command of ["preview", "resolve-pending"]) {
+    const result = runCli(command);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`unknown command .*${command}`));
+  }
+
+  const help = runCli("--help");
+  assert.equal(help.status, 0);
+  assert.doesNotMatch(help.stdout, /resolve-pending|zero-migrate preview/);
+});
+
+test("CLI rejects unsupported URL schemes without printing credentials", () => {
+  const databaseUrl = "mariadb://private-user:secret-password@localhost/app.db";
+  const result = runCli("apply", `--database-url=${databaseUrl}`);
   assert.equal(result.status, 1);
+  assert.match(result.stderr, /WARNING: --database-url contains an inline password/);
   assert.match(result.stderr, /could not infer a driver/);
   assert.match(result.stderr, /expected a postgres:\/\/ or mysql:\/\/ scheme/);
   assert.doesNotMatch(result.stderr, /private-user|secret-password|localhost\/app/);
+
+  const dir = temporaryDirectory(".cli-credential-warning-");
+  try {
+    const configFailure = runCli(
+      "apply",
+      `--database-url=${databaseUrl}`,
+      `--config=${join(dir, "missing.toml")}`,
+    );
+    assert.equal(configFailure.status, 1);
+    assert.match(
+      configFailure.stderr,
+      /WARNING: --database-url contains an inline password/,
+    );
+    assert.match(configFailure.stderr, /read config file/);
+    assert.doesNotMatch(
+      configFailure.stderr,
+      /private-user|secret-password|localhost\/app/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("CLI never prints an unsupported database URL", () => {
@@ -107,9 +247,19 @@ test("CLI never prints an unsupported database URL", () => {
   assert.match(result.stderr, /could not infer a driver/);
   assert.equal(result.stderr.includes(secretUrl), false);
   assert.doesNotMatch(result.stderr, /private-user|secret-password/);
+
+  const misplaced = runCli("status", "ignored", secretUrl);
+  assert.equal(misplaced.status, 1);
+  assert.doesNotMatch(misplaced.stderr, /private-user|secret-password|unknown:\/\//);
+  assert.match(misplaced.stderr, /redacted database URL/);
+
+  const asCommand = runCli(secretUrl);
+  assert.equal(asCommand.status, 1);
+  assert.doesNotMatch(asCommand.stderr, /private-user|secret-password|unknown:\/\//);
+  assert.match(asCommand.stderr, /redacted database URL/);
 });
 
-test("CLI rejects an explicitly empty database URL instead of using DATABASE_URL", () => {
+test("CLI rejects an explicit empty URL instead of using DATABASE_URL", () => {
   const result = runCliWithEnv(
     { DATABASE_URL: "postgres://production.example/app" },
     "apply",
@@ -120,12 +270,20 @@ test("CLI rejects an explicitly empty database URL instead of using DATABASE_URL
   assert.doesNotMatch(result.stderr, /migrations dir|production\.example/);
 });
 
-test("CLI honors --help before validating subcommand positionals", () => {
+test("inline-password detection follows the URL authority rule", () => {
+  assert.equal(hasInlinePassword("postgres://user:password@db.example/app"), true);
+  assert.equal(hasInlinePassword("mysql://user:@db.example/app"), true);
+  assert.equal(hasInlinePassword("postgres://user@db.example/app"), false);
+  assert.equal(hasInlinePassword("sqlite:./app.db"), false);
+});
+
+test("CLI honors help before validating command positionals", () => {
   for (const invocation of [
+    ["lint", "--help"],
     ["plan", "--help"],
-    ["preview", "--help"],
     ["apply", "--help"],
     ["status", "--help"],
+    ["resolve", "rename_users", "--help"],
     ["new", "demo", "--help"],
   ]) {
     const result = runCli(...invocation);
@@ -135,25 +293,27 @@ test("CLI honors --help before validating subcommand positionals", () => {
   }
 });
 
-test("CLI help advertises SQLite apply in user-facing language", () => {
+test("CLI help documents the v2 surface, config, and dialect rule", () => {
   const help = runCli("--help");
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /--dialect <name>/);
-  assert.match(help.stdout, /--registry <file>/);
-  assert.match(help.stdout, /--policy <file>/);
-  assert.match(help.stdout, /history .*--policy <file>/);
-  assert.match(help.stdout, /resolve-pending .*--policy <file>/);
-  assert.match(help.stdout, /Repeatable ordered TOML policy layer; first is the root\/bound/);
-  assert.match(help.stdout, /only root may use mandatory injects/);
-  assert.match(help.stdout, /--journal <path>/);
-  assert.match(help.stdout, /apply supports\s+PostgreSQL, MySQL 8, and SQLite/);
+  for (const command of ["new", "lint", "plan", "apply", "status", "resolve", "history"]) {
+    assert.match(help.stdout, new RegExp(`zero-migrate ${command}(?: |$)`));
+  }
+  assert.match(help.stdout, /--config <path>/);
+  assert.match(help.stdout, /--env <name>/);
+  assert.match(help.stdout, /--dialect <name>\s+lint only/);
+  assert.match(help.stdout, /Only lint accepts --dialect/);
+  assert.match(help.stdout, /--commit/);
+  assert.match(help.stdout, /--rollback/);
+  assert.match(help.stdout, /--strict/);
+  assert.match(help.stdout, /no down command and no clean command/);
+  assert.match(help.stdout, /plan and apply support PostgreSQL, MySQL 8, and SQLite/);
+  assert.match(help.stdout, /status supports PostgreSQL\s+and MySQL 8/);
   assert.doesNotMatch(help.stdout, /\u2014|host driver seam|addon|in-process/);
 
-  const sqlite = runCli("apply", "--database-url=sqlite:///tmp/app.db");
-  assert.equal(sqlite.status, 1);
-  assert.match(sqlite.stderr, /missing policy/);
-  assert.doesNotMatch(sqlite.stderr, /SQLite is not supported/);
-  assert.doesNotMatch(sqlite.stderr, /\u2014|host driver seam|addon|in-process/);
+  const liveDialect = runCli("plan", "--dialect=postgres");
+  assert.equal(liveDialect.status, 1);
+  assert.match(liveDialect.stderr, /--dialect is only valid with the lint command/);
 });
 
 test("CLI derives SQLite app and journal paths and honors --journal", () => {
@@ -187,12 +347,54 @@ test("CLI derives SQLite app and journal paths and honors --journal", () => {
   );
 });
 
+test("live plan leaves a fresh SQLite journal absent", () => {
+  const dir = temporaryDirectory(".cli-plan-sqlite-read-only-");
+  try {
+    writeSimpleMigration(dir);
+    const policyPath = writePolicy(dir);
+    const appPath = join(dir, "fresh.db");
+    const journalPath = join(dir, "fresh.migrations.db");
+    assert.equal(existsSync(appPath), false, "application database starts absent");
+    assert.equal(existsSync(journalPath), false, "migration journal starts absent");
+
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "plan",
+      `--dir=${dir}`,
+      `--policy=${policyPath}`,
+      `--database-url=sqlite:${appPath}`,
+      "--json",
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    const report = JSON.parse(result.stdout) as {
+      count: number;
+      pending: Array<{ version: string; name: string; sql: string }>;
+    };
+    assert.equal(report.count, 1);
+    assert.equal(report.pending.length, 1);
+    assert.match(report.pending[0].version, /^mig_/);
+    assert.equal(report.pending[0].name, "create_widgets");
+    assert.match(report.pending[0].sql, /CREATE TABLE/i);
+    assert.match(report.pending[0].sql, /widgets/i);
+    assert.equal(
+      existsSync(journalPath),
+      false,
+      "read-only plan must not create the derived SQLite journal",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("CLI database verbs require an explicit policy file", () => {
   const invocations = [
+    ["plan"],
     ["apply"],
     ["status"],
     ["history"],
-    ["resolve-pending", "mig_0000000000000000000001", "--apply", "--approve"],
+    ["resolve", "rename_users", "--commit", "--approve"],
   ];
   for (const invocation of invocations) {
     const base = [
@@ -211,8 +413,8 @@ test("CLI database verbs require an explicit policy file", () => {
   }
 });
 
-test("CLI rejects an empty policy document before opening a database session", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-policy-"));
+test("CLI rejects an empty policy before opening a database session", () => {
+  const dir = temporaryDirectory(".cli-policy-");
   try {
     const policyPath = join(dir, "empty-policy.toml");
     writeFileSync(policyPath, "");
@@ -230,12 +432,10 @@ test("CLI rejects an empty policy document before opening a database session", (
 });
 
 test("CLI loads repeated policy files in occurrence order", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-policy-layers-"));
+  const dir = temporaryDirectory(".cli-policy-layers-");
   try {
     const missingRootPath = join(dir, "missing-root.toml");
-    const laterLayerPath = join(dir, "later-layer.toml");
-    writeFileSync(laterLayerPath, "policy_version = 1\n");
-
+    const laterLayerPath = writePolicy(dir, "later-layer.toml");
     const result = runCli(
       "apply",
       "--database-url=postgres://127.0.0.1:1/never_connect",
@@ -252,49 +452,224 @@ test("CLI loads repeated policy files in occurrence order", () => {
   }
 });
 
-test("CLI plan validates the selected database dialect", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-dialect-"));
+test("config precedence is flag, environment, config, then default", () => {
+  const dir = temporaryDirectory(".cli-config-precedence-");
   try {
+    const configPath = join(dir, "zero-migrate.toml");
     writeFileSync(
-      join(dir, "20260715000000_virtual_column.mjs"),
-      `import { table, t } from "zero-migrate";
-export function up() {
-  table("products").create({
-    columns: {
-      base: t.int(),
-      computed: t.int().generated((col) => col("base").mul(2), { virtual: true }),
-    },
-  });
-}
+      configPath,
+      `[env.dev]
+url = "postgres://config.example/app"
+dir = "./config-migrations"
+owner_app = "app_config"
+schema = "config_schema"
+registry = "./config-registry.json"
+policy = ["./root.toml", "./leaf.toml"]
 `,
     );
-    const env = { DATABASE_URL: "", ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
-    const postgres = runCliWithEnv(env, "plan", `--dir=${dir}`, "--dialect=postgres");
-    const mysql = runCliWithEnv(env, "plan", `--dir=${dir}`, "--dialect=mysql");
 
-    assert.equal(postgres.status, 1);
-    assert.match(postgres.stdout, /ERROR/);
-    assert.equal(mysql.status, 0, mysql.stderr || mysql.stdout);
-    assert.match(mysql.stdout, /plan .*: ok/);
+    const resolved = resolveCliConfig({
+      cwd: dir,
+      configPath,
+      explicit: {
+        databaseUrl: "postgres://flag.example/app",
+        projectSchema: "flag_schema",
+      },
+      processEnv: {
+        ZERO_MIGRATE_URL: "postgres://environment.example/app",
+        ZERO_MIGRATE_OWNER_APP: "app_environment",
+      },
+    });
+
+    assert.equal(resolved.databaseUrl, "postgres://flag.example/app");
+    assert.equal(resolved.projectSchema, "flag_schema");
+    assert.equal(resolved.ownerApp, "app_environment");
+    assert.equal(resolved.dir, resolve(dir, "config-migrations"));
+    assert.equal(resolved.registryPath, resolve(dir, "config-registry.json"));
+    assert.deepEqual(resolved.policyPaths, [
+      resolve(dir, "root.toml"),
+      resolve(dir, "leaf.toml"),
+    ]);
+
+    const configOverLegacyUrl = resolveCliConfig({
+      cwd: dir,
+      configPath,
+      processEnv: { DATABASE_URL: "postgres://legacy.example/app" },
+    });
+    assert.equal(configOverLegacyUrl.databaseUrl, "postgres://config.example/app");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("CLI plan accepts a trusted ownership registry file", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-registry-"));
+test("config env references resolve set values and reject unset values", () => {
+  const dir = temporaryDirectory(".cli-config-env-");
+  try {
+    const configPath = join(dir, "zero-migrate.toml");
+    writeFileSync(
+      configPath,
+      `[env.dev]
+url = "env:CLI_TEST_DATABASE_URL"
+policy = ["env:CLI_TEST_ROOT_POLICY", "./leaf.toml"]
+`,
+    );
+
+    const loaded = loadZeroMigrateConfig({
+      cwd: dir,
+      configPath,
+      processEnv: {
+        CLI_TEST_DATABASE_URL: "postgres://configured.example/app",
+        CLI_TEST_ROOT_POLICY: "./root.toml",
+      },
+    });
+    assert.equal(loaded?.values.url, "postgres://configured.example/app");
+    assert.deepEqual(loaded?.values.policy, [
+      resolve(dir, "root.toml"),
+      resolve(dir, "leaf.toml"),
+    ]);
+
+    assert.throws(
+      () =>
+        loadZeroMigrateConfig({
+          cwd: dir,
+          configPath,
+          processEnv: { CLI_TEST_ROOT_POLICY: "./root.toml" },
+        }),
+      /references unset environment variable CLI_TEST_DATABASE_URL/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lint defaults to all dialects and --dialect narrows", () => {
+  const dir = temporaryDirectory(".cli-lint-dialects-");
+  try {
+    writeSimpleMigration(dir);
+    const env = { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
+
+    const all = runCliWithEnv(env, "lint", `--dir=${dir}`, "--json");
+    assert.equal(all.status, 0, all.stderr || all.stdout);
+    const allReports = JSON.parse(all.stdout) as Array<{
+      ok: boolean;
+      dialects: Array<{ dialect: string; ok: boolean }>;
+    }>;
+    assert.equal(allReports.length, 1);
+    assert.equal(allReports[0].ok, true);
+    assert.deepEqual(
+      allReports[0].dialects.map(({ dialect }) => dialect),
+      ["postgres", "mysql", "sqlite"],
+    );
+    assert.ok(allReports[0].dialects.every(({ ok }) => ok));
+
+    const mysql = runCliWithEnv(
+      env,
+      "lint",
+      `--dir=${dir}`,
+      "--dialect=mysql",
+      "--json",
+    );
+    assert.equal(mysql.status, 0, mysql.stderr || mysql.stdout);
+    const mysqlReports = JSON.parse(mysql.stdout) as Array<{
+      dialects: Array<{ dialect: string }>;
+    }>;
+    assert.deepEqual(mysqlReports[0].dialects.map(({ dialect }) => dialect), ["mysql"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lint --explain prints rendered SQL", () => {
+  const dir = temporaryDirectory(".cli-lint-explain-");
+  try {
+    writeSimpleMigration(dir);
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "lint",
+      `--dir=${dir}`,
+      "--dialect=postgres",
+      "--explain",
+    );
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /lint create_widgets: ok/);
+    assert.match(result.stdout, /CREATE TABLE/i);
+    assert.match(result.stdout, /dialect: postgres/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lint reports preview failures as per-migration dialect verdicts", () => {
+  const dir = temporaryDirectory(".cli-lint-dialect-failure-");
   try {
     writeFileSync(
-      join(dir, "20260715000000_create_users.mjs"),
+      join(dir, "20260715000000_rename_label.mjs"),
       `import { table, t } from "zero-migrate";
+export const name = "rename_label";
 export function up() {
-  table("users").create({ columns: { id: t.int() } });
+  table("widgets").column("old_label").rename({
+    to: "new_label",
+    type: t.text(),
+  });
 }
 `,
     );
+    const registryPath = join(dir, "registry.json");
+    writeFileSync(registryPath, JSON.stringify({ widgets: "app_cli" }));
+
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "lint",
+      `--dir=${dir}`,
+      "--dialect=mysql",
+      `--registry=${registryPath}`,
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /lint rename_label: fail/);
+    assert.match(result.stdout, /mysql/);
+    assert.equal(result.stderr, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lint validates the selected policy charter without --explain", () => {
+  const dir = temporaryDirectory(".cli-lint-policy-");
+  try {
+    writeSimpleMigration(dir);
+    const policyPath = join(dir, "invalid-policy.toml");
+    writeFileSync(policyPath, "this is not valid charter TOML");
+
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "lint",
+      `--dir=${dir}`,
+      "--dialect=postgres",
+      `--policy=${policyPath}`,
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /lint create_widgets: fail/);
+    assert.match(result.stdout, /policy|charter|TOML/i);
+    assert.equal(result.stderr, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lint accepts a trusted ownership registry", () => {
+  const dir = temporaryDirectory(".cli-registry-");
+  try {
+    writeSimpleMigration(dir, {
+      filename: "20260715000000_create_users.mjs",
+      migrationName: "create_users",
+      tableName: "users",
+    });
     writeFileSync(
       join(dir, "20260715000001_add_timezone.mjs"),
       `import { table, t } from "zero-migrate";
+export const name = "add_timezone";
 export function up() {
   table("users").column("timezone").add({ type: t.text() });
 }
@@ -302,26 +677,29 @@ export function up() {
     );
     const registryPath = join(dir, "registry.json");
     writeFileSync(registryPath, JSON.stringify({ users: "app_cli" }));
-    const env = { DATABASE_URL: "", ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
-    const withoutRegistry = runCliWithEnv(env, "plan", `--dir=${dir}`);
+    const env = { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
+
+    const withoutRegistry = runCliWithEnv(env, "lint", `--dir=${dir}`);
+    assert.equal(withoutRegistry.status, 1);
+    assert.match(withoutRegistry.stdout, /lint add_timezone: fail/);
+    assert.match(withoutRegistry.stdout, /unregistered/i);
+
     const withRegistry = runCliWithEnv(
       env,
-      "plan",
+      "lint",
       `--dir=${dir}`,
       `--registry=${registryPath}`,
     );
-
-    assert.equal(withoutRegistry.status, 1);
-    assert.match(withoutRegistry.stdout, /unregistered/i);
     assert.equal(withRegistry.status, 0, withRegistry.stderr || withRegistry.stdout);
-    assert.match(withRegistry.stdout, /plan .*: ok/);
+    assert.match(withRegistry.stdout, /lint create_users: ok/);
+    assert.match(withRegistry.stdout, /lint add_timezone: ok/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("CLI plan and apply reject duplicate resolved migration names before applying", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-duplicate-names-"));
+test("lint and apply reject duplicate resolved migration names before applying", () => {
+  const dir = temporaryDirectory(".cli-duplicate-names-");
   try {
     writeFileSync(
       join(dir, "20260715000000_first.mjs"),
@@ -337,18 +715,15 @@ export function up() {}
 };
 `,
     );
-    const env = { DATABASE_URL: "", ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
-    const policyPath = join(dir, "policy.toml");
-    writeFileSync(policyPath, "policy_version = 1\n");
+    const env = { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
+    const policyPath = writePolicy(dir);
 
-    const planned = runCliWithEnv(env, "plan", `--dir=${dir}`);
-    assert.equal(planned.status, 1);
-    assert.match(planned.stderr, /duplicate migration name.*shared_identity/i);
-    assert.match(planned.stderr, /20260715000000_first/);
-    assert.match(planned.stderr, /20260715000001_second/);
+    const linted = runCliWithEnv(env, "lint", `--dir=${dir}`);
+    assert.equal(linted.status, 1);
+    assert.match(linted.stderr, /duplicate migration name.*shared_identity/i);
+    assert.match(linted.stderr, /20260715000000_first/);
+    assert.match(linted.stderr, /20260715000001_second/);
 
-    // Port 1 is intentionally unreachable. Seeing the identity error instead of a
-    // connection error proves every name was checked before the first apply call.
     const applied = runCliWithEnv(
       env,
       "apply",
@@ -364,12 +739,13 @@ export function up() {}
   }
 });
 
-test("CLI plan applies --schema confinement before reporting a migration as valid", () => {
-  const dir = mkdtempSync(join(HERE, ".cli-schema-"));
+test("lint reports schema-confinement failures as a migration verdict", () => {
+  const dir = temporaryDirectory(".cli-schema-");
   try {
     writeFileSync(
       join(dir, "20260715000000_foreign_schema.mjs"),
       `import { table, t } from "zero-migrate";
+export const name = "foreign_schema";
 export function up() {
   table("widgets", { schema: "outside_project" }).create({
     columns: { id: t.int() },
@@ -378,15 +754,314 @@ export function up() {
 `,
     );
     const result = runCliWithEnv(
-      { DATABASE_URL: "", ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
-      "plan",
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "lint",
       `--dir=${dir}`,
       "--schema=app_data",
     );
 
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /ERROR/);
+    assert.match(result.stdout, /lint foreign_schema: fail/);
     assert.match(result.stdout, /outside_project|cross.schema/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status helpers implement clean, pending, and dirty strict outcomes", () => {
+  const clean = makeStatus({
+    currentVersion: "mig_applied",
+    applied: ["mig_applied"],
+    plans: [
+      {
+        version: "mig_applied",
+        name: "create_users",
+        state: "applied",
+        steps: [
+          { version: "mig_step_applied", name: "create users", kind: "ddl", state: "applied" },
+        ],
+        missingDependencies: [],
+      },
+    ],
+  });
+  assert.equal(statusIsDirty(clean), false);
+  assert.equal(statusExitCode(clean, true), 0);
+  assert.equal(statusExitCode(clean, false), 0);
+  assert.equal(formatStatusHuman(clean), "status: 1 applied, 0 pending\n");
+
+  const pending = makeStatus({
+    pending: ["mig_pending"],
+    plans: [
+      {
+        version: "mig_pending",
+        name: "add_timezone",
+        state: "pending",
+        steps: [
+          { version: "mig_step_pending", name: "add timezone", kind: "ddl", state: "pending" },
+        ],
+        missingDependencies: [],
+      },
+    ],
+  });
+  assert.equal(statusIsDirty(pending), true);
+  assert.equal(statusExitCode(pending, true), 1);
+  assert.equal(statusExitCode(pending, false), 0);
+  assert.match(formatStatusHuman(pending), /^status: 0 applied, 1 pending\n$/);
+
+  const drifted = makeStatus({
+    unexpectedJournal: [
+      {
+        version: "mig_unexpected",
+        state: "applied",
+        journalChecksum: "recorded-checksum",
+        journalKind: "apply",
+      },
+    ],
+    plans: [
+      {
+        version: "mig_drifted",
+        name: "create_orders",
+        state: "drifted",
+        steps: [
+          {
+            version: "mig_step_drifted",
+            name: "create orders",
+            kind: "ddl",
+            state: "drifted",
+          },
+        ],
+        missingDependencies: [],
+      },
+    ],
+  });
+  assert.equal(statusIsDirty(drifted), true);
+  assert.equal(statusExitCode(drifted, true), 1);
+  const human = formatStatusHuman(drifted);
+  assert.match(human, /drift: unexpected journal entry mig_unexpected \(applied\)/);
+  assert.match(human, /checksum mismatch: create_orders, step create orders \(mig_step_drifted\)/);
+
+  const json = JSON.parse(formatStatusJson(drifted)) as StatusReply;
+  assert.deepEqual(json.pending, []);
+  assert.equal(json.unexpectedJournal[0].journalChecksum, "recorded-checksum");
+  assert.equal(json.plans?.[0].steps[0].state, "drifted");
+});
+
+test("status strict treats outstanding contracts as dirty", () => {
+  const reply = makeStatus({
+    pendingContracts: [
+      { table: "users", pendingVersion: "mig_trigger", orphaned: false },
+    ],
+  });
+  assert.equal(statusIsDirty(reply), true);
+  assert.match(formatStatusHuman(reply), /pending online rename: users \(mig_trigger\)/);
+});
+
+test("pendingMigrationsForPlan maps pending plan IDs to source envelopes", () => {
+  const first: IrEnvelope = { ir_version: 1, name: "first", ops: [] };
+  const second: IrEnvelope = { ir_version: 1, name: "second", ops: [] };
+  const reply = makeStatus({
+    applied: ["mig_first"],
+    pending: ["mig_second"],
+    plans: [
+      {
+        version: "mig_second",
+        name: "second",
+        state: "pending",
+        steps: [],
+        missingDependencies: [],
+      },
+      {
+        version: "mig_first",
+        name: "first",
+        state: "applied",
+        steps: [],
+        missingDependencies: [],
+      },
+    ],
+  });
+
+  assert.deepEqual(pendingMigrationsForPlan(reply, [first, second]), [
+    { version: "mig_second", name: "second", envelope: second },
+  ]);
+
+  assert.throws(
+    () => pendingMigrationsForPlan(makeStatus({ pending: ["mig_missing"] }), [first]),
+    /cannot be matched to source.*mig_missing/,
+  );
+  assert.throws(
+    () =>
+      pendingMigrationsForPlan(
+        makeStatus({
+          plans: [
+            { version: "mig_one", name: "first", state: "pending", steps: [], missingDependencies: [] },
+            { version: "mig_two", name: "first", state: "pending", steps: [], missingDependencies: [] },
+          ],
+        }),
+        [first],
+      ),
+    /ambiguous migration name "first"/,
+  );
+});
+
+test("pending plan envelopes feed the offline SQL renderer", () => {
+  const previousAddonPath = process.env.ZERO_MIGRATE_ADDON_PATH;
+  process.env.ZERO_MIGRATE_ADDON_PATH = ADDON_PATH;
+  try {
+    const envelope: IrEnvelope = {
+      ir_version: currentIrVersion(),
+      name: "create_plan_widgets",
+      ops: [
+        {
+          op: "createTable",
+          name: "plan_widgets",
+          columns: [{ name: "id", type: "int" }],
+          primaryKey: null,
+          constraints: [],
+          indexes: [],
+        },
+      ],
+    };
+    const selected = pendingMigrationsForPlan(
+      makeStatus({
+        pending: ["mig_plan_widgets"],
+        plans: [
+          {
+            version: "mig_plan_widgets",
+            name: envelope.name,
+            state: "pending",
+            steps: [],
+            missingDependencies: [],
+          },
+        ],
+      }),
+      [envelope],
+    );
+    const rendered = previewSql({
+      envelopes: selected.map(({ envelope: value }) => JSON.stringify(value)),
+      dialect: "postgres",
+      defaultSchema: "public",
+      ownerApp: "app_cli",
+      charterLayers: [NO_INJECT_POLICY],
+    });
+    assert.equal(rendered.length, 1);
+    assert.match(rendered[0], /CREATE TABLE/i);
+    assert.match(rendered[0], /plan_widgets/);
+  } finally {
+    if (previousAddonPath === undefined) delete process.env.ZERO_MIGRATE_ADDON_PATH;
+    else process.env.ZERO_MIGRATE_ADDON_PATH = previousAddonPath;
+  }
+});
+
+test("resolvePendingVersion maps a migration name to one obligation", () => {
+  const reply = makeStatus({
+    pending: ["mig_rename_plan"],
+    pendingContracts: [
+      { table: "users", pendingVersion: "mig_rename_trigger", orphaned: false },
+    ],
+    plans: [
+      {
+        version: "mig_rename_plan",
+        name: "rename_users",
+        state: "partial",
+        steps: [
+          {
+            version: "mig_rename_trigger",
+            name: "install rename trigger",
+            kind: "onlineExpand",
+            state: "applied",
+          },
+        ],
+        missingDependencies: [],
+      },
+    ],
+  });
+  assert.equal(resolvePendingVersion(reply, "rename_users"), "mig_rename_trigger");
+
+  assert.throws(
+    () => resolvePendingVersion(reply, "unknown_rename"),
+    /unknown pending online-rename migration "unknown_rename"/,
+  );
+
+  const ambiguousName = makeStatus({
+    plans: [
+      { version: "mig_one", name: "rename_users", state: "partial", steps: [], missingDependencies: [] },
+      { version: "mig_two", name: "rename_users", state: "partial", steps: [], missingDependencies: [] },
+    ],
+  });
+  assert.throws(
+    () => resolvePendingVersion(ambiguousName, "rename_users"),
+    /ambiguous migration name "rename_users"/,
+  );
+
+  const ambiguousContract = makeStatus({
+    pending: ["mig_plan"],
+    pendingContracts: [
+      { table: "users", pendingVersion: "mig_trigger_one", orphaned: false },
+      { table: "users", pendingVersion: "mig_trigger_two", orphaned: false },
+    ],
+    plans: [
+      {
+        version: "mig_plan",
+        name: "rename_users",
+        state: "partial",
+        steps: [
+          { version: "mig_trigger_one", name: "trigger one", kind: "onlineExpand", state: "applied" },
+          { version: "mig_trigger_two", name: "trigger two", kind: "onlineExpand", state: "applied" },
+        ],
+        missingDependencies: [],
+      },
+    ],
+  });
+  assert.throws(
+    () => resolvePendingVersion(ambiguousContract, "rename_users"),
+    /multiple pending online renames.*ambiguous/,
+  );
+});
+
+test("resolve reports an unknown local migration before connecting", () => {
+  const dir = temporaryDirectory(".cli-resolve-unknown-");
+  try {
+    writeSimpleMigration(dir, { migrationName: "known_migration" });
+    const policyPath = writePolicy(dir);
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "resolve",
+      "unknown_migration",
+      "--commit",
+      "--approve",
+      `--dir=${dir}`,
+      `--policy=${policyPath}`,
+      "--database-url=postgres://127.0.0.1:1/never_connect",
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown migration "unknown_migration"/);
+    assert.doesNotMatch(result.stderr, /ECONNREFUSED|connect/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("live plan connect failures are clean, warned, and redacted", () => {
+  const dir = temporaryDirectory(".cli-plan-connect-");
+  try {
+    writeSimpleMigration(dir);
+    const policyPath = writePolicy(dir);
+    const secretUrl =
+      "postgres://private-user:secret-password@127.0.0.1:1/never_connect";
+    const result = runCliWithEnv(
+      { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+      "plan",
+      `--dir=${dir}`,
+      `--policy=${policyPath}`,
+      `--database-url=${secretUrl}`,
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /WARNING: --database-url contains an inline password/);
+    assert.match(result.stderr, /ECONNREFUSED|connect/i);
+    assert.equal(result.stderr.includes(secretUrl), false);
+    assert.doesNotMatch(result.stderr, /private-user|secret-password|postgres:\/\//i);
+    assert.doesNotMatch(result.stdout, /CREATE TABLE|would apply/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

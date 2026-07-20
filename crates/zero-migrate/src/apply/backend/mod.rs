@@ -382,6 +382,10 @@ pub trait MigrationBackend {
 
     // -- journal row I/O (dialect-neutral owned rows) -----------------------
 
+    /// True iff the journal meta objects already exist. MUST NOT create them, and
+    /// (SQLite) MUST NOT create/attach the journal file as a side effect.
+    async fn journal_exists(&self, cfg: &ExecutorConfig) -> Result<bool, JournalError>;
+
     /// Bootstrap the journal + immutability constructs (idempotent).
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError>;
 

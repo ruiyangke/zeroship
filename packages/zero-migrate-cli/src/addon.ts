@@ -34,6 +34,7 @@ import type {
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
+  PreviewSqlSource,
 } from "zero-migrate-node";
 
 export type {
@@ -47,6 +48,7 @@ export type {
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
+  PreviewSqlSource,
 };
 
 /** The neutral driver cell DTOs — the single source of truth from the generated
@@ -80,6 +82,9 @@ export interface MigrateAddon {
     projectSchema: string,
   ): LoadVerifyReply;
 
+  /** Sync, DB-free rendering of authored IR envelope JSON for operator review. */
+  previewSql(source: PreviewSqlSource): string[];
+
   /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the IR envelope
    *  as a JS value), LOWER it in Rust (stamp `owner_app` + fold
    *  `Checksum::of_ir`), then drive `executor::apply` over the host driver. Resolves
@@ -99,6 +104,13 @@ export interface MigrateAddon {
   /** Plan-aware status over authored IR envelopes. The addon lowers complete
    *  plans in Rust, retaining DML and backfill step identities. */
   statusIr(hostDriver: AddonHostDriver, req: StatusIrRequest): Promise<StatusReply>;
+
+  /** Read-only plan-aware status through the bundled in-process SQLite backend. */
+  statusIrSqlite(
+    appPath: string,
+    journalPath: string,
+    req: StatusIrRequest,
+  ): Promise<StatusReply>;
 
   /** Complete or abort one outstanding PostgreSQL online rename. */
   resolvePending(

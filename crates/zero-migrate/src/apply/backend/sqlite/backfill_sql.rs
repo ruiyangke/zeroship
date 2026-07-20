@@ -987,6 +987,7 @@ fn batch_error(last: Option<&CursorTuple>, error: SqliteActorError) -> BackfillE
 pub(crate) async fn ensure_backfill_progress(
     actor: &MigrationActor,
 ) -> Result<(), SqliteActorError> {
+    actor.ensure_journal_attached().await?;
     actor.set_mode(Mode::EngineJournal).await?;
     actor
         .exec(

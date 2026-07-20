@@ -14,7 +14,7 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::model::precondition::{Precondition, PreconditionCheck};
 use zero_migrate::PreconditionVerdict;
-use zero_migrate::SqliteBackend;
+use zero_migrate::{AppliedPlan, PlanStatusManifest, ReconciledPlanState, SqliteBackend};
 
 struct Paths {
     _dir: TempDir,
@@ -612,4 +612,66 @@ async fn reports_sqlite_dialect() {
         .await
         .expect("applied via trait");
     assert!(net.is_empty(), "fresh journal is empty");
+}
+
+#[compio::test]
+async fn read_only_plan_status_never_creates_a_fresh_journal() {
+    let p = paths("read_only_status");
+    let be = backend(&p);
+    let c = cfg();
+    let migration = mig("CREATE TABLE planned (id INTEGER PRIMARY KEY);");
+    let plan = AppliedPlan::single_step(migration.clone());
+    let manifest = PlanStatusManifest::from_applied_plan(&plan, &[])
+        .expect("single-step plan projects to status manifest");
+
+    assert!(
+        !p.journal.exists(),
+        "opening a fresh backend must not create or attach the journal file"
+    );
+    assert!(
+        !MigrationBackend::journal_exists(&be, &c)
+            .await
+            .expect("probe fresh journal"),
+        "a fresh backend has no journal meta objects"
+    );
+
+    let fresh = zero_migrate::ops::status::status_plans_via_backend_read_only(
+        &be,
+        &c,
+        std::slice::from_ref(&manifest),
+    )
+    .await
+    .expect("read-only status on a fresh backend");
+    assert_eq!(fresh.pending, vec![manifest.version.clone()]);
+    assert!(fresh.applied.is_empty());
+    assert_eq!(fresh.plans[0].state, ReconciledPlanState::Pending);
+    assert!(
+        !p.journal.exists(),
+        "read-only status must leave the separate journal file absent"
+    );
+
+    assert!(
+        be.apply_one_additive(&migration, "deployer")
+            .await
+            .expect("apply after read-only status"),
+        "the migration is newly applied"
+    );
+    assert!(p.journal.exists(), "apply creates the journal file");
+    assert!(
+        MigrationBackend::journal_exists(&be, &c)
+            .await
+            .expect("probe applied journal"),
+        "the journal table exists after apply"
+    );
+
+    let applied = zero_migrate::ops::status::status_plans_via_backend_read_only(
+        &be,
+        &c,
+        std::slice::from_ref(&manifest),
+    )
+    .await
+    .expect("read-only status after apply");
+    assert_eq!(applied.applied, vec![manifest.version.clone()]);
+    assert!(applied.pending.is_empty());
+    assert_eq!(applied.plans[0].state, ReconciledPlanState::Applied);
 }

@@ -224,7 +224,8 @@ pub struct StatusIrRequest {
     pub owner_app: String,
     /// The confined project schema.
     pub project_schema: String,
-    /// `"postgres" | "mysql"` selects the journal backend.
+    /// `"postgres" | "mysql" | "sqlite"` selects the journal backend and must
+    /// match the host-driven or in-process status entrypoint.
     pub dialect: String,
     /// The project's table-ownership registry.
     pub registry: std::collections::HashMap<String, String>,
@@ -232,6 +233,9 @@ pub struct StatusIrRequest {
     pub envelopes: Vec<JsonValue>,
     /// Required ordered policy charters, identical to the `applyIr` lowering input.
     pub charter_layers: Vec<String>,
+    /// Reconcile without bootstrapping journal objects. Defaults to `false` when
+    /// omitted so existing status callers retain their creating behavior.
+    pub read_only: Option<bool>,
 }
 
 /// The typed request for completing or aborting one outstanding PostgreSQL
@@ -596,6 +600,27 @@ pub struct GenArtifactsSource {
     /// confined system-shape injection. The first document is the root bound and
     /// each subsequent document is an untrusted narrowing layer. The composed
     /// policy is applied identically on the envelope and descriptor sides.
+    pub charter_layers: Vec<String>,
+}
+
+/// The source and rendering context for the sync, DB-free `previewSql` verb.
+///
+/// Each `envelopes` entry is a complete IR envelope serialized as JSON. The addon
+/// composes `charter_layers` once, then renders every envelope independently in
+/// input order for the requested dialect.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PreviewSqlSource {
+    /// Complete IR envelope JSON documents, in migration order.
+    pub envelopes: Vec<String>,
+    /// The target SQL dialect: `"postgres" | "sqlite" | "mysql"`.
+    pub dialect: String,
+    /// Schema used for operations that omit an explicit qualifier.
+    pub default_schema: String,
+    /// App attribution stamped into the offline preview lowering context.
+    pub owner_app: String,
+    /// Ordered policy-charter TOML documents (root bound, then narrowing layers).
     pub charter_layers: Vec<String>,
 }
 

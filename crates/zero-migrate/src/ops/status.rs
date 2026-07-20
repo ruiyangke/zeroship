@@ -867,13 +867,41 @@ pub async fn status_plans_via_backend<B: crate::apply::backend::MigrationBackend
     cfg: &ExecutorConfig,
     manifests: &[PlanStatusManifest],
 ) -> Result<AppliedPlanStatus, StatusError> {
-    backend.ensure_journal(cfg).await?;
+    status_plans_via_backend_inner(backend, cfg, manifests, true).await
+}
+
+/// Read and reconcile complete plan status without creating journal objects.
+///
+/// An absent journal is the fresh-project state: no steps have been applied, so
+/// every supplied plan reconciles from empty journal evidence. This path never
+/// calls [`MigrationBackend::ensure_journal`](crate::apply::backend::MigrationBackend::ensure_journal).
+///
+/// # Errors
+/// Journal existence/read failures, project-lock failures, and the pure
+/// reconciliation errors documented by [`reconcile_applied_plans`].
+pub async fn status_plans_via_backend_read_only<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<AppliedPlanStatus, StatusError> {
+    status_plans_via_backend_inner(backend, cfg, manifests, false).await
+}
+
+async fn status_plans_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+    bootstrap: bool,
+) -> Result<AppliedPlanStatus, StatusError> {
+    if bootstrap {
+        backend.ensure_journal(cfg).await?;
+    }
     backend
         .acquire_project_lock(cfg)
         .await
         .map_err(StatusError::ProjectLock)?;
 
-    let snapshot = status_plans_via_backend_locked(backend, cfg, manifests).await;
+    let snapshot = status_plans_via_backend_locked_inner(backend, cfg, manifests, !bootstrap).await;
 
     let release = backend.release_project_lock(cfg).await;
     match (snapshot, release) {
@@ -905,28 +933,70 @@ pub async fn status_plans_via_backend_locked<B: crate::apply::backend::Migration
     cfg: &ExecutorConfig,
     manifests: &[PlanStatusManifest],
 ) -> Result<AppliedPlanStatus, StatusError> {
+    status_plans_via_backend_locked_inner(backend, cfg, manifests, false).await
+}
+
+/// Reconcile complete plan status without bootstrapping while the caller holds
+/// the project lock.
+///
+/// If the journal objects do not exist, all journal-derived inputs are empty.
+/// This is the locked host-adapter seam used by live planning after its catalog
+/// snapshot and lowering have been bracketed by the same project lock.
+///
+/// # Errors
+/// The same journal and reconciliation errors as
+/// [`status_plans_via_backend_read_only`].
+#[doc(hidden)]
+pub async fn status_plans_via_backend_read_only_locked<
+    B: crate::apply::backend::MigrationBackend,
+>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<AppliedPlanStatus, StatusError> {
+    status_plans_via_backend_locked_inner(backend, cfg, manifests, true).await
+}
+
+async fn status_plans_via_backend_locked_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+    read_only: bool,
+) -> Result<AppliedPlanStatus, StatusError> {
     // Every apply/rollback/progress/obligation mutation uses this same project
     // lock. Holding it across all readers makes their combined result one coherent
     // backend snapshot even on dialects without a shared read transaction seam.
-    let entries = backend.applied(cfg).await?;
-    let rolled_back = backend.net_rolled_back_versions(cfg).await?;
-    let backfill_progress = backend.backfill_progress(cfg).await?;
-    let (outstanding, resolved) = if let Some(pending_contracts) = backend.pending_contracts() {
-        let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
-        let resolved = pending_contracts
-            .resolved_pending_contracts(cfg)
-            .await?
-            .into_iter()
-            .map(|terminal| ResolvedPendingContract {
-                pending_version: terminal.contract.pending_version,
-                plan_version: terminal.contract.plan_version,
-                contract_versions: terminal.contract.contract_versions,
-                resolution: terminal.resolution,
-            })
-            .collect();
-        (outstanding, resolved)
+    let journal_exists = !read_only || backend.journal_exists(cfg).await?;
+    let (entries, rolled_back, backfill_progress, outstanding, resolved) = if journal_exists {
+        let entries = backend.applied(cfg).await?;
+        let rolled_back = backend.net_rolled_back_versions(cfg).await?;
+        let backfill_progress = backend.backfill_progress(cfg).await?;
+        let (outstanding, resolved) = if let Some(pending_contracts) = backend.pending_contracts() {
+            let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
+            let resolved = pending_contracts
+                .resolved_pending_contracts(cfg)
+                .await?
+                .into_iter()
+                .map(|terminal| ResolvedPendingContract {
+                    pending_version: terminal.contract.pending_version,
+                    plan_version: terminal.contract.plan_version,
+                    contract_versions: terminal.contract.contract_versions,
+                    resolution: terminal.resolution,
+                })
+                .collect();
+            (outstanding, resolved)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        (
+            entries,
+            rolled_back,
+            backfill_progress,
+            outstanding,
+            resolved,
+        )
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
     reconcile_applied_plans_with_resolutions(
         manifests,
@@ -1177,13 +1247,39 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    backend.ensure_journal(cfg).await?;
+    status_via_backend_inner(backend, cfg, migrations, true).await
+}
+
+/// Compute migration-only status without creating journal objects.
+///
+/// A missing journal is reconciled as empty applied and superseded state. The
+/// ordinary [`status_via_backend`] path retains its idempotent bootstrap behavior.
+///
+/// # Errors
+/// The same journal, project-lock, and ordering errors as [`status_via_backend`].
+pub async fn status_via_backend_read_only<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
+    status_via_backend_inner(backend, cfg, migrations, false).await
+}
+
+async fn status_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    bootstrap: bool,
+) -> Result<MigrationStatus, StatusError> {
+    if bootstrap {
+        backend.ensure_journal(cfg).await?;
+    }
     backend
         .acquire_project_lock(cfg)
         .await
         .map_err(StatusError::ProjectLock)?;
 
-    let snapshot = status_via_backend_locked(backend, cfg, migrations).await;
+    let snapshot = status_via_backend_locked_inner(backend, cfg, migrations, !bootstrap).await;
     let release = backend.release_project_lock(cfg).await;
     match (snapshot, release) {
         (Ok(status), Ok(())) => Ok(status),
@@ -1215,7 +1311,35 @@ pub async fn status_via_backend_locked<B: crate::apply::backend::MigrationBacken
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    let entries = backend.applied(cfg).await?;
+    status_via_backend_locked_inner(backend, cfg, migrations, false).await
+}
+
+/// Compute migration-only status without bootstrapping while the caller holds
+/// the backend project lock.
+///
+/// # Errors
+/// The same journal and ordering errors as [`status_via_backend_read_only`].
+#[doc(hidden)]
+pub async fn status_via_backend_read_only_locked<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
+    status_via_backend_locked_inner(backend, cfg, migrations, true).await
+}
+
+async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    read_only: bool,
+) -> Result<MigrationStatus, StatusError> {
+    let journal_exists = !read_only || backend.journal_exists(cfg).await?;
+    let entries = if journal_exists {
+        backend.applied(cfg).await?
+    } else {
+        Vec::new()
+    };
     let applied: Vec<AppliedEntry> = entries
         .iter()
         .filter(|e| e.phase == Phase::Completed)
@@ -1229,7 +1353,11 @@ pub async fn status_via_backend_locked<B: crate::apply::backend::MigrationBacken
 
     let completed: HashMap<&str, &AppliedEntry> =
         applied.iter().map(|e| (e.version.as_str(), e)).collect();
-    let journal_superseded = backend.superseded_versions(cfg).await?;
+    let journal_superseded = if journal_exists {
+        backend.superseded_versions(cfg).await?
+    } else {
+        Vec::new()
+    };
     let superseded_owned =
         crate::apply::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
@@ -1241,8 +1369,12 @@ pub async fn status_via_backend_locked<B: crate::apply::backend::MigrationBacken
     // Outstanding pending contracts + blocked plans, read
     // through the neutral capability. If the backend has no pending-contract
     // capability, this is structurally empty and can never false-gate a deploy.
-    let outstanding = if let Some(pending_contracts) = backend.pending_contracts() {
-        pending_contracts.outstanding_pending_contracts(cfg).await?
+    let outstanding = if journal_exists {
+        if let Some(pending_contracts) = backend.pending_contracts() {
+            pending_contracts.outstanding_pending_contracts(cfg).await?
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };

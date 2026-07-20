@@ -487,6 +487,36 @@ export interface PlanStatusStepDto {
   writesQuiesced?: string
 }
 
+/**
+ * Render IR envelopes to SQL offline, without a database or host driver.
+ *
+ * The ordered policy charter is composed into the same effective policy used by
+ * apply/artifact generation. Each envelope is then lowered independently against
+ * an empty schema through the core preview renderer, preserving input order and
+ * its `[runtime-resolved]` labels for operations that require live catalog state.
+ */
+export declare function previewSql(source: PreviewSqlSource): Array<string>
+
+/**
+ * The source and rendering context for the sync, DB-free `previewSql` verb.
+ *
+ * Each `envelopes` entry is a complete IR envelope serialized as JSON. The addon
+ * composes `charter_layers` once, then renders every envelope independently in
+ * input order for the requested dialect.
+ */
+export interface PreviewSqlSource {
+  /** Complete IR envelope JSON documents, in migration order. */
+  envelopes: Array<string>
+  /** The target SQL dialect: `"postgres" | "sqlite" | "mysql"`. */
+  dialect: string
+  /** Schema used for operations that omit an explicit qualifier. */
+  defaultSchema: string
+  /** App attribution stamped into the offline preview lowering context. */
+  ownerApp: string
+  /** Ordered policy-charter TOML documents (root bound, then narrowing layers). */
+  charterLayers: Array<string>
+}
+
 /** Complete or abort one outstanding PostgreSQL online column rename. */
 export declare function resolvePending(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: ResolvePendingRequest): Promise<ApplyReply>
 
@@ -562,7 +592,10 @@ export interface StatusIrRequest {
   ownerApp: string
   /** The confined project schema. */
   projectSchema: string
-  /** `"postgres" | "mysql"` selects the journal backend. */
+  /**
+   * `"postgres" | "mysql" | "sqlite"` selects the journal backend and must
+   * match the host-driven or in-process status entrypoint.
+   */
   dialect: string
   /** The project's table-ownership registry. */
   registry: Record<string, string>
@@ -570,7 +603,19 @@ export interface StatusIrRequest {
   envelopes: Array<JsonValue>
   /** Required ordered policy charters, identical to the `applyIr` lowering input. */
   charterLayers: Array<string>
+  /**
+   * Reconcile without bootstrapping journal objects. Defaults to `false` when
+   * omitted so existing status callers retain their creating behavior.
+   */
+  readOnly?: boolean
 }
+
+/**
+ * `statusIrSqlite`: reconcile authored plans through the bundled in-process
+ * SQLite backend. The journal is bootstrapped by default, matching [`status_ir`];
+ * a request with `readOnly: true` uses the non-creating journal-existence path.
+ */
+export declare function statusIrSqlite(appPath: string, journalPath: string, req: StatusIrRequest): Promise<StatusReply>
 
 /** The typed reply for `status` (the projected `MigrationStatus`). */
 export interface StatusReply {

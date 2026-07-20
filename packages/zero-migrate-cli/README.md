@@ -22,17 +22,17 @@ files directly. The matching native binary is pulled in automatically through
 
 ```
 zero-migrate new <name>            Scaffold a new migration in ./migrations
-zero-migrate plan                  Offline validation of every migration (no DB)
-zero-migrate preview               Print the structured operations a migration emits
+zero-migrate lint                  Offline validation for all dialects
+zero-migrate plan                  Show pending SQL against a live database
 zero-migrate apply                 Apply pending migrations over --database-url
 zero-migrate status                Reconcile the migration set against the journal
 zero-migrate history               Print the applied-migration audit trail (PostgreSQL)
-zero-migrate resolve-pending <pending-version>  Finish or abort a PostgreSQL online column rename
+zero-migrate resolve <migration> --commit|--rollback  Resolve a PostgreSQL online rename
 zero-migrate --version
 ```
 
-`apply`, `status`, `history`, and `resolve-pending` read `--database-url` or the
-`DATABASE_URL` environment variable. All four also require at least one
+`plan`, `apply`, `status`, `history`, and `resolve` read `--database-url`, the
+selected `zero-migrate.toml` environment, or `DATABASE_URL`. Live commands also require at least one
 operator-controlled table-shape policy file through `--policy`; there is
 no embedded default. Repeat the flag to compose an ordered policy stack. The first
 occurrence is the trusted root charter and bound. Each later occurrence is an
@@ -76,9 +76,10 @@ await apply({
 
 ## Database support
 
-PostgreSQL and MySQL 8 through the CLI and the Node API. SQLite is supported
-through the Rust API only. `history` is PostgreSQL-only. Migration modules run as
-ordinary JavaScript and are not sandboxed; run trusted modules only.
+PostgreSQL and MySQL 8 through the CLI and the Node API. The CLI also supports
+SQLite plan and apply. `status`, `history`, and `resolve` remain limited to their
+documented network dialects. Migration modules run as ordinary JavaScript and are
+not sandboxed; run trusted modules only.
 
 ## Docs
 

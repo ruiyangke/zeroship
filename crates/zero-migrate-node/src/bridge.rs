@@ -57,8 +57,8 @@ use crate::wire::{
     ApplyIrSqliteRequest, ApplyPendingContractDto, ApplyReply, ApplyRequest, BlockedPlanDto,
     CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource,
     HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply, PendingContractStatusDto,
-    PlanStatusDto, PlanStatusStepDto, ResolvePendingRequest, RuntimeOptionsDto, StatusIrRequest,
-    StatusReply, StatusRequest, UnexpectedJournalEntryDto,
+    PlanStatusDto, PlanStatusStepDto, PreviewSqlSource, ResolvePendingRequest, RuntimeOptionsDto,
+    StatusIrRequest, StatusReply, StatusRequest, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -98,6 +98,17 @@ fn effective_policy_from_wire_layers(
 ) -> std::result::Result<zero_migrate::EffectivePolicy, String> {
     let layers = charter_layer_refs(charter_layers);
     zero_migrate::effective_policy_from_charter_layers(&layers)
+}
+
+fn preview_dialect(s: &str) -> std::result::Result<SqlDialect, String> {
+    match s {
+        "postgres" => Ok(SqlDialect::Postgres),
+        "sqlite" => Ok(SqlDialect::Sqlite),
+        "mysql" => Ok(SqlDialect::Mysql),
+        other => Err(format!(
+            "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +190,45 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
             api::gen_artifacts_from_descriptors(&descriptors, schema, &charter_refs)
         }
     }
+}
+
+/// Render IR envelopes to SQL offline, without a database or host driver.
+///
+/// The ordered policy charter is composed into the same effective policy used by
+/// apply/artifact generation. Each envelope is then lowered independently against
+/// an empty schema through the core preview renderer, preserving input order and
+/// its `[runtime-resolved]` labels for operations that require live catalog state.
+#[napi(js_name = "previewSql")]
+pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
+    let PreviewSqlSource {
+        envelopes,
+        dialect,
+        default_schema,
+        owner_app,
+        charter_layers,
+    } = source;
+
+    let dialect = preview_dialect(&dialect).map_err(Error::from_reason)?;
+    let effective_policy = effective_policy_from_wire_layers(&charter_layers).map_err(|e| {
+        Error::from_reason(format!("previewSql: policy charter failed to load: {e}"))
+    })?;
+    let opts = zero_migrate::PreviewOpts {
+        default_schema,
+        owner_app,
+        effective_policy,
+    };
+
+    envelopes
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| {
+            zero_migrate::render_ir_envelope_sql(envelope, dialect, &opts).map_err(|e| {
+                Error::from_reason(format!(
+                    "previewSql: envelope[{index}] failed to render: {e}"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn gen_artifacts_err(msg: impl Into<String>) -> GenArtifactsReply {
@@ -843,12 +893,15 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
     dialect: &str,
     registry_json: &str,
     charter_layers: &[String],
+    read_only: bool,
 ) -> std::result::Result<StatusReply, String> {
     let charter_refs = charter_layer_refs(charter_layers);
-    backend
-        .ensure_journal(cfg)
-        .await
-        .map_err(|error| error.to_string())?;
+    if !read_only {
+        backend
+            .ensure_journal(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     backend
         .acquire_project_lock(cfg)
         .await
@@ -859,16 +912,32 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
             .snapshot_schema(cfg)
             .await
             .map_err(|error| format!("live schema introspection failed: {error}"))?;
-        let journal_entries = backend
-            .applied(cfg)
-            .await
-            .map_err(|error| error.to_string())?;
-        let resolved_contracts = match backend.pending_contracts() {
-            Some(capability) => capability
-                .resolved_pending_contracts(cfg)
+        let journal_exists = if read_only {
+            backend
+                .journal_exists(cfg)
                 .await
-                .map_err(|error| error.to_string())?,
-            None => Vec::new(),
+                .map_err(|error| error.to_string())?
+        } else {
+            true
+        };
+        let journal_entries = if journal_exists {
+            backend
+                .applied(cfg)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+        let resolved_contracts = if journal_exists {
+            match backend.pending_contracts() {
+                Some(capability) => capability
+                    .resolved_pending_contracts(cfg)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
         let artifacts = crate::lower::lower_ordered_envelopes_to_plans(
             envelope_json,
@@ -888,10 +957,16 @@ async fn status_ir_with_locked_backend<B: MigrationBackend>(
                     .map_err(|error| error.to_string())
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let status =
+        let status = if read_only {
+            zero_migrate::ops::status::status_plans_via_backend_read_only_locked(
+                backend, cfg, &manifests,
+            )
+            .await
+        } else {
             zero_migrate::ops::status::status_plans_via_backend_locked(backend, cfg, &manifests)
                 .await
-                .map_err(|error| error.to_string())?;
+        }
+        .map_err(|error| error.to_string())?;
         Ok::<StatusReply, String>(plan_status_reply(&status))
     }
     .await;
@@ -1285,7 +1360,9 @@ pub fn status_ir(
         registry,
         envelopes,
         charter_layers,
+        read_only,
     } = req;
+    let read_only = read_only.unwrap_or(false);
     let registry_json = serde_json::to_string(&registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
 
@@ -1318,6 +1395,7 @@ pub fn status_ir(
                     &dialect,
                     &registry_json,
                     &charter_layers,
+                    read_only,
                 )
                 .await
             }
@@ -1332,10 +1410,72 @@ pub fn status_ir(
                     &dialect,
                     &registry_json,
                     &charter_layers,
+                    read_only,
                 )
                 .await
             }
         }
+    })
+}
+
+/// `statusIrSqlite`: reconcile authored plans through the bundled in-process
+/// SQLite backend. The journal is bootstrapped by default, matching [`status_ir`];
+/// a request with `readOnly: true` uses the non-creating journal-existence path.
+#[napi(js_name = "statusIrSqlite", ts_return_type = "Promise<StatusReply>")]
+pub fn status_ir_sqlite(
+    env: Env,
+    app_path: String,
+    journal_path: String,
+    req: StatusIrRequest,
+) -> Result<Object<'static>> {
+    let StatusIrRequest {
+        owner_app,
+        project_schema,
+        dialect,
+        registry,
+        envelopes,
+        charter_layers,
+        read_only,
+    } = req;
+    if dialect != "sqlite" {
+        return Err(Error::from_reason(format!(
+            "statusIrSqlite requires dialect \"sqlite\" (got {dialect:?})"
+        )));
+    }
+    let read_only = read_only.unwrap_or(false);
+    let registry_json = serde_json::to_string(&registry)
+        .map_err(|error| Error::from_reason(format!("registry is not serializable: {error}")))?;
+    let envelope_json = envelopes
+        .into_iter()
+        .map(|envelope| {
+            serde_json::to_string(&envelope).map_err(|error| {
+                Error::from_reason(format!("envelope is not serializable: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
+
+    run_in_process_verb(env, move || async move {
+        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+        let cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
+        status_ir_with_locked_backend(
+            &backend,
+            &cfg,
+            &envelope_json,
+            &owner_app,
+            &project_schema,
+            &dialect,
+            &registry_json,
+            &charter_layers,
+            read_only,
+        )
+        .await
     })
 }
 

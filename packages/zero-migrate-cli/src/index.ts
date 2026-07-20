@@ -30,6 +30,7 @@ import {
   type StatusReply,
   type HistoryReply,
   type LoadVerifyReply,
+  type PreviewSqlSource,
 } from "./addon.js";
 import { openPgSession } from "./driver-pg.js";
 import { openMysqlSession } from "./driver-mysql2.js";
@@ -40,6 +41,7 @@ import {
 } from "zero-migrate/internal/recorder";
 
 export { currentIrVersion } from "./addon.js";
+export type { PreviewSqlSource } from "./addon.js";
 export type { IrEnvelope, MigrationModule } from "zero-migrate/internal/recorder";
 
 /** A driver target the facade opens a pinned host session against.
@@ -56,6 +58,12 @@ export type DriverConfig =
   | { kind: "sqlite"; appPath: string; journalPath: string };
 
 type NetworkDriverConfig = Exclude<DriverConfig, { kind: "sqlite" }>;
+
+/** Render already-authored IR envelope JSON through the addon's offline SQL
+ * preview renderer. This never opens a database connection. */
+export function previewSql(source: PreviewSqlSource): string[] {
+  return loadAddon().previewSql(source);
+}
 
 /** The dialect string the addon lower + load-verify + backend-select expect. */
 function dialectOf(driver: DriverConfig): "postgres" | "mysql" | "sqlite" {
@@ -341,6 +349,15 @@ export interface HostReconciledStatusOptions extends HostStatusBaseOptions {
   nameFallback?: string;
 }
 
+/** Plan-aware status for callers that already authored each migration exactly
+ * once. This is used by the CLI's live plan path so the same envelopes are
+ * reconciled and rendered. */
+export interface HostEnvelopeStatusOptions extends HostStatusBaseOptions {
+  envelopes: readonly IrEnvelope[];
+  /** Reconcile without bootstrapping absent journal objects. Default `false`. */
+  readOnly?: boolean;
+}
+
 /** Journal-only status does not lower authored migrations, but still requires
  * the executor's explicitly authored policy documents. */
 export interface HostJournalStatusOptions extends HostStatusBaseOptions {
@@ -380,34 +397,36 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
     );
   }
   assertExplicitPolicy(opts.policy, "status");
+  if (opts.migrations !== undefined) {
+    if (
+      opts.nameFallbacks !== undefined &&
+      opts.nameFallbacks.length !== opts.migrations.length
+    ) {
+      throw new Error(
+        "zero-migrate-cli: status nameFallbacks must match migrations length",
+      );
+    }
+    const addon = loadAddon();
+    const envelopes = opts.migrations.map((migration, index) =>
+      authorEnvelope(
+        addon,
+        migration,
+        opts.nameFallbacks?.[index] ?? opts.nameFallback,
+      ),
+    );
+    return await statusEnvelopes({
+      ownerApp: opts.ownerApp,
+      projectSchema: opts.projectSchema,
+      driver: opts.driver,
+      registry: opts.registry,
+      policy: opts.policy,
+      envelopes,
+    });
+  }
+
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
-    if (opts.migrations !== undefined) {
-      if (
-        opts.nameFallbacks !== undefined &&
-        opts.nameFallbacks.length !== opts.migrations.length
-      ) {
-        throw new Error(
-          "zero-migrate-cli: status nameFallbacks must match migrations length",
-        );
-      }
-      const envelopes = opts.migrations.map((migration, index) =>
-        authorEnvelope(
-          addon,
-          migration,
-          opts.nameFallbacks?.[index] ?? opts.nameFallback,
-        ),
-      );
-      return await addon.statusIr(hostDriver, {
-        ownerApp: opts.ownerApp,
-        projectSchema: opts.projectSchema,
-        dialect: dialectOf(opts.driver),
-        registry: opts.registry ?? {},
-        envelopes,
-        charterLayers: [...opts.policy],
-      });
-    }
     return await addon.status(hostDriver, {
       projectId: opts.projectSchema,
       projectSchema: opts.projectSchema,
@@ -415,6 +434,41 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
       migrations: [], // the read path / empty-journal flow (see doc).
       charterLayers: [...opts.policy],
     });
+  } finally {
+    await close();
+  }
+}
+
+/** Reconcile a complete ordered set of already-authored envelopes. */
+export async function statusEnvelopes(
+  opts: HostEnvelopeStatusOptions,
+): Promise<StatusReply> {
+  if (opts.driver.kind === "sqlite" && opts.readOnly !== true) {
+    throw new Error(
+      "zero-migrate-cli: status is not available for SQLite; SQLite apply is supported",
+    );
+  }
+  assertExplicitPolicy(opts.policy, "status");
+  const addon = loadAddon();
+  const request = {
+    ownerApp: opts.ownerApp,
+    projectSchema: opts.projectSchema,
+    dialect: dialectOf(opts.driver),
+    registry: opts.registry ?? {},
+    envelopes: [...opts.envelopes],
+    charterLayers: [...opts.policy],
+    readOnly: opts.readOnly ?? false,
+  };
+  if (opts.driver.kind === "sqlite") {
+    return await addon.statusIrSqlite(
+      opts.driver.appPath,
+      opts.driver.journalPath,
+      request,
+    );
+  }
+  const { hostDriver, close } = await openSession(opts.driver);
+  try {
+    return await addon.statusIr(hostDriver, request);
   } finally {
     await close();
   }

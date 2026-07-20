@@ -721,6 +721,22 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         Ok(())
     }
 
+    async fn journal_exists(&self, cfg: &ExecutorConfig) -> Result<bool, JournalError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT 1 AS journal_exists
+                   FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = ?
+                    AND TABLE_NAME = 'schema_migrations'
+                    AND TABLE_TYPE = 'BASE TABLE'
+                  LIMIT 1",
+                &[cfg.pg.meta_schema.as_str().into()],
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
         session::ensure_idle_for_journal(self.conn).await?;
         session::acquire_journal_bootstrap_lock(self.conn, &cfg.project_id).await?;

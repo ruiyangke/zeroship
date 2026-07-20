@@ -54,6 +54,7 @@ const IMMUTABLE_TRG: &str = "zs_immutable_trg";
 /// Some("_mig")` and (in engine mode) allows it. Each statement is a discrete
 /// `execute` call; the journal CREATE/INSERT/CREATE TRIGGER are all engine-mode.
 pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteActorError> {
+    actor.ensure_journal_attached().await?;
     actor.set_mode(Mode::EngineJournal).await?;
 
     // 1. The SINGLE consolidated append-only events table. `event_seq INTEGER

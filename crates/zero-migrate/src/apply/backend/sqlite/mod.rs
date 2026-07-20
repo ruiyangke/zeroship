@@ -55,6 +55,7 @@ pub use rebuild_sql::RebuildError;
 #[derive(Debug)]
 pub struct SqliteBackend {
     actor: MigrationActor,
+    journal_path: PathBuf,
     /// OS-backed whole-plan lock shared by every process opening this app file.
     project_lock: File,
     project_lock_path: PathBuf,
@@ -88,6 +89,7 @@ impl SqliteBackend {
             })?;
         Ok(Self {
             actor,
+            journal_path: journal_path.to_path_buf(),
             project_lock,
             project_lock_path,
             project_lock_held: Mutex::new(false),
@@ -595,6 +597,46 @@ impl MigrationBackend for SqliteBackend {
     }
 
     // -- journal row I/O ----------------------------------------------------
+
+    async fn journal_exists(&self, _cfg: &ExecutorConfig) -> Result<bool, JournalError> {
+        let exists = self.journal_path.try_exists().map_err(|error| {
+            JournalError::Backend(format!(
+                "inspect sqlite journal path {}: {error}",
+                self.journal_path.display()
+            ))
+        })?;
+        if !exists {
+            return Ok(false);
+        }
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.journal_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|error| {
+            JournalError::Backend(format!(
+                "open sqlite journal {} read-only: {error}",
+                self.journal_path.display()
+            ))
+        })?;
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM sqlite_master
+                      WHERE type = 'table' AND name = 'schema_migrations'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| {
+                JournalError::Backend(format!(
+                    "inspect sqlite journal {} schema: {error}",
+                    self.journal_path.display()
+                ))
+            })?;
+        Ok(exists)
+    }
 
     async fn ensure_journal(&self, _cfg: &ExecutorConfig) -> Result<(), JournalError> {
         journal_sql::ensure_journal(&self.actor)
