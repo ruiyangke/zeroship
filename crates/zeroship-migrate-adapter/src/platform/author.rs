@@ -11,13 +11,21 @@ use zeroship_runtime::{ModuleEntry, Runtime};
 /// S2 test glue.
 const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
 
-/// The STANDALONE `zero-migrate` recorder bundle — the CURRENT v1 DSL + recorder
+/// The `zero-migrate` engine's OWN recorder bundle — the CURRENT v1 DSL + recorder
 /// (`table()`/`t.*`/`role`/`grant`/`createFunction`/… → `__begin`/`__drain`).
 /// Mapping `@zeroship/migrate` to THIS file is what makes the authored envelope v1.
+///
+/// This is the ENGINE's recorder (vendored in the submodule), NOT the monorepo's
+/// `sdks/migrate` copy: only the engine's recorder is guaranteed in lockstep with
+/// the engine's IR model (e.g. it lowers the `genRandomUuid()` source alias to the
+/// `Expr::UuidV4` IR the engine accepts, whereas the monorepo bundle emitted a raw
+/// `genRandomUuid` synth token the engine now rejects). It is also fully
+/// self-contained (no `@zeroship/db`/`zeroship` external imports), so the authoring
+/// module graph needs no extra stubs.
 const STANDALONE_RECORDER_JS: &str =
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../sdks/migrate/dist/embedded-recorder.js"
+        "/../../third_party/zero-migrate/packages/zero-migrate/dist/embedded-recorder.js"
     ));
 
 /// The deserialized adapter result mirroring the JSON the glue emits.

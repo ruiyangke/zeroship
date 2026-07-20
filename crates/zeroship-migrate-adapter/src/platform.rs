@@ -623,7 +623,16 @@ pub async fn run_platform_migrations(
         report
             .skipped
             .extend(outcome.applied.skipped.into_iter().filter(|v| file_versions.contains(v)));
-        advance_state(&mut state, owner_app, &created_tables);
+        // Re-introspect the live catalog after each file so the NEXT file lowers
+        // against the full column-level snapshot of everything applied so far. The
+        // engine's FK/reference resolution needs the target table's live catalog
+        // SNAPSHOT (columns), not just its name — an in-memory name-only advance
+        // (see `advance_state`) leaves a later cross-file FK (e.g. a constraints
+        // file referencing a table created several files earlier) unresolvable:
+        // "unmanaged target has no live catalog snapshot". A fresh snapshot_schema
+        // is authoritative and cheap at platform-setup cadence.
+        let _ = &created_tables;
+        state = seed_state(&session, &cfg.project_schema, owner_app).await?;
     }
 
     Ok(report)
