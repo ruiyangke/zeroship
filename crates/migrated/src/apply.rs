@@ -21,7 +21,8 @@ use crate::migration_store::{
     StoreMigrationInput, StoredMigration,
 };
 use crate::policy::{
-    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, SealVerifier,
+    confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
+    ManagedPolicyError, SealVerifier,
 };
 use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
 use crate::provisioning::{provision_migrator, ProvisionRoleError};
@@ -400,8 +401,16 @@ async fn apply_ir_documents_with_policy(
         .map_err(ApplyRequestError::ProvisionSchema)?;
     let role = migrator_role_name(&schema)
         .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
-    let exec_cfg = ExecutorConfig::new(schema.clone(), schema.clone(), policy.policy.clone())
-        .with_migrator_role(role.clone());
+    // The executor re-vets rendered SQL at apply time from its own policy, so it must
+    // carry the same no-inject confined guard charter as guarded lower. The composed
+    // inject-bearing policy remains separate and is passed explicitly to shape
+    // resolution and `IrAuthor` below.
+    let exec_cfg = ExecutorConfig::new(
+        schema.clone(),
+        schema.clone(),
+        guard_policy_for_managed(&schema),
+    )
+    .with_migrator_role(role.clone());
     provision_migrator(session.client(), &exec_cfg).await?;
     let backend = PostgresBackend::new_generic(&session);
 
@@ -636,8 +645,8 @@ async fn apply_ir_documents_with_policy(
     // apply carries an authenticated, ceiling-stamped integrity token (the audit
     // records its binding: dialect / matcher version / ceiling version / registry
     // digest). Pre-launch: stored seals don't matter — this seal is minted+verified
-    // in-process for tamper-detection, and the guard/policy that DRIVE the apply come
-    // from the same effective policy it seals.
+    // in-process for tamper-detection. This sealed policy drives managed shape/lower;
+    // the rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
     let sealed_audit = sealed_profile_audit_json(
         sealed_policy.sealed.dialect(),
@@ -762,9 +771,10 @@ struct SealedApplyOutcome {
 ///
 /// Verifies the in-process MAC + binding (tamper/staleness fail-closed), then drives
 /// the published engine's guarded lower + `apply_plan` per file. Table-shape injection
-/// is resolved through the composed engine [`EffectivePolicy`](PdpPolicy) (the same
-/// policy the seal covers); the per-app confined guard reads that same policy. This is
-/// the service-owned reimplementation of the in-tree `apply_sealed` +
+/// is resolved through the composed engine [`EffectivePolicy`](PdpPolicy) that the
+/// seal covers. The rendered-DDL guard uses the separately authored, schema-bound
+/// no-inject confined charter so it can vet the managed CREATE TABLE emitted by lower.
+/// This is the service-owned reimplementation of the in-tree `apply_sealed` +
 /// `apply_bundle_ir_postgres`, since the published engine exports neither.
 #[allow(clippy::too_many_arguments)]
 async fn apply_sealed(
@@ -780,7 +790,7 @@ async fn apply_sealed(
     applied_by: &str,
 ) -> Result<SealedApplyOutcome, SealedApplyError> {
     verifier.verify(&sealed, policy)?;
-    let guard_cfg = guard_config_for_managed(&exec_cfg.project_schema, policy);
+    let guard_cfg = guard_config_for_managed(&exec_cfg.project_schema);
     apply_bundle_ir_postgres(
         session,
         backend,
@@ -1104,8 +1114,7 @@ async fn preflight_ir_documents(
     policy: &EffectivePolicy,
 ) -> Result<PreflightReport, ApplyRequestError> {
     let files = discover_ir_files(migrations_dir)?;
-    let projected = policy.project_for_preflight()?;
-    let guard_cfg = guard_config_for_managed(schema, &projected.policy);
+    let guard_cfg = guard_config_for_managed(schema);
     let mut state = postgres_ir_apply_state(session, exec_cfg, schema)
         .await
         .map_err(IrApplyError::Snapshot)?;
@@ -1219,10 +1228,15 @@ async fn preflight_ir_documents(
     Ok(report)
 }
 
-/// Build the per-app confined guard from the composed policy that also drives shape
-/// resolution and sealing.
-fn guard_config_for_managed(schema: &str, effective: &PdpPolicy) -> GuardConfig {
-    GuardConfig::confined_with_effective(schema.to_string(), effective.clone())
+/// Build the rendered-DDL guard from the authored no-inject confined charter, bound
+/// to the same exact app schema as the inject-bearing policy used during lower.
+fn guard_config_for_managed(schema: &str) -> GuardConfig {
+    GuardConfig::from_policy(guard_policy_for_managed(schema), SqlDialect::Postgres)
+}
+
+fn guard_policy_for_managed(schema: &str) -> PdpPolicy {
+    confined_guard_policy_for_schema(schema)
+        .expect("embedded no-inject confined guard charter must bind and compose")
 }
 
 /// The versions of a migration set that require operator approval, folding the SEALED
