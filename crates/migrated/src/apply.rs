@@ -21,8 +21,7 @@ use crate::migration_store::{
     StoreMigrationInput, StoredMigration,
 };
 use crate::policy::{
-    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, ManagedPosture,
-    SealVerifier,
+    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, SealVerifier,
 };
 use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
 use crate::provisioning::{provision_migrator, ProvisionRoleError};
@@ -401,8 +400,8 @@ async fn apply_ir_documents_with_policy(
         .map_err(ApplyRequestError::ProvisionSchema)?;
     let role = migrator_role_name(&schema)
         .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
-    let exec_cfg =
-        ExecutorConfig::new(schema.clone(), schema.clone()).with_migrator_role(role.clone());
+    let exec_cfg = ExecutorConfig::new(schema.clone(), schema.clone(), policy.policy.clone())
+        .with_migrator_role(role.clone());
     provision_migrator(session.client(), &exec_cfg).await?;
     let backend = PostgresBackend::new_generic(&session);
 
@@ -643,7 +642,7 @@ async fn apply_ir_documents_with_policy(
     let sealed_audit = sealed_profile_audit_json(
         sealed_policy.sealed.dialect(),
         sealed_policy.sealed.matcher_version(),
-        sealed_policy.sealed.ceiling_version(),
+        sealed_policy.sealed.charter_version(),
         &sealed_policy.sealed.registry_digest(),
     );
     tracing::debug!(
@@ -675,7 +674,6 @@ async fn apply_ir_documents_with_policy(
         dir.path(),
         &exec_cfg,
         &apply_policy.policy,
-        &apply_policy.managed,
         approval,
         &applied_by,
     )
@@ -765,8 +763,8 @@ struct SealedApplyOutcome {
 /// Verifies the in-process MAC + binding (tamper/staleness fail-closed), then drives
 /// the published engine's guarded lower + `apply_plan` per file. Table-shape injection
 /// is resolved through the composed engine [`EffectivePolicy`](PdpPolicy) (the same
-/// policy the seal covers); the per-app confined guard is tightened with the managed
-/// posture. This is the service-owned reimplementation of the in-tree `apply_sealed` +
+/// policy the seal covers); the per-app confined guard reads that same policy. This is
+/// the service-owned reimplementation of the in-tree `apply_sealed` +
 /// `apply_bundle_ir_postgres`, since the published engine exports neither.
 #[allow(clippy::too_many_arguments)]
 async fn apply_sealed(
@@ -778,12 +776,11 @@ async fn apply_sealed(
     migrations_dir: &Path,
     exec_cfg: &ExecutorConfig,
     policy: &PdpPolicy,
-    managed: &ManagedPosture,
     approval: Approval,
     applied_by: &str,
 ) -> Result<SealedApplyOutcome, SealedApplyError> {
     verifier.verify(&sealed, policy)?;
-    let guard_cfg = guard_config_for_managed(&exec_cfg.project_schema, managed);
+    let guard_cfg = guard_config_for_managed(&exec_cfg.project_schema, policy);
     apply_bundle_ir_postgres(
         session,
         backend,
@@ -1107,8 +1104,8 @@ async fn preflight_ir_documents(
     policy: &EffectivePolicy,
 ) -> Result<PreflightReport, ApplyRequestError> {
     let files = discover_ir_files(migrations_dir)?;
-    let projected = policy.project_for_preflight();
-    let guard_cfg = guard_config_for_managed(schema, &projected.managed);
+    let projected = policy.project_for_preflight()?;
+    let guard_cfg = guard_config_for_managed(schema, &projected.policy);
     let mut state = postgres_ir_apply_state(session, exec_cfg, schema)
         .await
         .map_err(IrApplyError::Snapshot)?;
@@ -1222,14 +1219,10 @@ async fn preflight_ir_documents(
     Ok(report)
 }
 
-/// Build the per-app confined guard, tightened with the managed posture (extension
-/// allowlist + data-security). `GuardConfig::confined(schema)` pins the app schema
-/// (`schema.cross_schema`); the managed posture layers on the extension allowlist and
-/// the RLS/destructive obligations — byte-identical to the old profile-driven builder.
-fn guard_config_for_managed(schema: &str, managed: &ManagedPosture) -> GuardConfig {
-    GuardConfig::confined(schema.to_string())
-        .with_extension_allowlist(managed.extensions.clone())
-        .with_data_security(managed.require_rls, managed.destructive_ops)
+/// Build the per-app confined guard from the composed policy that also drives shape
+/// resolution and sealing.
+fn guard_config_for_managed(schema: &str, effective: &PdpPolicy) -> GuardConfig {
+    GuardConfig::confined_with_effective(schema.to_string(), effective.clone())
 }
 
 /// The versions of a migration set that require operator approval, folding the SEALED

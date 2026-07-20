@@ -14,46 +14,66 @@
 //!    over `PostgresBackend::new_generic(&CompioPgSession)`, recording to the
 //!    platform journal (`<project_schema>_migrations`).
 //!
-//! # The two operator-side Platform seams (LOWER + APPLY)
+//! # The two operator-side Platform consumers (LOWER + APPLY)
 //!
-//! Both halves run on the published engine's PUBLIC, token-gated Platform API:
+//! Both halves consume the same explicitly authored Platform policy:
 //!
-//! - LOWER — `GuardConfig::platform(&cap, schemas, extensions)` (already public):
+//! - LOWER — `GuardConfig::from_policy(platform_effective, SqlDialect::Postgres)`:
 //!   every op the platform schema uses — `schema` / `extension` / `role` /
 //!   `domain` / `sequence` / `createFunction` / `raw` / `table().trigger()` /
 //!   `table().comment()` / `column().comment()` / `setRls` / `policy()` /
 //!   `currentSetting` / `grant` / `revoke` / `dropFunction` / `table().drop()` —
 //!   authors on the standalone v1 recorder and lowers under the Platform guard.
 //!   The DSL/op support is COMPLETE — there is NO missing op type.
-//! - APPLY — `ExecutorConfig::platform(&cap, project_id, project_schema, schemas,
-//!   extensions)`: the operator-side production seam for a Platform-trust executor
-//!   (the APPLY-half peer of `GuardConfig::platform`). `MigrationEngine`'s executor
-//!   derives its first-pass guard from `exec_cfg.guard_config()`, which honours
-//!   `Platform` because the config was built through this token-gated ctor, so it
+//! - APPLY — `ExecutorConfig::new(project_id, project_schema, platform_effective)`:
+//!   `MigrationEngine`'s executor derives its first-pass guard from that same policy, so it
 //!   admits the platform DDL (CREATE SCHEMA / roles / grants / cross-schema
 //!   `public` / functions) the confined creator posture denies.
-//!
-//! Both require an `OperatorCapability` token, minted through the engine's named
-//! production seam `OperatorCapability::new()`. This monorepo bin is the
-//! operator-side production caller — the napi host is not the only legitimate
-//! Platform-apply producer.
 
 use std::path::{Path, PathBuf};
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::guard::GuardConfig;
 use zero_migrate::{
-    effective_policy_from_ceiling_toml, resolve_create_table_policy, Approval, ApprovalScope,
+    effective_policy_from_charter_toml, resolve_create_table_policy, Approval, ApprovalScope,
     ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationId, MigrationIr,
     PlanStep, PostgresBackend, RenameStep, SqlDialect,
 };
-use zero_migrate_ir::capability::OperatorCapability;
 use zero_migrate_policy::EffectivePolicy as PdpPolicy;
 
 /// The platform (author-owned, no-inject) ceiling. `resolve_create_table_policy` over
-/// its composed effective policy is a pass-through (no injects); the guard's
-/// privileged posture comes from `GuardConfig::platform`.
+/// its composed effective policy is a pass-through (no injects) and carries the
+/// complete privileged guard/executor posture.
 const PLATFORM_CEILING_TOML: &str = include_str!("../policies/platform.policy.toml");
+
+fn platform_effective(project_schema: &str) -> PdpPolicy {
+    const PLACEHOLDER: &str = "\"__ZEROSHIP_PROJECT_SCHEMA__\"";
+    assert_eq!(
+        PLATFORM_CEILING_TOML.matches(PLACEHOLDER).count(),
+        3,
+        "platform charter must bind all three namespace grants"
+    );
+    let project_schema =
+        serde_json::to_string(project_schema).expect("project schema serializes as TOML");
+    let charter = PLATFORM_CEILING_TOML.replace(PLACEHOLDER, &project_schema);
+    effective_policy_from_charter_toml(&charter).expect("embedded platform charter composes")
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn platform_charter_retains_the_project_and_public_schema_allowlist() {
+        let policy = platform_effective("zeroship");
+        let guard = GuardConfig::from_policy(policy, SqlDialect::Postgres);
+        let Some(zero_migrate::SchemaScope::Allowlist(mut schemas)) = guard.schema_scope() else {
+            panic!("platform charter must produce a schema allowlist");
+        };
+        schemas.sort();
+        assert_eq!(schemas, vec!["public", "zeroship"]);
+    }
+}
 
 use crate::CompioPgSession;
 
@@ -77,18 +97,6 @@ pub struct PlatformMigrateConfig {
     pub project_schema: String,
     /// The advisory-lock / journal project id (conventionally `zeroship`).
     pub project_id: String,
-}
-
-/// The cross-schema allowlist the Platform guard permits references to. The
-/// platform migrations reference `public` (extensions, unqualified `citext`) beside
-/// the primary `zeroship` schema.
-fn platform_schemas(project_schema: &str) -> Vec<String> {
-    vec![project_schema.to_string(), "public".to_string()]
-}
-
-/// The `CREATE EXTENSION` allowlist the platform migrations rely on.
-fn platform_extensions() -> Vec<String> {
-    vec!["citext".to_string(), "uuid-ossp".to_string()]
 }
 
 /// What a platform migrate run produced.
@@ -264,15 +272,12 @@ struct LowerCtx {
 
 impl LowerCtx {
     fn new(project_schema: &str) -> Self {
-        let cap = OperatorCapability::new();
-        let schemas = platform_schemas(project_schema);
-        let extensions = platform_extensions();
+        let policy = platform_effective(project_schema);
         Self {
             project_schema: project_schema.to_string(),
             owner_app: PLATFORM_OWNER_APP,
-            guard_cfg: GuardConfig::platform(&cap, schemas, extensions),
-            policy: effective_policy_from_ceiling_toml(PLATFORM_CEILING_TOML)
-                .expect("embedded platform ceiling composes"),
+            guard_cfg: GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres),
+            policy,
         }
     }
 }
@@ -525,24 +530,11 @@ pub async fn run_platform_migrations(
     let ctx = LowerCtx::new(&cfg.project_schema);
     let owner_app = ctx.owner_app;
 
-    // ── the Platform executor posture (operator-side production seam) ──
-    // The engine's executor first-pass guard is derived from
-    // `exec_cfg.guard_config()`, which honours Platform ONLY when the config was
-    // built via the token-gated `ExecutorConfig::platform`. That ctor is the
-    // PUBLIC operator-side Platform seam (the APPLY-half peer of the already-public
-    // `GuardConfig::platform` LOWER-half seam); it requires an `OperatorCapability`
-    // token, minted here through the engine's named production seam
-    // `OperatorCapability::new()`. This monorepo bin is the operator-side
-    // production caller — it applies the platform's own trusted infra schema
-    // (CREATE SCHEMA / roles / grants / cross-schema public / functions) over the
-    // native compio `SqlSession`, so the executor guard admits platform DDL.
-    let exec_cap = OperatorCapability::new();
-    let exec_cfg = ExecutorConfig::platform(
-        &exec_cap,
+    // The executor consumes the exact same authored policy used for lowering.
+    let exec_cfg = ExecutorConfig::new(
         cfg.project_id.clone(),
         cfg.project_schema.clone(),
-        platform_schemas(&cfg.project_schema),
-        platform_extensions(),
+        ctx.policy.clone(),
     );
 
     let backend = PostgresBackend::new_generic(&session);

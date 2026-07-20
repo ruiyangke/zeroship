@@ -64,7 +64,7 @@ use zero_migrate::render::declarative::{
     CollectionDescriptor, FieldDescriptor, IndexDescriptor,
 };
 use zero_migrate::{
-    desired_snapshot_for_dialect, effective_policy_from_ceiling_toml, Approval, Checksum,
+    desired_snapshot_for_dialect, effective_policy_from_charter_toml, Approval, Checksum,
     ChecksumInput, DeclarativeApplyError, DeclarativeAuthor, ExecutorConfig, GuardConfig, Migration,
     MigrationEngine, MigrationFlags, MigrationId,
 };
@@ -135,7 +135,7 @@ pub(crate) async fn run_sqlite_via_engine(
     // crates/migrated/policies/confined.policy.toml). Its grants/inject are
     // `scope = "all"`, so it applies regardless of the (SQLite-inert) schema name.
     const CONFINED_CEILING_TOML: &str = include_str!("../../policies/confined.policy.toml");
-    let effective = effective_policy_from_ceiling_toml(CONFINED_CEILING_TOML)
+    let effective = effective_policy_from_charter_toml(CONFINED_CEILING_TOML)
         .map_err(|e| DbError::internal(format!("sqlite engine: confined policy failed: {e}")))?;
 
     // The desired snapshot. This path is SQLite, so it MUST use the dialect-aware
@@ -148,8 +148,9 @@ pub(crate) async fn run_sqlite_via_engine(
     let engine = MigrationEngine::new();
     // SQLite ignores the schema/lock strings (single-actor; journal in `_mig`);
     // the engine still needs a config to thread. project_id == app_id is inert.
-    let exec_cfg = ExecutorConfig::new(app_id, app_id);
-    let guard_cfg = GuardConfig::confined_sqlite(app_id);
+    let exec_cfg = ExecutorConfig::new(app_id, app_id, effective.clone());
+    let guard_cfg = GuardConfig::confined_with_effective(app_id, effective.clone())
+        .for_dialect(SqlDialect::Sqlite);
     let author = DeclarativeAuthor::new_for_dialect(app_id, app_id, SqlDialect::Sqlite);
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());

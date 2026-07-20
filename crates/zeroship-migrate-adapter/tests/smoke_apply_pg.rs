@@ -20,26 +20,32 @@
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    effective_policy_from_ceiling_toml, resolve_create_table_policy, Approval, ExecutorConfig,
-    GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect,
+    effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
+    PostgresBackend, SqlDialect,
 };
 use zeroship_migrate_adapter::CompioPgSession;
 
 /// The confined table-shape ceiling (the seven system columns + three indexes +
-/// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCeiling` document composed
-/// into an `EffectivePolicy` via the engine's `effective_policy_from_ceiling_toml`.
+/// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCharter` document composed
+/// into an `EffectivePolicy` via the engine's `effective_policy_from_charter_toml`.
 /// (The old `PolicyProfile::confined()` is gone; the confined shape is now policy data.)
 const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
 [[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["__PROJECT_SCHEMA__"] }
+
+[[grant]]
 key = "schema.create_table"
 value = true
-scope = "all"
+scope = { include = ["__PROJECT_SCHEMA__"] }
 
 [[grant]]
 key = "schema.rename"
 value = true
-scope = "all"
+scope = { include = ["__PROJECT_SCHEMA__"] }
 
 [[grant]]
 key = "safety.destructive_ops"
@@ -80,10 +86,24 @@ fn token() -> String {
     format!("{pid}_{nanos}")
 }
 
-fn cfg_for(tok: &str) -> ExecutorConfig {
-    let mut c = ExecutorConfig::new(format!("{PROJECT}_{tok}"), format!("proj_{tok}"));
+fn confined_effective(project_schema: &str) -> EffectivePolicy {
+    const PLACEHOLDER: &str = "\"__PROJECT_SCHEMA__\"";
+    assert_eq!(CONFINED_CEILING_TOML.matches(PLACEHOLDER).count(), 3);
+    let project_schema = serde_json::to_string(project_schema).expect("schema serializes");
+    let charter = CONFINED_CEILING_TOML.replace(PLACEHOLDER, &project_schema);
+    effective_policy_from_charter_toml(&charter).expect("confined charter composes")
+}
+
+fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
+    let project_schema = format!("proj_{tok}");
+    let effective = confined_effective(&project_schema);
+    let mut c = ExecutorConfig::new(
+        format!("{PROJECT}_{tok}"),
+        project_schema,
+        effective.clone(),
+    );
     c.pg.meta_schema = format!("meta_{tok}");
-    c
+    (c, effective)
 }
 
 /// The env var gating the live-PG smoke test. Mirrors the standalone's suite gate.
@@ -116,11 +136,14 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// policy (the platform's create-table policy) — the same normalisation the
 /// SQLite IR-apply test uses before lowering. `addColumn` ops pass through
 /// untouched.
-fn resolved_envelope_json(raw: &str) -> String {
+fn resolved_envelope_json(
+    raw: &str,
+    effective: &EffectivePolicy,
+    default_schema: &str,
+) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
-    let confined =
-        effective_policy_from_ceiling_toml(CONFINED_CEILING_TOML).expect("confined ceiling composes");
-    let resolved = resolve_create_table_policy(&ir, &confined).expect("test IR resolves");
+    let resolved =
+        resolve_create_table_policy(&ir, effective, default_schema).expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -165,7 +188,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("connect compio session to test PG");
     let tok = token();
-    let cfg = cfg_for(&tok);
+    let (cfg, effective) = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     ensure_project_schema(&session, &cfg).await;
 
@@ -179,10 +202,17 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
             ]},
             {"op":"addColumn","table":"notes","column":"tag","type":"text","nullable":true}
         ]}"#,
+        &effective,
+        &cfg.project_schema,
     );
 
     // (b→c) The REAL fail-closed gate + lower, Postgres dialect.
-    let author = IrAuthor::new(&cfg.project_schema, APP, SqlDialect::Postgres);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        APP,
+        SqlDialect::Postgres,
+        &effective,
+    );
     let migrations = author
         .load_and_lower(&ir, APP, &Default::default(), &LiveSchema::default())
         .expect("a valid IR envelope must lower on Postgres");
@@ -190,7 +220,8 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
 
     // (c) PostgresBackend over the compio adapter + MigrationEngine.
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::confined(cfg.project_schema.clone());
+    let guard_cfg =
+        GuardConfig::confined_with_effective(cfg.project_schema.clone(), effective.clone());
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),

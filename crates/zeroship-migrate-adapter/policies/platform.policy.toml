@@ -2,22 +2,83 @@
 #
 # Author-owned: it injects NO mandatory system shape, so `resolve_create_table_policy`
 # is a pass-through over it (the platform's `db/migrations-ts` author their tables
-# verbatim). The guard is built separately via `GuardConfig::platform` (which carries
-# the privileged vendor set + the raw-island relaxation); this ceiling only needs to
-# grant the namespace-authority (create / rename anywhere) so the composed
-# `EffectivePolicy` is a valid no-inject shape policy.
+# verbatim). This charter is the single source for both the lowering guard and executor
+# posture, including the privileged vendor set, extension allowlist, namespace
+# authority, and raw-island role relaxation (`GuardMode::Enforced` + `access.role`).
+# The adapter binds the project-schema placeholder below before loading the charter;
+# `public` remains the only cross-schema peer.
 
 policy_version = 1
 
 [[grant]]
-key = "schema.create_table"
+key = "access.role"
 value = true
 scope = "all"
 
 [[grant]]
-key = "schema.rename"
+key = "access.grant"
 value = true
 scope = "all"
+
+[[grant]]
+key = "code.extension"
+value = ["citext", "uuid-ossp"]
+scope = "all"
+
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.policy"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.rls"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw_view_body"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.materialized_view"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
 
 [[grant]]
 key = "safety.destructive_ops"

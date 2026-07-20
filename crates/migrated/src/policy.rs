@@ -7,8 +7,8 @@
 //! + its `seal_effective_profile` HMAC are DELETED. This module rebuilds the managed
 //! server on the engine's surviving PDP:
 //!
-//! - the OPERATOR CEILING is a [`zero_migrate_policy::RootCeiling`] — a [`PolicyDoc`]
-//!   loaded [`LoadContext::RootCeiling`] (the only layer that may carry a `mandatory`
+//! - the OPERATOR CEILING is a [`zero_migrate_policy::RootCharter`] — a [`PolicyDoc`]
+//!   loaded [`LoadContext::RootCharter`] (the only layer that may carry a `mandatory`
 //!   inject). The default ceiling is the monorepo-owned CONFINED document embedded
 //!   below; named tiers add more ceilings to the [`ProfileCatalog`].
 //! - the CREATOR DRAFT is an untrusted [`PolicyDoc`] loaded [`LoadContext::NonRootLayer`].
@@ -22,20 +22,20 @@
 //! (`resolve_create_table_policy`) and escalation-reject. The three MANAGED knobs a
 //! confined app's guard still needs (`require_rls`, `destructive_ops`,
 //! `extensions`) are read back out of the composed policy into a [`ManagedPosture`]
-//! so the per-app `GuardConfig::confined(app_schema)` can be tightened the same way
-//! the old `guard_config_for_profile` did — one source of truth, no drift.
+//! so the per-app guard can consume that exact policy — one source of truth, no drift.
 
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
-use zero_migrate::{effective_policy_from_ceiling_toml, seal, DestructiveOps, SealError, SealedPolicy};
+use zero_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy};
 use zero_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zero_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
+    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
 };
 use zero_migrate_policy::{
     admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
-    LoadError, ObjectName, PolicyDoc, RootCeiling,
+    LoadError, ObjectName, PolicyDoc, RootCharter,
 };
 
 /// The seal binding: the scope matcher folds Postgres identifiers under this dialect
@@ -65,7 +65,9 @@ impl ManagedPolicyConfig {
     pub fn new(mac_key: impl Into<Vec<u8>>, catalog: ProfileCatalog) -> Result<Self, ManagedPolicyError> {
         // Prove the default ceiling loads + composes at construction time (fail fast
         // on a malformed embedded/operator ceiling rather than per-request).
-        catalog.default_ceiling().effective()?;
+        catalog
+            .default_ceiling()
+            .effective_for_app_schema("__zeroship_policy_validation__")?;
         Ok(Self { catalog, mac_key: mac_key.into() })
     }
 
@@ -102,13 +104,13 @@ impl ManagedPolicyConfig {
         draft: Option<&ParsedDraft>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(app_id, tier);
+        let app_base = ceiling.effective_for_app_schema(&app_id.to_string())?;
         let policy = match draft {
-            // The `ceiling` operand is a finalized ceiling: `RootCeiling` itself is a
-            // valid finalized single-layer ceiling (it implements `AdmitCeiling`), so
-            // it may be `admit`'s ceiling directly.
-            Some(draft) => admit(ceiling.root(), &draft.doc, &builtin_registry())
+            // Admit the untrusted creator draft only after the operator charter has
+            // been bound to this app's exact schema. Any grant outside it is rejected.
+            Some(draft) => admit(&app_base, &draft.doc, &builtin_registry())
                 .map_err(ManagedPolicyError::Compose)?,
-            None => ceiling.effective()?,
+            None => app_base,
         };
         Ok(EffectivePolicy::new(
             ceiling.id.clone(),
@@ -207,12 +209,34 @@ impl EffectivePolicy {
     /// Project for preflight: anything other than `Forbid` → `Warn` (preflight surfaces
     /// destructive ops as gated, without blocking the classification pass).
     #[must_use]
-    pub fn project_for_preflight(&self) -> Self {
-        let mut projected = self.clone();
-        if projected.managed.destructive_ops != DestructiveOps::Forbid {
-            projected.managed.destructive_ops = DestructiveOps::Warn;
+    pub fn project_for_preflight(&self) -> Result<Self, ManagedPolicyError> {
+        if self.managed.destructive_ops != DestructiveOps::Allow {
+            return Ok(self.clone());
         }
-        projected
+        const PREFLIGHT_WARN_LAYER: &str = r#"policy_version = 1
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "warn"
+scope = "all"
+"#;
+        let registry = builtin_registry();
+        let draft = PolicyDoc::parse_toml(
+            PREFLIGHT_WARN_LAYER,
+            &registry,
+            LoadContext::NonRootLayer,
+        )
+        .map_err(|error| {
+            ManagedPolicyError::CeilingCompose(format!(
+                "load fixed preflight policy layer: {error:?}"
+            ))
+        })?;
+        let policy = admit(&self.policy, &draft, &registry).map_err(|error| {
+            ManagedPolicyError::CeilingCompose(format!(
+                "compose fixed preflight policy layer: {error:?}"
+            ))
+        })?;
+        Ok(Self::new(self.ceiling_id.clone(), self.ceiling_version, policy))
     }
 }
 
@@ -314,34 +338,45 @@ impl ProfileCatalog {
     }
 }
 
-/// One operator ceiling: an id + monotonic version + the parsed [`RootCeiling`] and
+/// One operator ceiling: an id + monotonic version + the parsed [`RootCharter`] and
 /// its source TOML (kept so the ceiling-only effective policy can be composed through
-/// the engine's own `effective_policy_from_ceiling_toml`).
+/// the engine's own `effective_policy_from_charter_toml`).
 #[derive(Debug, Clone)]
 pub struct ManagedCeiling {
     pub id: String,
     pub tier: Option<String>,
     pub ceiling_version: u64,
-    root: RootCeiling,
+    root: RootCharter,
     toml: String,
+    bind_app_schema: bool,
 }
 
 impl ManagedCeiling {
-    /// Parse a ceiling from a `RootCeiling` TOML document.
+    /// Parse a ceiling from a `RootCharter` TOML document.
     pub fn from_toml(
         id: impl Into<String>,
         tier: Option<String>,
         ceiling_version: u64,
         toml: &str,
     ) -> Result<Self, ManagedPolicyError> {
-        let root = RootCeiling::parse_toml(toml, &builtin_registry())
+        let root = RootCharter::parse_toml(toml, &builtin_registry())
             .map_err(ManagedPolicyError::CeilingLoad)?;
-        Ok(Self { id: id.into(), tier, ceiling_version, root, toml: toml.to_string() })
+        Ok(Self {
+            id: id.into(),
+            tier,
+            ceiling_version,
+            root,
+            toml: toml.to_string(),
+            bind_app_schema: false,
+        })
     }
 
     /// The monorepo-owned confined default ceiling.
     pub fn confined(ceiling_version: u64) -> Result<Self, ManagedPolicyError> {
-        Self::from_toml("confined-default", None, ceiling_version, CONFINED_CEILING_TOML)
+        let mut ceiling =
+            Self::from_toml("confined-default", None, ceiling_version, CONFINED_CEILING_TOML)?;
+        ceiling.bind_app_schema = true;
+        Ok(ceiling)
     }
 
     /// The monorepo-owned platform (author-owned) ceiling.
@@ -350,17 +385,101 @@ impl ManagedCeiling {
     }
 
     #[must_use]
-    pub fn root(&self) -> &RootCeiling {
+    pub fn root(&self) -> &RootCharter {
         &self.root
     }
 
     /// Compose the ceiling against a grant-only draft extracted from itself to obtain
     /// its effective policy (the no-creator-draft path). Injects/requires/validates
     /// survive from the root ceiling; grants become effective through the ceiling's own
-    /// grant rules. Delegates to the engine's `effective_policy_from_ceiling_toml`.
+    /// grant rules. Delegates to the engine's `effective_policy_from_charter_toml`.
     fn effective(&self) -> Result<PdpPolicy, ManagedPolicyError> {
-        effective_policy_from_ceiling_toml(&self.toml).map_err(ManagedPolicyError::CeilingCompose)
+        effective_policy_from_charter_toml(&self.toml).map_err(ManagedPolicyError::CeilingCompose)
     }
+
+    fn effective_for_app_schema(&self, schema: &str) -> Result<PdpPolicy, ManagedPolicyError> {
+        if !self.bind_app_schema {
+            return self.effective();
+        }
+        let charter = bind_confined_charter_to_schema(&self.toml, schema)
+            .map_err(ManagedPolicyError::CeilingCompose)?;
+        effective_policy_from_charter_toml(&charter).map_err(ManagedPolicyError::CeilingCompose)
+    }
+}
+
+fn schema_scope_value(schema: &str) -> toml::Value {
+    let mut scope = toml::map::Map::new();
+    scope.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String(schema.to_string())]),
+    );
+    toml::Value::Table(scope)
+}
+
+/// Bind the reusable confined charter to one exact app schema. Validate the expected
+/// template shape so a later policy edit fails closed instead of changing authority.
+fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String, String> {
+    let mut doc: toml::Value = toml::from_str(source)
+        .map_err(|error| format!("parse confined charter for schema binding: {error}"))?;
+    let grants = doc
+        .as_table_mut()
+        .and_then(|root| root.get_mut("grant"))
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| "confined charter must contain [[grant]] rules".to_string())?;
+
+    let mut create_table_rules = 0_u8;
+    let mut rename_rules = 0_u8;
+    for (index, value) in grants.iter_mut().enumerate() {
+        let rule = value
+            .as_table_mut()
+            .ok_or_else(|| format!("confined charter grant {index} must be a table"))?;
+        let key = rule
+            .get("key")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("confined charter grant {index} must have a string key"))?;
+        match key.as_str() {
+            KEY_SCHEMA_CREATE_TABLE | KEY_SCHEMA_RENAME => {
+                if rule.get("value").and_then(toml::Value::as_bool) != Some(true)
+                    || rule.get("scope").and_then(toml::Value::as_str) != Some("all")
+                {
+                    return Err(format!(
+                        "confined charter {key} must remain true at scope=all before app binding"
+                    ));
+                }
+                rule.insert("scope".to_string(), schema_scope_value(schema));
+                if key == KEY_SCHEMA_CREATE_TABLE {
+                    create_table_rules += 1;
+                } else {
+                    rename_rules += 1;
+                }
+            }
+            KEY_SCHEMA_CROSS_SCHEMA => {
+                return Err(
+                    "confined charter must not carry schema.cross_schema before app binding"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    if create_table_rules != 1 || rename_rules != 1 {
+        return Err(format!(
+            "confined charter app binding requires one create-table and one rename grant; \
+             found {create_table_rules} and {rename_rules}"
+        ));
+    }
+
+    let mut cross_schema = toml::map::Map::new();
+    cross_schema.insert(
+        "key".to_string(),
+        toml::Value::String(KEY_SCHEMA_CROSS_SCHEMA.to_string()),
+    );
+    cross_schema.insert("value".to_string(), toml::Value::Boolean(true));
+    cross_schema.insert("scope".to_string(), schema_scope_value(schema));
+    grants.push(toml::Value::Table(cross_schema));
+
+    toml::to_string(&doc).map_err(|error| format!("serialize app-bound charter: {error}"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -482,6 +601,16 @@ mod tests {
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
         // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
+        let app_schema = app_id.to_string();
+        let guard = zero_migrate::guard::GuardConfig::confined_with_effective(
+            app_schema.clone(),
+            effective.policy.clone(),
+        );
+        assert_eq!(
+            guard.schema_scope(),
+            Some(zero_migrate::SchemaScope::Single(app_schema)),
+            "the effective policy must retain the exact app-schema boundary"
+        );
     }
 
     #[test]
@@ -561,6 +690,45 @@ scope = "all"
 
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
+    }
+
+    #[test]
+    fn draft_cannot_escape_the_app_schema_boundary() {
+        let cfg = config();
+        let app_id = Uuid::new_v4();
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+"#,
+            })
+            .expect("cross-schema draft parses before admission");
+
+        let err = cfg
+            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .expect_err("authority outside the app schema must be rejected");
+        assert!(matches!(err, ManagedPolicyError::Compose(_)));
+        assert!(err.is_creator_fault());
+    }
+
+    #[test]
+    fn preflight_projection_tightens_allow_to_warn_in_the_pdp() {
+        let cfg = config();
+        let app_id = Uuid::new_v4();
+        let effective = cfg
+            .compose_effective_for_app(&app_id, None, None)
+            .expect("default confined policy composes");
+        let projected = effective
+            .project_for_preflight()
+            .expect("fixed preflight layer composes");
+
+        assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
+        assert_eq!(projected.managed.destructive_ops, DestructiveOps::Warn);
     }
 
     #[test]
