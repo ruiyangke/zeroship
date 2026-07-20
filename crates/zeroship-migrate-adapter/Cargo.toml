@@ -1,7 +1,7 @@
 # Phase F — the monorepo's bridge between the published `zero-migrate` engine and
 # the platform's native compio-postgres driver.
 #
-# `zero-migrate` (the standalone engine at /home/ruiyang/Projects/zero-migrate)
+# `zero-migrate` (the standalone engine vendored at third_party/zero-migrate)
 # ships NO native Rust network Postgres driver: its PG apply path is generic over
 # the driver-neutral `zero_migrate::driver::SqlSession` seam (the host/napi bridge
 # is the production producer). This crate supplies the MONOREPO's producer: a
@@ -34,14 +34,14 @@ publish = false
 platform-cli = ["dep:zeroship-runtime", "dep:v8", "dep:serde_json", "dep:serde", "dep:zero-migrate-ir", "dep:zero-migrate-policy"]
 
 [dependencies]
-# The published engine (path dep — cargo path-deps may point outside the
-# workspace). Default features light `host-pg` → the internal `pg_seam` cfg, which
-# exposes `driver::SqlSession`, the generic `PostgresBackend<D>`, and the
-# `<D: SqlSession>` apply/journal path this adapter drives.
-zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
+# The published engine (vendored git submodule; path declared once in the root
+# `[workspace.dependencies]`). Default features light `host-pg` → the internal
+# `pg_seam` cfg, which exposes `driver::SqlSession`, the generic `PostgresBackend<D>`,
+# and the `<D: SqlSession>` apply/journal path this adapter drives.
+zero-migrate = { workspace = true }
 # The published engine's IR crate — names the `OperatorCapability` trust token the
 # Platform executor/guard posture requires (Stage 4a platform-migrate only).
-zero-migrate-ir = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-ir", optional = true }
+zero-migrate-ir = { workspace = true, optional = true }
 # The engine PDP — names the composed `EffectivePolicy` the platform table-shape
 # resolver + `load_and_lower_guarded` thread (Stage 4a platform-migrate only).
 zero-migrate-policy = { workspace = true, optional = true }

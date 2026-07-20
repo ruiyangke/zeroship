@@ -246,6 +246,7 @@ async fn seed_state(
             .map(|t| (t.clone(), owner_app.to_string()))
             .collect(),
         sqlite_schemas: std::collections::BTreeMap::new(),
+        logical_columns: std::collections::BTreeMap::new(),
     };
     Ok(ApplyState {
         registry,
@@ -309,10 +310,15 @@ fn author_and_lower_file(
 
     // (3) fold the Platform table-shape profile into every createTable BEFORE the
     // fail-closed load gate. Non-createTable ops pass through untouched.
-    let bytes = resolve_shape(&envelope, &ctx.policy, &file)?;
+    let bytes = resolve_shape(&envelope, &ctx.policy, &ctx.project_schema, &file)?;
 
     // (4) fail-closed load gate + guarded lower under the Platform guard.
-    let ir_author = IrAuthor::new(&ctx.project_schema, ctx.owner_app, SqlDialect::Postgres);
+    let ir_author = IrAuthor::new(
+        &ctx.project_schema,
+        ctx.owner_app,
+        SqlDialect::Postgres,
+        &ctx.policy,
+    );
     let ir_author = match ctx.guard_cfg.schema_scope() {
         Some(scope) => ir_author.with_schema_scope(scope),
         None => ir_author,
@@ -410,7 +416,9 @@ fn restamp_stable_versions(
                 );
             }
             PlanStep::Dml { .. }
-            | PlanStep::Backfill(_)
+            | PlanStep::Backfill { .. }
+            | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::SynchronizeIdentity(_)
             | PlanStep::OnlineRename(RenameStep::PgExpandContract(_))
             | PlanStep::OnlineRename(RenameStep::SqliteRebuild(_)) => {
                 return Err(PlatformMigrateError::Apply {
@@ -636,6 +644,7 @@ pub async fn run_platform_migrations(
 fn resolve_shape(
     envelope: &str,
     policy: &PdpPolicy,
+    default_schema: &str,
     file: &str,
 ) -> Result<String, PlatformMigrateError> {
     let ir: MigrationIr =
@@ -643,11 +652,12 @@ fn resolve_shape(
             file: file.to_string(),
             message: format!("deserialize IR envelope: {e}"),
         })?;
-    let resolved =
-        resolve_create_table_policy(&ir, policy).map_err(|e| PlatformMigrateError::Shape {
+    let resolved = resolve_create_table_policy(&ir, policy, default_schema).map_err(|e| {
+        PlatformMigrateError::Shape {
             file: file.to_string(),
             message: format!("resolve table-shape policy: {e}"),
-        })?;
+        }
+    })?;
     serde_json::to_string(&resolved).map_err(|e| PlatformMigrateError::Shape {
         file: file.to_string(),
         message: format!("re-serialize resolved IR envelope: {e}"),

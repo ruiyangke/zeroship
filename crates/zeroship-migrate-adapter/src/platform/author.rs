@@ -15,7 +15,10 @@ const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
 /// (`table()`/`t.*`/`role`/`grant`/`createFunction`/… → `__begin`/`__drain`).
 /// Mapping `@zeroship/migrate` to THIS file is what makes the authored envelope v1.
 const STANDALONE_RECORDER_JS: &str =
-    include_str!("/home/ruiyang/Projects/zero-migrate/sdks/migrate/dist/embedded-recorder.js");
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdks/migrate/dist/embedded-recorder.js"
+    ));
 
 /// The deserialized adapter result mirroring the JSON the glue emits.
 #[derive(serde::Deserialize)]

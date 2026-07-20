@@ -838,15 +838,18 @@ fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError
 fn resolve_shape_bytes(
     raw_bytes: &str,
     policy: &PdpPolicy,
+    default_schema: &str,
     file: &str,
 ) -> Result<String, IrApplyError> {
     let ir: MigrationIr = serde_json::from_str(raw_bytes).map_err(|e| IrApplyError::Read {
         file: file.to_string(),
         message: format!("deserialize IR envelope: {e}"),
     })?;
-    let resolved = resolve_create_table_policy(&ir, policy).map_err(|e| IrApplyError::Read {
-        file: file.to_string(),
-        message: format!("resolve table-shape policy: {e}"),
+    let resolved = resolve_create_table_policy(&ir, policy, default_schema).map_err(|e| {
+        IrApplyError::Read {
+            file: file.to_string(),
+            message: format!("resolve table-shape policy: {e}"),
+        }
     })?;
     serde_json::to_string(&resolved).map_err(|e| IrApplyError::Read {
         file: file.to_string(),
@@ -893,6 +896,7 @@ async fn postgres_ir_apply_state(
             .map(|t| (t.clone(), owner_app.to_string()))
             .collect(),
         sqlite_schemas: BTreeMap::new(),
+        logical_columns: BTreeMap::new(),
     };
     Ok(PostgresIrApplyState {
         registry,
@@ -990,9 +994,9 @@ async fn apply_one_ir_file_postgres(
     // unresolved createTable. This is the managed-service analogue of the creator
     // build tool's shape fold, and the same normalisation the Phase-F smoke test
     // proves green. Non-`createTable` ops pass through untouched.
-    let bytes = resolve_shape_bytes(&raw_bytes, policy, &file)?;
+    let bytes = resolve_shape_bytes(&raw_bytes, policy, project_schema, &file)?;
 
-    let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres);
+    let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres, policy);
     if let Some(scope) = guard_cfg.schema_scope() {
         author = author.with_schema_scope(scope);
     }
@@ -1133,8 +1137,8 @@ async fn preflight_ir_documents(
         // Fold the effective table-shape profile the same way the apply path does,
         // so preflight lowers the SAME resolved artifact it will apply (identical
         // version-ids + destructive/approval classification).
-        let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, &file)?;
-        let mut author = IrAuthor::new(schema, schema, SqlDialect::Postgres);
+        let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, schema, &file)?;
+        let mut author = IrAuthor::new(schema, schema, SqlDialect::Postgres, &policy.policy);
         if let Some(scope) = guard_cfg.schema_scope() {
             author = author.with_schema_scope(scope);
         }
@@ -1272,8 +1276,10 @@ fn step_version(step: &PlanStep) -> Option<String> {
     match step {
         PlanStep::Ddl(migration) => Some(migration.version.as_str().to_string()),
         PlanStep::Dml { version, .. } => Some(version.as_str().to_string()),
-        PlanStep::OnlineRename(_) => step.approval_scope_version().map(ToOwned::to_owned),
-        PlanStep::Backfill(_) => None,
+        PlanStep::AlterPrimaryKey(_)
+        | PlanStep::SynchronizeIdentity(_)
+        | PlanStep::OnlineRename(_) => step.approval_scope_version().map(ToOwned::to_owned),
+        PlanStep::Backfill { .. } => None,
     }
 }
 
