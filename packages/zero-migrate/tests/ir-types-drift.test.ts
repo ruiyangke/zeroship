@@ -74,8 +74,9 @@ const TS = {
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
   // — are not `const` and are checked structurally by the round-trip, not here).
+  // `string` is now a struct variant (`{ string: { length } }`), not a bare token.
   ColTypeStrings: [
-    "string", "text", "int", "smallInt", "bigInt", "double", "real", "boolean",
+    "text", "int", "smallInt", "bigInt", "double", "real", "boolean",
     "json", "timestamp", "date", "uuid", "inet", "textArray", "bytes", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.

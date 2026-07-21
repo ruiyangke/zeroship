@@ -148,6 +148,14 @@ export interface CharOptions {
   length: number;
 }
 
+/** Options for `t.string({ length, caseSensitive })` — a bounded `VARCHAR(N)`.
+ *  `length` defaults to 255 when omitted (the industrial convention). `false`
+ *  records the portable case-insensitive-text facet. */
+export interface StringOptions {
+  length?: number;
+  caseSensitive?: boolean;
+}
+
 /** Options for `t.vector({ dimensions, metric })` — the pgvector dimensionality
  *  plus optional distance metric (closed {@link VectorMetric} set). Omitted
  *  metric ⇒ the engine's opclass default. */
@@ -269,10 +277,16 @@ export interface ColumnDef {
 }
 
 /** The fluent migration `t.*` physical column-type lexicon. Canonical names only
- * — the universal ID shortcut, untyped reference factory, `string`/`integer`
- * aliases, and the `{notNull,default}` options-bag overload are removed. */
+ * — the universal ID shortcut, untyped reference factory, the loose `integer`
+ * alias, and the `{notNull,default}` options-bag overload are removed. `t.string`
+ * is a first-class bounded `VARCHAR(N)`, distinct from unbounded `t.text`. */
 export interface TypeLexicon {
+  /** Unbounded text (`TEXT`). Use {@link TypeLexicon.string} for a bounded,
+   *  indexable `VARCHAR(N)`. */
   text(opts?: TextOptions): ColumnDef;
+  /** Bounded variable-length string (`VARCHAR(N)` on Postgres/MySQL, `TEXT` on
+   *  SQLite). `length` defaults to 255 when omitted. */
+  string(opts?: StringOptions): ColumnDef;
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
   textArray(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */

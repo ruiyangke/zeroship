@@ -24,10 +24,10 @@ function migrateColType(def: unknown): unknown {
 }
 
 test("ONE lexicon: a db field reduces to the same ColType the migration t.* produces", () => {
-  // `dbT.string()` reduces to the neutral `"string"` ColType (the migration
-  // lexicon's canonical text type is `t.text()`→`"text"`; the `string` token is a
-  // distinct wire variant only the db bridge still produces, alias removal).
-  assert.deepEqual(colTypeFromDbField(dbT.string()), "string");
+  // `dbT.string()` (no bounded-length contract) reduces to the unbounded `"text"`
+  // ColType — identical rendering to the retired bare `string` ColType. A bounded
+  // string is authored explicitly with `t.string({ length })` → `{string:{length}}`.
+  assert.deepEqual(colTypeFromDbField(dbT.string()), "text");
   assert.deepEqual(colTypeFromDbField(dbT.boolean()), migrateColType(t.boolean()));
   assert.deepEqual(colTypeFromDbField(dbT.timestamp()), migrateColType(t.timestamp()));
   assert.deepEqual(colTypeFromDbField(dbT.json()), migrateColType(t.json()));
@@ -60,7 +60,7 @@ test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColT
   assert.deepEqual(colTypeFromDbField(dbT.encrypted({ wraps: dbT.number() })), {
     encrypted: { of: "double" },
   });
-  assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "string" } });
+  assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "text" } });
 });
 
 test("fromDb keeps the legacy dbType.ref carrier and required facet", () => {

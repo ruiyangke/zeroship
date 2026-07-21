@@ -102,9 +102,12 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     return { encrypted: { of: inner } };
   }
   switch (def.type) {
-    // Scalars whose db token maps 1:1 onto a neutral ColType.
+    // Scalars whose db token maps 1:1 onto a neutral ColType. A db `string` field
+    // has no bounded-length contract, so it maps to unbounded `text` (identical
+    // rendering to the retired bare `string` ColType); an explicit bounded string
+    // is authored with `t.string({ length })`.
     case "string":
-      return "string";
+      return "text";
     case "number":
       return "double";
     case "boolean":

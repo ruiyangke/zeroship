@@ -668,6 +668,21 @@ function textColumn(opts) {
     caseSensitive: opts?.caseSensitive === false ? false : void 0
   });
 }
+function stringColumn(opts) {
+  if (opts !== void 0 && (opts === null || typeof opts !== "object")) {
+    throw structuredError(
+      "OP_INVALID",
+      "t.string(opts): opts must be { length?: number, caseSensitive?: boolean }"
+    );
+  }
+  const length = requireOptionalPositiveInteger(opts?.length, "t.string({ length })") ?? 255;
+  if (opts?.caseSensitive !== void 0 && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.string({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDefImpl({ string: { length } }, {
+    caseSensitive: opts?.caseSensitive === false ? false : void 0
+  });
+}
 function bytesToBase64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -1128,6 +1143,7 @@ var perRow = Object.freeze({
 });
 var t = {
   text: (opts) => textColumn(opts),
+  string: (opts) => stringColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
   numeric: (opts = {}) => {
     requirePlainObject(opts, "t.numeric(opts)");

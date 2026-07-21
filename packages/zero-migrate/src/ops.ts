@@ -129,6 +129,7 @@ import type {
   TableStrictness,
   TableRef,
   TextOptions,
+  StringOptions,
   TypeIdOptions,
   TriggerBodyBuilder,
   TriggerStmt,
@@ -1089,6 +1090,23 @@ function textColumn(opts?: TextOptions): ColumnDefImpl {
   });
 }
 
+function stringColumn(opts?: StringOptions): ColumnDefImpl {
+  if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+    throw structuredError(
+      "OP_INVALID",
+      "t.string(opts): opts must be { length?: number, caseSensitive?: boolean }",
+    );
+  }
+  // `length` defaults to 255 (the industrial convention) when omitted.
+  const length = requireOptionalPositiveInteger(opts?.length, "t.string({ length })") ?? 255;
+  if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.string({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDefImpl({ string: { length } } as ColType, {
+    caseSensitive: opts?.caseSensitive === false ? false : undefined,
+  });
+}
+
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
  *  `Buffer` dependency — runs identically in the V8 record host and Node. */
 function bytesToBase64(bytes: Uint8Array): string {
@@ -1675,6 +1693,7 @@ export const perRow: PerRowGenerators = Object.freeze({
 
 export const t: TypeLexicon = {
   text: (opts?: TextOptions) => textColumn(opts),
+  string: (opts?: StringOptions) => stringColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
   numeric: (opts = {}) => {
     requirePlainObject(opts, "t.numeric(opts)");

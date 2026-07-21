@@ -743,6 +743,8 @@ test("named type payloads record the same ColType tokens", () => {
       columns: {
         amount: t.numeric({ precision: 12, scale: 2 }),
         code: t.char({ length: 3 }),
+        title: t.string({ length: 200 }),
+        slug: t.string(),
         embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
         default_numeric: t.numeric(),
       },
@@ -754,6 +756,9 @@ test("named type payloads record the same ColType tokens", () => {
   assert.deepEqual(ops, engineOps);
   assert.deepEqual(cols.amount, { decimal: { precision: 12, scale: 2 } });
   assert.deepEqual(cols.code, { char: { length: 3 } });
+  assert.deepEqual(cols.title, { string: { length: 200 } });
+  // `t.string()` defaults to length 255 (the industrial convention).
+  assert.deepEqual(cols.slug, { string: { length: 255 } });
   assert.deepEqual(cols.embedding, { vector: { vector: 1536 } });
   assert.deepEqual(cols.default_numeric, { decimal: { precision: 38, scale: 9 } });
   assert.equal(ops[0].columns.find((col: any) => col.name === "embedding").vectorMetric, "cosine");
