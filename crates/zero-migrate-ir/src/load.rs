@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ir::{IrVersionError, MigrationIr, Op};
+use crate::ir::{IrVersionError, MigrationIr, Op, ViewQuery};
 use crate::migration::{Checksum, MigrationFlags};
 use crate::validate::AuthoringError;
 
@@ -258,6 +258,27 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
             for inner in leg {
                 collect_target_tables(inner, out);
             }
+        }
+    } else if let Op::CreateView {
+        query: ViewQuery::Structured { select },
+        ..
+    } = op
+    {
+        // A view READS from its FROM/JOIN source tables, so those source tables
+        // are the ownership-checkable targets — `op_target_table` returns `None`
+        // for `CreateView` (the view NAME is a created object, not a touched
+        // table). Without this, a confined creator could author a view SELECTing
+        // ANOTHER app's tables in the same permitted schema — a read-only
+        // cross-tenant disclosure the ownership gate otherwise closes. A source
+        // table the deploying app does not own (or that is unregistered) fails
+        // closed, exactly like any other targeted table.
+        //
+        // The `ViewQuery::Raw` body is an opaque SQL string whose referenced
+        // tables cannot be extracted here; it is separately gated by
+        // `VendorCapability::RawViewBody` (operator approval).
+        out.push(&select.from.name);
+        for join in &select.joins {
+            out.push(&join.table.name);
         }
     } else if let Some(table) = op_target_table(op) {
         out.push(table);
@@ -522,4 +543,103 @@ mod tests {
             .expect_err("a different app must not synchronize the generator");
         assert!(error.to_string().contains("orders"), "{error}");
     }
+
+    fn create_view_ir(from: &str, join: Option<&str>) -> MigrationIr {
+        use crate::expr::Expr;
+        use crate::ir::{Join, JoinKind, SelectAst, SelectItem, TableRef, ViewQuery};
+        let joins = join
+            .map(|t| {
+                vec![Join {
+                    kind: JoinKind::Inner,
+                    table: TableRef {
+                        name: t.to_string(),
+                        schema: None,
+                        alias: None,
+                    },
+                    on: Expr::UuidV4,
+                }]
+            })
+            .unwrap_or_default();
+        MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "create reporting view".to_string(),
+            owner_app: "untrusted-wire-hint".to_string(),
+            ops: vec![Op::CreateView {
+                name: "report".to_string(),
+                schema: None,
+                columns: None,
+                query: ViewQuery::Structured {
+                    select: Box::new(SelectAst {
+                        from: TableRef {
+                            name: from.to_string(),
+                            schema: None,
+                            alias: None,
+                        },
+                        projection: vec![SelectItem::ColRef {
+                            table: None,
+                            name: "id".to_string(),
+                            alias: None,
+                        }],
+                        joins,
+                        r#where: None,
+                        group_by: Vec::new(),
+                        having: None,
+                        order_by: None,
+                        limit: None,
+                    }),
+                },
+                replace: None,
+                materialized: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
+    #[test]
+    fn create_view_from_table_participates_in_table_ownership_gate() {
+        // A view READS from its FROM table, so the source table is ownership-checked:
+        // the owning app may build a view over its own table, but another app may
+        // not author a view SELECTing it (a cross-tenant read the gate must refuse).
+        let ir = create_view_ir("orders", None);
+        let owned = BTreeMap::from([("orders".to_string(), "orders-app".to_string())]);
+        enforce_ir_ownership(&ir, "orders-app", &owned)
+            .expect("the owning app may build a view over its own table");
+
+        let error = enforce_ir_ownership(&ir, "other-app", &owned).unwrap_err();
+        assert_eq!(
+            error,
+            IrLoadError::NotTableOwner {
+                op_index: 0,
+                table: "orders".to_string(),
+                owner: "orders-app".to_string(),
+                deploying_app: "other-app".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn create_view_join_to_another_apps_table_is_refused() {
+        // Even the app that owns the FROM table cannot smuggle in another app's
+        // table through a JOIN: every source table in the SELECT is checked.
+        let ir = create_view_ir("orders", Some("secrets"));
+        let owned = BTreeMap::from([
+            ("orders".to_string(), "orders-app".to_string()),
+            ("secrets".to_string(), "secret-app".to_string()),
+        ]);
+        let error = enforce_ir_ownership(&ir, "orders-app", &owned).unwrap_err();
+        assert_eq!(
+            error,
+            IrLoadError::NotTableOwner {
+                op_index: 0,
+                table: "secrets".to_string(),
+                owner: "secret-app".to_string(),
+                deploying_app: "orders-app".to_string(),
+            }
+        );
+    }
+
 }
