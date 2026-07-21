@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   discoverZeroMigrateConfig,
@@ -184,6 +184,57 @@ policy = ["./config-root.toml", "./config-leaf.toml"]
   }
 });
 
+test("ZERO_MIGRATE_POLICY carries multiple layers via the path delimiter", () => {
+  // A single-valued env var used to collapse a multi-layer policy to one layer;
+  // the env var now expresses an ordered layer list like PATH.
+  const resolved = resolveCliConfig({
+    processEnv: {
+      ZERO_MIGRATE_POLICY: ["./root.toml", "./team.toml", "./svc.toml"].join(
+        delimiter,
+      ),
+    },
+  });
+  assert.deepEqual(resolved.policyPaths, [
+    "./root.toml",
+    "./team.toml",
+    "./svc.toml",
+  ]);
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("ZERO_MIGRATE_POLICY with blank/whitespace layers is treated as absent", () => {
+  const resolved = resolveCliConfig({
+    processEnv: { ZERO_MIGRATE_POLICY: `  ${delimiter} ${delimiter} ` },
+  });
+  // No layers -> no policy (not a single empty-string layer), and no warning.
+  assert.deepEqual(resolved.policyPaths, []);
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("ZERO_MIGRATE_POLICY overriding a config policy warns about dropped layers", () => {
+  const project = temporaryProject();
+  try {
+    writeFileSync(
+      project.config,
+      `[env.dev]
+policy = ["./config-root.toml", "./config-team.toml"]
+`,
+    );
+    const resolved = resolveCliConfig({
+      cwd: project.child,
+      processEnv: { ZERO_MIGRATE_POLICY: "./env-only.toml" },
+    });
+    // Env wins (single layer), but the collapse is surfaced, not silent.
+    assert.deepEqual(resolved.policyPaths, ["./env-only.toml"]);
+    assert.equal(resolved.warnings.length, 1);
+    assert.match(resolved.warnings[0], /ZERO_MIGRATE_POLICY \(1 layer\)/);
+    assert.match(resolved.warnings[0], /2-layer policy/);
+    assert.match(resolved.warnings[0], /widen effective policy/);
+  } finally {
+    rmSync(project.root, { recursive: true, force: true });
+  }
+});
+
 test("no config preserves DATABASE_URL and built-in CLI defaults", () => {
   const project = temporaryProject();
   try {
@@ -201,6 +252,7 @@ test("no config preserves DATABASE_URL and built-in CLI defaults", () => {
         policyPaths: [],
         configPath: undefined,
         environment: undefined,
+        warnings: [],
       },
     );
   } finally {

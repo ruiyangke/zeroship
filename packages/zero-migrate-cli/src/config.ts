@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 
 const CONFIG_FILENAME = "zero-migrate.toml";
 
@@ -42,6 +42,12 @@ export interface ResolvedCliConfig {
   configPath?: string;
   /** Present only when a config file was loaded. */
   environment?: string;
+  /**
+   * Non-fatal diagnostics the caller should surface (e.g. an env var that
+   * overrode a committed multi-layer policy). Empty when there is nothing to
+   * warn about.
+   */
+  warnings: string[];
 }
 
 export interface LoadZeroMigrateConfigOptions {
@@ -227,8 +233,44 @@ export function resolveCliConfig(options: ResolveCliConfigOptions = {}): Resolve
   const defaults = options.defaults ?? {};
   const config = loaded?.values;
 
-  const environmentPolicy = defined(processEnv.ZERO_MIGRATE_POLICY);
+  // `ZERO_MIGRATE_POLICY` carries an ORDERED list of charter layers, delimited
+  // by the OS path separator (`:` on POSIX, `;` on Windows) exactly like `PATH`.
+  // Wrapping the raw string in a single-element array (the old behaviour) made it
+  // impossible to express a multi-layer policy from the environment, so a stray
+  // single-valued env var silently COLLAPSED a committed multi-layer policy to one
+  // layer. Since layers only narrow, dropping layers widens effective policy.
+  const environmentPolicyRaw = defined(processEnv.ZERO_MIGRATE_POLICY);
+  const environmentPolicyLayers =
+    environmentPolicyRaw === undefined
+      ? undefined
+      : (() => {
+          const layers = environmentPolicyRaw
+            .split(delimiter)
+            .map((layer) => layer.trim())
+            .filter((layer) => layer.length > 0);
+          // An env var set to an empty/whitespace value carries no layers; treat
+          // it as absent rather than as an empty (no-charter) policy.
+          return layers.length > 0 ? layers : undefined;
+        })();
+
+  const warnings: string[] = [];
+  if (
+    explicit.policyPaths === undefined &&
+    environmentPolicyLayers !== undefined &&
+    config?.policy !== undefined
+  ) {
+    const envCount = environmentPolicyLayers.length;
+    const configCount = config.policy.length;
+    warnings.push(
+      `ZERO_MIGRATE_POLICY (${envCount} layer${envCount === 1 ? "" : "s"}) ` +
+        `overrides the ${configCount}-layer policy in ` +
+        `${loaded?.path ?? "the config file"}; only the environment layers are ` +
+        `in effect. Policy layers only narrow, so this can widen effective policy.`,
+    );
+  }
+
   return {
+    warnings,
     databaseUrl:
       explicit.databaseUrl ??
       defined(processEnv.ZERO_MIGRATE_URL) ??
@@ -261,8 +303,8 @@ export function resolveCliConfig(options: ResolveCliConfigOptions = {}): Resolve
     policyPaths:
       explicit.policyPaths !== undefined
         ? [...explicit.policyPaths]
-        : environmentPolicy !== undefined
-          ? [environmentPolicy]
+        : environmentPolicyLayers !== undefined
+          ? environmentPolicyLayers
           : config?.policy !== undefined
             ? [...config.policy]
             : [...(defaults.policyPaths ?? [])],

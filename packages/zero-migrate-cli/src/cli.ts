@@ -361,6 +361,9 @@ function resolveParsedArgs(args: Args): Args {
   args.projectSchema = resolved.projectSchema;
   args.registryPath = resolved.registryPath;
   args.policyPaths = resolved.policyPaths;
+  for (const warning of resolved.warnings) {
+    process.stderr.write(`WARNING: ${warning}\n`);
+  }
   return args;
 }
 
