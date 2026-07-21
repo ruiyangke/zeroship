@@ -93,8 +93,8 @@ fn people_raw_envelope() -> MigrationIr {
         "op": "createTable",
         "name": "people",
         "columns": [
-            { "name": "name", "type": "string" },
-            { "name": "email", "type": "string", "nullable": false }
+            { "name": "name", "type": "text" },
+            { "name": "email", "type": "text", "nullable": false }
         ],
         "primaryKey": null,
         "indexes": [

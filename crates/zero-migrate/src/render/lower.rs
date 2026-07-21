@@ -8709,6 +8709,11 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // inverse the descriptor models. An explicit `nullable: false` ⇒ required.
     let required = !c.nullable.unwrap_or(true);
     let (ty, legacy_references) = col_type_to_token(&c.ty);
+    // A genuine unbounded `t.text()` column (`ColType::Text`, no value-format /
+    // id-prefix facet) renders as MySQL `TEXT`. Typed-ids carry a facet and bounded
+    // system columns are `String`, so neither is flagged here.
+    let unbounded_text =
+        matches!(c.ty, ColType::Text) && c.value_format.is_none() && c.id_prefix.is_none();
     let references = c
         .references
         .as_ref()
@@ -8765,6 +8770,10 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         ColType::Char { length } => Some(i64::from(*length)),
         _ => None,
     };
+    let max_length = match &c.ty {
+        ColType::String { length } => Some(i64::from(*length)),
+        _ => None,
+    };
     // Thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose if the IR doesn't carry them:
     //   - legacy internal `id_prefix` → the descriptor's `id_prefix` so the
@@ -8803,6 +8812,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         mask: c.mask.map(IrMask::to_sdk_json).or(encrypted_mask),
         vector_dims,
         char_len,
+        max_length,
+        unbounded_text,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         case_sensitive: c.case_sensitive,
         id_prefix: c.id_prefix.clone(),
@@ -8839,7 +8850,7 @@ fn encrypted_wraps_token(of: &ColType) -> &'static str {
 /// (`def_to_column_type_for_dialect`).
 fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     match ty {
-        ColType::String => ("string".into(), None),
+        ColType::String { .. } => ("string".into(), None),
         ColType::Text => ("string".into(), None),
         ColType::Int => ("int".into(), None),
         ColType::SmallInt => ("smallInt".into(), None),
@@ -10661,7 +10672,9 @@ mod tests {
                 },
                 TIrColumn {
                     name: "team".into(),
-                    ty: ColType::Text,
+                    // A PK component must be bounded/indexable on MySQL: `t.string`,
+                    // not unbounded `t.text()`.
+                    ty: ColType::String { length: 255 },
                     nullable: None,
                     default: None,
                     unique: None,
@@ -10686,7 +10699,10 @@ mod tests {
             (
                 SqlDialect::Postgres,
                 crate::model::validate::Dialect::Postgres,
-                [r#""account_id" uuid NOT NULL"#, r#""team" text NOT NULL"#],
+                [
+                    r#""account_id" uuid NOT NULL"#,
+                    r#""team" character varying(255) NOT NULL"#,
+                ],
             ),
             (
                 SqlDialect::Sqlite,
@@ -10701,7 +10717,7 @@ mod tests {
                 crate::model::validate::Dialect::Mysql,
                 [
                     r#"`account_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL"#,
-                    r#"`team` VARCHAR(191) NOT NULL"#,
+                    r#"`team` VARCHAR(255) NOT NULL"#,
                 ],
             ),
         ] {
@@ -10910,7 +10926,7 @@ mod tests {
             .find(|m| m.up.contains("CREATE TABLE"))
             .expect("create");
         assert!(
-            create.up.contains("\"id\" text PRIMARY KEY NOT NULL"),
+            create.up.contains("\"id\" character varying(255) PRIMARY KEY NOT NULL"),
             "confined resolved CreateTable must still render the inline id PK byte-shape:\n{}",
             create.up
         );
@@ -12000,7 +12016,7 @@ mod tests {
             vec![TIrColumn {
                 name: "secret".into(),
                 ty: ColType::Encrypted {
-                    of: Box::new(ColType::String),
+                    of: Box::new(ColType::Text),
                 },
                 nullable: None,
                 default: None,
@@ -12064,7 +12080,7 @@ mod tests {
             "widgets",
             vec![TIrColumn {
                 name: "title".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: None,
                 default: None,
                 unique: None,
@@ -12106,7 +12122,7 @@ mod tests {
             "widgets",
             vec![TIrColumn {
                 name: "title".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
                 unique: None,
@@ -12159,7 +12175,7 @@ mod tests {
             "docs",
             vec![TIrColumn {
                 name: "note".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: Some(false),
                 default: Some(IrDefault::Literal {
                     value: crate::model::ir::IrScalar::Str(nasty.into()),
@@ -12348,7 +12364,7 @@ mod tests {
                     "vault",
                     "secret",
                     &ColType::Encrypted {
-                        of: Box::new(ColType::String),
+                        of: Box::new(ColType::Text),
                     },
                     None,
                     None,

@@ -1231,6 +1231,9 @@ fn mysql_ddl_type(data_type: &str) -> String {
     if let Some(len) = char_len_from_data_type(&lower) {
         return format!("CHAR({len})");
     }
+    if let Some(len) = varchar_len_from_data_type(&lower) {
+        return format!("VARCHAR({len})");
+    }
     match lower.as_str() {
         "text" => "VARCHAR(191)".to_string(),
         "double precision" | "float8" => "DOUBLE".to_string(),
@@ -1688,6 +1691,18 @@ pub struct FieldDescriptor {
     /// intermediate SDK-shaped `FieldDef` the shared renderer consumes.
     #[serde(rename = "charLen", default)]
     pub char_len: Option<i64>,
+    /// `t.string({ length })` — bounded variable-length string. Mirrors
+    /// `maxLength` on the intermediate SDK-shaped `FieldDef`; drives
+    /// `VARCHAR(N)` on Postgres/MySQL (`TEXT` on SQLite).
+    #[serde(rename = "maxLength", default)]
+    pub max_length: Option<i64>,
+    /// Render-only marker for a genuine unbounded `t.text()` column (`ColType::Text`
+    /// with no value-format / id-prefix facet — NOT a typed-id, and NOT a bounded
+    /// system column, which are `String`). Drives an unbounded `TEXT` spelling on
+    /// MySQL via `ddl_type_override`; the base data_type stays `text` so Postgres
+    /// and drift are unaffected. Never serialized.
+    #[serde(skip)]
+    pub unbounded_text: bool,
     /// `t.vector(_, { metric })` — distance metric (`cosine` | `l2` |
     /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
     #[serde(rename = "vectorMetric", default)]
@@ -1891,6 +1906,9 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     def.insert("type".into(), serde_json::Value::String(f.ty.clone()));
     if let Some(len) = f.char_len {
         def.insert("charLen".into(), serde_json::Value::from(len));
+    }
+    if let Some(len) = f.max_length {
+        def.insert("maxLength".into(), serde_json::Value::from(len));
     }
     if let Some(d) = f.vector_dims {
         def.insert("vectorDims".into(), serde_json::Value::from(d));
@@ -2656,12 +2674,19 @@ fn column_snapshot_for_field(
         } else {
             None
         };
-    let ddl_type_override =
-        if matches!(f.case_sensitive, Some(false)) && matches!(dialect, SqlDialect::Mysql) {
-            Some("text".to_string())
-        } else {
-            None
-        };
+    // On MySQL, both a case-insensitive text facet AND a genuine unbounded `t.text()`
+    // column render `TEXT` rather than the base `VARCHAR(191)`. The base data_type
+    // stays `text`, so Postgres and the catalog/drift comparison are unaffected.
+    // Bounded system columns are `String`, so they never set `unbounded_text` and
+    // stay `VARCHAR(N)`; a genuine `t.text()` used in a MySQL key is rejected by
+    // validation, so an unindexable `TEXT` key can never be emitted.
+    let ddl_type_override = if matches!(dialect, SqlDialect::Mysql)
+        && (matches!(f.case_sensitive, Some(false)) || f.unbounded_text)
+    {
+        Some("text".to_string())
+    } else {
+        None
+    };
     Ok(ColumnSnapshot {
         name: f.name.clone(),
         data_type,
@@ -8387,6 +8412,18 @@ pub(crate) fn char_len_from_data_type(data_type: &str) -> Option<u32> {
         .strip_prefix("character(")
         .or_else(|| lower.strip_prefix("char("))
         .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
+}
+
+/// The declared length of a bounded `VARCHAR` base type (`character varying(N)`
+/// / `varchar(N)`), as produced for a `t.string({ length })` column. Fixed-length
+/// `character(N)` is handled by [`char_len_from_data_type`] and is excluded here.
+pub(crate) fn varchar_len_from_data_type(data_type: &str) -> Option<u32> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character varying(")
+        .or_else(|| lower.strip_prefix("varchar("))?
         .strip_suffix(')')?;
     inner.parse::<u32>().ok().filter(|len| *len > 0)
 }

@@ -487,8 +487,10 @@ export function badColTypes(): void {
   // @ts-expect-error — `t` has no `t.notARealType()` factory.
   t.notARealType();
 
-  // @ts-expect-error — the removed `t.string` alias (canonical is t.text()).
+  // `t.string()` is now a first-class bounded `VARCHAR(N)` (default length 255),
+  // no longer a removed alias — it type-checks as a valid column factory.
   t.string();
+  t.string({ length: 120 });
 
   // The recorder still exposes `t.int()` in this branch; keep it type-checked
   // until the recorder twin removes the alias too.

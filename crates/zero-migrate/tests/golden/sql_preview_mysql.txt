@@ -6,7 +6,7 @@ SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;
 
 SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');
 
-CREATE TABLE `public`.`codes` (`code` INT NOT NULL, `created_at` DATETIME(6) NOT NULL, `created_by` VARCHAR(191), `deleted_at` DATETIME(6), `id` VARCHAR(191) PRIMARY KEY NOT NULL, `label` VARCHAR(191), `updated_at` DATETIME(6) NOT NULL, `updated_by` VARCHAR(191), `version` INT NOT NULL);
+CREATE TABLE `public`.`codes` (`code` INT NOT NULL, `created_at` DATETIME(6) NOT NULL, `created_by` VARCHAR(255), `deleted_at` DATETIME(6), `id` VARCHAR(255) PRIMARY KEY NOT NULL, `label` VARCHAR(255), `updated_at` DATETIME(6) NOT NULL, `updated_by` VARCHAR(255), `version` INT NOT NULL);
 
 CREATE UNIQUE INDEX `codes_code_key` ON `public`.`codes` (`code`);
 
@@ -16,7 +16,7 @@ CREATE INDEX `codes_deleted_at_idx` ON `public`.`codes` (`deleted_at`);
 
 CREATE INDEX `codes_updated_at_idx` ON `public`.`codes` (`updated_at`);
 
-ALTER TABLE `public`.`codes` ADD COLUMN `note` VARCHAR(191);
+ALTER TABLE `public`.`codes` ADD COLUMN `note` text;
 
 -- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): catalog-probed at apply (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply runs when the probe says run
 

@@ -2966,12 +2966,31 @@
       "description": "Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema\nenumerates exactly the supported types and the lowering is a total\nmatch. Camel-cased on the wire (`\"int\"`, `\"bigInt\"`, `\"geoPoint\"`, …).",
       "oneOf": [
         {
-          "description": "Bounded variable-length string (`VARCHAR`-ish).",
-          "type": "string",
-          "const": "string"
+          "description": "Bounded variable-length string (`VARCHAR(N)`). Portable across all\ndialects: `varchar(N)` on Postgres/MySQL, `TEXT` on SQLite. Authored via\n`t.string({ length })`, defaulting to 255 when omitted.",
+          "type": "object",
+          "properties": {
+            "string": {
+              "type": "object",
+              "properties": {
+                "length": {
+                  "description": "Maximum length in characters.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "length"
+              ]
+            }
+          },
+          "required": [
+            "string"
+          ],
+          "additionalProperties": false
         },
         {
-          "description": "Unbounded text (`TEXT`).",
+          "description": "Unbounded text (`TEXT`). Authored via `t.text()`; never silently capped.",
           "type": "string",
           "const": "text"
         },

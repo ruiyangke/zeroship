@@ -353,7 +353,13 @@ fn resolve_create_table(
 fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeError> {
     let name = canonical_inject_identifier(&column.name, "column")?;
     let ty = match column.ty.as_str() {
-        "text" => ColType::Text,
+        // Policy-injected system string columns (the public `id`, actor stamps like
+        // created_by/updated_by) are BOUNDED `VARCHAR(255)`: they hold ids, are often
+        // keyed (the `id` primary key, audit indexes), and must be index-able on
+        // MySQL, where an unbounded `TEXT` cannot be a key. Typing them here (not
+        // just at render) keeps every path — validate, both injection resolvers, the
+        // collection/query renderer — consistent.
+        "text" => ColType::String { length: 255 },
         "timestamptz" | "timestamp with time zone" => ColType::Timestamp,
         "integer" | "int" => ColType::Int,
         other => {
@@ -409,7 +415,7 @@ fn inject_default_to_ir(
             .map(|value| IrDefault::Literal {
                 value: crate::model::ir::IrScalar::Int(value),
             }),
-        ColType::Text
+        ColType::Text | ColType::String { .. }
             if normalized.len() >= 2
                 && normalized.starts_with('\'')
                 && normalized.ends_with('\'') =>

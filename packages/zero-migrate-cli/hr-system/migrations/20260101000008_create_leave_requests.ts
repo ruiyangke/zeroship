@@ -15,11 +15,13 @@ export default {
           .typeId({ prefix: "emp" })
           .notNull()
           .references("employees", "id", { onDelete: "cascade" }),
-        leave_type: t.text().notNull(),
+        leave_type: t.string({ length: 32 }).notNull(),
         start_date: t.date().notNull(),
         end_date: t.date().notNull(),
         days: t.numeric({ precision: 4, scale: 1 }).notNull(),
-        status: t.text().notNull().default("pending"),
+        // `status` is an index member (composite employee/status index), so it is
+        // a bounded `t.string`, not unbounded `t.text()`.
+        status: t.string({ length: 32 }).notNull().default("pending"),
         metadata: t.json().notNull().default({}),
         created_at: t.timestamp().notNull().default(now()),
       },

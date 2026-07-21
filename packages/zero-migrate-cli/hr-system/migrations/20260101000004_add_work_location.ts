@@ -6,6 +6,6 @@ export const name = "add_work_location";
 
 export default {
   up() {
-    table("employees").column("work_location").add({ type: t.text() });
+    table("employees").column("work_location").add({ type: t.string({ length: 255 }) });
   },
 };
