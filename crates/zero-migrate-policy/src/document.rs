@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::knob::{KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity};
 use crate::registry::PolicyRegistry;
+use crate::value_order::leq_value;
 use crate::rule::{
     AuthorPkPolicy, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule, RuleKind,
     ValidatePredicate,
@@ -106,6 +107,11 @@ pub enum LoadError {
     /// A knob value is invalid for its knob's kind (or below a `UintCharter`
     /// hard floor) (II.2.1).
     InvalidKnobValue { key: String, detail: String },
+    /// A rule sets a `DeclaredOnly` knob to a NON-DEFAULT value (II.6). A
+    /// `DeclaredOnly` knob is declared metadata only — the engine neither enforces
+    /// it nor lets it be sealed above its default on the enforced path, so raising
+    /// it would advertise authority the engine lacks. Rejected fail-closed at load.
+    DeclaredOnlyNonDefault { key: String },
     /// A scope pattern literal is malformed (bad glob, >2 segments, bad quoting).
     MalformedScope { pattern: String },
     /// A scope was authored with an empty include (the ⊥/⊤ collision guard).
@@ -142,6 +148,35 @@ impl From<ScopeError> for LoadError {
             ScopeError::EmptyInclude => LoadError::EmptyInclude,
         }
     }
+}
+
+/// II.6 gate: a `DeclaredOnly` knob advertises no engine authority, so a rule may
+/// not raise it above its default on the enforced path — every loaded document is
+/// composed toward sealing/enforcement. Rejects fail-closed when the rule's value
+/// is above the knob's default; a rule whose value EQUALS the default (a no-op) is
+/// admissible. Uses the composer's own "raises above default" test
+/// (`!leq_value(value, default)`), so `StrSet` order-insensitivity is honored and
+/// the gate agrees byte-for-byte with how composition classifies a non-default
+/// rule. `Enforced` / `HostEnforced` knobs are unaffected (the predicate is false).
+fn reject_declared_only_nondefault(
+    key: &str,
+    def: &KnobDef,
+    value: &KnobValue,
+) -> Result<(), LoadError> {
+    if !def.enforcement.forbids_nondefault_on_enforced_path() {
+        return Ok(());
+    }
+    let raises_above_default =
+        !leq_value(&def.kind, value, &def.default).map_err(|e| LoadError::InvalidKnobValue {
+            key: key.to_string(),
+            detail: format!("{e:?}"),
+        })?;
+    if raises_above_default {
+        return Err(LoadError::DeclaredOnlyNonDefault {
+            key: key.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ── wire (serde) types ──────────────────────────────────────────────────────────
@@ -404,6 +439,7 @@ impl PolicyDoc {
             }
             let value = g.value.into_knob_value();
             validate_value(&g.key, &value, &def.kind)?;
+            reject_declared_only_nondefault(&g.key, def, &value)?;
             let scope = resolve_rule_scope(g.scope, def, &default_scope, RuleClass::Grant, &g.key)?;
             rules.push(Rule {
                 scope,
@@ -423,6 +459,7 @@ impl PolicyDoc {
             }
             let value = r.value.into_knob_value();
             validate_value(&r.key, &value, &def.kind)?;
+            reject_declared_only_nondefault(&r.key, def, &value)?;
             // Require rules are object-filterable (never Global-key by
             // section↔polarity + object_model contract), and are NOT subject to the
             // A3 grant-unbounded gate (that is Grant-kind only).
@@ -865,4 +902,59 @@ fn fold_name(s: &str) -> Vec<u8> {
     normalize_pg_identifier(s)
         .map(|o| o.schema)
         .unwrap_or_else(|| s.to_ascii_lowercase().into_bytes())
+}
+
+#[cfg(test)]
+mod declared_only_gate_tests {
+    use super::*;
+    use crate::knob::Enforcement;
+
+    const KEY: &str = "meta.declared_flag";
+
+    // A consumer-registered DeclaredOnly Grant knob (no builtin knob is DeclaredOnly;
+    // the registry is consumer-extensible, which is exactly the II.6 exposure).
+    fn declared_only_registry() -> PolicyRegistry {
+        PolicyRegistry::empty()
+            .with([KnobDef {
+                key: KnobKey::parse(KEY).expect("valid key"),
+                kind: KnobKind::UintCharter { hard_floor: 0 },
+                polarity: Polarity::Grant,
+                default: KnobValue::Uint(0),
+                enforcement: Enforcement::DeclaredOnly,
+                object_model: ObjectModel::Global,
+                requires_db_privilege: false,
+                inherit: true,
+                docs: String::new(),
+            }])
+            .expect("registry with one DeclaredOnly knob is valid")
+    }
+
+    fn load_grant(value: u64) -> Result<PolicyDoc, LoadError> {
+        PolicyDoc::parse_toml(
+            &format!(
+                "policy_version = 1\n[[grant]]\nkey = \"{KEY}\"\nvalue = {value}\nscope = \"all\"\n"
+            ),
+            &declared_only_registry(),
+            LoadContext::RootCharter,
+        )
+    }
+
+    #[test]
+    fn declared_only_knob_rejects_a_nondefault_grant() {
+        // II.6: a DeclaredOnly knob advertises no engine authority, so raising it
+        // above its default on the enforced (load->seal) path must be refused. Before
+        // this gate was wired, the non-default value loaded and sealed silently.
+        assert_eq!(
+            load_grant(5).unwrap_err(),
+            LoadError::DeclaredOnlyNonDefault {
+                key: KEY.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn declared_only_knob_allows_a_default_valued_grant() {
+        // A rule whose value EQUALS the default is a no-op and stays admissible.
+        load_grant(0).expect("a grant equal to the knob default is admissible");
+    }
 }
