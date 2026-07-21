@@ -196,11 +196,12 @@ let backend = SqliteBackend::open(
 ```
 
 Use different files for application data and the migration journal. SQLite apply
-is currently Rust-only.
+is also available through Node and the CLI; this Rust API is an additional host
+for advanced integrations.
 
 The SQLite backend supports transactional DDL, schema snapshots, table rebuilds,
 insert, update, delete, and batched backfill. It rejects non-transactional
-migrations. Rust apply coordinates zero-migrate processes that use the same
+migrations. SQLite apply coordinates zero-migrate processes that use the same
 application database, and it refuses to open for migration when crash-safe
 application and journal settings cannot be established.
 
@@ -366,12 +367,12 @@ It exposes `apply`, `resolvePending`, `plan`, `validate`, `status`, `history`, a
 
 Current JavaScript boundaries:
 
-- apply supports complete ordered schema and data migrations on PostgreSQL and
-  MySQL, not SQLite;
+- apply supports complete ordered schema and data migrations on PostgreSQL,
+  MySQL, and SQLite;
 - pending deletes and backfills require Node `approved: true` or CLI
   `--approve`;
 - PostgreSQL online rename returns `pendingContracts` from `apply()` and uses
-  `resolvePending()` or CLI `resolve-pending` for approved completion or abort;
+  `resolvePending()` or CLI `resolve` for approved completion or abort;
 - plan/validate are offline checks, not full Rust engine plans;
 - status is plan-aware on PostgreSQL and MySQL when supplied the ordered
   migration set; history remains PostgreSQL-only;
