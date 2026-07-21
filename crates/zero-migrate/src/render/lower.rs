@@ -752,7 +752,7 @@ fn mysql_explicit_text_storage(ddl_type: &str) -> Option<MysqlTextStorageSnapsho
         .find_map(|window| (window[0] == "collate").then(|| window[1].clone()));
     match (character_set, collation) {
         // `utf8mb4` is the platform-default charset, and the only collations the
-        // renderer emits on it (`utf8mb4_bin` case-sensitive, `utf8mb4_0900_ai_ci`
+        // renderer emits on it (`utf8mb4_0900_as_cs` case-sensitive, `utf8mb4_0900_ai_ci`
         // case-insensitive) map 1:1 to the `caseSensitive` intent — which is compared
         // separately. So a `utf8mb4` column is NOT "explicit storage" that requires
         // exact target metadata; only a non-default charset (a typed-id's `ascii`)
@@ -10725,7 +10725,7 @@ mod tests {
                 crate::model::validate::Dialect::Mysql,
                 [
                     r#"`account_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL"#,
-                    r#"`team` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL"#,
+                    r#"`team` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL"#,
                 ],
             ),
         ] {

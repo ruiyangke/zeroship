@@ -2792,7 +2792,7 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
     // Strip an explicit `CHARACTER SET ... COLLATE ...` clause: it is the column's
     // collation, which the base-family canonicalization ignores (charset/collation
     // is compared independently). `VARCHAR(255) CHARACTER SET utf8mb4 COLLATE
-    // utf8mb4_bin` and a bare `varchar(255)` canonicalize to the same base family.
+    // utf8mb4_0900_as_cs` and a bare `varchar(255)` canonicalize to the same base family.
     let lower = lower
         .split(" character set ")
         .next()

@@ -1254,7 +1254,7 @@ fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> O
     let collation = if case_insensitive {
         "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
     } else {
-        "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
     };
     Some(format!("{base} {collation}"))
 }
