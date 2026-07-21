@@ -40,6 +40,19 @@ export type HostDriver = (
   args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void],
 ) => void;
 
+/** Host-enforced transport controls (the host owns the socket). Mirrors
+ *  `MysqlSessionOptions`; all optional. Structurally compatible with
+ *  `NetworkSecurityOptions` in `index.ts`, which is what `openSession` passes. */
+export interface PgSessionOptions {
+  /** A PEM CA bundle to pin (TLS). When set, `pg` verifies the server cert. */
+  tlsCa?: string;
+  /** Reject the connection if the URL host is not in this allowlist (checked
+   *  before the socket opens). */
+  hostAllowlist?: string[];
+  /** Per-verb query timeout in ms (applied by `pg` as `query_timeout`). */
+  queryTimeoutMs?: number;
+}
+
 // OIDs whose values must cross as exact strings (the exact-integer domain).
 const OID_INT8 = 20;
 const OID_NUMERIC = 1700;
@@ -107,12 +120,30 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
  */
 export async function openPgSession(
   connectionString: string,
+  opts: PgSessionOptions = {},
 ): Promise<{ hostDriver: HostDriver; client: PgClient; close: () => Promise<void> }> {
   const pg = (await import("pg")).default as unknown as PgModule;
+
+  // Host-side net-allowlist: refuse a host not in the allowlist BEFORE connect
+  // (the host owns the socket now — mirrors driver-mysql2.ts).
+  if (opts.hostAllowlist && opts.hostAllowlist.length > 0) {
+    const parsed = new URL(connectionString);
+    if (!opts.hostAllowlist.includes(parsed.hostname)) {
+      throw new Error(
+        `host pg driver: ${parsed.hostname} is not in the host allowlist ${JSON.stringify(opts.hostAllowlist)}`,
+      );
+    }
+  }
+
   const client = new pg.Client({
     connectionString,
     // Connection-scoped parsers — immune to a global setTypeParser override.
     types: connectionScopedTypes(pg) as never,
+    // TLS pin (host owns the socket now). Verifies the server cert against the
+    // pinned CA; distinct from any `sslmode` in the connection URL.
+    ...(opts.tlsCa ? { ssl: { ca: opts.tlsCa } } : {}),
+    // Per-verb bound: `pg` applies `query_timeout` to every query on the client.
+    ...(opts.queryTimeoutMs !== undefined ? { query_timeout: opts.queryTimeoutMs } : {}),
   });
   await client.connect();
 

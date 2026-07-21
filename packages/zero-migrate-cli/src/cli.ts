@@ -31,6 +31,7 @@ import {
   statusEnvelopes,
   currentIrVersion,
   type DriverConfig,
+  type NetworkSecurityOptions,
 } from "./index.js";
 import { loadAddon, type StatusReply } from "./addon.js";
 import { resolveCliConfig, type CliConfigValues } from "./config.js";
@@ -122,6 +123,14 @@ interface Args {
   databaseUrl?: string;
   /** Optional SQLite migration-journal file override. */
   journalPath?: string;
+  /** `--tls-ca <file>`: path to a PEM CA bundle to PIN for the network driver. */
+  tlsCaPath?: string;
+  /** `--host-allowlist <csv>`: comma-separated hosts the driver may connect to. */
+  hostAllowlist?: string;
+  /** `--query-timeout <ms>`: per-verb query timeout for the network driver. */
+  queryTimeoutMs?: string;
+  /** Resolved host-enforced transport controls for the network driver. */
+  security?: NetworkSecurityOptions;
   /** Dialect selected for offline lint validation. Defaults to all dialects. */
   dialect?: Dialect;
   /** Path to the trusted JSON table-ownership registry. */
@@ -204,6 +213,15 @@ function parseArgs(argv: string[]): Args {
         break;
       case "journal":
         args.journalPath = takeVal();
+        break;
+      case "tls-ca":
+        args.tlsCaPath = takeVal();
+        break;
+      case "host-allowlist":
+        args.hostAllowlist = takeVal();
+        break;
+      case "query-timeout":
+        args.queryTimeoutMs = takeVal();
         break;
       case "dialect": {
         const value = takeVal();
@@ -361,6 +379,7 @@ function resolveParsedArgs(args: Args): Args {
   args.projectSchema = resolved.projectSchema;
   args.registryPath = resolved.registryPath;
   args.policyPaths = resolved.policyPaths;
+  args.security = resolveNetworkSecurity(args, process.env);
   for (const warning of resolved.warnings) {
     process.stderr.write(`WARNING: ${warning}\n`);
   }
@@ -491,8 +510,58 @@ function sqliteJournalPath(appPath: string): string {
   return `${appPath.slice(0, -extension.length)}.migrations${extension}`;
 }
 
+function nonEmptyEnv(value: string | undefined): string | undefined {
+  return value === undefined || value.trim().length === 0 ? undefined : value;
+}
+
+/** Build the host-enforced transport controls from flags (highest precedence),
+ *  then env. `--tls-ca` / `ZERO_MIGRATE_TLS_CA` is a FILE PATH whose PEM contents
+ *  are pinned (not the PEM itself). Returns `undefined` when no control is set, so
+ *  the network driver default is unchanged. These apply only to `postgres`/`mysql`
+ *  drivers (the host owns the socket); SQLite runs in-process. */
+export function resolveNetworkSecurity(
+  args: Pick<Args, "tlsCaPath" | "hostAllowlist" | "queryTimeoutMs">,
+  processEnv: NodeJS.ProcessEnv,
+): NetworkSecurityOptions | undefined {
+  const caPath = args.tlsCaPath ?? nonEmptyEnv(processEnv.ZERO_MIGRATE_TLS_CA);
+  const allowlistRaw = args.hostAllowlist ?? nonEmptyEnv(processEnv.ZERO_MIGRATE_HOST_ALLOWLIST);
+  const timeoutRaw = args.queryTimeoutMs ?? nonEmptyEnv(processEnv.ZERO_MIGRATE_QUERY_TIMEOUT_MS);
+
+  const security: NetworkSecurityOptions = {};
+  if (caPath !== undefined) {
+    try {
+      security.tlsCa = readFileSync(caPath, "utf8");
+    } catch (e) {
+      throw new CliError(
+        `--tls-ca: cannot read CA bundle ${JSON.stringify(caPath)}: ${(e as Error).message}`,
+      );
+    }
+  }
+  if (allowlistRaw !== undefined) {
+    const hosts = allowlistRaw
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0);
+    if (hosts.length > 0) security.hostAllowlist = hosts;
+  }
+  if (timeoutRaw !== undefined) {
+    const ms = Number(timeoutRaw);
+    if (!Number.isInteger(ms) || ms <= 0) {
+      throw new CliError(
+        `--query-timeout must be a positive integer (ms); got ${JSON.stringify(timeoutRaw)}`,
+      );
+    }
+    security.queryTimeoutMs = ms;
+  }
+  return Object.keys(security).length > 0 ? security : undefined;
+}
+
 /** Select the supported Node driver from a database URL scheme. */
-export function driverFor(databaseUrl: string, journalOverride?: string): DriverConfig {
+export function driverFor(
+  databaseUrl: string,
+  journalOverride?: string,
+  security?: NetworkSecurityOptions,
+): DriverConfig {
   const trimmed = databaseUrl.trimStart();
   const lower = trimmed.toLowerCase();
   const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed);
@@ -501,13 +570,13 @@ export function driverFor(databaseUrl: string, journalOverride?: string): Driver
     if (journalOverride !== undefined) {
       throw new CliError("flag --journal is only valid for a SQLite database URL");
     }
-    return { kind: "postgres", url: databaseUrl };
+    return { kind: "postgres", url: databaseUrl, security };
   }
   if (lower.startsWith("mysql://")) {
     if (journalOverride !== undefined) {
       throw new CliError("flag --journal is only valid for a SQLite database URL");
     }
-    return { kind: "mysql", url: databaseUrl };
+    return { kind: "mysql", url: databaseUrl, security };
   }
   const isBareSqlitePath =
     (!hasUriScheme || isWindowsDrivePath) &&
@@ -796,7 +865,7 @@ async function runLivePlan(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl);
+  const driver = driverFor(args.databaseUrl, undefined, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -854,7 +923,7 @@ async function runApply(args: Args): Promise<number> {
       "missing database URL (pass --database-url or set DATABASE_URL)",
     );
   }
-  const driver = driverFor(args.databaseUrl, args.journalPath);
+  const driver = driverFor(args.databaseUrl, args.journalPath, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -944,7 +1013,7 @@ async function runStatus(args: Args): Promise<number> {
       "missing database URL (pass --database-url or set DATABASE_URL)",
     );
   }
-  const driver = driverFor(args.databaseUrl);
+  const driver = driverFor(args.databaseUrl, undefined, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -1020,7 +1089,7 @@ async function runResolve(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl);
+  const driver = driverFor(args.databaseUrl, undefined, args.security);
   if (driver.kind !== "postgres") {
     throw new CliError("resolve supports only PostgreSQL online renames");
   }
@@ -1068,7 +1137,7 @@ async function runHistory(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl);
+  const driver = driverFor(args.databaseUrl, undefined, args.security);
   if (driver.kind !== "postgres") {
     throw new CliError("history supports only PostgreSQL");
   }
@@ -1111,6 +1180,12 @@ Flags:
   --dir <dir>           Migration directory (default ./migrations)
   --database-url <url>  postgres:// or mysql:// DSN, or sqlite:<path>
   --journal <path>      SQLite journal override (default: <app>.migrations.<ext>)
+  --tls-ca <file>       Pin this PEM CA bundle for the postgres/mysql TLS connection
+                        (env ZERO_MIGRATE_TLS_CA); verifies the server certificate
+  --host-allowlist <csv> Reject connecting to any host not in this comma list
+                        (env ZERO_MIGRATE_HOST_ALLOWLIST)
+  --query-timeout <ms>  Per-verb query timeout for the network driver
+                        (env ZERO_MIGRATE_QUERY_TIMEOUT_MS)
   --dialect <name>      lint only: postgres, mysql, or sqlite (default all three)
   --registry <file>     Trusted JSON map of table names to owner app IDs
   --policy <file>

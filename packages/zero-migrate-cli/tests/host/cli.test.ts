@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import {
   formatStatusHuman,
   hasInlinePassword,
   pendingMigrationsForPlan,
+  resolveNetworkSecurity,
   resolvePendingVersion,
   statusExitCode,
   statusIsDirty,
@@ -345,6 +347,72 @@ test("CLI derives SQLite app and journal paths and honors --journal", () => {
     () => driverFor("sqlite:/tmp/app.db", ""),
     /--journal needs a non-empty file path/,
   );
+});
+
+test("driverFor attaches host-enforced transport security to network drivers", () => {
+  const security = { hostAllowlist: ["db.internal"], queryTimeoutMs: 5000 };
+  assert.deepEqual(driverFor("postgres://db.internal/app", undefined, security), {
+    kind: "postgres",
+    url: "postgres://db.internal/app",
+    security,
+  });
+  assert.deepEqual(driverFor("mysql://db.internal/app", undefined, security), {
+    kind: "mysql",
+    url: "mysql://db.internal/app",
+    security,
+  });
+});
+
+test("resolveNetworkSecurity: flags win over env, absent yields undefined", () => {
+  // Nothing set anywhere -> undefined (driver default unchanged, controls off).
+  assert.equal(resolveNetworkSecurity({}, {}), undefined);
+
+  // Env-only supplies the controls.
+  const fromEnv = resolveNetworkSecurity(
+    {},
+    {
+      ZERO_MIGRATE_HOST_ALLOWLIST: "a.example, b.example ,",
+      ZERO_MIGRATE_QUERY_TIMEOUT_MS: "2500",
+    },
+  );
+  assert.deepEqual(fromEnv, {
+    hostAllowlist: ["a.example", "b.example"],
+    queryTimeoutMs: 2500,
+  });
+
+  // A flag overrides the env for the same control.
+  const flagWins = resolveNetworkSecurity(
+    { hostAllowlist: "only.flag" },
+    { ZERO_MIGRATE_HOST_ALLOWLIST: "ignored.env" },
+  );
+  assert.deepEqual(flagWins, { hostAllowlist: ["only.flag"] });
+});
+
+test("resolveNetworkSecurity rejects a non-positive query timeout", () => {
+  assert.throws(
+    () => resolveNetworkSecurity({ queryTimeoutMs: "0" }, {}),
+    /--query-timeout must be a positive integer/,
+  );
+  assert.throws(
+    () => resolveNetworkSecurity({ queryTimeoutMs: "abc" }, {}),
+    /--query-timeout must be a positive integer/,
+  );
+});
+
+test("resolveNetworkSecurity reads and pins the --tls-ca bundle contents", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zm-tlsca-"));
+  try {
+    const caPath = join(dir, "ca.pem");
+    writeFileSync(caPath, "-----BEGIN CERTIFICATE-----\nPINME\n-----END CERTIFICATE-----\n");
+    const security = resolveNetworkSecurity({ tlsCaPath: caPath }, {});
+    assert.match(security?.tlsCa ?? "", /PINME/);
+    assert.throws(
+      () => resolveNetworkSecurity({ tlsCaPath: join(dir, "missing.pem") }, {}),
+      /--tls-ca: cannot read CA bundle/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("live plan leaves a fresh SQLite journal absent", () => {

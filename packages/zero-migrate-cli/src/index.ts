@@ -52,9 +52,24 @@ export type { IrEnvelope, MigrationModule } from "zero-migrate/internal/recorder
  *  `MysqlBackend` — `GET_LOCK`, `?` placeholders), and the addon selects the
  *  backend from the `dialect` string. SQLite is NOT a host driver — it runs
  *  in-process via rusqlite and never crosses the seam. */
+/** Host-enforced transport controls for a network driver (the host owns the
+ *  socket). All optional; an absent field leaves the corresponding control off.
+ *  These reach the pinned session drivers (`driver-pg.ts` / `driver-mysql2.ts`),
+ *  which is why they must be carried on the driver config rather than dropped. */
+export interface NetworkSecurityOptions {
+  /** PEM CA bundle to PIN (TLS). When set, the server certificate is verified
+   *  against it. Distinct from any `sslmode`/`ssl` in the connection URL. */
+  tlsCa?: string;
+  /** Reject the connection before opening a socket if the URL host is not in
+   *  this allowlist. */
+  hostAllowlist?: string[];
+  /** Per-verb query timeout in milliseconds. */
+  queryTimeoutMs?: number;
+}
+
 export type DriverConfig =
-  | { kind: "postgres"; url: string }
-  | { kind: "mysql"; url: string }
+  | { kind: "postgres"; url: string; security?: NetworkSecurityOptions }
+  | { kind: "mysql"; url: string; security?: NetworkSecurityOptions }
   | { kind: "sqlite"; appPath: string; journalPath: string };
 
 type NetworkDriverConfig = Exclude<DriverConfig, { kind: "sqlite" }>;
@@ -79,11 +94,11 @@ async function openSession(
   driver: NetworkDriverConfig,
 ): Promise<{ hostDriver: AddonHostDriver; close: () => Promise<void> }> {
   if (driver.kind === "postgres") {
-    const s = await openPgSession(driver.url);
+    const s = await openPgSession(driver.url, driver.security);
     return { hostDriver: s.hostDriver, close: s.close };
   }
   if (driver.kind === "mysql") {
-    const s = await openMysqlSession(driver.url);
+    const s = await openMysqlSession(driver.url, driver.security);
     return { hostDriver: s.hostDriver, close: s.close };
   }
   const unreachable: never = driver;
