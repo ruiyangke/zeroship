@@ -210,7 +210,7 @@ async fn add_column_ifnotexists_absent_runs() {
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "email".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -260,7 +260,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     for m in lower(Op::AddColumn {
         table: "t".into(),
         column: "email".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -278,7 +278,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "email".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -402,7 +402,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     for m in lower(Op::AddColumn {
         table: "t".into(),
         column: "owner".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -496,7 +496,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "email".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -583,7 +583,7 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     let be = backend(&p);
     for m in lower(Op::CreateTable {
         name: "t".into(),
-        columns: vec![col("legacy", ColType::String)],
+        columns: vec![col("legacy", ColType::Text)],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
@@ -652,7 +652,7 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     let make_op = || Op::CreateTable {
         name: "t".into(),
         columns: vec![
-            col("title", ColType::String),
+            col("title", ColType::Text),
             col("happened", ColType::Timestamp),
         ],
         primary_key: None,
@@ -743,7 +743,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
         name: "t".into(),
         columns: vec![IrColumn {
             name: "email".into(),
-            ty: ColType::String,
+            ty: ColType::Text,
             nullable: Some(true),
             default: None,
             unique: Some(true),
@@ -925,7 +925,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
 
     for m in lower(Op::CreateTable {
         name: "t".into(),
-        columns: vec![col("name", ColType::String)],
+        columns: vec![col("name", ColType::Text)],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],

@@ -1447,7 +1447,7 @@ fn logical_reference_types_match(
     match (local, target) {
         // These two legacy neutral variants share one unformatted text storage
         // contract. Public `t.text()` records `Text`.
-        (ColType::String | ColType::Text, ColType::String | ColType::Text) => true,
+        (ColType::String { .. } | ColType::Text, ColType::String { .. } | ColType::Text) => true,
         _ => local == target,
     }
 }
@@ -1471,7 +1471,7 @@ fn lowered_reference_storage(ty: &crate::model::ir::ColType, dialect: Dialect) -
     use crate::model::ir::ColType;
 
     match ty {
-        ColType::String | ColType::Text | ColType::Ref { .. } => "text".to_string(),
+        ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
         ColType::SmallInt => match dialect {
             Dialect::Sqlite => "integer".to_string(),
             _ => "smallint".to_string(),
@@ -9635,9 +9635,9 @@ mod tests {
     fn type_id_value_format_requires_exact_text_storage() {
         for ty in [
             ColType::Uuid,
-            ColType::String,
+            ColType::String { length: 255 },
             ColType::Encrypted {
-                of: Box::new(ColType::Text),
+                of: Box::new(ColType::String { length: 255 }),
             },
         ] {
             let ir = ir_with(vec![create_with_type_id("user", ty, None)]);
@@ -9721,9 +9721,9 @@ mod tests {
     fn ulid_value_format_requires_exact_text_storage() {
         for ty in [
             ColType::Uuid,
-            ColType::String,
+            ColType::String { length: 255 },
             ColType::Encrypted {
-                of: Box::new(ColType::Text),
+                of: Box::new(ColType::String { length: 255 }),
             },
         ] {
             let ir = ir_with(vec![create_with_ulid(ty, None)]);

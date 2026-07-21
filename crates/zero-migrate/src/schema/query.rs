@@ -174,6 +174,16 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             }
         }
 
+        // `t.string({ length })` — bounded VARCHAR. A `string` token carrying an
+        // explicit `maxLength` renders `character varying(N)` (SQL-standard spelling
+        // for `VARCHAR(N)`); a `string` without one keeps the unbounded `TEXT`
+        // spelling from `def_to_pg_type` (uuid / typed-id / ref land there).
+        if zs_type == Some("string") {
+            if let Some(len) = max_length(def) {
+                return format!("character varying({len})");
+            }
+        }
+
         def_to_pg_type(def).to_string()
     }
 
@@ -2480,6 +2490,12 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
 
 fn char_len(def: &serde_json::Value) -> Option<u64> {
     def.get("charLen")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|len| *len > 0)
+}
+
+fn max_length(def: &serde_json::Value) -> Option<u64> {
+    def.get("maxLength")
         .and_then(serde_json::Value::as_u64)
         .filter(|len| *len > 0)
 }

@@ -1231,6 +1231,9 @@ fn mysql_ddl_type(data_type: &str) -> String {
     if let Some(len) = char_len_from_data_type(&lower) {
         return format!("CHAR({len})");
     }
+    if let Some(len) = varchar_len_from_data_type(&lower) {
+        return format!("VARCHAR({len})");
+    }
     match lower.as_str() {
         "text" => "VARCHAR(191)".to_string(),
         "double precision" | "float8" => "DOUBLE".to_string(),
@@ -1688,6 +1691,11 @@ pub struct FieldDescriptor {
     /// intermediate SDK-shaped `FieldDef` the shared renderer consumes.
     #[serde(rename = "charLen", default)]
     pub char_len: Option<i64>,
+    /// `t.string({ length })` — bounded variable-length string. Mirrors
+    /// `maxLength` on the intermediate SDK-shaped `FieldDef`; drives
+    /// `VARCHAR(N)` on Postgres/MySQL (`TEXT` on SQLite).
+    #[serde(rename = "maxLength", default)]
+    pub max_length: Option<i64>,
     /// `t.vector(_, { metric })` — distance metric (`cosine` | `l2` |
     /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
     #[serde(rename = "vectorMetric", default)]
@@ -1891,6 +1899,9 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     def.insert("type".into(), serde_json::Value::String(f.ty.clone()));
     if let Some(len) = f.char_len {
         def.insert("charLen".into(), serde_json::Value::from(len));
+    }
+    if let Some(len) = f.max_length {
+        def.insert("maxLength".into(), serde_json::Value::from(len));
     }
     if let Some(d) = f.vector_dims {
         def.insert("vectorDims".into(), serde_json::Value::from(d));
@@ -8387,6 +8398,18 @@ pub(crate) fn char_len_from_data_type(data_type: &str) -> Option<u32> {
         .strip_prefix("character(")
         .or_else(|| lower.strip_prefix("char("))
         .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
+}
+
+/// The declared length of a bounded `VARCHAR` base type (`character varying(N)`
+/// / `varchar(N)`), as produced for a `t.string({ length })` column. Fixed-length
+/// `character(N)` is handled by [`char_len_from_data_type`] and is excluded here.
+pub(crate) fn varchar_len_from_data_type(data_type: &str) -> Option<u32> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character varying(")
+        .or_else(|| lower.strip_prefix("varchar("))?
         .strip_suffix(')')?;
     inner.parse::<u32>().ok().filter(|len| *len > 0)
 }

@@ -541,9 +541,14 @@ pub enum CursorStability {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ColType {
-    /// Bounded variable-length string (`VARCHAR`-ish).
-    String,
-    /// Unbounded text (`TEXT`).
+    /// Bounded variable-length string (`VARCHAR(N)`). Portable across all
+    /// dialects: `varchar(N)` on Postgres/MySQL, `TEXT` on SQLite. Authored via
+    /// `t.string({ length })`, defaulting to 255 when omitted.
+    String {
+        /// Maximum length in characters.
+        length: u32,
+    },
+    /// Unbounded text (`TEXT`). Authored via `t.text()`; never silently capped.
     Text,
     /// 32-bit signed integer.
     Int,

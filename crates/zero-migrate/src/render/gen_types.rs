@@ -1291,7 +1291,11 @@ fn render_col_type(
     vector_metric: Option<crate::VectorMetric>,
 ) -> String {
     match ty {
-        ColType::String | ColType::Text => match case_sensitive {
+        ColType::String { length } => match case_sensitive {
+            Some(false) => format!("t.string({{ length: {length}, caseSensitive: false }})"),
+            _ => format!("t.string({{ length: {length} }})"),
+        },
+        ColType::Text => match case_sensitive {
             Some(false) => "t.text({ caseSensitive: false })".to_string(),
             _ => "t.text()".to_string(),
         },

@@ -183,7 +183,7 @@ fn create_table_render_is_byte_identical_pg() {
         columns: vec![
             IrColumn {
                 name: "title".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
                 unique: None,
@@ -198,7 +198,7 @@ fn create_table_render_is_byte_identical_pg() {
             },
             IrColumn {
                 name: "slug".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: None,
                 default: None,
                 unique: Some(true),
@@ -381,7 +381,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
             // The IR carries an encrypted column wrapping a string.
             name: "secret".into(),
             ty: ColType::Encrypted {
-                of: Box::new(ColType::String),
+                of: Box::new(ColType::Text),
             },
             nullable: None,
             default: None,
@@ -465,7 +465,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),
-            ty: ColType::String,
+            ty: ColType::Text,
             nullable: None,
             default: None,
             unique: None,
@@ -553,7 +553,7 @@ fn add_column_render_is_byte_identical_pg() {
     let ops = vec![Op::AddColumn {
         table: "people".into(),
         column: "nickname".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: None,
         default: None,
         value_format: None,
@@ -1282,7 +1282,7 @@ fn create_table_render_is_byte_identical_sqlite() {
         columns: vec![
             IrColumn {
                 name: "title".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
                 unique: None,
@@ -1297,7 +1297,7 @@ fn create_table_render_is_byte_identical_sqlite() {
             },
             IrColumn {
                 name: "slug".into(),
-                ty: ColType::String,
+                ty: ColType::Text,
                 nullable: None,
                 default: None,
                 unique: Some(true),
@@ -1374,7 +1374,7 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
         name: "events".into(),
         columns: vec![IrColumn {
             name: "kind".into(),
-            ty: ColType::String,
+            ty: ColType::Text,
             nullable: None,
             default: None,
             unique: None,
@@ -1543,7 +1543,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         columns: vec![IrColumn {
             name: "secret".into(),
             ty: ColType::Encrypted {
-                of: Box::new(ColType::String),
+                of: Box::new(ColType::Text),
             },
             nullable: None,
             default: None,
@@ -1619,7 +1619,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),
-            ty: ColType::String,
+            ty: ColType::Text,
             nullable: None,
             default: None,
             unique: None,
@@ -1705,7 +1705,7 @@ fn add_column_render_is_byte_identical_sqlite() {
     let ops = vec![Op::AddColumn {
         table: "people".into(),
         column: "nickname".into(),
-        ty: ColType::String,
+        ty: ColType::Text,
         nullable: None,
         default: None,
         value_format: None,

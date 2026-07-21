@@ -90,7 +90,7 @@ const MYSQL_FEATURE_IR: &str = r#"{
     {"op":"createTable","name":"teams","columns":[
       {"name":"id","type":"int","nullable":false,"identity":{"always":false}},
       {"name":"name","type":"text","nullable":false},
-      {"name":"name_lc","type":"string",
+      {"name":"name_lc","type":"text",
         "generated":{"expr":{"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"name"}]},"stored":true}}
     ],"primaryKey":["id"]},
     {"op":"createTable","name":"members","columns":[
@@ -626,5 +626,40 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
     assert!(
         out.contains("-- preview:"),
         "carries a summary line:\n{out}"
+    );
+}
+
+/// A bounded `t.string({ length })` column (`ColType::String { length }`) renders a
+/// portable `VARCHAR(N)` on Postgres/MySQL and `TEXT` on SQLite — the "write once"
+/// bounded-string contract. `t.text()` (`ColType::Text`) stays unbounded.
+#[test]
+fn string_length_renders_bounded_varchar_across_dialects() {
+    let ir = r#"{"ir_version":1,"name":"bounded","ops":[
+      {"op":"createTable","name":"widgets","columns":[
+        {"name":"id","type":"int","nullable":false,"identity":{"always":false}},
+        {"name":"code","type":{"string":{"length":200}},"nullable":false}
+      ],"primaryKey":["id"]}
+    ]}"#;
+    let resolved = resolve_envelope_json(ir);
+
+    let pg = render_ir_envelope_sql(&resolved, SqlDialect::Postgres, &opts())
+        .expect("bounded string renders on PG");
+    assert!(
+        pg.contains("character varying(200)") || pg.contains("varchar(200)"),
+        "PG must render a bounded varchar(200):\n{pg}"
+    );
+
+    let mysql = render_ir_envelope_sql(&resolved, SqlDialect::Mysql, &opts())
+        .expect("bounded string renders on MySQL");
+    assert!(
+        mysql.contains("VARCHAR(200)"),
+        "MySQL must render VARCHAR(200), not the legacy VARCHAR(191) cap:\n{mysql}"
+    );
+
+    let sqlite = render_ir_envelope_sql(&resolved, SqlDialect::Sqlite, &opts())
+        .expect("bounded string renders on SQLite");
+    assert!(
+        sqlite.to_uppercase().contains("\"CODE\" TEXT") || sqlite.contains("code") && sqlite.contains("TEXT"),
+        "SQLite stores the bounded string as TEXT:\n{sqlite}"
     );
 }
