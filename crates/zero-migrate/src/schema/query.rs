@@ -1846,10 +1846,22 @@ pub fn build_create_indexes(
                 .get("vectorMetric")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("cosine");
+            // A MISSING metric defaults to cosine (see `unwrap_or` above), but a
+            // PRESENT-but-unknown metric must be rejected: silently coercing a
+            // typo'd metric to Cosine would pick the wrong pgvector opclass /
+            // SQLite distance function with no build- or apply-time error. The
+            // closed-enum guarantee that holds on the IR path
+            // (`model::ir::VectorMetric`, deserialize-bounded) must hold here too.
             let metric = match metric_str {
+                "cosine" => crate::schema::descriptors::VectorMetric::Cosine,
                 "l2" => crate::schema::descriptors::VectorMetric::L2,
                 "innerProduct" | "ip" => crate::schema::descriptors::VectorMetric::InnerProduct,
-                _ => crate::schema::descriptors::VectorMetric::Cosine,
+                other => {
+                    return Err(QueryError::InvalidIdent(format!(
+                        "{collection}.{field}: unknown vectorMetric {other:?} \
+                         (expected \"cosine\", \"l2\", or \"innerProduct\")"
+                    )));
+                }
             };
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
             out.push(IndexSpec {
@@ -3270,6 +3282,60 @@ columns = [
         assert_eq!(out.len(), 1);
         let spec = &out[0];
         assert!(spec.sql.contains(r#"("user")"#), "sql: {}", spec.sql);
+    }
+
+    #[test]
+    fn test_build_indexes_vector_metric_parses_known_values() {
+        use crate::schema::descriptors::VectorMetric;
+        for (input, expected) in [
+            ("cosine", VectorMetric::Cosine),
+            ("l2", VectorMetric::L2),
+            ("innerProduct", VectorMetric::InnerProduct),
+            ("ip", VectorMetric::InnerProduct),
+        ] {
+            let schema = json!({
+                "embedding": {"type": "vector", "vectorDims": 768, "vectorMetric": input},
+            });
+            let out = build_create_indexes("app1", "docs", &schema).unwrap();
+            assert_eq!(out.len(), 1, "input {input}: {out:?}");
+            match &out[0].kind {
+                IndexKind::Vector { dims, metric } => {
+                    assert_eq!(*dims, 768, "input {input}");
+                    assert_eq!(*metric, expected, "input {input}");
+                }
+                other => panic!("input {input}: expected vector index, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_indexes_vector_metric_defaults_to_cosine_when_absent() {
+        // A MISSING metric is a legitimate default (cosine), not an error.
+        let schema = json!({
+            "embedding": {"type": "vector", "vectorDims": 768},
+        });
+        let out = build_create_indexes("app1", "docs", &schema).unwrap();
+        assert_eq!(out.len(), 1);
+        match &out[0].kind {
+            IndexKind::Vector { metric, .. } => {
+                assert_eq!(*metric, crate::schema::descriptors::VectorMetric::Cosine);
+            }
+            other => panic!("expected vector index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_indexes_rejects_unknown_vector_metric() {
+        // A typo'd or out-of-set metric must be REJECTED, not silently coerced
+        // to Cosine — that would pick the wrong pgvector opclass / SQLite
+        // distance function with no build- or apply-time error.
+        let schema = json!({
+            "embedding": {"type": "vector", "vectorDims": 768, "vectorMetric": "manhatten"},
+        });
+        let err = build_create_indexes("app1", "docs", &schema).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown vectorMetric"), "msg: {msg}");
+        assert!(msg.contains("manhatten"), "msg: {msg}");
     }
 
     #[test]
