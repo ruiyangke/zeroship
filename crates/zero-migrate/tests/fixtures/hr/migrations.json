@@ -28,7 +28,11 @@
           },
           {
             "name": "name",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 255
+              }
+            },
             "nullable": false
           },
           {
@@ -154,17 +158,29 @@
           },
           {
             "name": "email",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 254
+              }
+            },
             "nullable": false
           },
           {
             "name": "first_name",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 255
+              }
+            },
             "nullable": false
           },
           {
             "name": "last_name",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 255
+              }
+            },
             "nullable": false
           },
           {
@@ -184,12 +200,20 @@
           },
           {
             "name": "employment_type",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 32
+              }
+            },
             "nullable": false
           },
           {
             "name": "status",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 32
+              }
+            },
             "nullable": false,
             "default": {
               "literal": {
@@ -238,7 +262,11 @@
         "op": "addColumn",
         "table": "employees",
         "column": "work_location",
-        "type": "text"
+        "type": {
+          "string": {
+            "length": 255
+          }
+        }
       }
     ]
   },
@@ -258,7 +286,11 @@
           },
           {
             "name": "title",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 255
+              }
+            },
             "nullable": false
           },
           {
@@ -367,7 +399,11 @@
           },
           {
             "name": "status",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 32
+              }
+            },
             "nullable": false,
             "default": {
               "literal": {
@@ -497,7 +533,11 @@
           },
           {
             "name": "leave_type",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 32
+              }
+            },
             "nullable": false
           },
           {
@@ -522,7 +562,11 @@
           },
           {
             "name": "status",
-            "type": "text",
+            "type": {
+              "string": {
+                "length": 32
+              }
+            },
             "nullable": false,
             "default": {
               "literal": {
@@ -1080,7 +1124,11 @@
         "op": "addColumn",
         "table": "employees",
         "column": "full_name",
-        "type": "text"
+        "type": {
+          "string": {
+            "length": 512
+          }
+        }
       },
       {
         "op": "backfill",
