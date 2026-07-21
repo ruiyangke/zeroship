@@ -1220,6 +1220,45 @@ fn inline_checks_clause(c: &ColumnSnapshot) -> String {
     }
 }
 
+/// Whether a MySQL column type spelling is a character type that carries a
+/// collation (the `VARCHAR`/`CHAR`/`TEXT` family). Numeric, temporal, JSON, BLOB,
+/// and `ENUM` types do not take a general string collation here.
+fn mysql_type_takes_collation(base: &str) -> bool {
+    let u = base.trim().to_ascii_uppercase();
+    u.starts_with("VARCHAR")
+        || u.starts_with("CHAR(")
+        || u == "CHAR"
+        || u.starts_with("TEXT")
+        || u.starts_with("TINYTEXT")
+        || u.starts_with("MEDIUMTEXT")
+        || u.starts_with("LONGTEXT")
+}
+
+/// The full MySQL column type (base spelling + an explicit collation) for a field,
+/// or `None` for a non-character column (which needs no override and renders via
+/// [`mysql_ddl_type`]). A `caseSensitive: false` facet or an unbounded `t.text()`
+/// renders `TEXT`; every character type pins an explicit collation so string
+/// comparison is case-SENSITIVE by default (matching Postgres/SQLite) unless
+/// `caseSensitive: false` asks for a case-insensitive collation. Typed-id columns
+/// overwrite this with their own `ascii_bin` via value-format metadata.
+fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> Option<String> {
+    let case_insensitive = matches!(f.case_sensitive, Some(false));
+    let base = if case_insensitive || f.unbounded_text {
+        "text".to_string()
+    } else {
+        mysql_ddl_type(data_type)
+    };
+    if !mysql_type_takes_collation(&base) {
+        return None;
+    }
+    let collation = if case_insensitive {
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+    } else {
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+    };
+    Some(format!("{base} {collation}"))
+}
+
 fn mysql_ddl_type(data_type: &str) -> String {
     let lower = data_type.trim().to_ascii_lowercase();
     if lower.starts_with("enum(") {
@@ -2674,16 +2713,16 @@ fn column_snapshot_for_field(
         } else {
             None
         };
-    // On MySQL, both a case-insensitive text facet AND a genuine unbounded `t.text()`
-    // column render `TEXT` rather than the base `VARCHAR(191)`. The base data_type
-    // stays `text`, so Postgres and the catalog/drift comparison are unaffected.
-    // Bounded system columns are `String`, so they never set `unbounded_text` and
-    // stay `VARCHAR(N)`; a genuine `t.text()` used in a MySQL key is rejected by
-    // validation, so an unindexable `TEXT` key can never be emitted.
-    let ddl_type_override = if matches!(dialect, SqlDialect::Mysql)
-        && (matches!(f.case_sensitive, Some(false)) || f.unbounded_text)
-    {
-        Some("text".to_string())
+    // On MySQL, every character column carries an EXPLICIT collation so that string
+    // equality and uniqueness match Postgres/SQLite (case-SENSITIVE) instead of
+    // depending on the MySQL server default (typically `utf8mb4_0900_ai_ci`, which is
+    // case-INSENSITIVE). The base spelling also folds in the case-insensitive facet
+    // and the unbounded `t.text()` -> `TEXT` mapping (Postgres/SQLite and the base
+    // `data_type` are unaffected — the collation lives only in the emitted MySQL DDL).
+    // Typed-id columns overwrite this with their own `ascii_bin` via value-format
+    // metadata applied after the snapshot is built, so ids/typed-refs still match.
+    let ddl_type_override = if matches!(dialect, SqlDialect::Mysql) {
+        mysql_type_override_with_collation(f, &data_type)
     } else {
         None
     };

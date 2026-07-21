@@ -2789,6 +2789,17 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
 #[must_use]
 pub fn mysql_canonical_type(data_type: &str) -> String {
     let lower = data_type.trim().to_ascii_lowercase();
+    // Strip an explicit `CHARACTER SET ... COLLATE ...` clause: it is the column's
+    // collation, which the base-family canonicalization ignores (charset/collation
+    // is compared independently). `VARCHAR(255) CHARACTER SET utf8mb4 COLLATE
+    // utf8mb4_bin` and a bare `varchar(255)` canonicalize to the same base family.
+    let lower = lower
+        .split(" character set ")
+        .next()
+        .and_then(|head| head.split(" collate ").next())
+        .unwrap_or(&lower)
+        .trim()
+        .to_string();
     let no_width = strip_mysql_int_display_width(&lower);
     if no_width.starts_with("enum(") {
         return no_width;
