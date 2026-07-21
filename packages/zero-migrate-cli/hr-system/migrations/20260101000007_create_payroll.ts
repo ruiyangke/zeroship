@@ -12,7 +12,7 @@ export default {
         id: ids.ulid().primaryKey(),
         period_label: t.char({ length: 7 }).notNull(),
         run_date: t.date().notNull(),
-        status: t.text().notNull().default("draft"),
+        status: t.string({ length: 32 }).notNull().default("draft"),
       },
     });
 

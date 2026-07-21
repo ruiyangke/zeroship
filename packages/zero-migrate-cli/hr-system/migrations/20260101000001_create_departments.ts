@@ -12,7 +12,7 @@ export default {
       columns: {
         id: ids.typeId({ prefix: "dept" }).primaryKey(),
         code: t.char({ length: 8 }).notNull(),
-        name: t.text().notNull(),
+        name: t.string({ length: 255 }).notNull(),
         is_active: t.boolean().notNull().default(true),
         created_at: t.timestamp().notNull().default(now()),
       },

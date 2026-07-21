@@ -6,7 +6,7 @@ export const name = "backfill_full_name";
 
 export default {
   up() {
-    table("employees").column("full_name").add({ type: t.text() });
+    table("employees").column("full_name").add({ type: t.string({ length: 512 }) });
 
     table("employees").backfill({
       name: "backfill_employee_full_name",

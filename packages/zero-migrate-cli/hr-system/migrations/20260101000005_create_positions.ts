@@ -9,7 +9,9 @@ export default {
     table("positions").create({
       columns: {
         id: ids.ulid().primaryKey(),
-        title: t.text().notNull(),
+        // `title` has a unique index (added later), so it must be a bounded
+        // `t.string` (VARCHAR) — MySQL cannot index unbounded `t.text()`.
+        title: t.string({ length: 255 }).notNull(),
         department_scope: t.char({ length: 8 }),
         is_leadership: t.boolean().notNull().default(false),
       },

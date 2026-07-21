@@ -19,13 +19,17 @@ export default {
           .bigInt()
           .notNull()
           .references("job_grades", "id", { onDelete: "restrict" }),
-        email: t.text().notNull(),
-        first_name: t.text().notNull(),
-        last_name: t.text().notNull(),
+        // Bounded strings: `email` and `status` are index members (a unique email
+        // index and the composite dept/status index), so they must be `t.string`
+        // (VARCHAR) — MySQL cannot index unbounded `t.text()`. The rest are bounded
+        // by nature (names, a short employment-type vocabulary).
+        email: t.string({ length: 254 }).notNull(),
+        first_name: t.string({ length: 255 }).notNull(),
+        last_name: t.string({ length: 255 }).notNull(),
         hire_date: t.date().notNull(),
         base_salary: t.numeric({ precision: 12, scale: 2 }).notNull(),
-        employment_type: t.text().notNull(),
-        status: t.text().notNull().default("active"),
+        employment_type: t.string({ length: 32 }).notNull(),
+        status: t.string({ length: 32 }).notNull().default("active"),
         manager_id: ids
           .typeId({ prefix: "emp" })
           .references("employees", "id", { onDelete: "setNull" }),
