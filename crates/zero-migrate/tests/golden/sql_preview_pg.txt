@@ -2,7 +2,7 @@
 -- plan "representative"  (dialect: postgres)
 -- ============================================================
 
-CREATE TABLE "public"."codes" ("code" integer NOT NULL, "created_at" timestamptz NOT NULL, "created_by" text, "deleted_at" timestamptz, "id" text PRIMARY KEY NOT NULL, "label" text, "updated_at" timestamptz NOT NULL, "updated_by" text, "version" integer NOT NULL);
+CREATE TABLE "public"."codes" ("code" integer NOT NULL, "created_at" timestamptz NOT NULL, "created_by" character varying(255), "deleted_at" timestamptz, "id" character varying(255) PRIMARY KEY NOT NULL, "label" character varying(255), "updated_at" timestamptz NOT NULL, "updated_by" character varying(255), "version" integer NOT NULL);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "codes_code_key" ON "public"."codes" ("code");
 

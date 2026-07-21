@@ -1696,6 +1696,13 @@ pub struct FieldDescriptor {
     /// `VARCHAR(N)` on Postgres/MySQL (`TEXT` on SQLite).
     #[serde(rename = "maxLength", default)]
     pub max_length: Option<i64>,
+    /// Render-only marker for a genuine unbounded `t.text()` column (`ColType::Text`
+    /// with no value-format / id-prefix facet — NOT a typed-id, and NOT a bounded
+    /// system column, which are `String`). Drives an unbounded `TEXT` spelling on
+    /// MySQL via `ddl_type_override`; the base data_type stays `text` so Postgres
+    /// and drift are unaffected. Never serialized.
+    #[serde(skip)]
+    pub unbounded_text: bool,
     /// `t.vector(_, { metric })` — distance metric (`cosine` | `l2` |
     /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
     #[serde(rename = "vectorMetric", default)]
@@ -2667,12 +2674,19 @@ fn column_snapshot_for_field(
         } else {
             None
         };
-    let ddl_type_override =
-        if matches!(f.case_sensitive, Some(false)) && matches!(dialect, SqlDialect::Mysql) {
-            Some("text".to_string())
-        } else {
-            None
-        };
+    // On MySQL, both a case-insensitive text facet AND a genuine unbounded `t.text()`
+    // column render `TEXT` rather than the base `VARCHAR(191)`. The base data_type
+    // stays `text`, so Postgres and the catalog/drift comparison are unaffected.
+    // Bounded system columns are `String`, so they never set `unbounded_text` and
+    // stay `VARCHAR(N)`; a genuine `t.text()` used in a MySQL key is rejected by
+    // validation, so an unindexable `TEXT` key can never be emitted.
+    let ddl_type_override = if matches!(dialect, SqlDialect::Mysql)
+        && (matches!(f.case_sensitive, Some(false)) || f.unbounded_text)
+    {
+        Some("text".to_string())
+    } else {
+        None
+    };
     Ok(ColumnSnapshot {
         name: f.name.clone(),
         data_type,

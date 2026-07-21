@@ -1329,10 +1329,15 @@ fn render_injected_default(
 }
 
 fn injected_column_type(column: &IrColumn, dialect: SqlDialect) -> Result<String, QueryError> {
-    let token = match &column.ty {
-        ColType::Text => "string",
-        ColType::Timestamp => "date",
-        ColType::Int => "int",
+    let def = match &column.ty {
+        ColType::Text => serde_json::json!({ "type": "string" }),
+        // Bounded system string (`id`, actor stamps): `character varying(N)` on
+        // Postgres/MySQL, `TEXT` on SQLite — index-able on every dialect.
+        ColType::String { length } => {
+            serde_json::json!({ "type": "string", "maxLength": length })
+        }
+        ColType::Timestamp => serde_json::json!({ "type": "date" }),
+        ColType::Int => serde_json::json!({ "type": "int" }),
         _ => {
             return Err(QueryError::InvalidFilter(format!(
                 "injected column {:?} has unsupported resolved type {:?}",
@@ -1340,10 +1345,7 @@ fn injected_column_type(column: &IrColumn, dialect: SqlDialect) -> Result<String
             )))
         }
     };
-    Ok(def_to_column_type_for_dialect(
-        &serde_json::json!({ "type": token }),
-        dialect,
-    ))
+    Ok(def_to_column_type_for_dialect(&def, dialect))
 }
 
 /// Render the active policy's canonical injected indexes. Physical names are
@@ -3434,7 +3436,7 @@ columns = [
         // The injected PK is emitted exactly once. The prefix declaration must
         // NOT add a second, quoted column from the author-field loop.
         assert!(
-            create.contains("id TEXT PRIMARY KEY"),
+            create.contains("id character varying(255) PRIMARY KEY"),
             "injected id PK column present: {create}"
         );
         assert_eq!(
@@ -4716,12 +4718,17 @@ columns = [
         }
     }
 
-    /// `id TEXT PRIMARY KEY` — identical on both engines. Replaces the
-    /// legacy `id SERIAL PRIMARY KEY` previously emitted.
+    /// The system `id` primary key is a BOUNDED string — `character varying(255)`
+    /// on Postgres, `TEXT` (varchar affinity) on SQLite — so it is index-able as a
+    /// primary key on every dialect (MySQL cannot key an unbounded `TEXT`). Replaces
+    /// the legacy `id SERIAL PRIMARY KEY`.
     #[test]
-    fn create_table_emits_id_text_primary_key() {
+    fn create_table_emits_id_bounded_string_primary_key() {
         let schema = serde_json::json!({});
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for (dialect, expected_id) in [
+            (SqlDialect::Postgres, "id character varying(255) PRIMARY KEY"),
+            (SqlDialect::Sqlite, "id TEXT PRIMARY KEY"),
+        ] {
             let sql = build_create_table_with_fks_for_dialect(
                 "app1",
                 "posts",
@@ -4731,8 +4738,8 @@ columns = [
             )
             .expect("build ok");
             assert!(
-                sql.contains("id TEXT PRIMARY KEY"),
-                "missing `id TEXT PRIMARY KEY` for {dialect:?}: {sql}"
+                sql.contains(expected_id),
+                "missing `{expected_id}` for {dialect:?}: {sql}"
             );
             assert!(
                 !sql.contains("id SERIAL"),
@@ -4972,7 +4979,7 @@ columns = [
             "FK target must still reference id: {sql}"
         );
         // FK target IS the new TEXT id; the FK clause itself unchanged.
-        assert!(sql.contains("id TEXT PRIMARY KEY"), "{sql}");
+        assert!(sql.contains("id character varying(255) PRIMARY KEY"), "{sql}");
     }
 
     /// SQLite places the schema name on the INDEX, not the TABLE:
@@ -5183,8 +5190,8 @@ columns = [
         for (dialect, keyword, mixed_case) in [
             (
                 SqlDialect::Postgres,
-                r#""order" TEXT NOT NULL"#,
-                r#""CamelCase" TEXT NULL"#,
+                r#""order" character varying(255) NOT NULL"#,
+                r#""CamelCase" character varying(255) NULL"#,
             ),
             (
                 SqlDialect::Sqlite,
@@ -5193,8 +5200,8 @@ columns = [
             ),
             (
                 SqlDialect::Mysql,
-                "`order` VARCHAR(191) NOT NULL",
-                "`CamelCase` VARCHAR(191) NULL",
+                "`order` VARCHAR(255) NOT NULL",
+                "`CamelCase` VARCHAR(255) NULL",
             ),
         ] {
             let sql = super::build_create_table_with_fks_for_dialect(

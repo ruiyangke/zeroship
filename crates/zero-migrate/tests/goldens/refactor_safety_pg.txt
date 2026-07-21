@@ -52,7 +52,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "created_by",
-            data_type: "text",
+            data_type: "character varying(255)",
             nullable: true,
             default: None,
             generated: None,
@@ -84,7 +84,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "id",
-            data_type: "text",
+            data_type: "character varying(255)",
             nullable: false,
             default: None,
             generated: None,
@@ -184,7 +184,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "updated_by",
-            data_type: "text",
+            data_type: "character varying(255)",
             nullable: true,
             default: None,
             generated: None,

@@ -8223,7 +8223,7 @@ mod tests {
               "name": "memberships",
               "columns": [
                 { "name": "account_id", "type": "uuid", "nullable": false },
-                { "name": "team", "type": "text", "nullable": false }
+                { "name": "team", "type": {"string":{"length":255}}, "nullable": false }
               ],
               "primaryKey": ["account_id", "team"],
               "constraints": [],
@@ -8257,7 +8257,7 @@ mod tests {
                     name: "memberships".into(),
                     columns: vec![
                         part_col("account_id", ColType::Uuid, false),
-                        part_col("team", ColType::Text, false),
+                        part_col("team", ColType::String { length: 255 }, false),
                     ],
                     primary_key: Some(
                         primary_key
@@ -8316,7 +8316,7 @@ mod tests {
               "name": "memberships",
               "columns": [
                 { "name": "account_id", "type": "uuid", "nullable": false },
-                { "name": "team", "type": "text", "nullable": false }
+                { "name": "team", "type": {"string":{"length":255}}, "nullable": false }
               ],
               "primaryKey": ["account_id", "team"],
               "constraints": [],
@@ -10387,7 +10387,7 @@ mod tests {
         );
         let plain_target = typed_reference_key_table(
             "accounts",
-            typed_reference_column("id", ColType::Text, None, None, None),
+            typed_reference_column("id", ColType::String { length: 255 }, None, None, None),
         );
         let ulid_error =
             validate_ir_platform(&ir_with(vec![ulid_child, plain_target]), Dialect::Mysql)

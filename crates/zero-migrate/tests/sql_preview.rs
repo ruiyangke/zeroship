@@ -39,7 +39,7 @@ const REPRESENTATIVE_IR: &str = r#"{
   "ops": [
     {"op":"createTable","name":"codes","columns":[
       {"name":"code","type":"int","nullable":false,"unique":true},
-      {"name":"label","type":"text"}
+      {"name":"label","type":{"string":{"length":255}}}
     ]},
     {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
     {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"},
@@ -65,7 +65,7 @@ const REPRESENTATIVE_IR_MYSQL: &str = r#"{
   "ops": [
     {"op":"createTable","name":"codes","columns":[
       {"name":"code","type":"int","nullable":false,"unique":true},
-      {"name":"label","type":"text"}
+      {"name":"label","type":{"string":{"length":255}}}
     ]},
     {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
     {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"},
@@ -202,7 +202,7 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
       "ops": [
         {"op":"createTable","name":"codes","columns":[
           {"name":"code","type":"int","nullable":false,"unique":true},
-          {"name":"label","type":"text"}
+          {"name":"label","type":{"string":{"length":255}}}
         ]},
         {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
         {"op":"insert","table":"codes",
