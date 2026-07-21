@@ -1300,7 +1300,14 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
     }
     match lower.as_str() {
         "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" => "INTEGER",
-        "real" | "double precision" | "numeric" => "REAL",
+        "real" | "double precision" => "REAL",
+        // `numeric`/`decimal` are EXACT types. SQLite has no fixed-precision decimal
+        // storage class; REAL (or NUMERIC) affinity coerces a sufficiently wide
+        // decimal through a binary float, silently losing precision and diverging
+        // from the documented "exact decimal text" guarantee (dialects.md). Store as
+        // TEXT affinity — byte-for-byte decimal text — matching the typed
+        // `ColType::Decimal` SQLite override.
+        "numeric" | "decimal" => "TEXT",
         "bytea" | "blob" | "geography(point, 4326)" => "BLOB",
         "boolean" => "INTEGER",
         _ => "TEXT",

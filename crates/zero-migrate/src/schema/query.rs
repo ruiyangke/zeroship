@@ -261,7 +261,10 @@ impl SchemaRenderer for SqliteSchemaRenderer {
             Some("textArray") => "TEXT".to_string(),
             Some("ref") => "TEXT".to_string(),
             Some("literal") => match def.get("literalValue") {
-                Some(serde_json::Value::Number(_)) => "NUMERIC".to_string(),
+                // Exact decimal TEXT affinity, matching the numeric/decimal column
+                // mapping and the `t.numeric()` SQLite override; NUMERIC/REAL affinity
+                // would coerce a wide literal through a binary float.
+                Some(serde_json::Value::Number(_)) => "TEXT".to_string(),
                 Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
                 _ => "TEXT".to_string(),
             },
@@ -417,6 +420,34 @@ mod schema_renderer_tests {
         );
         assert_eq!(renderer(SqlDialect::Sqlite).dialect(), SqlDialect::Sqlite);
         assert_eq!(renderer(SqlDialect::Mysql).dialect(), SqlDialect::Mysql);
+    }
+
+    #[test]
+    fn sqlite_numeric_literal_column_is_text_not_lossy_real() {
+        // A numeric `t.literal()` must render TEXT (exact decimal text), not
+        // NUMERIC/REAL: those affinities coerce a wide decimal through a binary
+        // float, contradicting the documented exact-decimal-text guarantee and
+        // diverging from the `t.numeric()` SQLite override (also TEXT).
+        let def = serde_json::json!({ "type": "literal", "literalValue": 3.14 });
+        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&def), "TEXT");
+        // MySQL keeps exact fixed-precision; PG keeps `numeric`.
+        assert_eq!(
+            renderer(SqlDialect::Mysql).column_type(&def),
+            "DECIMAL(65, 30)"
+        );
+    }
+
+    #[test]
+    fn sqlite_numeric_and_decimal_canonicalise_to_text_affinity() {
+        // The model's logical `numeric`/`decimal` type and a live SQLite column
+        // (now declared TEXT) must canonicalise to the SAME affinity token, so a
+        // numeric column no longer shows phantom snapshot<->introspection drift.
+        assert_eq!(sqlite_canonical_type("numeric"), "text");
+        assert_eq!(sqlite_canonical_type("decimal"), "text");
+        assert_eq!(sqlite_canonical_type("text"), "text");
+        // `double precision` / `real` stay REAL affinity — they ARE binary floats.
+        assert_eq!(sqlite_canonical_type("double precision"), "real");
+        assert_eq!(sqlite_canonical_type("real"), "real");
     }
 }
 
@@ -2784,8 +2815,12 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
         "boolean" | "integer" | "bigint" | "smallint" | "int8" | "int4" | "int2" | "int" => {
             "integer"
         }
-        // NUMERIC affinity: PG `numeric` (a numeric `t.literal()`), and live `numeric`.
-        "numeric" | "decimal" => "numeric",
+        // TEXT affinity: `numeric`/`decimal` (a numeric `t.literal()`, `t.numeric()`)
+        // are stored as exact decimal TEXT on SQLite — no fixed-precision storage
+        // class — matching the emitter and the `t.numeric()` override. A live
+        // `numeric`/`decimal` declaration canonicalises the same way, so the model
+        // and introspection agree instead of drifting (numeric-vs-real).
+        "numeric" | "decimal" => "text",
         // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
         "bytea" | "blob" => "blob",
         // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
