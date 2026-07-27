@@ -6,8 +6,8 @@
 > state of the runtime, SDKs, and dev experience.
 >
 > Organizing principle: **dependency order**, not impressive-demo order.
-> Each phase unlocks the next. AI builder is deferred, not cancelled — it
-> only ships when creators can monetize what it generates.
+> Each phase unlocks the next. AI builder is deferred, not cancelled - it
+> only ships once generated apps can be built, deployed, and operated reliably.
 
 ---
 
@@ -20,19 +20,19 @@ bugs fixed in the todo-demo wiring session unlock every app from here.
 
 **Where the market is**: Lovable at $6.6B / $400M ARR hunting for acquisitions.
 Anthropic has a leaked full-stack builder. Wix owns Base44 and could connect
-it to their marketplace. **None of them take a cut of end-user revenue**. That
-unclaimed monetization loop is the only strategic opening large enough to
-justify building a new platform in this market.
+it to their marketplace. Most competitors concentrate on generation and
+deployment. zeroship's opportunity is the integrated infrastructure required
+to build, deploy, and operate generated apps.
 
-**The singular bet**: zeroship wins by being the first and only place where
-non-technical creators can ship an AI-generated app that earns money from end
-users, with the platform taking a Shopify-style 15%. Everything in this plan
-either makes that loop possible, makes it work well, or defends it from the
-obvious threats.
+**The singular bet**: zeroship becomes the place where non-technical creators
+can ship and operate AI-generated apps on integrated runtime, data, auth,
+payments, and operations infrastructure. Everything in this plan either makes
+that lifecycle possible, makes it work well, or defends it from the obvious
+threats.
 
 **The discipline**: runtime perf is done. Don't ship more of it. Every
 engineering hour from here is spent on **creator-visible value** or
-**monetization-loop durability**.
+**operational durability**.
 
 ---
 
@@ -61,13 +61,13 @@ meetings and context switches).
 | Phase | Goal | Duration | Unlocks |
 |---|---|---|---|
 | **0. DONE** | Runtime + SDK foundation | — | dev loop works |
-| **1. Creator MVP** | One non-technical creator ships a monetized app | **10-14 days** | real revenue flows, case study |
+| **1. Creator MVP** | One non-technical creator ships and operates a production app | **10-14 days** | live app runs, case study |
 | **2. AI POC** | Validate that AI can generate zeroship apps that work | **3-5 days** | go/no-go on AI builder investment |
 | **3. AI Builder v1** | Non-coders go prompt→shipped | **8-12 days** | real TAM expansion |
 | **4. Differentiators** | What nobody else has | **5-7 days** (parallel) | defensibility |
 | **5. Ecosystem** | SDKs + marketplace | ongoing | moat compounds |
 
-Total to "first real creator making money": **2-3 weeks**.
+Total to "first creator-operated production app": **2-3 weeks**.
 Total to "AI builder in beta": **5-7 weeks**.
 
 ---
@@ -75,9 +75,9 @@ Total to "AI builder in beta": **5-7 weeks**.
 ## Phase 1: Creator MVP (10-14 days)
 
 **Definition of done**: a creator who can write some TypeScript but isn't a
-DevOps person can ship a real consumer app, onboard their Stripe account, take
-money from end users, and see their payout in the dashboard. Platform takes
-its 15%.
+DevOps person can ship a real consumer app, onboard their Stripe account,
+accept payments, and inspect payout state in the dashboard. The Stripe Connect
+path is verified end to end.
 
 ### 1.1 Scaffold (0.5 day) — `npm create zeroship-app`
 
@@ -118,21 +118,22 @@ storage (creators can fake it with DB) but cheap to ship.
 - SDK: typed accessors `kv.get<string>("session:xyz")`
 - TTL support first-class
 
-### 1.4 Stripe Connect (3-4 days) — **the defining feature**
+### 1.4 Stripe Connect (3-4 days) - **managed payments path**
 
 *Wall-clock bottleneck: Stripe KYC sandbox cycles + webhook reliability
 testing. Code itself is ~1 day with Claude.*
 
-This is the thing that makes zeroship a platform vs another PaaS.
+This completes the platform-managed payment path for deployed apps.
 
 - Creator onboarding: Express Connect flow (zeroship is platform, creator
   is Express account)
 - KYC + identity verification handled by Stripe
-- Platform fee: 15% via `application_fee_amount` on every charge
+- Server-held `FeePolicy` stamps `application_fee_amount` on every charge
 - App-facing SDK: `@zeroship/payments` — `createCheckout(priceId, {successUrl})`,
   subscription management, webhook relay
-- End user pays → Stripe → creator gets 85% → zeroship gets 15% → split goes
-  to each party's Stripe balance, payouts on standard schedule
+- End-user payment -> Stripe routes the charge using the connected account and
+  server-held fee policy -> Stripe balances and payouts follow their configured
+  schedules
 - Creator dashboard: pending payouts, payout history, failed charges, dispute
   surface
 
@@ -142,9 +143,8 @@ This is the thing that makes zeroship a platform vs another PaaS.
 - Creators in countries without Connect Express → manual platform sign-off
   required, queue for Phase 4
 
-**Why this phase**: without this, nothing else matters commercially. Every
-day we don't have it is a day a creator can't choose us over Lovable+DIY
-Stripe.
+**Why this phase**: the AI builder depends on a working payment path and
+reliable webhook state.
 
 ### 1.5 Schema migration beyond additive (1-2 days)
 
@@ -188,8 +188,8 @@ Every real creator needs their own domain.
 
 The UI where creators live.
 
-- Apps list: name, status, domain, last deploy, revenue (MTD)
-- Per-app view: revenue graph, error rate, request count, active users
+- Apps list: name, status, domain, last deploy, payment activity (MTD)
+- Per-app view: payment activity graph, error rate, request count, active users
 - Deploy history with diff viewer + one-click rollback
 - Logs per app (last 24h, keyword search)
 - Settings: custom domain, env vars, Stripe Connect status, API keys
@@ -201,8 +201,8 @@ eating our own dog food is worth 2x the PR value)
 ### Phase 1 exit criteria
 
 Pick one real non-technical creator. They scaffold an app, deploy it, wire
-up their Stripe Connect, publish at a custom domain, take money from 5 real
-end users, and see their first payout in their dashboard. Document every
+up their Stripe Connect, publish at a custom domain, accept payments from five
+real end users, and inspect payout state in their dashboard. Document every
 point of friction.
 
 **If we can't get one creator through this loop, don't ship AI builder.**
@@ -297,13 +297,13 @@ working app deployed to their subdomain, can iterate via chat.
 
 Critical — this is where Lovable/Bolt eat credits and lose user trust. Our
 version should:
-- NOT charge creator per retry (our revenue is end-user cut, not token usage)
+- Track retries as part of the build session, not as separate billing events
 - Cap retries per bug (3 attempts, then ask creator)
 - Surface what it tried in plain English
 - Commit each attempt so creator can rewind
 
-This is a concrete differentiator: "the AI is free to try, because we earn
-when your app earns."
+This is a concrete differentiator: the AI can retry without changing
+per-session accounting.
 
 ---
 
@@ -365,7 +365,7 @@ accumulation.
 - `@zeroship/permissions` — RBAC/ABAC primitives
 - `@zeroship/analytics` — product analytics for end users
 - App marketplace (long-term, 6+ months out): creators publish templates;
-  other creators remix; platform takes a smaller cut on template sales
+  other creators remix through the marketplace
 
 Third-party SDKs (written by the community) on npm.
 
@@ -398,17 +398,18 @@ Things we will NOT ship in 2026, even though they're tempting:
 
 ## Risks and mitigations
 
-**Risk 1: Lovable ships end-user monetization before us.**
+**Risk 1: Lovable ships comparable managed payments before us.**
 - Probability: meaningful (they're hunting for acquisitions, have $500M+ cash)
-- Impact: existential (our only claimed territory gets contested)
+- Impact: high (a major technical differentiator narrows)
 - Mitigation: finish Phase 1 in ≤10 weeks. Don't pad.
-- Trigger to re-plan: Lovable announces Stripe Connect marketplace layer
+- Trigger to re-plan: Lovable announces a managed Stripe Connect layer
 
 **Risk 2: Anthropic ships their leaked full-stack builder with payments.**
 - Probability: medium, timeline unknown
 - Impact: severe (model quality + distribution + now platform)
-- Mitigation: integrate deeply with Claude — become their reference platform.
-  If they add payments, we're their end-user monetization partner.
+- Mitigation: integrate deeply with Claude and become a deployment/runtime
+  target. If they add payments, integrate through the standard Connect and
+  deploy contracts.
 - Trigger to re-plan: Anthropic announces the full-stack builder publicly
 
 **Risk 3: Security incident on a deployed zeroship app.**
@@ -434,18 +435,18 @@ Things we will NOT ship in 2026, even though they're tempting:
 | Week | Ship | Days | Why |
 |---|---|---|---|
 | **W1** | Scaffold + storage + KV + schema migration + deploy polish | 4 | Onboarding floor + capability completeness + production readiness |
-| **W1-W2** | **Stripe Connect + custom domains** | 4-6 | Monetization loop (the moat) + creator can ship at own domain |
-| **W2-W3** | Creator dashboard MVP | 2-3 | Where creators see revenue |
-| **end of W3** | **First real creator ships a monetized app** | — | Phase 1 exit gate |
+| **W1-W2** | **Stripe Connect + custom domains** | 4-6 | Managed payment path + creator can ship at own domain |
+| **W2-W3** | Creator dashboard MVP | 2-3 | Deployment, payment, and ops visibility |
+| **end of W3** | **First real creator runs a production app** | - | Phase 1 exit gate |
 | **W3-W4** | AI POC harness + 10-app test + decision | 3-5 | Go/no-go on AI builder |
 | **W4-W6** | AI builder v1 (if POC clears) | 8-12 | TAM expansion |
 | **W4-W6** | Multi-tenant SaaS + observability + rate limiting (parallel) | 5-7 | Defensibility |
 | **W7+** | Ecosystem SDKs, marketplace | ongoing | Moat compounds |
 
-**One-sentence strategy**: ship the monetization loop in ~2 weeks, validate
-AI codegen quality in ~4 days, commit AI builder only if the SDK surface
-holds under real AI load, and use the 5-7 days of differentiator work in
-parallel to make sure whatever Lovable ships later this year doesn't erase us.
+**One-sentence strategy**: ship the integrated app lifecycle in ~2 weeks,
+validate AI codegen quality in ~4 days, commit AI builder only if the SDK
+surface holds under real AI load, and use the 5-7 days of differentiator work
+in parallel to preserve technical differentiation.
 
 ## Wall-clock reality check
 
@@ -462,5 +463,5 @@ calendar gets bent by:
 - **Beta creator feedback loop** (depends entirely on your creator pool)
 - **Human decisions** (scoping, positioning, UX copy) — always wall-clock
 
-Realistic calendar from today: **first monetized creator in 3 weeks**, **AI
+Realistic calendar from today: **first creator-operated app in 3 weeks**, **AI
 builder beta in 6 weeks** if you don't stop to do other things.

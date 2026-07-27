@@ -1,6 +1,6 @@
 # zeroship Feature Map
 
-zeroship is a platform where anyone can create, launch, and monetize software without
+zeroship is a platform where anyone can create, launch, and run software without
 writing code: creators describe an app in natural language, AI builds it, and the
 platform runs everything (hosting, database, auth, payments, scaling). This document is
 **the** comprehensive, navigable map of every platform feature, assembled from 19 area
@@ -661,7 +661,7 @@ purely trust-based. **Note:** a *complete* metering→pricing→spending-limit e
 | Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
 | Usage history / snapshots | 🟠 | internal (DB schema only) | `db/migrations-ts/20260702000200_control_tables.ts` | — | — | Table exists; no code reads/writes it. |
 | env.meter.* native primitive | 🔵 | `env.meter.*` (planned) | `crates/control/src/metering.rs` | — | — | Single-line stub; not registered in runtime. |
-| Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/control/src/stripe_handlers.rs` | — | — | 15% set by SDK; not re-verified server-side. |
+| Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/control/src/stripe_handlers.rs` | — | — | Fee set by SDK; not re-verified server-side. |
 
 ---
 
@@ -1115,7 +1115,7 @@ Totals across **20** areas (≈745 catalogued features; the §20 packages + the 
 - 🟠 Metering aggregation helpers (`crates/control/src/metering.rs`) — single-line stub comment, no impl.
 - 🟡 Worker → control usage pipeline — `POST /internal/usage` is implemented but **no worker ever calls it**; usage read returns empty maps in real deploys.
 - 🟠 Usage history snapshots (`app_usage_history`) — table exists; no code reads or writes it.
-- 🟡 Platform fee enforcement — the 15% fee is set by the SDK and read from the Stripe payload, never re-computed server-side.
+- 🟡 Platform fee enforcement — the application fee is set by the SDK and read from the Stripe payload, never re-computed server-side.
 - 🟠 Stripe Connect onboarding URL — returns a hardcoded placeholder; the real `account_links` POST is a TODO.
 
 **Object storage has no production backend:**

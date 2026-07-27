@@ -53,7 +53,7 @@ The rest of this document is unchanged in its BILLING half (the two registries, 
 
 ## 1. Context
 
-Stream 1 (infra usage billing) shipped as an in-house pipeline: workers pre-aggregate per-app atomic counters (`crates/metering/src/meter.rs`), flush a `UsageReport` over HTTP to control (`crates/metering/src/flush.rs`), control dedups + aggregates into `usage_aggregates` (`crates/control/src/metering/mod.rs`), a spend engine enforces caps (`crates/control/src/spend.rs`), and a Stripe reconciler invoices (`crates/control/src/cron/billing_reconcile.rs`). A `MeteringProvider` trait (`crates/control/src/metering/provider/mod.rs`) was retrofitted on top so usage can *also* be exported to OpenMeter / Stripe Billing Meters, but production billing is still the in-house "Native" rail.
+The infrastructure usage billing path shipped as an in-house pipeline: workers pre-aggregate per-app atomic counters (`crates/metering/src/meter.rs`), flush a `UsageReport` over HTTP to control (`crates/metering/src/flush.rs`), control dedups + aggregates into `usage_aggregates` (`crates/control/src/metering/mod.rs`), a spend engine enforces caps (`crates/control/src/spend.rs`), and a Stripe reconciler invoices (`crates/control/src/cron/billing_reconcile.rs`). A `MeteringProvider` trait (`crates/control/src/metering/provider/mod.rs`) was retrofitted on top so usage can *also* be exported to OpenMeter / Stripe Billing Meters, but production billing is still the in-house "Native" rail.
 
 The platform owner has decided to **invert this at scale**. The design target is now explicitly **millions of end-users** of creator apps. The pipeline must be a purpose-built high-throughput streaming design, not "Postgres-as-event-store." Two owner decisions define the new shape:
 
@@ -80,7 +80,7 @@ zeroship is **pre-launch with an explicit no-back-compat mandate** (`AGENTS.md` 
 
 ### Non-goals
 
-- Stream 2 (Connect application-fee on creator revenue). `creator_fee_policy` / `invoice_payments` / the Connect path are orthogonal (but see §12.4 for the customer-model collision note).
+- Stripe Connect payment processing. `creator_fee_policy` / `invoice_payments` / the Connect path are orthogonal (but see section 12.4 for the customer-model collision note).
 - Building a new metering third party or a hosted rating DSL. Rating lives inside the invoicer/provider close path (the existing `charge_cents` model for Lite/`stripe_invoice`).
 - Changing the CU pricing model (`crates/control/src/pricing.rs`), the plan catalog, or the FeePolicy shapes.
 - An object-storage/Parquet cold archive of raw events for provider-independence. It is an **Open Question** (OQ-6), NOT built by default under "stream-to-provider only."
@@ -193,7 +193,7 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
     let token = ctx.secrets.resolve(&cfg.token)?;     // secret backend, not plaintext
     if cfg.base_url.trim().is_empty() || token.is_empty() {
         return Err(ProviderError::Config(
-            "openmeter: base_url + token required — refusing to boot (silent revenue black hole)".into()));
+            "openmeter: base_url + token required - refusing to boot (silent billing gap)".into()));
     }
     if cfg.meter_slug.trim().is_empty() {
         return Err(ProviderError::Config("openmeter: meter_slug required for aggregate read-back".into()));
@@ -233,7 +233,7 @@ pub fn register_builtin(r: &mut ProviderRegistry) {
 }
 ```
 
-**Registration mechanism.** An explicit `register_builtin()` list (RECOMMENDED) over `inventory`/`linkme` auto-registration: the list is greppable, deterministic, adds no dependency, and cannot be dead-code-eliminated by `--release` LTO + `gc-sections` (a link-section `submit!` referenced by nothing can be silently dropped — a *silent revenue black hole*). The 2-line delta is small enough that robustness wins.
+**Registration mechanism.** An explicit `register_builtin()` list (RECOMMENDED) over `inventory`/`linkme` auto-registration: the list is greppable, deterministic, adds no dependency, and cannot be dead-code-eliminated by `--release` LTO + `gc-sections` (a link-section `submit!` referenced by nothing can be silently dropped - a *silent billing gap*). The 2-line delta is small enough that robustness wins.
 
 ### Pillar 2 — Extensible STREAM-TRANSPORT REGISTRY (the second seam) — scoped to the Kafka-family
 
@@ -598,7 +598,7 @@ v1–v4 tried to make a LOCAL fold exactly-once so it could serve BOTH billing (
 Spend Warn/Degrade/Block is derived by the **periodic per-app recompute** (rated via `spend.rs` + `pricing::charge_cents`), **never** a provider anywhere on the enforcement path and **no Redis counter**. **Invariant, v7:**
 
 - **Detection = the cadence; the ACTION = instant.** The cadence batch (default 1h) recomputes each app's per-metric totals from the retained stream, prices them, runs `derive_state`, and writes `app_spend_state`. The gateway pulls `app_spend_state` (~5s registry pull) and enforces at the edge INSTANTLY (`enforce::check_spend`). An app trips its cap within one cadence period; the 402 itself is instant.
-- **The Warn / Degrade / Block thresholds are cleanly separated** (`SpendThresholds`: `warn_pct=80`, `degrade_pct=95`, `block_pct=100`, `deadband_pct=5` — `spend.rs`). **Warn** (~80%, a dashboard/email signal) and **Degrade** (~95%, gateway throttle — tighter concurrency + rate limit, **the app stays up**) are the "app keeps running" states of the AGENTS revenue model. **Block** (~100%, a 402 before dispatch) is the terminal hard cap the creator opted into.
+- **The Warn / Degrade / Block thresholds are cleanly separated** (`SpendThresholds`: `warn_pct=80`, `degrade_pct=95`, `block_pct=100`, `deadband_pct=5` - `spend.rs`). **Warn** (~80%, a dashboard/email signal) and **Degrade** (~95%, gateway throttle - tighter concurrency + rate limit, **the app stays up**) are the "app keeps running" states of the documented spend-control model. **Block** (~100%, a 402 before dispatch) is the terminal hard cap the creator opted into.
 - **Overshoot is bounded by the throughput backstop, not by counter accuracy.** Because detection lags by up to one cadence, a runaway app can overshoot by at most `R × cadence`. The coarse per-app rate/concurrency cap at the gateway (`enforce::RateLimitRegistry`/`ConcurrencyRegistry`) caps `R`, so the overshoot is bounded regardless of cadence (§Pillar 4). The free tier gets a tighter cap. This is per-app and isolated: one app's overshoot cannot move any other app.
 - **BILLING never reads `app_spend_state`.** The provider is the canonical billing number: **self-invoicing** providers rate their own meter; **owned invoicers** (`stripe_invoice`/`lite`) rate the **local per-app recompute at close** (after the settle window, §5.3), **cross-checked against** the provider's settled `read_aggregate` (health finding on mismatch). This reconciles v4 MF#3's "rate from local, it's complete" intent with the v5 "provider is canonical" decision: the local recompute is the *basis* (complete after settle), the provider aggregate is the *cross-check*. Any post-settle straggler is corrected by §6.3; the terminal period is handled by the §5.3 true-up. See §5.3.
 - The §6.3 correction spine is **UNCHANGED** (`CorrectionCapability`, `Backfiller`, signed `adjustment_note`, `(subject, period, correction_seq)` idempotency keys). Its independent witness is the **local per-app recompute** — the SAME batch that drives enforcement (one recompute, two consumers).
@@ -788,7 +788,7 @@ All in the `zeroship` schema; existing billing tables in `db/migrations-ts/20260
 | `billing_reconciliation_findings` | **KEPT + extended.** New kinds: `provider_meter_drift`, `provider_reject`, `late_period_adjustment`, `forwarder_down_exceeds_retention`, `subject_attribution_mismatch`, `terminal_period_trureup` (v6, terminal-period settlement — §5.3/§11). | Pillar 5/7 reconciliation + dead-letter + §6.3 corrective path + honest local-gap alert (§11) + attribution cross-check (OQ-10). |
 | `billing_metrics`, `metric_weights`, `plans`, `pricing_config` | **KEPT unchanged.** | CU pricing + plan catalog out of scope; the Lite/`stripe_invoice` invoicer path + enforcement read them. |
 | `invoices`, `invoice_lines`, `billing_provider_refs`, `billing_customer_refs` | **KEPT.** Written by the Lite/`stripe_invoice` invoicer (incl. the local-only sink) and `SubjectRef` mapping. | Invoice bookkeeping provider-neutral. |
-| `creator_fee_policy`, `invoice_payments`, disputes/refunds/payout tables | **UNTOUCHED** by the pipeline, but see §12.2 for the credit-note flow into `invoices`/`invoice_lines`. | Stream 2 / payment-lifecycle. |
+| `creator_fee_policy`, `invoice_payments`, disputes/refunds/payout tables | **UNTOUCHED** by the pipeline, but see section 12.2 for the credit-note flow into `invoices`/`invoice_lines`. | Connect payment lifecycle. |
 
 Worker-side (not a DB table): the optional bounded **redb WAL floor** (`$DATA/usage-outbox.redb`) holding the pre-ack window for the SHIP path (§7, option a).
 
@@ -828,7 +828,7 @@ Hard orderings: S1→S5 (traits before producer), S3→S4→S5 (stream + consume
 | **Cadence gap — a runaway app between recomputes (v7 enforcement failure mode)** | Detection lags by up to one cadence (default 1h), so a runaway app can overshoot its cap by at most `R × cadence`. This is bounded by the **coarse per-app throughput cap** at the gateway (`enforce::RateLimitRegistry`/`ConcurrencyRegistry`), which caps `R` — the free tier gets a tighter cap. The next cadence recompute writes `app_spend_state` and the gateway Blocks instantly. Enforcement is a **stateless cron** — no counter to lose, nothing to rebuild. | Bounded overshoot ≤ `R × cadence`, shrinkable by tightening EITHER knob (cadence, cap). Never a wrong bill (billing is the provider). Per-app and isolated — no platform-wide term. |
 | **Control/enforcement-batch outage** | The last-written `app_spend_state` is retained and the gateway keeps enforcing it; when the batch resumes it recomputes from the retained stream (bounded by stream retention, OQ-7) and catches up. No ephemeral state is lost. | Enforcement degrades to "stale but enforcing"; recovers fully from the stream. Billing unaffected (it never reads `app_spend_state`). |
 | **Terminal period at account close / creator churn (v6, CRITICAL #2)** | No "next invoice" to carry a straggler debit. The terminal invoice is withheld until `period_end + settle_window`, then a final §6.3 reconcile runs the local recompute vs `invoiced`; residual → a terminal true-up line on the closing invoice, or a `terminal_period_trureup` finding + operator settlement if the account is already zeroed. | The last period is complete-by-construction (closed after settle); the terminal straggler is a surfaced true-up, never a silent uncorrectable underbill. |
-| **Revenue black hole (misconfig)** | `build_stack()` refuses: no meter, no invoicer, meter-only without an invoicer, a self-invoicing provider that is not also the meter feed, or a not-`production_ready` provider without `--allow-unsupported-billing`. | Generalizes today's "refuse to boot with no creds." |
+| **Billing gap (misconfiguration)** | `build_stack()` refuses: no meter, no invoicer, meter-only without an invoicer, a self-invoicing provider that is not also the meter feed, or a not-`production_ready` provider without `--allow-unsupported-billing`. | Generalizes today's "refuse to boot with no creds." |
 | **`lite` reaches real Stripe (A6 guard)** | Default Lite invoicer is the LOCAL-only sink (no Stripe). The Stripe path is opt-in AND `production_ready()==false` gates the whole provider behind `--allow-unsupported-billing`. | Evaluation cannot accidentally bill real creators; the money path is doubly gated. |
 | **Compromised/buggy worker** | Per-worker auth (bill-04, S2) scopes `source`; provider dedup key `(source, event_id)` isolates namespaces; `i64::try_from` skip-not-wrap retained; custom-metric cardinality cap (100/app) retained. **Residual (R2 Part 7.8):** the dedup key isolates namespaces but not ATTRIBUTION — `subject.app_id` is stamped by the trusted runtime injection (server-injected `app_id`, per AGENTS.md), not app code, but a fully-compromised worker could still assert another app's subject. Mitigation (OQ-10): the forwarder cross-checks `subject.app_id` against the route registry's worker→app assignment before forwarding/incrementing; a mismatch → `subject_attribution_mismatch` finding + drop. | Cross-worker suppression + overflow + cardinality closed; attribution forgery bounded by the registry cross-check (OQ-10). |
 | **Enforcement-changing mutation on an idle app** | `set_limit`/`set_plan`/FX/suspend all write `spend_dirty` (Pillar 5 table). | A lowered limit enforces on the next fast tick, not the hourly sweep (resolves critique #10). |
@@ -860,9 +860,9 @@ The split SoT means the dashboard could show different numbers than the invoice.
 - The **invoice/billing history** reads whatever produced the invoice: for an **owned-invoicer** stack (openmeter+`stripe_invoice`, `lite`) that is the finalized `invoices`/`invoice_lines` rows WE wrote by rating the provider's settled aggregate; for a **self-invoicing** provider it reads the provider's invoice API — the number the provider rated from its own meter.
 - Because the live widget is approximate and the invoice is the provider's canonical number, a small live-vs-final difference is expected and labelled; a **material** drift surfaces a reconciliation banner sourced from `billing_reconciliation_findings`, and the creator sees the invoicing party's figure on anything labelled "invoice." This is documented so the split is intentional and legible, not a silent inconsistency.
 
-### 12.5 Stream-2 (15% Connect fee) customer-model note (Missing-Concept #8)
+### 12.5 Stripe Connect customer-model note (Missing-Concept #8)
 
-Stream-2 is a non-goal, but: the platform-side billing Customer (Stream-1, the creator pays zeroship) and the creator's own Connect account (Stream-2, end-users pay the creator) are **different Stripe customers on different accounts** and do not collide. A note is added so a future Stream-2 epic knows the `SubjectRef`/customer mapping here is platform-side only.
+Connect payments are a non-goal here, but the platform-side billing Customer and each creator-linked Connect account are **different Stripe objects on different accounts** and do not collide. The `SubjectRef` customer mapping here is platform-side only.
 
 ---
 
@@ -938,7 +938,7 @@ Every new component upholds it:
 - **#7** — Fully-local invoice sink for zero-external-account evaluation; recording fakes separated from Lite (§Pillar 6).
 - **#8** — Every enforcement-changing mutation (limit/plan/FX/suspend) writes `spend_dirty` (Pillar 5 table), not just usage folds.
 
-**Smaller flags + missing concepts resolved:** per-thread `HttpClientFactory` (no shared `SendWrapper`), `capabilities()`↔`as_*()` consistency enforced at registry build, honest redb dependency accounting (§7), honest "one file + 2 lines" count, `SecretResolver` into factories, `provider_dead_letter`, and new sections for multi-currency (§12.1), refunds/credits/disputes (§12.2), provider→provider migration (§12.3), the event-forwarder as a first-class component (§Pillar 7), creator-facing UX under a split SoT (§12.4), and the Stream-2 customer-model note (§12.5).
+**Smaller flags + missing concepts resolved:** per-thread `HttpClientFactory` (no shared `SendWrapper`), `capabilities()` and `as_*()` consistency enforced at registry build, honest redb dependency accounting (section 7), honest "one file + 2 lines" count, `SecretResolver` into factories, `provider_dead_letter`, and new sections for multi-currency (section 12.1), refunds/credits/disputes (section 12.2), provider-to-provider migration (section 12.3), the event-forwarder as a first-class component (Pillar 7), creator-facing UX under a split SoT (section 12.4), and the Connect customer-model note (section 12.5).
 
 ---
 

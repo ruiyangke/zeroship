@@ -185,7 +185,7 @@ Not built yet. When we build it for Stripe Connect:
 - Webhook signature is verified statelessly
 - Idempotency is enforced by writing to Postgres with a unique event ID
   constraint (duplicate webhook = unique violation, ignored)
-- Revenue metering emits events to the bus for aggregation
+- Usage metering emits events to the bus for aggregation
 
 No worker-local state needed. Design from scratch for the stateless model.
 

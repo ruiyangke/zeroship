@@ -1,10 +1,14 @@
 # zeroship
 
-**A platform where anyone can launch and monetize software — without writing code.**
+**A platform for building, deploying, and running applications from local source.**
 
-Describe what you want in natural language. AI builds it. The platform handles hosting, database, auth, payments, and scale. Creators keep 85% of revenue; the platform takes 15%.
+Creators and coding agents build applications locally, package them as content-addressed `.zship` artifacts, and deploy them to zeroship.
 
-Think Shopify, but the products are AI-generated apps.
+The platform provides a V8-per-thread worker runtime, managed database, authentication, key-value storage, object storage, and request routing.
+
+A small `env.*` native-primitive kernel exposes runtime capabilities. `@zeroship/*` npm packages provide the higher-level developer APIs.
+
+The gateway uses each application's manifest to route requests, serve assets, and dispatch application code to workers.
 
 ---
 

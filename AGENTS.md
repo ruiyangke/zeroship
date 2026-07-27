@@ -1,6 +1,6 @@
 # zeroship
 
-A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform earns two ways: creators pay for the infrastructure their apps consume (tiered plans + pay-as-you-go overage), and when a creator monetizes their app the platform takes a configurable application fee on end-user revenue (default 15%). Think Shopify for AI-generated apps.
+A platform where anyone can create, launch, and run software without writing code. Creators describe what they want in natural language. AI builds it. The platform handles the infrastructure: hosting, database, auth, payments, and scaling. It meters the infrastructure each app consumes, and integrates Stripe (including Stripe Connect) so apps can accept payments from their end users.
 
 **Primary creator flow (2026-06-29 direction): build locally → deploy.** Creators (or an AI coding agent — Claude Code / Codex — on the creator's machine) build a zeroship app locally and `zeroship deploy` the built `.zship` to the platform. We don't rebuild a hosted in-browser AI builder (the agents do that better); the platform's value is the *infrastructure* (runtime, `env.*` primitives, deploy contract, gateway, billing). The hosted-build environment / **sandbox is deferred** (extracted to the standalone `zeroship-sandbox` project). Golden path + scaffold: `docs/build-and-deploy-golden-path.md` · `examples/starter/` (+ its `CLAUDE.md`) · `tests/golden_path.sh`.
 
@@ -63,7 +63,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 
 Two systems, shared infrastructure, **zero tokio** — everything on compio/io_uring.
 
-### System 1 — Creator Platform (creators build, deploy, monetize)
+### System 1 — Creator Platform (creators build, deploy, operate)
 
 ```
 Creator Dashboard (web UI)
@@ -340,31 +340,30 @@ Conventions for writing `play()` interactions and using
 
 ---
 
-## Revenue model
+## Usage metering and payments
 
-Two independent revenue streams, built as two sequenced epics.
+The platform meters the infrastructure each app consumes and provides a
+Stripe-based payment integration. Two independent subsystems.
 
-**Stream 1 — infra usage billing (shipped).** Creators pay the platform for the
-infrastructure their apps consume. Pricing is a data-driven, operator-editable
-plan catalog — per tier: `base_fee`, `included_quota[metric]`,
-`overage_rate[metric]`, `spend_limit_default`. Exceeding the included quota
-accrues pay-as-you-go overage (the app keeps running, not blocked):
+**Infrastructure usage metering (shipped).** Usage is measured server-side so
+app code can neither forge nor suppress it. Pricing is a data-driven,
+operator-editable plan catalog — per tier: `base_fee`, `included_quota[metric]`,
+`overage_rate[metric]`, `spend_limit_default`. Usage beyond the included quota
+is metered as overage (the app keeps running, not blocked):
 `charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]`. A
 per-app configurable **spend limit** (not the quota) drives enforcement:
 Warn (~80%) → Degrade (gateway throttle — tighter concurrency + rate limit, app
 stays up) → Block (402 before dispatch). The free tier sets `spend_limit ≈ base`,
-so it is quota-capped by construction and needs no card. The platform computes
-line items from this policy and bills them as Stripe **invoice items** on a
-platform-side Customer (no Stripe-side price objects). Live across the
-`metering` crate + the data primitives (producers: worker platform counters +
-`env.{db,kv,storage}` usage metrics) → `control` (idempotent ingest,
-aggregation, compute-unit pricing, spend engine, Stripe reconciler) →
-`gateway` (edge enforcement). See `docs/reference/billing-metering.md`.
+so it is quota-capped by construction and needs no card. The metered line items
+are emitted as Stripe **invoice items** on a platform-side Customer (no
+Stripe-side price objects). Live across the `metering` crate + the data
+primitives (producers: worker platform counters + `env.{db,kv,storage}` usage
+metrics) → `control` (idempotent ingest, aggregation, compute-unit pricing,
+spend engine, Stripe reconciler) → `gateway` (edge enforcement). See
+`docs/reference/billing-metering.md`.
 
-**Stream 2 — application fee on creator revenue (separate upcoming epic).** When
-a creator monetizes their app, end-users pay via Stripe **Connect** (the creator
-connects their own Stripe). The platform takes a server-controlled,
-per-creator-configurable application fee, stamped server-side on the Connect
-charge so creator code cannot bypass it. `FeePolicy { Fixed { amount_cents } |
-Percent { percent, cap_cents?, floor_cents? } }`; the default for a new creator
-is `Percent { 15%, no cap, no floor }`.
+**Payments (Stripe Connect).** Apps can accept payments from their end users via
+Stripe **Connect**: the creator connects their own Stripe account and charges
+settle to it. The platform can stamp a server-controlled fee on Connect charges,
+enforced server-side so app code cannot bypass it (`FeePolicy { Fixed {
+amount_cents } | Percent { percent, cap_cents?, floor_cents? } }`).

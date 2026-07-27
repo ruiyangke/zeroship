@@ -76,7 +76,7 @@ The current meter is **per-worker, per-request**:
 All three under-bill, which is **customer-favourable** — none is a financial-loss
 risk to the platform's *spend caps* (those read the same `usage_aggregates`, so
 they simply cap on less). That is why the roadmap sequences G4 after the
-revenue-*protecting* gaps. This design closes H1 (SSE/streaming now; WS deferred
+billing-integrity gaps. This design closes H1 (SSE/streaming now; WS deferred
 to the WS-transport epic) and H2 (the real unknown), and makes a reasoned
 **defer** call on H3.
 
@@ -416,7 +416,7 @@ the bound: **`cpu_us` undercounts by the async-continuation CPU, which is
 unattributed.** Since `cpu_us` is weighted modestly (1 CU/ms, dominated by
 `requests` at 1 CU each — see `0041` seed) and under-billing is
 customer-favourable, the kernel-accumulator work is not justified ahead of the
-revenue-protecting gaps. It becomes worthwhile only if/when CPU-heavy async
+billing-integrity gaps. It becomes worthwhile only if/when CPU-heavy async
 workloads dominate a plan's cost — a *measured* trigger, not a speculative one.
 
 > **If undertaken later:** the accumulator lives on the runtime's per-request
@@ -572,8 +572,8 @@ through the unchanged pricing path.
   `0046`. No dependency on the schema redesign (confirmed against the dependency
   matrix).
 - **Sequencing:** H2 and H1-SSE are **independent of each other** (different
-  crates: gateway vs worker) and of the revenue-protecting gaps (G1/G2). Per the
-  roadmap they sit in Wave 3 — *after* the revenue-protecting gaps, because
+  crates: gateway vs worker) and of the billing-integrity gaps (G1/G2). Per the
+  roadmap they sit in Wave 3 - *after* the billing-integrity gaps, because
   under-billing is customer-favourable, not a loss.
 - **Risk:** **Low.** Both add usage that today is missed; neither can
   *over*-bill (H2's metric is disjoint-by-construction from the worker's; H1
