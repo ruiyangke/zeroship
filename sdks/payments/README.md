@@ -18,7 +18,7 @@ The fee is server-authoritative; the client never touches it. (Fee policy is
 operator-only and lives in the admin surface, not here.)
 
 The earlier version of this SDK built the Stripe Checkout Session directly in
-creator-controlled code with `application_fee_percent` defaulting to 15% —
+creator-controlled code with `application_fee_percent` set client-side —
 trivially settable to 0. That path is **deleted**. The money path now runs
 server-side.
 

@@ -6,10 +6,10 @@
 
 ## FINALIZED DESIGN (decisions locked 2026-06-13) — source of truth; supersedes the Open Questions below
 
-The business model is **two independent revenue streams**, built as **two sequenced epics**.
+The design has **two independent billing and payment paths**, built as **two sequenced epics**.
 
-### Stream 1 — Infra usage billing (THIS epic, PR1–6). "Infra cost amortized to creators."
-- Creators pay the **platform** for the infrastructure their apps consume. This is the platform's cost-recovery revenue.
+### Path 1 - Infrastructure usage billing (THIS epic, PR1-6)
+- The platform records and bills the infrastructure usage each app consumes.
 - **Tiered plans + CONFIGURABLE pricing policy** — a data-driven, operator-editable plan catalog (NOT hardcoded). Per tier: `base_fee`, `included_quota[metric]`, `overage_rate[metric]`, `spend_limit_default`.
 - **Exceed the included quota → pay-as-you-go OVERAGE** (charges accrue; the app keeps running, NOT blocked). `charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]`.
 - **Spend limit** (per-app configurable cap) drives enforcement, NOT the quota: **Warn** (~80%) → **Degrade** (soft cap = gateway throttle: tighten the app's concurrency + rate limit via `enforce.rs`, pushed by `ControlEvent::SpendState`; app stays up, cost accrual slows) → **Block** (hard cap = 402 before dispatch). Degrade is IN for v1.
@@ -18,9 +18,9 @@ The business model is **two independent revenue streams**, built as **two sequen
 - **Creator billing identity = a Stripe CUSTOMER** (object in the *platform's* Stripe account) **+ a saved PaymentMethod** via a Stripe-hosted setup flow (Checkout setup-mode / SetupIntent). **NOT a Stripe account.** A card is the gate to crossing the free quota (doubles as the upgrade prompt).
 - **Metric set (v1):** the 5 platform counters (`requests, cpu_us, wall_us, egress_bytes, ingress_bytes`) + an open `env.meter` `custom: map<metric,u64>` for SDK-defined metrics. **Billing period:** calendar month (UTC).
 
-### Stream 2 — Application fee on creator revenue (SEPARATE creator-payments epic, AFTER Stream 1).
-- Creators charge **their** end-users via Stripe **Connect** (they connect their *own* Stripe via OAuth — **ISS-30, IN**, repurposed).
-- The platform takes a **server-controlled, per-creator-configurable** application fee (**ISS-29 done right** — not the bypassable client-side default). Stamped server-side on the Connect charge; the creator's code cannot set or bypass it.
+### Path 2 - Stripe Connect fee policy (SEPARATE CONNECT PAYMENTS EPIC, AFTER PATH 1)
+- Deployed apps use Stripe **Connect** with creator-linked accounts established through OAuth (**ISS-30, IN**, repurposed).
+- A **server-controlled, per-creator-configurable** `FeePolicy` is stamped on each Connect charge (**ISS-29 done right** - not the bypassable client-side configuration). Creator code cannot set or bypass it.
 - **`FeePolicy`** (per creator, server-stored). Both models supported:
   ```rust
   enum FeePolicy {
@@ -30,23 +30,23 @@ The business model is **two independent revenue streams**, built as **two sequen
   // fee = Fixed → amount_cents ;
   //       Percent → clamp(round(txn_cents × percent), floor.unwrap_or(0), cap.unwrap_or(MAX))
   ```
-  Default for a new creator: `Percent { 15%, cap: none, floor: none }`. Extensible (a future `Fixed+Percent` hybrid is just another variant).
+  Fee policy values are configured per creator; no platform-wide default is specified here. Extensible (a future `Fixed+Percent` hybrid is just another variant).
 - `@zeroship/payments` is rewritten to use Connect + the server-stamped fee.
 
 ### Decisions resolved (these supersede "## Open questions" at the bottom)
 1. **Price model** → tiered + configurable pricing policy; pay-go overage past quota.
-2. **Stripe model** → compute-ourselves + invoice items (Stream 1); Connect + server-stamped fee (Stream 2).
+2. **Stripe model** -> compute-ourselves + invoice items (Path 1); Connect + server-stamped fee (Path 2).
 3. **Degrade** → gateway throttle (concurrency + rate). In v1.
 4. **Metrics** → 5 platform counters + open `env.meter` custom map (v1).
 5. **Billing period** → calendar month (UTC).
-6. **application_fee** → server-controlled, per-creator `FeePolicy {Fixed | Percent+cap+floor}`, default 15%. **NOT dropped** — the earlier draft's "drop the application_fee" is *reversed*: what was wrong was the *bypassable fixed client default*, not the fee itself.
-7. **Onboarding** → infra billing: creator = Stripe Customer + card (no Stripe account); creator revenue: Connect (ISS-30).
-8. **Sequencing** → Stream 1 (infra billing, PR1–6) FIRST; Stream 2 (Connect + fee) as its own epic after.
+6. **application_fee** -> server-controlled, per-creator `FeePolicy {Fixed | Percent+cap+floor}`. **NOT dropped** - the earlier draft's "drop the application_fee" is reversed: the problem was bypassable client-side configuration, not the field itself.
+7. **Onboarding** -> infra billing: creator = Stripe Customer + card (no Stripe account); Connect account linking: OAuth (ISS-30).
+8. **Sequencing** -> Path 1 (infra billing, PR1-6) FIRST; Path 2 (Connect + fee policy) as its own epic after.
 
 ### Scope corrections vs the original draft below
-- **ISS-29 + ISS-30 are NOT dropped** — they move to Stream 2 (the creator-payments epic), done right (server-controlled fee + real Connect onboarding). The body below that says "rewrite the SDK to remove the fee" / "drop application_fee" is **superseded** by this.
-- **PR6 in the body = the Stream-1 reconciler** (usage → invoice items on the platform Customer). It does **not** stamp `application_fee` — that's Stream 2.
-- **AGENTS.md is now STALE:** the "platform takes 15% / $100 → −$15 / platform only earns when creators earn" revenue model no longer describes the platform. The platform earns from (1) infra usage billing + (2) a configurable application fee. **Update AGENTS.md when this lands.**
+- **ISS-29 + ISS-30 are NOT dropped** - they move to Path 2 (the Connect payments epic), with server-controlled fee policy and real Connect onboarding. The body below that says "rewrite the SDK to remove the fee" / "drop application_fee" is **superseded** by this.
+- **PR6 in the body = the Path 1 reconciler** (usage -> invoice items on the platform Customer). It does **not** stamp `application_fee` - that is Path 2.
+- **AGENTS.md is now STALE:** update its billing and payments description to match infrastructure usage billing plus a configurable `FeePolicy` for Stripe Connect charges.
 
 ---
 
@@ -68,8 +68,8 @@ on it**:
   run unbounded. (ISS-31)
 - **Plan is self-escalatable:** `plan_id` is free-text on the app, no server-side
   plan catalog or price model (CT-A1).
-- **Fee not server-enforced:** the 15% is a client-side default in
-  `@zeroship/payments` checkout, overridable/bypassable (ISS-29).
+- **Fee not server-enforced:** the fee policy is configured client-side in
+  `@zeroship/payments` checkout and is overridable/bypassable (ISS-29).
 - **Stripe onboarding is a placeholder** (returns a hardcoded Express URL; no
   `account_links`) (ISS-30).
 
@@ -112,7 +112,7 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
    (429/degrade over limit)                                   └─ reconciler (compio
                                                                   interval) ──► invoice
                                                                   items / metered subs
-                                                                  + application_fee 15%
+                                                                  + server-stamped application_fee
 ```
 
 ### 1. Producer — `env.meter` + the worker meter (ISS-18, CT-B2)
@@ -163,7 +163,7 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
   invoice items** (via `cyper`, reusing `stripe_handlers`/`stripe_store`).
 - **ISS-29 (fee):** move checkout-session creation server-side; control stamps
   `application_fee_percent` from a platform-held rate (the plan catalog), so the
-  15% is server-enforced and unbypassable. Rewrite `@zeroship/payments` checkout
+  configured fee is server-enforced and unbypassable. Rewrite `@zeroship/payments` checkout
   to receive only a session URL (pre-launch — break the SDK).
 - **ISS-30 (onboarding):** replace the placeholder with a real
   `/v1/account_links` Account-Link flow + verify the returning `acct_` belongs to
@@ -277,10 +277,10 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
   re-scales the seed rates (the platform seed table used e.g. `300 millicents /
   1_000_000 requests`; convert to cents at seed time, NOT in the hot path).
 - **D4 — creator billing identity lives on a NEW `creator_billing` table** keyed
-  by `creator_id`, NOT on `apps`. `creator_accounts` already holds the Stream-2
-  Connect `acct_…` and is keyed `creator_id UUID PRIMARY KEY REFERENCES
+  by `creator_id`, NOT on `apps`. `creator_accounts` already holds the Path 2
+  Connect `acct_...` and is keyed `creator_id UUID PRIMARY KEY REFERENCES
   zeroship.users(id)` (changeset `0004`); so a `creator_id` **is a user id**. The
-  Stream-1 platform Customer `cus_…` is distinct and gets its own
+  Path 1 platform Customer `cus_...` is distinct and gets its own
   `creator_billing` table (also keyed by the same `creator_id`/user id).
   - **Creator→app ownership join (H1 — the schema has NO `apps.creator_id`).**
     Changeset `0031` states it explicitly: *"This schema has no `apps.creator_id`
@@ -623,7 +623,7 @@ fixtures for the new `SpendState` variant + `spend_state` field. `clippy` clean.
 **Goal.** End of calendar month (UTC): per creator, sum `usage_aggregates` across
 their apps → `charge_cents` per app via the PR4 catalog → Stripe **invoice items**
 on the platform's **Customer**. Idempotent per period. Card via Checkout
-setup-mode. NO Connect / application_fee (Stream-2).
+setup-mode. NO Connect / application_fee (Path 2).
 
 #### (a) Files to create/modify
 - **NEW `crates/control/src/stripe_client.rs`** — thin `cyper`-based Stripe REST
@@ -676,7 +676,7 @@ setup-mode. NO Connect / application_fee (Stream-2).
   Registered in `cron/mod.rs::spawn_all` via `compio::runtime::spawn(...).detach()`.
 - **MODIFY `stripe_store.rs`** — `creator_billing` upserts: `get_customer`/`set_customer`.
 - **MODIFY `stripe_handlers.rs`** — ADD `POST /api/creators/:id/billing/setup`
-  (Stream-1: ensure a `cus_…` exists for the creator via `stripe_client`, persist
+  (Path 1: ensure a `cus_...` exists for the creator via `stripe_client`, persist
   it to `creator_billing`, return a Checkout setup-mode session URL). Extend the
   EXISTING webhook handler (do NOT add a second one) to also handle
   `setup_intent.succeeded` (sets `creator_billing.default_pm_set=true`) and
@@ -686,7 +686,7 @@ setup-mode. NO Connect / application_fee (Stream-2).
   ride the same already-verified ingest path (`extract_creator_id` at
   `stripe_handlers.rs:365` resolves `metadata.creator_id`). The infra-billing
   Connect `onboard`/`callback` placeholder (`stripe_handlers.rs:83`,
-  `/api/creators/:id/stripe/onboard`) is **Stream-2 and left untouched** by this
+  `/api/creators/:id/stripe/onboard`) is **Path 2 and left untouched** by this
   epic.
 - **MODIFY `lib.rs` (`AppState`) + `main.rs`** — ADD `stripe_secret_key:
   SecretString` (+ optional `stripe_base_url` test override). Required in prod;
@@ -776,8 +776,8 @@ non-empty `Idempotency-Key` on every mutating call. `clippy` clean.
   `exclude` entry + this proposal).
 - **DELETE** `crates/platform/`; **MODIFY root `Cargo.toml`** (remove `exclude`);
   **MODIFY `docs/reference/billing-metering.md`** → "shipped"; **MODIFY `AGENTS.md`**
-  revenue model (replace the stale "platform takes 15% / $100 → −$15" block with
-  "infra usage billing + configurable application fee (Stream 2)").
+  billing and payments summary (describe infrastructure usage billing plus a
+  configurable `FeePolicy` for Stripe Connect charges).
 - **Test:** `cargo build --workspace` + `cargo test -p zeroship-control
   -p zeroship-gateway -p zeroship-core` green; `grep` gate (no `zeroship_platform`/
   `crates/platform` references remain outside git history).
@@ -826,7 +826,7 @@ server-side only; RLS fail-closed on app-keyed tables; least-priv grants.
 > — verified; no schema change there, units are derived at pricing time.
 
 > **Deliberate billing-semantics change (MINOR-3 — not a regression).** Refactor
-> B replaces the original Stream-1 *per-metric* free quota `included_quota[metric]`
+> B replaces the original Path 1 *per-metric* free quota `included_quota[metric]`
 > with a **single global `included_units`** applied to the summed compute-unit
 > total. This is intentional and follows directly from the CU model: once every
 > metric is converted into a common unit (CU) and accumulated into one total
@@ -1694,7 +1694,7 @@ and always spawned.
   - `native` / `stripe`: `stripe_secret_key` required (already enforced).
   - `stripe`: ALSO require `stripe-meter-event-name` + `stripe-meter-price-id`
     non-empty (else fail to boot — a Stripe-Meters deployment with no meter is a
-    silent revenue black hole).
+    silent metering-export failure).
   - `openmeter`: require `openmeter-url` + `openmeter-token` non-empty.
   - All guards bypassable ONLY under `insecure_dev`, matching the existing
     pattern.
@@ -1791,7 +1791,7 @@ provider config persisted, which v1 does NOT.
 3. **Provider-aware cron spawning correctness.** A misconfigured `spawn_all` that
    spawns `billing_reconcile` under `stripe` (where `invoice` is a no-op, fine) but
    FORGETS to spawn `metering_export` (where CU is pushed) yields a Stripe
-   deployment that enforces locally but bills Stripe $0 — a silent revenue black
-   hole. Mitigation: the M6 prod guard refuses to boot a stripe/openmeter
+   deployment that enforces locally but bills Stripe $0 - a silent zero-billing
+   failure. Mitigation: the M6 prod guard refuses to boot a stripe/openmeter
    deployment without its creds, and an integration test asserts the spawned-cron
    set per provider kind matches the M5 table.

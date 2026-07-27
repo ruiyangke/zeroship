@@ -6,9 +6,8 @@ A creator's workshop, not a developer's terminal.
 
 Per `/home/ruiyang/Projects/appbase/.claude/worktrees/kernel-cut/CLAUDE.md`:
 
-> A platform where anyone can create, launch, and monetize software — without
-> writing code. Creators describe what they want. AI builds it. Think Shopify
-> for AI-generated apps.
+> A platform where anyone can create, launch, and run software without
+> writing code. Creators describe what they want. AI builds it.
 
 Today's UI **targets developers** — monospace prose, lowercase chrome,
 neon-green-on-pure-black, dense iconography, `// ai builder` comment-syntax

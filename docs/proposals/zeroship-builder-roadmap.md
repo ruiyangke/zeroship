@@ -11,7 +11,7 @@
 >
 > | Doc | Keep | Replaced by this doc |
 > |---|---|---|
-> | `docs/proposals/feature-roadmap.md` | strategic thesis (monetization moat) | platform phase ordering (predates the built builder) |
+> | `docs/proposals/feature-roadmap.md` | strategic thesis (integrated app lifecycle) | platform phase ordering (predates the built builder) |
 > | `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` | §0–§29 behavior/UX/architecture | §30 Release 0–3 phasing |
 > | `docs/archive/superpowers/specs/2026-04-30-zeroship-builder-features.md` | the 580-feature inventory (A–JJ) | priority→release mapping |
 > | `zeroship-builder-status.md` | the May-1 build-state snapshot | "recommended next focus" (folded into M1/M2/M4) |
@@ -21,9 +21,8 @@
 ## 1 · Goal
 
 A creator describes an app in natural language; a fleet of AI agents
-(**Builder · Critic · Reviewer · PM · SRE**) builds it, ships it on the zeroship
-runtime, monitors it, fixes it, and helps the creator monetize it. The platform
-takes 15%; the creator keeps the rest.
+(**Builder, Critic, Reviewer, PM, SRE**) builds it, ships it on the zeroship
+runtime, monitors it, fixes it, and helps the creator operate it.
 
 Not "AI builds your app" — **"AI builds *and operates* your app: a tiny product
 team in software."**
@@ -37,16 +36,11 @@ road there as always-shippable tiers.
 
 ## 2 · Strategic thesis (why the order is what it is)
 
-From `feature-roadmap.md`, and still true: **the moat is the monetization loop.**
-Competitors (Lovable, v0, Bolt, Base44) let creators *ship*; none take a
-Shopify-style cut of *end-user revenue*. zeroship wins by being the first place a
-non-coder ships an AI-generated app that **earns money**, platform taking 15%.
-
-Consequence for ordering: a beta where creators ship **and earn** beats a beta
-where they only ship. Monetization is therefore pulled into the **first
-externally-meaningful tier (M1)** — cheap to do now because the backend
+From `feature-roadmap.md`, the core objective is an integrated build-and-operate
+loop. The first externally meaningful tier (M1) therefore covers deployment,
+operations, and payment surfaces together. The relevant backends
 (`stripe_handlers`, `stripe_store`, `metering`, `@zeroship/payments`) already
-exists; it is mostly creator-facing UI wiring.
+exist; they mainly need creator-facing UI wiring.
 
 ## 3 · Where we are today (2026-05-25)
 
@@ -71,8 +65,8 @@ clean `.zship` builds.
   agent-driven; the Reviewer "pre-deploy gate" is advisory prose with no hook.
 - **B4 — the data canvases are stubs.** Issues/deploys/media/archive/incidents
   live in KV or hardcoded sample constants (ISSUES.md ISS-14/15/17/19/20–26).
-- **B5 — conveniences:** no public preview DNS, GCS L2 snapshot stub, dead
-  `/sessions/*` API in `sandbox.ts`, monetization UI absent.
+- **B5 - conveniences:** no public preview DNS, GCS L2 snapshot stub, dead
+  `/sessions/*` API in `sandbox.ts`, payments UI absent.
 
 ---
 
@@ -106,9 +100,9 @@ Status legend: ✅ shipped · 🟡 partial · 🔶 stubbed (UI-honest placeholde
 | **O** End-user auth (built app) | 188–192 | [1–2] | 🔶 config UI stub | M2 |
 | **P** Templates | 193–199 | [2–3] | ✅ gallery/use; ⬜ detail page, submit | shipped · M4 (marketplace) |
 | **Q** Account / profile | 200–207 | [0–2] | ✅ name/email/password; ⬜ portfolio | shipped · M4 |
-| **R** Billing — creator pays | 208–216 | [2] | ⬜ **UI missing** (backend real: stripe/metering) | **M1** |
-| **S** Payouts — creator earns | 217–224 | [2] | ⬜ **UI missing** (backend real: Stripe Connect) | **M1** (core) · M3 (tax/schedule) |
-| **T** Built-app monetization | 225–229 | [2–3] | ⬜ UI/templates (SDK `@zeroship/payments` exists) | M1 (checkout) · M3 (coupons/trials) |
+| **R** Usage billing | 208-216 | [2] | [missing] **UI missing** (backend real: Stripe/metering) | **M1** |
+| **S** Stripe Connect payouts | 217-224 | [2] | [missing] **UI missing** (backend real: Stripe Connect) | **M1** (core); M3 (tax/schedule) |
+| **T** Built-app payments | 225-229 | [2-3] | [missing] UI/templates (SDK `@zeroship/payments` exists) | M1 (checkout); M3 (coupons/trials) |
 | **U** Sharing / social | 230–236 | [2–3] | 🟡 OG/meta; ⬜ showcase/stars/follows | M2 · M4 |
 | **V** Collaboration | 237–242 | [4] | ⬜ | M4+ |
 | **W** Notifications | 243–246 | [1] | 🟡 in-app; ⬜ email/prefs | M2 |
@@ -157,14 +151,14 @@ platform prerequisite lands.
   compiles, runs in the sandbox, and deploys to a reachable URL**, proven by a
   faithful e2e that drives the real runtime + dispatcher (no shims).
 
-### M1 — Monetizable closed beta *(real creators ship AND earn)*
+### M1 - Operational closed beta *(real creators build and run)*
 
 > **Outcome demo:** a hand-picked creator signs up, builds an app, attaches
-> Stripe, an end user pays, the platform takes 15%, the creator sees earnings —
-> all state survives restart and is multi-node-honest.
+> Stripe, an end-user payment completes, and transaction and payout state are visible.
+> All state survives restart and is multi-node-honest.
 
 - **Builder lane:** creator **billing** UI (R: plan/usage/invoices) + **payouts**
-  UI (S: Stripe Connect onboarding, earnings dashboard, 15% breakdown) +
+  UI (S: Stripe Connect onboarding, payout dashboard, `FeePolicy` breakdown) +
   **built-app checkout** (T: `@zeroship/payments` wiring); un-stub the 7
   canvases (issues, deploys/rollback, media→real storage, archive, forgot-pw,
   account-delete); custom-domain UI (M-167).
@@ -199,7 +193,7 @@ platform prerequisite lands.
 
 - **Builder lane:** branch switcher + per-branch env (II.1/II.4); themes &
   feature-sets real (DD); data management deep ops + backups/restore + migrations
-  -as-objects (HH); built-app monetization extras (T: coupons/trials).
+  -as-objects (HH); built-app payment extras (T: coupons/trials).
 - **Platform lane:** `compio-postgres` schema-namespaced branching
   (`project_<id>__<branch>`); migration safety hard-gate on `prod`; gateway
   `{branch}--{slug}` host parsing; rate-limit/abuse protection; SaaS primitives.
@@ -210,7 +204,7 @@ platform prerequisite lands.
 
 > **Outcome demo:** the complete §0–§31 product, public sign-up open.
 
-- **Builder lane:** admin console (Y, role-gated: apps/users/revenue/health/audit);
+- **Builder lane:** admin console (Y, role-gated: apps/users/payments/health/audit);
   public showcase + creator portfolios (U/Q); templates marketplace +
   creator-publishing (P/BB); collaboration (V); notifications center + email (W);
   global search (X); help hub (Z).
@@ -223,11 +217,11 @@ platform prerequisite lands.
 ### Tier dependency map
 
 ```
-M0 close-the-loop ──► M1 monetizable beta ──► M2 quality+agents ──► M3 branching+diff ──► M4 GA
-   (B1·B2·B3)            (money UI + 7 stubs)     (real telemetry)      (branch DB)         (admin/growth)
-        │                      │                       │
-   measurable            real creator            hard-gate blocks
-   10-prompt gate        ships & earns           a bad deploy
+M0 close-the-loop -> M1 operational beta -> M2 quality+agents -> M3 branching+diff -> M4 GA
+   (B1/B2/B3)         (payments UI + 7 stubs)    (real telemetry)    (branch DB)    (admin/growth)
+        |                         |                    |
+   measurable               real creator        hard-gate blocks
+   10-prompt gate           builds and runs      a bad deploy
 ```
 
 ---
@@ -268,8 +262,8 @@ deep-review the tier's chunks ─► draft chunk brief ─► dispatch builder s
 
 ## 7 · Open decisions to confirm
 
-1. **Monetization in M1** (this doc's recommendation) vs deferred to a later tier.
-   Rationale for M1: the moat thesis + the backend already exists.
+1. **Payments in M1** (this doc's recommendation) vs deferred to a later tier.
+   Rationale for M1: the end-to-end flow and backend already exist.
 2. **Branching deferred to M3/M4** despite the design spec placing two-branch in
    Release 0. Rationale: too platform-heavy to gate the core loop; only the
    migration hard-gate is pulled earlier (M2).

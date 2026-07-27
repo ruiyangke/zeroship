@@ -1,14 +1,14 @@
-# Runbook — Stripe CONNECT money-flow E2E (`tests/e2e_stripe_connect_live.sh`)
+# Runbook - Stripe Connect payment-flow E2E (`tests/e2e_stripe_connect_live.sh`)
 
-The Connect peer of `tests/e2e_stripe_billing.sh` (the Stream-1 infra rail, see
+The Connect peer of `tests/e2e_stripe_billing.sh` (the infrastructure billing path, see
 `stripe-billing-e2e.md`) and `tests/e2e_stripe_webhooks_live.sh` (real-delivery
-webhooks). It drives zeroship's Stream-2 **creator-revenue** Connect path against
+webhooks). It drives zeroship's **Stripe Connect payment** path against
 **REAL Stripe TEST mode** (`api.stripe.com`), not the in-repo mock: the cyper
 `StripeClient` Connect calls (`create_connect_account`, `create_account_link`,
 `retrieve_account`, `create_connect_payment_intent`), the server-held `FeePolicy`
 (`crates/control/src/fee_policy.rs`), the `connect_checkout` / `callback` /
 `set_fee_policy` handlers, and the signature-verified `/internal/webhooks/stripe`
-ingest of `account.updated` / `invoice.paid` (Connect revenue) / `payout.failed`.
+ingest of `account.updated` / `invoice.paid` (Connect payment) / `payout.failed`.
 
 ## Connect is currently DISABLED on the test account — the harness SKIPs cleanly
 
@@ -17,7 +17,7 @@ create new accounts if you've signed up for Connect…". The harness probes this
 **first** and, when Connect is off, prints
 `SKIP: Connect not enabled on this account — enable at dashboard.stripe.com/connect`
 and exits 0 — exactly like the other `*_live` tests self-skip without creds. It
-is safe to commit and run anytime; it runs the full money flow the moment
+is safe to commit and run anytime; it runs the full payment flow the moment
 Connect is enabled.
 
 ## What still needs the user to do (one-time, to fully validate)
@@ -26,7 +26,7 @@ Connect is enabled.
    (Platform/marketplace; the API-creatable Express/Custom account path is what
    the harness needs). No code change is required afterward.
 2. Re-run the harness (below). It will mint a real Express `acct_…`, drive the
-   server-stamped 15% application fee onto a real PaymentIntent, exercise the M2
+   server-stamped configured application fee onto a real PaymentIntent, exercise the M2
    gate and M4 attribution, and assert against real fetched-back Stripe objects.
 
 The **hosted Express browser onboarding flow is never fully automatable**; the
@@ -78,20 +78,21 @@ down control and deletes the test-mode connected accounts it minted on exit.
    (`type=express`, `metadata[creator_id]` ownership signal) and returns a real
    `account_links` onboarding URL; `callback` verifies ownership + persists
    Stripe's `charges_enabled` truth.
-3. **Server-stamped fee** — `connect_checkout` resolves the server-held `FeePolicy`
-   (default 15%) and stamps `application_fee_amount` + `transfer_data[destination]`
+3. **Server-stamped fee** - `connect_checkout` resolves the server-held `FeePolicy`
+   and stamps `application_fee_amount` + `transfer_data[destination]`
    on the real PaymentIntent; a malicious client `application_fee_amount=1` is
    **ignored** (no wire path). The harness fetches the PI back from Stripe and
-   asserts `application_fee_amount == 15%`, `amount == gross`, `destination ==
-   acct_`. An operator-set 25%-capped-$40 policy is also honored on the wire.
-4. **M2 money-hole gate** — a real-shaped `account.updated` flipping
+   asserts `application_fee_amount` matches the configured policy, `amount ==
+   gross`, and `destination == acct_`. An operator-set 25%-capped-$40 policy is
+   also honored on the wire.
+4. **M2 disabled-account gate** - a real-shaped `account.updated` flipping
    `charges_enabled→false` re-caches the flag; a subsequent `connect_checkout` is
    **blocked (400)** with no PaymentIntent created.
-5. **M4 payout attribution** — a connect-revenue `invoice.paid` whose settling
+5. **M4 payout attribution** - a Connect `invoice.paid` whose settling
    account (`on_behalf_of` / `transfer_data.destination`) **mismatches** the
    creator's stored `stripe_account_id` is **rejected** (`attribution_mismatch`,
    no payout row — metadata-only trust refused); an **owned** settling account is
-   **credited** (net = gross − 15% fee); a revenue event with **no** settling
+   **credited** (net = gross - configured fee); a payment event with **no** settling
    account is refused (`no_settling_account`).
 6. **payout.failed** — a real-shaped `payout.failed` for the linked `acct_`
    resolves the creator (`get_creator_by_account`) and records a `payout_failures`

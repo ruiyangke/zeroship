@@ -608,10 +608,8 @@ PWA; Rork ships to the actual app stores.
 **Data/DB.** Firebase / Supabase templates. No proprietary DB.
 
 **Verdict.** The **only competitor targeting consumer mobile creators**.
-Positions itself as "for App Store entrepreneurs" — the closest PR
-positioning to zeroship's "Shopify for AI apps", but technically and
-economically different (it rides Apple's 30%/15% rails, not its own
-monetization layer).
+Positions itself as "for App Store entrepreneurs." It relies on Apple's
+30%/15% payment rails.
 
 ---
 
@@ -679,11 +677,11 @@ match. Replit is code-first + chat side (more developer-y).
 
 ## Feature Gaps Nobody Has Filled
 
-**1. End-user monetization with platform cut** — THE gap.
-Every tool monetizes the creator via subscription. None take 15% of what end
-users pay creators. This is zeroship's unclaimed territory. (Stripe Billing
-integrations in Lovable/Bolt are creator-facing, not marketplace — creator
-keeps 100% of the gross, minus Stripe's own ~3%.)
+**1. Platform-managed end-user payments.**
+Most tools bill creators via subscription. Stripe Billing integrations in
+Lovable/Bolt are creator-facing rather than platform-managed infrastructure;
+payments flow through the creator's Stripe account, and the creator keeps 100%
+of the gross minus Stripe's own ~3% processing fee.
 
 **2. Multi-tenant SaaS generation at scale.**
 No tool handles "I want to build a SaaS that serves 1000 paying end users
@@ -827,7 +825,7 @@ zeroship's thesis.
 - Figma import — bundle via third party
 
 **Features zeroship could ship as differentiators**:
-- **End-user monetization loop** — the unclaimed #1 gap
+- **Platform-managed end-user payments** - an infrastructure capability few competitors provide
 - **Multi-tenant SaaS as a first-class primitive** — nobody has it
 - **Security posture narrative** — Veracode/RLS incidents give real credibility
   air if you can back it up (sandbox, RLS-aware generation, auto-rate-limit)

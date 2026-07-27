@@ -1,12 +1,12 @@
 # Platform Gap Analysis — "What's Missing" — 2026-06-11
 
-> Five parallel read-only capability audits (creator journey · platform primitives/SDKs ·
-> billing/monetization · production readiness · multi-tenant scale) against `main` HEAD.
+> Five parallel read-only capability audits (creator journey / platform primitives/SDKs /
+> billing/payments / production readiness / multi-tenant scale) against `main` HEAD.
 > Question: not "is it correct/secure" (covered in the 2026-06-{03,09,11} security reviews)
 > but **what capability is absent or stubbed** for zeroship to be a working product per its
-> stated vision (no-code AI app platform: hosting · DB · auth · payments · scaling, 15% cut).
+> stated vision (no-code AI app platform: hosting, DB, auth, payments, and scaling).
 
-## Framing — the core is strong; the gaps are the business + ops + scale layer
+## Framing - the core is strong; the gaps are the infrastructure + ops + scale layer
 
 What's genuinely built and solid: the V8/compio runtime + sandbox boundary, the four app
 primitives (`env.{db,kv,storage,auth}`) wired in the worker, the `.zship` deploy pipeline +
@@ -15,34 +15,36 @@ content-addressed blob ingest, gateway manifest dispatch + CHWBL, the full auth 
 mechanism, and the deploy contract (`default = {fetch?, rpc?}`). The runtime can run
 a real app.
 
-What's missing clusters into four areas, in priority order: **(0) the monetization engine
-doesn't function end-to-end** — the literal reason the platform exists; **(1) production data
-durability** — it can't safely hold what creators ship; **(2) the production/ops layer** —
-it can't go on the public internet as-is; **(3) scale infrastructure** — it breaks past a
-few dozen tenants; and **(4) a set of product capabilities** real apps need.
+What's missing clusters into four areas, in priority order: **(0) usage metering and
+payments do not function end to end** - a core technical gap; **(1) production data
+durability** - it cannot safely hold what creators ship; **(2) the production/ops
+layer** - it cannot go on the public internet as-is; **(3) scale
+infrastructure** - it breaks past a few dozen tenants; and **(4) a set of
+product capabilities** real apps need.
 
 ---
 
-## Tier 0 — The monetization engine is non-functional end-to-end
+## Tier 0 - Usage metering and payments are non-functional end to end
 
-This is the single biggest gap: "the platform takes 15%" cannot operate today. Four audits
-converged here. A creator **can** get paid (Stripe Connect direct charges settle to their
-account automatically), but **the platform cannot collect its cut, and there is no usage
-billing at all.**
+This is the single biggest gap: usage metering and server-side `FeePolicy`
+enforcement do not operate today. Four audits converged here. Stripe Connect
+direct charges can settle to connected accounts automatically, but **the
+configured `FeePolicy` is not enforced and there is no usage billing
+pipeline.**
 
 - **No `env.meter` primitive** — apps cannot record billable units. Documented as "planned"; no `MeterPlugin` in the worker. (`crates/worker/src/cache.rs`)
 - **No usage producer** — the control plane has a `POST /internal/usage` ingest + `UsageReport` type, but **nothing on the worker/gateway ever emits one**. The billing pipe is open on the receiving end with nothing feeding it. (`crates/control/src/internal.rs:150`)
 - **`metering.rs` is a 1-line stub.** No usage → pricing → invoice/charge pipeline exists.
-- **The 15% fee is not server-enforced** — it's a client-side default in creator-controlled code (`sdks/payments/checkout.ts`, `applicationFeePercent ?? 15`), overridable to 0 or bypassable. The webhook only records what Stripe reports; no floor, no creator↔account binding. (filed CT-B1)
+- **The configured fee is not server-enforced** - its value is set in creator-controlled code (`sdks/payments/checkout.ts`, `applicationFeePercent`), overridable to 0 or bypassable. The webhook only records what Stripe reports; no floor and no creator-to-account binding. (filed CT-B1)
 - **Spending-limit enforcement is dead code** — a complete-looking metering/billing/enforcement engine (~2000 LOC) lives in `crates/platform/`, which is **workspace-excluded and tokio-based**, so it violates the zero-tokio invariant and can never run. It needs a from-scratch compio reimplementation, not a port.
 - **Stripe Connect onboarding is a placeholder** — `stripe_handlers.rs::onboard` returns a hardcoded URL; no real `/v1/account_links` call, no `acct_` ownership verification.
-- **No monetization UI** — the Stripe backend + SDK are real but there's no creator surface to onboard, set pricing, or see payouts, and no end-user checkout wiring.
+- **No payments UI** - the Stripe backend + SDK are real but there is no creator surface to onboard, set pricing, or inspect payouts, and no end-user checkout wiring.
 - **Plan→pricing is disconnected** — `plan_id` is free-text, self-escalatable to `unlimited` (CT-A1), gates only runtime limits, maps to no pricing.
 
-**To make the business model real:** server-side checkout that stamps the fee from a
-platform-held rate (CT-B1) → real Stripe onboarding → an `env.meter` primitive + worker
-usage producer → a compio reimplementation of metering→pricing→spending-limits → a creator
-monetization UI.
+**To complete the technical stack:** server-side checkout that applies the
+server-held `FeePolicy` (CT-B1) -> real Stripe onboarding -> an `env.meter`
+primitive + worker usage producer -> a compio reimplementation of metering,
+pricing, and spending limits -> a creator payments UI.
 
 ---
 
@@ -93,12 +95,12 @@ monetization UI.
 
 ## The five gaps to fix first (cross-domain)
 
-1. **Stand up the metering→billing→fee-enforcement spine** (Tier 0) — `env.meter` + worker producer + server-enforced 15% checkout + a compio metering/spend engine. Without it the platform earns nothing and has no usage data. This is the product's reason to exist.
+1. **Stand up the metering, billing, and fee-enforcement spine** (Tier 0) - `env.meter` + worker producer + server-enforced `FeePolicy` + a compio metering/spend engine. Without it the platform has no usage data or end-to-end billing path.
 2. **Production object storage + DB/object backups** (Tier 1) — implement `S3BlobStore` + the plugin-storage `s3` backend; add platform-wide backup/PITR. Until then a disk loss is fatal.
 3. **Production TLS + custom-domain cert automation** (Tier 1/2) — the per-app/custom-domain promise has no implementation and the stack serves plain HTTP.
 4. **DB connection proxy (PgBouncer/PgCat)** (Tier 1) — the 8-conn-per-app pool caps the platform at ~dozens of apps; a transaction-mode proxy is the smallest fix with the largest scale unlock.
 5. **Deploy history + rollback** (Tier 2) — a one-way `deploy_hash` with no revert is uniquely dangerous for AI-generated deploys; pair with edge observability so operators can see and recover from a bad rollout.
 
-> Note: several Tier 2/3 product gaps (deploy-in-AI-loop, monetization UI, observability surfaces,
+> Note: several Tier 2/3 product gaps (deploy-in-AI-loop, payments UI, observability surfaces,
 > rollback UI) are coupled to the **builder rewrite** already planned — fold them into that scope
 > rather than bolting onto the current builder.
