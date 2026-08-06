@@ -20,9 +20,9 @@
 //! The value maps are the ground truth; the composer is the code under test.
 
 use zero_migrate_policy::{
-    admit, finalize_charter, overlay, restrict, ComposeError, Enforcement, KnobDef, KnobKey,
-    KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCharter, RuleKind,
-    TrustedDoc,
+    admit, finalize_charter, overlay, restrict, ComposeError, Enforcement, GrantRegion, KnobDef,
+    KnobKey, KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCharter,
+    RuleKind, TrustedDoc,
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1476,4 +1476,86 @@ impl std::fmt::Debug for Pat {
             Pat::Staging => "staging",
         })
     }
+}
+
+/// A grant that a later layer pulls back anywhere is not universal, so it must not
+/// read as `Top`.
+///
+/// `Top` is a claim about the whole universe, and the guard spends it: `sql.raw` at
+/// `Top` is the fully-trusted raw posture, and `schema.cross_schema` at `Top` makes
+/// the schema scope `Unconfined`. The per-layer visible region is granted-minus-
+/// masked-above, and `All` minus a real mask has no glob representation, so the
+/// estimate widens back to `All` - which used to be read straight back as `Top`.
+#[test]
+fn a_grant_narrowed_anywhere_is_scoped_not_top() {
+    let reg = registry();
+    // base (root): sql.raw granted over the WHOLE universe.
+    let base = TrustedDoc::register_catalog_entry(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
+        &reg,
+    )
+    .unwrap();
+    // over: sql.raw pulled back to the default (false) on `secret` only.
+    let over = TrustedDoc::register_catalog_entry(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = false\nscope = { include = [\"secret\"] }\n",
+        &reg,
+    )
+    .unwrap();
+    let charter = finalize_charter(overlay(&base, &over, &reg).unwrap()).unwrap();
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&charter, &empty, &reg).unwrap();
+
+    let key = KnobKey::parse("sql.raw").unwrap();
+    let secret_t = ObjectName::table(b"secret".to_vec(), b"t".to_vec());
+    let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+
+    // The hole is real: the grant is genuinely below its granted value on `secret`
+    // and above it everywhere else.
+    assert_eq!(
+        ep.grants(&key, &secret_t),
+        Some(KnobValue::Bool(false)),
+        "the later layer pulls sql.raw back to default on secret"
+    );
+    assert_eq!(
+        ep.grants(&key, &app_t),
+        Some(KnobValue::Bool(true)),
+        "sql.raw stays granted outside the narrowed scope"
+    );
+
+    // So the region is Scoped, and universality is false.
+    assert_eq!(ep.grant_region(&key), GrantRegion::Scoped);
+    assert!(
+        !ep.grant_is_top(&key),
+        "a grant denied somewhere must never report as granted everywhere"
+    );
+}
+
+/// The counterpart: an unnarrowed universal grant must still reach `Top`, so the
+/// fix above does not simply deny everything.
+#[test]
+fn an_unnarrowed_universal_grant_is_still_top() {
+    let reg = registry();
+    let base = TrustedDoc::register_catalog_entry(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
+        &reg,
+    )
+    .unwrap();
+    let empty_over = TrustedDoc::register_catalog_entry("policy_version = 1\n", &reg).unwrap();
+    let charter = finalize_charter(overlay(&base, &empty_over, &reg).unwrap()).unwrap();
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&charter, &empty, &reg).unwrap();
+
+    let key = KnobKey::parse("sql.raw").unwrap();
+    assert_eq!(ep.grant_region(&key), GrantRegion::Top);
+    assert!(ep.grant_is_top(&key));
 }

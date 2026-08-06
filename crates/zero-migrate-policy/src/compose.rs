@@ -585,9 +585,13 @@ impl EffectivePolicy {
     #[must_use]
     pub fn grant_region(&self, key: &KnobKey) -> GrantRegion {
         match self.effective_granted_scope(key) {
-            Ok(Scope::All) => GrantRegion::Top,
-            Ok(Scope::Nothing) => GrantRegion::Ungranted,
-            Ok(Scope::Of { .. }) => GrantRegion::Scoped,
+            // `Top` is a claim of universality, so it may only be answered from an
+            // EXACT region. An estimate that had to widen is, by construction, a
+            // grant with a hole punched in it, which is precisely not universal.
+            Ok((Scope::All, Exactness::Exact)) => GrantRegion::Top,
+            Ok((Scope::All, Exactness::Widened)) => GrantRegion::Scoped,
+            Ok((Scope::Nothing, _)) => GrantRegion::Ungranted,
+            Ok((Scope::Of { .. }, _)) => GrantRegion::Scoped,
             Err(_) => GrantRegion::Ungranted,
         }
     }
@@ -598,8 +602,9 @@ impl EffectivePolicy {
     /// lower layer contributes its `grantedScope` MINUS the region already COVERED
     /// (presence) by any layer above it — a lower grant only shows through where no
     /// upper layer masks it. Joins (⊒-conservative) the per-layer contributions.
-    fn effective_granted_scope(&self, key: &KnobKey) -> Result<Scope, ComposeError> {
+    fn effective_granted_scope(&self, key: &KnobKey) -> Result<(Scope, Exactness), ComposeError> {
         let mut acc = Scope::Nothing;
+        let mut exactness = Exactness::Exact;
         // The union of all higher layers' COVERED scope on this key (presence mask).
         let mut masked_above = Scope::Nothing;
         for layer in &self.layers {
@@ -608,15 +613,20 @@ impl EffectivePolicy {
                 // This layer's grant shows through only where no higher layer covers.
                 let visible = match granted.difference(&masked_above) {
                     Difference::Scope(s) => s,
-                    // Not cleanly representable: fall back to the raw granted region
-                    // (⊒-conservative — only widens the estimate, safe for the ⊤ test).
-                    Difference::NotRepresentable => granted.clone(),
+                    // The complement of a glob is not a glob, so `All` minus a real
+                    // mask has no representation. Fall back to the raw granted region
+                    // and record that the estimate WIDENED: callers asking about
+                    // universality must not read the widened value as proof of it.
+                    Difference::NotRepresentable => {
+                        exactness = Exactness::Widened;
+                        granted.clone()
+                    }
                 };
                 acc = acc.join(&visible);
                 masked_above = masked_above.join(&km.covered_scope());
             }
         }
-        Ok(acc)
+        Ok((acc, exactness))
     }
 
     /// Return the literal schema names included by non-default EFFECTIVE grant rules
@@ -857,6 +867,22 @@ pub(crate) fn layered_nondefault_grant_rules<'a>(
         }
     }
     Ok(out)
+}
+
+/// Whether a computed granted region is the exact set or a widened over-estimate.
+///
+/// A layer's visible grant is its granted scope minus the region higher layers
+/// already cover, and that difference has no glob representation when a real mask
+/// is subtracted from the whole universe. The estimate then widens, which is safe
+/// for membership questions (it only ever admits more objects than are truly
+/// granted, and callers re-check the concrete object) but NOT for universality: a
+/// widened `All` is exactly the case where a hole was punched out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Exactness {
+    /// Every layer's contribution subtracted cleanly.
+    Exact,
+    /// At least one contribution had to widen, so the region is an over-estimate.
+    Widened,
 }
 
 /// The shape of the region where a grant key is above its default (II.2.5). The
