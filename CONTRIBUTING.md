@@ -144,9 +144,13 @@ Pick exactly one. `fix`, `feat`, and `refactor` cover most changes.
 - `style` - formatting only (rustfmt/prettier), no code change
 - `build` - build system, workspace membership, packaging, deploy config
 - `ci` - CI workflows and automation
+- `perf` - a change made primarily to improve performance
+- `bench` - adding or reworking benchmarks (this repo has a first-class benchmarking surface)
+- `revert` - reverting a previous commit
 
-Do not invent a new type unless there is a real need; keep it lowercase and
-single-word.
+Do not invent a new type beyond this list unless there is a real need; keep it
+lowercase and single-word. The type is never a scope name - write `feat(auth): ...`,
+never `auth: ...`.
 
 ### Scope
 
@@ -174,6 +178,11 @@ named after it.
   defaults in CREATE TABLE DDL"), not "update code". Roughly 50-72 characters; never
   exceed about 80.
 - Lowercase first word after the colon; no trailing period.
+- No internal-process markers. Strip orchestration artifacts before committing:
+  `phase N`, `stage N`, `part N`, `wave N`, `milestone`, job/task IDs (`J2`, `M0`,
+  `P1 C6`, `L8`, `M21`), `A`/`B`/`C`/`D` step letters, and PR or issue numbers. They are
+  meaningless to anyone reading the history later. State the outcome, not how the work
+  was scheduled: `chore(reorg): libs/ extraction`, not `chore(reorg) phase 5: ...`.
 
 ### Breaking changes
 
