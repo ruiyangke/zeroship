@@ -428,7 +428,7 @@ mod schema_renderer_tests {
         // NUMERIC/REAL: those affinities coerce a wide decimal through a binary
         // float, contradicting the documented exact-decimal-text guarantee and
         // diverging from the `t.numeric()` SQLite override (also TEXT).
-        let def = serde_json::json!({ "type": "literal", "literalValue": 3.14 });
+        let def = serde_json::json!({ "type": "literal", "literalValue": 2.5 });
         assert_eq!(renderer(SqlDialect::Sqlite).column_type(&def), "TEXT");
         // MySQL keeps exact fixed-precision; PG keeps `numeric`.
         assert_eq!(
