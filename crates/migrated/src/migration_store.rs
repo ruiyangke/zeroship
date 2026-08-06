@@ -142,16 +142,19 @@ impl MigrationStore {
         message: &str,
     ) -> Result<(), MigrationStoreError> {
         let client = self.connect().await?;
-        client
+        let updated = client
             .execute(
                 "UPDATE zeroship.migrated_migrations \
                     SET status = 'pending_approval', approved_by = NULL, approved_at = NULL, \
                         approved_checksum = NULL, last_error = $3 \
-                  WHERE app_id = $1 AND migration_id = $2",
+                  WHERE app_id = $1 AND migration_id = $2 AND status = 'approved'",
                 &[&app_id, &migration_id, &message],
             )
             .await
             .map_err(MigrationStoreError::Query)?;
+        if updated == 0 {
+            return Err(MigrationStoreError::InvalidTransition);
+        }
         Ok(())
     }
 
@@ -388,6 +391,8 @@ pub enum MigrationStoreError {
     CeilingVersionOverflow(u64),
     #[error("migration is not pending approval")]
     NotPending,
+    #[error("invalid migration transition: expected approved status")]
+    InvalidTransition,
 }
 
 impl Default for AuditAction {
@@ -422,4 +427,223 @@ fn hex_bytes(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEFAULT_TEST_DSN: &str =
+        "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_control_test";
+    const INVALID_TRANSITION_ERROR: &str =
+        "invalid migration transition: expected approved status";
+
+    fn test_dsn() -> String {
+        std::env::var("MIGRATED_TEST_DB")
+            .or_else(|_| std::env::var("CONTROL_TEST_DB"))
+            .or_else(|_| std::env::var("PG_TEST_URL"))
+            .unwrap_or_else(|_| DEFAULT_TEST_DSN.to_string())
+    }
+
+    async fn test_client() -> Client {
+        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+            .await
+            .expect("connect to migrated test database");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+            .batch_execute(
+                r#"
+                CREATE SCHEMA IF NOT EXISTS zeroship;
+                CREATE TABLE IF NOT EXISTS zeroship.migrated_migrations (
+                  app_id uuid NOT NULL,
+                  migration_id uuid NOT NULL,
+                  status text NOT NULL CHECK (
+                    status IN ('planned', 'pending_approval', 'approved', 'applied', 'rejected')
+                  ),
+                  request_body jsonb NOT NULL,
+                  effective_profile jsonb NOT NULL,
+                  ceiling_id text NOT NULL,
+                  ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
+                  gated_versions jsonb NOT NULL DEFAULT '[]'::jsonb,
+                  submitted_by uuid NOT NULL,
+                  submitted_at timestamptz NOT NULL DEFAULT now(),
+                  approved_by uuid,
+                  approved_at timestamptz,
+                  applied_at timestamptz,
+                  approved_checksum text,
+                  last_error text,
+                  PRIMARY KEY (app_id, migration_id)
+                );
+                "#,
+            )
+            .await
+            .expect("ensure migrated migration table");
+        client
+    }
+
+    async fn insert_transition_row(
+        client: &Client,
+        app_id: Uuid,
+        migration_id: Uuid,
+        principal_id: Uuid,
+        status: &str,
+    ) {
+        client
+            .execute(
+                "INSERT INTO zeroship.migrated_migrations \
+                    (app_id, migration_id, status, request_body, effective_profile, \
+                     ceiling_id, ceiling_version, gated_versions, submitted_by, submitted_at, \
+                     approved_by, approved_at, applied_at, approved_checksum, last_error) \
+                 VALUES ($1, $2, $3, '{\"marker\":\"original\"}'::jsonb, \
+                         '{\"require_rls\":true}'::jsonb, 'test-ceiling', 7, \
+                         '[\"0001\"]'::jsonb, $4, \
+                         TIMESTAMPTZ '2026-08-01 01:02:03+00', $4, \
+                         TIMESTAMPTZ '2026-08-01 02:03:04+00', \
+                         CASE WHEN $3 = 'applied' \
+                              THEN TIMESTAMPTZ '2026-08-01 03:04:05+00' END, \
+                         'approved-checksum', \
+                         CASE WHEN $3 = 'rejected' THEN 'original rejection' END)",
+                &[&app_id, &migration_id, &status, &principal_id],
+            )
+            .await
+            .expect("insert transition test row");
+    }
+
+    async fn seed_transition_dependencies(client: &Client, app_id: Uuid, principal_id: Uuid) {
+        let plan_id = "pln_migration_store_transition_test";
+        client
+            .execute(
+                "INSERT INTO zeroship.plans \
+                    (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+                     runtime_limits_json) \
+                 VALUES ($1, 'Migration Store Transition Test', 0, 0, 0, '{}'::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&plan_id],
+            )
+            .await
+            .expect("seed transition test plan");
+        let email = format!("migration-store-{principal_id}@zeroship.test");
+        client
+            .execute(
+                "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
+                 VALUES ($1, $2::citext, 'Migration Store Test User', NOW())",
+                &[&principal_id, &email],
+            )
+            .await
+            .expect("seed transition test user");
+        let app_name = format!("migration-store-{}", app_id.simple());
+        client
+            .execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
+                 VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
+                &[&app_id, &app_name, &plan_id],
+            )
+            .await
+            .expect("seed transition test app");
+    }
+
+    async fn row_snapshot(client: &Client, app_id: Uuid, migration_id: Uuid) -> String {
+        let rows = client
+            .query(
+                "SELECT row_to_json(migration_row)::text AS snapshot \
+                   FROM zeroship.migrated_migrations AS migration_row \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &migration_id],
+            )
+            .await
+            .expect("snapshot migration row");
+        rows.first().expect("migration row exists").get("snapshot")
+    }
+
+    #[ntex::test]
+    async fn revert_to_pending_only_transitions_approved_rows_pg() {
+        let client = test_client().await;
+        let store = MigrationStore::new(test_dsn());
+        let app_id = Uuid::now_v7();
+        let principal_id = Uuid::new_v4();
+        let approved_id = Uuid::now_v7();
+        let applied_id = Uuid::now_v7();
+        let rejected_id = Uuid::now_v7();
+
+        seed_transition_dependencies(&client, app_id, principal_id).await;
+        insert_transition_row(&client, app_id, approved_id, principal_id, "approved").await;
+        insert_transition_row(&client, app_id, applied_id, principal_id, "applied").await;
+        insert_transition_row(&client, app_id, rejected_id, principal_id, "rejected").await;
+
+        store
+            .revert_to_pending(app_id, approved_id, "approved content drifted")
+            .await
+            .expect("approved row must revert to pending");
+        let approved_rows = client
+            .query(
+                "SELECT status, approved_by, approved_at::text AS approved_at, \
+                        approved_checksum, last_error \
+                   FROM zeroship.migrated_migrations \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &approved_id],
+            )
+            .await
+            .expect("read reverted approved row");
+        let approved = approved_rows.first().expect("approved row exists");
+        assert_eq!(approved.get::<_, String>("status"), "pending_approval");
+        assert_eq!(approved.get::<_, Option<Uuid>>("approved_by"), None);
+        assert_eq!(approved.get::<_, Option<String>>("approved_at"), None);
+        assert_eq!(approved.get::<_, Option<String>>("approved_checksum"), None);
+        assert_eq!(
+            approved.get::<_, Option<String>>("last_error").as_deref(),
+            Some("approved content drifted")
+        );
+
+        let applied_before = row_snapshot(&client, app_id, applied_id).await;
+        let applied_error = store
+            .revert_to_pending(app_id, applied_id, "must not replace applied data")
+            .await
+            .expect_err("reverting an applied row must return an invalid-transition error");
+        assert_eq!(applied_error.to_string(), INVALID_TRANSITION_ERROR);
+        assert_eq!(
+            row_snapshot(&client, app_id, applied_id).await,
+            applied_before,
+            "applied row must remain byte-identical"
+        );
+
+        let rejected_before = row_snapshot(&client, app_id, rejected_id).await;
+        let rejected_error = store
+            .revert_to_pending(app_id, rejected_id, "must not replace rejected data")
+            .await
+            .expect_err("reverting a rejected row must return an invalid-transition error");
+        assert_eq!(rejected_error.to_string(), INVALID_TRANSITION_ERROR);
+        assert_eq!(
+            row_snapshot(&client, app_id, rejected_id).await,
+            rejected_before,
+            "rejected row must remain byte-identical"
+        );
+
+        let missing_error = store
+            .revert_to_pending(app_id, Uuid::now_v7(), "missing")
+            .await
+            .expect_err("reverting a missing row must return an invalid-transition error");
+        assert_eq!(missing_error.to_string(), INVALID_TRANSITION_ERROR);
+
+        client
+            .execute(
+                "DELETE FROM zeroship.migrated_migrations WHERE app_id = $1",
+                &[&app_id],
+            )
+            .await
+            .expect("delete transition test rows");
+        client
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .await
+            .expect("delete transition test app");
+        client
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&principal_id],
+            )
+            .await
+            .expect("delete transition test user");
+    }
 }
