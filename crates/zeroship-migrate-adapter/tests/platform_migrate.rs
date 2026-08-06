@@ -1,4 +1,4 @@
-//! Phase F Stage 4a — prove the platform-schema migrate path on the PUBLISHED
+//! Prove the platform-schema migrate path on the PUBLISHED
 //! engine: every `db/migrations-ts/*.ts` file AUTHORS (zeroship-runtime V8 + the
 //! standalone v1 recorder) and LOWERS (fail-closed load gate + Platform-guarded
 //! lower) cleanly on the standalone (v1) engine.
@@ -9,7 +9,7 @@
 //!
 //! The APPLY half runs on the published engine's PUBLIC token-gated Platform seam
 //! (`ExecutorConfig::platform`). `apply_all_platform_migrations_to_fresh_db`
-//! applies all 11 migrations to a FRESH scratch database on :5440 and
+//! applies every migration to a FRESH scratch database on :5440 and
 //! INDEPENDENTLY asserts (via a second connection) that the expected platform
 //! schemas/tables/RLS-policy/function+trigger/grants landed. Gated on
 //! `ZERO_MIGRATE_TEST_PG_URL` (skips clean when unset).
@@ -34,6 +34,11 @@ mod platform_cli {
     /// apply tests from overlapping regardless of the caller's thread count. The
     /// DB-free author+lower test does not take it.
     static DB_APPLY_LOCK: Mutex<()> = Mutex::new(());
+
+    /// How many files `db/migrations-ts` holds. Asserted rather than derived so
+    /// that a discovery bug which silently drops a file fails loudly instead of
+    /// agreeing with itself. Adding a migration updates this one constant.
+    const PLATFORM_MIGRATION_FILES: usize = 12;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -76,11 +81,10 @@ mod platform_cli {
         let lowered = author_and_lower_all(&dir, "zeroship")
             .expect("every platform .ts must author + lower on the published v1 engine");
 
-        // There are 11 platform migration files today.
         assert_eq!(
             lowered.len(),
-            11,
-            "expected 11 platform migrations, got {}: {:?}",
+            PLATFORM_MIGRATION_FILES,
+            "expected {PLATFORM_MIGRATION_FILES} platform migrations, got {}: {:?}",
             lowered.len(),
             lowered.iter().map(|(f, _)| f).collect::<Vec<_>>()
         );
@@ -192,7 +196,7 @@ mod platform_cli {
         row.try_get::<_, i64>(0).expect("decode journal count")
     }
 
-    /// PROVE Stage 4a end to end: apply ALL 11 platform migrations to a FRESH
+    /// PROVE the apply path end to end: apply EVERY platform migration to a FRESH
     /// scratch database on :5440 via the real `run_platform_migrations` path
     /// (zeroship-runtime V8 author → zero-migrate Platform lower+apply over the
     /// native compio seam), then INDEPENDENTLY assert (a SECOND connection) that the
@@ -203,7 +207,7 @@ mod platform_cli {
     async fn apply_all_platform_migrations_to_fresh_db() {
         let Some(url) = pg_url() else {
             eprintln!(
-                "skipping Stage 4a full-apply proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                "skipping the full-apply proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
             return;
@@ -252,10 +256,10 @@ mod platform_cli {
                 .expect("DROP DATABASE scratch");
         }
 
-        result.expect("Stage 4a full apply + assertions must pass");
+        result.expect("full apply + assertions must pass");
     }
 
-    /// Apply all 11 migrations to `scratch_dsn` and independently assert the schema.
+    /// Apply every migration to `scratch_dsn` and independently assert the schema.
     /// Returns `Ok(())` on full success; the caller drops the scratch DB regardless.
     async fn run_and_assert(scratch_dsn: &str) -> Result<(), String> {
         // ── APPLY: the real platform-migrate path (V8 author → Platform apply) ──
@@ -268,8 +272,11 @@ mod platform_cli {
         let report = run_platform_migrations(&cfg)
             .await
             .map_err(|e| format!("run_platform_migrations failed: {e}"))?;
-        if report.files != 11 {
-            return Err(format!("expected 11 files, saw {}", report.files));
+        if report.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "expected {PLATFORM_MIGRATION_FILES} files, saw {}",
+                report.files
+            ));
         }
         if report.applied.is_empty() {
             return Err("no migrations were applied".to_string());
@@ -450,7 +457,7 @@ mod platform_cli {
     }
 
     /// PROVE the platform-migrate one-shot is IDEMPOTENT (re-runnable). On a FRESH
-    /// scratch DB: run 1 applies all 11 files' migrations (N applied, 0 skipped); run
+    /// scratch DB: run 1 applies every file's migrations (N applied, 0 skipped); run
     /// 2 over the SAME already-migrated DB re-lowers the identical `.ts` set and must
     /// skip EVERY migration (0 applied, N skipped) and exit clean — the journal row
     /// count is UNCHANGED (no duplicate rows) and no "already exists" error surfaces.

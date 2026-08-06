@@ -292,7 +292,13 @@ fn author_and_lower_file(
     ctx: &LowerCtx,
     state: &ApplyState,
     path: &Path,
-) -> Result<zero_migrate::render::lower::LoweredArtifact, PlatformMigrateError> {
+) -> Result<
+    (
+        MigrationIr,
+        zero_migrate::render::lower::LoweredArtifact,
+    ),
+    PlatformMigrateError,
+> {
     let file = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -315,7 +321,11 @@ fn author_and_lower_file(
 
     // (3) fold the Platform table-shape profile into every createTable BEFORE the
     // fail-closed load gate. Non-createTable ops pass through untouched.
-    let bytes = resolve_shape(&envelope, &ctx.policy, &ctx.project_schema, &file)?;
+    let resolved = resolve_shape(&envelope, &ctx.policy, &ctx.project_schema, &file)?;
+    let bytes = serde_json::to_string(&resolved).map_err(|e| PlatformMigrateError::Shape {
+        file: file.clone(),
+        message: format!("re-serialize resolved IR envelope: {e}"),
+    })?;
 
     // (4) fail-closed load gate + guarded lower under the Platform guard.
     let ir_author = IrAuthor::new(
@@ -328,7 +338,7 @@ fn author_and_lower_file(
         Some(scope) => ir_author.with_schema_scope(scope),
         None => ir_author,
     };
-    ir_author
+    let lowered = ir_author
         .load_and_lower_guarded(
             &bytes,
             ctx.owner_app,
@@ -337,9 +347,10 @@ fn author_and_lower_file(
             &ctx.guard_cfg,
         )
         .map_err(|e| PlatformMigrateError::Lower {
-            file,
+            file: file.clone(),
             message: e.to_string(),
-        })
+        })?;
+    Ok((resolved, lowered))
 }
 
 /// Per-file span of the order-preserving version space. Each file is assigned an
@@ -501,7 +512,19 @@ pub fn author_and_lower_all(
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let lowered = author_and_lower_file(&ctx, &state, path)?;
+        let (resolved, lowered) = author_and_lower_file(&ctx, &state, path)?;
+        state
+            .live_schema
+            .advance_logical_columns(
+                &resolved,
+                SqlDialect::Postgres,
+                &ctx.project_schema,
+                None,
+            )
+            .map_err(|e| PlatformMigrateError::Lower {
+                file: file.clone(),
+                message: format!("advance authored logical columns: {e}"),
+            })?;
         advance_state(&mut state, ctx.owner_app, &lowered.created_tables);
         out.push((file, lowered));
     }
@@ -554,8 +577,7 @@ pub async fn run_platform_migrations(
             .to_string();
 
         // AUTHOR (V8) + LOWER (Platform guard) — the fully-reachable half.
-        let mut lowered = author_and_lower_file(&ctx, &state, path)?;
-        let created_tables = lowered.created_tables.clone();
+        let (resolved, mut lowered) = author_and_lower_file(&ctx, &state, path)?;
 
         // Re-stamp every lowered step's journal version DETERMINISTICALLY from this
         // file's sorted position + step order, so a re-run reproduces byte-identical
@@ -630,9 +652,26 @@ pub async fn run_platform_migrations(
         // (see `advance_state`) leaves a later cross-file FK (e.g. a constraints
         // file referencing a table created several files earlier) unresolvable:
         // "unmanaged target has no live catalog snapshot". A fresh snapshot_schema
-        // is authoritative and cheap at platform-setup cadence.
-        let _ = &created_tables;
-        state = seed_state(&session, &cfg.project_schema, owner_app).await?;
+        // is authoritative and cheap at platform-setup cadence. Authored value
+        // formats cannot be reconstructed from that physical catalog, so retain
+        // the earlier logical contracts and advance them through this file on the
+        // freshly seeded state.
+        let logical_columns = std::mem::take(&mut state.live_schema.logical_columns);
+        let mut refreshed = seed_state(&session, &cfg.project_schema, owner_app).await?;
+        refreshed.live_schema.logical_columns = logical_columns;
+        refreshed
+            .live_schema
+            .advance_logical_columns(
+                &resolved,
+                SqlDialect::Postgres,
+                &ctx.project_schema,
+                None,
+            )
+            .map_err(|e| PlatformMigrateError::Lower {
+                file: file.clone(),
+                message: format!("advance authored logical columns: {e}"),
+            })?;
+        state = refreshed;
     }
 
     Ok(report)
@@ -647,7 +686,7 @@ fn resolve_shape(
     policy: &PdpPolicy,
     default_schema: &str,
     file: &str,
-) -> Result<String, PlatformMigrateError> {
+) -> Result<MigrationIr, PlatformMigrateError> {
     let ir: MigrationIr =
         serde_json::from_str(envelope).map_err(|e| PlatformMigrateError::Shape {
             file: file.to_string(),
@@ -659,8 +698,5 @@ fn resolve_shape(
             message: format!("resolve table-shape policy: {e}"),
         }
     })?;
-    serde_json::to_string(&resolved).map_err(|e| PlatformMigrateError::Shape {
-        file: file.to_string(),
-        message: format!("re-serialize resolved IR envelope: {e}"),
-    })
+    Ok(resolved)
 }
