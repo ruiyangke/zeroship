@@ -177,8 +177,8 @@ derived from `AUTH_BROKER_SECRET_FILE`; public clients are PKCE-only.
 
 ## Data Model
 
-The auth tables live in the `zeroship` PostgreSQL schema and are owned by
-`zeroship-migrate`:
+The auth tables live in the `zeroship` PostgreSQL schema and are created by the
+platform corpus applied through `zeroship-platform-migrate`:
 
 | Table | Purpose |
 |---|---|
@@ -218,7 +218,12 @@ at minimum:
 Run platform migrations before booting services:
 
 ```bash
-zeroship-migrate migrate --dir ./db/migrations-ts --database-url "$DATABASE_URL" --profile platform --yes
+cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+./target/release/zeroship-platform-migrate \
+  --database-url "$DATABASE_URL" \
+  --migrations-dir ./db/migrations-ts \
+  --project-schema zeroship \
+  --project-id zeroship
 ```
 
 Then start `zeroship-auth` with the variables above. On boot it publishes the

@@ -2,7 +2,7 @@
 
 - **Status**: Proposal (drives Task #69) — normative, buildable form
 - **Date**: 2026-06-23
-- **Crate / branch**: `zeroship-migrate` @ `feat/db-migration-engine`; new sibling JS package `@zeroship/migrate` (the migration op builder, consumed as **named ESM imports**); existing adapter crate `zeroship-migrate-js`
+- **Crate / branch**: `zeroship-migrate` @ `feat/db-migration-engine`; new sibling JS package `@zeroship/migrate` (the migration op builder, consumed as **named ESM imports**); existing JS authoring adapter crate
 
 > This document is the self-contained normative contract. An implementer (human or AI coding agent) can build from it alone. It states only final decisions. A short non-normative changelog of superseded readings lives in Appendix B.
 

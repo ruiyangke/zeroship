@@ -34,7 +34,7 @@ echo "============================================"
 echo "  zeroship E2E — multi-app -> per-creator attribution (REAL Lago)"
 echo "============================================"
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — cargo build --release"; exit 2; }; done
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
@@ -100,8 +100,9 @@ lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/plans" -d "{\"plan\":{\"name\"
 [ -n "$BM_ID" ] && pass "Lago seeded: billable_metric 'requests' + plan 'e2e_plan'" || { fail "lago seed"; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" "$BIN/zeroship-migrate" migrate \
-  --dir "$ROOT/db/migrations-ts" --database-url "$DBURL" --profile platform --yes > "$MIG_LOG" 2>&1 \
+"$BIN/zeroship-platform-migrate" \
+  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+  --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }
 
 PLAN_ID="pln_mapp_e2e"

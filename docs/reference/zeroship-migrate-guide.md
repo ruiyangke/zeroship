@@ -1,10 +1,16 @@
-# The zeroship-migrate reference
+# Historical in-tree migration-engine reference
 
-**What this is:** a complete engineering reference for `zeroship-migrate`, zeroship's in-house, security-first, dialect-neutral database-migration engine — its authoring DSL, its checksummed IR wire contract, its three-dialect render/apply machinery, its durability guarantees, its trust model, and how the platform both self-hosts on it and folds it into the build.
+**What this is:** a historical engineering snapshot of zeroship's former in-tree,
+security-first, dialect-neutral database-migration engine. The engine now lives in
+`third_party/zero-migrate`; the old workspace crate and standalone executables no
+longer exist.
 
 **Who it's for:** engineers modifying the crate, authors writing platform/creator migrations, and reviewers auditing the security substrate.
 
-This guide describes the current `@zeroship/migrate` authoring surface and engine.
+Do not use the old commands in this snapshot as operational instructions. Current
+platform apply instructions live in [Database migrations](../runbooks/db-migrations.md),
+and the current creator build path is documented in
+[Vite plugin](./vite-plugin.md#migration-first-type-generation-gen-types).
 
 All file:line citations are relative to the repo root and were read from the source tree for this guide so every claim is checkable.
 
@@ -37,7 +43,7 @@ Per the crate's own module doc (`crates/zeroship-migrate/src/lib.rs:1-19`), `zer
 
 - a **security core** — the migration data types, the parse-time SQL security guard (deny-list + cross-schema confinement), and defense-in-depth trust profiles;
 - a **migration unit + executor** — an append-only tamper-evident journal, a per-project advisory lock, and a transactional / two-phase-non-transactional apply flow with idempotent crash recovery and drift/tamper checksum verification, all run under a least-privilege `migrator` role;
-- a **JS-first authoring front-end** — V8-backed schema evaluation, `op.*` recording, dialect-neutral IR canonicalization, and type generation (`lib.rs:4-7`), packaged for creators as the `@zeroship/migrate` npm SDK and for the platform as the `zeroship-migrate-js` CLI.
+- a **JS-first authoring front-end** — V8-backed schema evaluation, `op.*` recording, dialect-neutral IR canonicalization, and type generation (`lib.rs:4-7`), packaged for creators as the `@zeroship/migrate` npm SDK and formerly exposed to the platform through a JS authoring CLI that was removed with the in-tree engine.
 
 The crate index summarizes it as: "*Migration engine. Multi-dialect apply: native compio-postgres fast path (PG) + in-process SQLite + live MySQL via the JsDriverBackend... Carries V8 (depends on zeroship-runtime) for the JS authoring front-end + the MySQL driver isolate.*" (`AGENTS.md`, crate index).
 
@@ -255,13 +261,13 @@ standalone-cli = []   # raw standalone apply/runner for user-owned DBs; server/c
 
 The takeaway: in a normal embedder (worker/control) build, the "Trusted" / user-owned-DB profile is **compiled out entirely**.
 
-### 2.9 Binaries
+### 2.9 Binaries in the former in-tree layout
 
 | Bin | Path | Notes |
 | --- | --- | --- |
 | `zeroship-migrate` | `src/bin/zeroship-migrate.rs` | Operator CLI. `required-features = ["standalone-cli"]`. `#[compio::main]` (NOT tokio). |
-| `zeroship-migrate-js` | `src/bin/zeroship-migrate-js.rs` | The JS authoring CLI (name kept so Vite/PATH call sites resolve). Always built. |
-| `zeroship-migrate-recorder-child` | `src/bin/recorder-child.rs` | The kernel-sandboxed recorder child — one child per tenant. Always built. |
+| JS authoring CLI (removed) | former JS CLI source | Vite/PATH-facing authoring entry point; always built in the former layout. |
+| Recorder-child executable (removed) | `src/bin/recorder-child.rs` | Kernel-sandboxed recorder child — one child per tenant in the former layout. |
 
 ### 2.10 Public API surface
 
@@ -768,13 +774,18 @@ The platform's authoring layer holds a creator's **declared schema** — the per
 
 ### 5.2 `generate --schema` and `DeclarativeDeployPlan`
 
-`frontend/generate.rs` exposes the differ as a CLI verb: `zeroship-migrate-js generate --schema schema.js` evaluates the schema module in a sandboxed V8 child to a descriptor IR, diffs it against the live DB, and renders a deployable `.sql` (covering the full vector/postgis/FK/CHECK surface). The `--project-schema` flag (default `public`) names the schema to introspect (`zeroship-migrate-js.rs:104-106`).
+`frontend/generate.rs` exposed the differ through the former JS authoring CLI's
+`generate --schema schema.js` verb. It evaluated the schema module in a
+sandboxed V8 child to a descriptor IR, diffed it against the live DB, and
+rendered a deployable `.sql` covering the full vector/postgis/FK/CHECK surface.
+The `--project-schema` flag (default `public`) named the schema to introspect in
+the former CLI source.
 
 The control-plane deploy path drives the same differ through `apply_declarative` (`executor.rs`) with a `DeclarativeDeployPlan` (re-exported at `lib.rs:142-146`). A declarative deploy is several **sub-batches** (the plain additive set plus one online-rename **expand** per renamed column) that must serialize *as a whole*: the outer `apply_declarative` acquires the project advisory lock once via `acquire_project_lock_outer` and threads `LockMode::AlreadyHeld` into each inner `apply_with_lock` — the lock is taken exactly once and freed exactly once, never freed between sub-batches where a second deploy could interleave ([§9.3](#9-the-apply-engine--durability)). Per-sub-batch session hygiene (GUC snapshot/restore + `RESET ROLE`) still runs every time.
 
 ### 5.3 The migration-first fold: migration set → `env.db.ts` + `schema.runtime.json`
 
-The reverse direction makes the `op.*` migration set the **sole source of truth** for the typed `env.db` surface — the types are *generated from the fold*, never hand-declared (`frontend/gen_types.rs`). `zeroship-migrate-js gen-types` produces two artifacts in `generated/zeroship/` (the *committed* output dir, chosen so `env.db.ts` can be in tsconfig):
+The reverse direction makes the `op.*` migration set the **sole source of truth** for the typed `env.db` surface — the types are *generated from the fold*, never hand-declared (`frontend/gen_types.rs`). The former JS authoring CLI's `gen-types` command produced two artifacts in `generated/zeroship/` (the *committed* output dir, chosen so `env.db.ts` can be in tsconfig):
 
 1. **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`: `{ version: 1, collections: { [c]: { fields, options, indexes } } }` (`gen_types.rs:15-16,40`).
 2. **`env.db.ts`** — a real `.ts` **module** (not a `.d.ts`) reconstructing `const schema = { … t.text() … } as const` of `@zeroship/db` `t.*()` builder calls, wrapping collections in `defineSchema(...)` + runtime-metadata chains (`.softDelete()`, `.withVersioning()`, `.strictness(...)`, `.index(...)`), then `declare module "zeroship" { interface Env { db: Db<typeof schema> } }` (`gen_types.rs:493-548`). It **must** be a module because `t.*()` value expressions are illegal in a `.d.ts` ambient context, and the SDK's `InferFieldDef` inference keys only off `TypeBuilder` builder calls — so the emitter reconstructs builder calls rather than a hand-rolled interface (`gen_types.rs:42-51`).
@@ -783,11 +794,25 @@ The reverse direction makes the `op.*` migration set the **sole source of truth*
 
 Declared-only facets survive the fold — the typed-id `prefix`, vector `metric`, and `mask` brand all flow into `env.db.ts`, so `env.db.users.email` reads back as `MaskedValue<T>` *purely from migration history*.
 
-**Schema neutrality:** the CLI `gen-types` subcommand always folds under the **constant `"public"`** project schema (`render_artifacts(&ops, "public")`, `zeroship-migrate-js.rs:337`) — type recovery does not care which schema the tables live in, which is why creators never pass `{schema}` and it still works.
+**Schema neutrality:** the former CLI's `gen-types` subcommand always folded under the **constant `"public"`** project schema (`render_artifacts(&ops, "public")`, line 337 of the former CLI source) — type recovery does not care which schema the tables live in, which is why creators never passed `{schema}`.
 
 ### 5.4 How the fold is consumed
 
-The vite-plugin is a *thin client* of the same `zeroship-migrate-js` CLI — it never evaluates untrusted `.ts` in-process. `genTypesViaCli` shells `zeroship-migrate-js gen-types --dir <migrations> --out <outDir> [--check]` (`sdks/vite-plugin/src/migrations.ts:246-286`), with graceful binary resolution (explicit `cliPath` → `ZEROSHIP_MIGRATE_JS_BIN` → `node_modules/.bin` → prod/CI bare PATH, else dev `null` no-op). The `.zship` packer does **not** carry migration documents — it reads only the generated `schema.runtime.json` and stages it as the manifest's content-addressed `runtime_descriptor` blob (`sdks/vite-plugin/src/zship.ts:203-216`); deploy-time application runs through the standalone migration service. At runtime boot, `@zeroship/bootstrap`'s `installSchema(schema, env.db, { descriptor })` walks the descriptor, runs `registerModel` in topological order, and plants typed `Collection` wrappers on the native `env.db`. So both directions meet at one wire type — the v1 `RuntimeSchemaDescriptor`: `gen-types` *emits* it, the `.zship` packer *carries* it, `installSchema` *installs* it. See [§11.6–§11.7](#11-platform-self-hosting--build-integration).
+The vite-plugin now runs gen-types in-process: its pure-JS recorder evaluates
+the committed migration modules into IR envelopes, and `zero-migrate-node`'s
+`genArtifacts` verb folds and renders `env.db.ts` plus
+`schema.runtime.json`. There is no CLI subprocess or missing-binary no-op. The
+`.zship` packer does **not** carry migration documents — it reads only the
+generated `schema.runtime.json` and stages it as the manifest's
+content-addressed `runtime_descriptor` blob
+(`sdks/vite-plugin/src/zship.ts:203-216`); deploy-time application runs through
+the standalone migration service. At runtime boot, `@zeroship/bootstrap`'s
+`installSchema(schema, env.db, { descriptor })` walks the descriptor, runs
+`registerModel` in topological order, and plants typed `Collection` wrappers on
+the native `env.db`. So both directions meet at one wire type — the v1
+`RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*
+it, `installSchema` *installs* it. See
+[§11.6–§11.7](#11-platform-self-hosting--build-integration).
 
 ---
 
@@ -1494,11 +1519,13 @@ Every layer is explicit about its own limits and names the next layer that cover
 
 ## §11 Platform self-hosting & build integration
 
-The zeroship platform is its own biggest `zeroship-migrate` customer. The entire platform database — control-plane, auth/OIDC, billing/metering, and the extracted sandbox's tables — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the *same* engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
+The zeroship platform is its own biggest `zero-migrate` customer. The entire platform database — control-plane, auth/OIDC, billing/metering, and the extracted sandbox's tables — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the same engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
 
 ### 11.1 The platform migration corpus (`db/migrations-ts/`)
 
-The platform's Postgres schema is a **single `zeroship` schema**, managed by `zeroship-migrate` under its Platform profile. The source of truth is nine committed `.ts` files (no SQL/Flyway/Liquibase, no committed `.ir.json`):
+The platform's Postgres schema is a **single `zeroship` schema**, applied by
+`zeroship-platform-migrate` under its Platform profile. The source of truth is
+the committed `.ts` corpus (no SQL/Flyway/Liquibase, no committed `.ir.json`):
 
 | File | `export const name` | Contents |
 | --- | --- | --- |
@@ -1530,7 +1557,7 @@ The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the
 
 ### 11.3 The two trust profiles (Confined vs Platform)
 
-The engine ships two embedded profiles, both `include_str!`'d TOML (`model/profile.rs:27,32`): `policy-profiles/confined.toml` (least-privilege default + fail-closed fallback, `PolicyProfile::default()` → `confined()`) and `policy-profiles/platform.toml` (`extends = "confined"`, everything enabled). `ZEROSHIP_MIGRATE_PROFILE` defaults to `platform` in `ops/db-migrate.sh:39`; the compose `migrate` service hardcodes `--profile=platform`. There is deliberately **no** `permissive` preset and no sealed belt-skip posture (`SealedPosture` has only `Confined`/`Platform`).
+The engine ships two embedded profiles, both `include_str!`'d TOML (`model/profile.rs:27,32`): `policy-profiles/confined.toml` (least-privilege default + fail-closed fallback, `PolicyProfile::default()` → `confined()`) and `policy-profiles/platform.toml` (`extends = "confined"`, everything enabled). The current platform runner selects Platform internally; it exposes no profile flag. There is deliberately **no** `permissive` preset and no sealed belt-skip posture (`SealedPosture` has only `Confined`/`Platform`).
 
 | Knob | Confined | Platform |
 | --- | --- | --- |
@@ -1550,9 +1577,16 @@ The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draf
 
 Services **never migrate themselves** — `control`/`auth` connect to an already-migrated DB. Two apply vectors, both driving the same engine:
 
-**(a) Compose one-shot `migrate` service** (`deploy/compose/docker-compose.yml`, the `migrate` service) invokes `zeroship-migrate migrate --dir=/db/migrations-ts --database-url=… --profile=platform --yes`, records each `.ts` to transient IR, applies under Platform, exits 0. `control`/`auth` `depends_on` it with `service_completed_successfully`. `--yes` is required because the platform set contains reviewed in-place evolutions (DROP CONSTRAINT/COLUMN) the engine flags DESTRUCTIVE. `security_opt: [seccomp:unconfined]` because `io_uring_setup` needs it.
+**(a) Compose one-shot `migrate` service** (`deploy/compose/docker-compose.yml`,
+the `migrate` service) invokes `zeroship-platform-migrate` with the database URL,
+migrations directory, project schema `zeroship`, and project id `zeroship`. It
+records each `.ts` to transient IR, applies under Platform, and exits 0.
+`control`/`auth` depend on it with `service_completed_successfully`.
 
-**(b) By-hand wrapper `ops/db-migrate.sh`** shells the bin (via `cargo run` or `ZEROSHIP_MIGRATE_BIN`), targeting compose Postgres on `localhost:5440`. Subcommands: `migrate` (apply pending platform `.ts`) plus generic `status`/`validate`/`rollback` that "do not yet load platform `.ts`". It wires the recorder child (`ZEROSHIP_RECORDER_CHILD`), since recording untrusted `.ts` happens in a kernel-sandboxed child.
+**(b) By-hand wrapper `deploy/ops/db-migrate.sh`** invokes the apply-only runner
+via `cargo run` or `ZEROSHIP_MIGRATE_BIN`, targeting compose Postgres on
+`localhost:5440`. It accepts no migration subcommand. The runner records the
+committed platform corpus in-process.
 
 The engine tracks applied work in an append-only journal in a **meta schema (default `zeroship_migrations`)**, so `migrate` runs only pending work and is idempotent. **Do not confuse** the engine journal (`zeroship_migrations.schema_migrations`) with the `migrated_migrations` *table* the corpus creates (the creator migration-workflow store, §11.6). Apply is `BEGIN; <up>; INSERT journal; COMMIT` per step — no whole-bundle transaction. Operator-approved go-lives are gated by the `migrations:approve` (`Action::AppsApproveMigration`) admin-only action and per-version approval scoping ([§9.11](#9-the-apply-engine--durability)).
 
@@ -1588,9 +1622,12 @@ This ingress is where the §11.3 seal machinery meets the effective-policy meet:
 
 ---
 
-## §12 Testing & operating
+## §12 Historical testing and operation
 
-This section covers how the crate is *verified* (its golden/round-trip gates, live-DB suites, sandboxed-recorder parity, and the embedded-fixture gotcha) and how it is *operated* (the `standalone-cli` binary, its verbs, the schema-dump path). The crate has an unusually large test surface — ~130 integration test files under `crates/zeroship-migrate/tests/` (>2 MB) — because it is simultaneously a security kernel, a multi-dialect renderer, and a wire-format authority.
+This section records how the former in-tree crate was verified and operated. Its
+paths and commands are not current appbase instructions; use the standalone
+`third_party/zero-migrate` project for engine development and the current
+platform-runner commands in §12.10 for appbase.
 
 ### 12.1 The three-gate golden/round-trip model (`op_round_trip.rs`)
 
@@ -1600,7 +1637,9 @@ The load-bearing anti-drift mechanism is `tests/op_round_trip.rs` because the IR
 - **Gate 2 — JS↔Rust value-checksum round-trip** (`:169-177`): both the fresh IR and the golden are folded through the SAME `Checksum::of_ir(&CanonicalOpList(&ir.ops), &MigrationFlags::default(), &ir.owner_app, &[], &[], &ir.preconditions)` and asserted equal — the *authoritative* check, comparing typed **values**, invariant under JCS-formatting differences.
 - **Gate 3 — variant exhaustiveness** (`every_op_variant_has_a_fixture`, `:208-260`): reads `op-ir.schema.json`, extracts every `Op` discriminant, asserts the fixtures cover the whole set, and hard-codes the count: `assert_eq!(expected.len(), 53, "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition")` (`:235-236`). Adding an `Op` without a corpus fixture fails CI.
 
-Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` (`:127`), then review the changed fixtures.
+In the former tree, the corpus regeneration test was `op_round_trip`. Run the
+corresponding test from the standalone project's own workspace when changing
+that corpus; the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.2 The IR-schema golden (`op_ir_schema.rs`)
 
@@ -1630,9 +1669,12 @@ Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip
 - **Golden execution traces** (`golden_trace_pg.rs`/`golden_trace_sqlite.rs` → `tests/golden-traces/*.txt`): capture a full apply trace + resulting schema against live PG/SQLite. `assert_frozen` panics if the fixture is absent (a first-run capture is reviewed + committed, never self-blessed). The PG destructive-refusal trace is asserted identical across an oracle leg and a live leg.
 - **Generated-TS `.d.ts` goldens** (`gen_types_dts_golden.rs`) + a `tsc` gate (`gen_types_dts_tsc_gate.rs`).
 
-### 12.8 The `standalone-cli` binary and its verbs
+### 12.8 The former `standalone-cli` binary and its verbs
 
-The operator CLI (`src/bin/zeroship-migrate.rs`, `required-features = ["standalone-cli"]`, `#[compio::main]`) is a thin `clap` arg-parser delegating to `command::runner::run_*` — the ONLY place the `OperatorCapability` token is minted. `tests/standalone_feature.rs` enforces that `control`/`plugin-db`/`schema-authority-e2e` do NOT enable the feature and the workspace uses `resolver = "3"`. It is deliberately dbmate-compatible. Verbs (`Command` enum, `zeroship-migrate.rs:234-364`):
+The removed operator CLI (`src/bin/zeroship-migrate.rs`,
+`required-features = ["standalone-cli"]`, `#[compio::main]`) was a thin `clap`
+argument parser delegating to `command::runner::run_*`. The table below is a
+historical inventory, not a list of commands provided by appbase today:
 
 | verb | DB? | purpose |
 | --- | --- | --- |
@@ -1649,34 +1691,24 @@ The operator CLI (`src/bin/zeroship-migrate.rs`, `required-features = ["standalo
 | `load` / `setup` | yes | bootstrap a fresh DB by replaying `schema.sql` + reconstructing the journal from the trailer |
 | `resolve-pending [--apply\|--abort] <version>` | yes | discharge a cross-deploy online-rename pending contract ([§9.14](#9-the-apply-engine--durability)); PG-only; `--abort` needs `--acknowledge-shadow-data-loss` |
 
-`--profile` selects the guard posture (`trusted` — the binary DEFAULT, deny-list OFF; `platform` — widened, explicit opt-in with `--schema`/`--extension`/`--meta-schema`; `confined` — full creator deny-list, but reached via `submit_migration`, never this binary). Precedence for every setting: **CLI flag > env (`ZEROSHIP_MIGRATE_*` / `DATABASE_URL`) > `zeroship-migrate.toml` > built-in default**. Engine auto-detected from DSN unless `--engine` forces it. `new` produces raw `.sql` and is demoted to the trusted/legacy path — creators author portable op.* `.ts` via `zeroship-migrate-js new`/`generate`.
+`--profile` selects the guard posture (`trusted` — the binary DEFAULT, deny-list OFF; `platform` — widened, explicit opt-in with `--schema`/`--extension`/`--meta-schema`; `confined` — full creator deny-list, but reached via `submit_migration`, never this binary). Precedence for every setting: **CLI flag > env (`ZEROSHIP_MIGRATE_*` / `DATABASE_URL`) > `zeroship-migrate.toml` > built-in default**. Engine auto-detected from DSN unless `--engine` forces it. `new` produces raw `.sql` and is demoted to the trusted/legacy path — creators formerly authored portable op.* `.ts` through the retired JS authoring CLI's `new`/`generate` commands.
 
-### 12.9 The schema-dump / `pg_dump` path
+### 12.9 The former schema-dump / `pg_dump` path
 
-`dump` (`run_dump`, `:1016-1052`) is engine-agnostic with a shared trailer: **Postgres** shells `pg_dump --schema-only --no-owner --no-privileges` (honoring a `PG_DUMP` env var for a pinned binary; a missing/failed `pg_dump` is an honest error, never a half-dump); **SQLite** derives `CREATE` statements from `sqlite_master` through the hardened backend (no `sqlite3` shell-out); **MySQL** returns `RunError::MysqlLiveExecUnimplemented` (render-only here). Both engines append the SAME `-- zeroship-migrate schema_migrations` trailer, one `--   <version>\t<checksum>\t<name>` line per applied entry — self-contained so `load` reconstructs the journal from it alone. After a successful `migrate`/`up`/`rollback`/`down`, the CLI **auto-refreshes** `schema.sql` (dbmate parity) unless `--no-dump-schema`; a post-commit dump failure is non-fatal (the migration already committed). Exercised by `bin_e2e_pg.rs`, `cli_dbmate_e2e_{pg,sqlite}.rs`, `cli_load_lifecycle_{pg,sqlite}.rs`, `cli_platform_pg.rs`, `resolve_pending_cli_pg.rs`.
+The removed CLI's `dump` path (`run_dump`, `:1016-1052`) was engine-agnostic
+with a shared trailer. This behavior is retained here only as historical design
+context; `zeroship-platform-migrate` is apply-only and does not expose dump,
+load, rollback, or schema-refresh commands.
 
-### 12.10 Quick reference
+### 12.10 Current appbase quick reference
 
 ```bash
-# DB-free anti-drift + schema + preview gates (always safe):
-cargo test -p zeroship-migrate --test op_round_trip
-cargo test -p zeroship-migrate --test op_ir_schema
-cargo test -p zeroship-migrate --test full_surface
-cargo test -p zeroship-migrate --test sql_preview
+# Build the platform-schema runner. A plain workspace --bins build omits it.
+cargo build --release -p zeroship-migrate-adapter \
+  --features platform-cli --bin zeroship-platform-migrate
 
-# Regenerate goldens after an intentional shape change:
-UPDATE_CORPUS=1          cargo test -p zeroship-migrate --test op_round_trip
-UPDATE_SCHEMA=1          cargo test -p zeroship-migrate --test op_ir_schema
-UPDATE_PREVIEW_GOLDENS=1 cargo test -p zeroship-migrate --test sql_preview
-
-# Live Postgres (needs docker appbase-migrate-postgres-1 on :5440); serialize:
-cargo test -p zeroship-migrate --test declarative_pg -- --test-threads=1
-
-# Live MySQL JsDriver (soft-skips unless MIGRATE_REQUIRE_MYSQL=1):
-MIGRATE_REQUIRE_MYSQL=1 cargo test -p zeroship-migrate --test mysql_jsdriver_e2e
-
-# The standalone CLI + its e2e suites:
-cargo test -p zeroship-migrate --features standalone-cli
+# Apply db/migrations-ts to compose Postgres through the repository wrapper.
+./deploy/ops/db-migrate.sh
 
 # JS/pnpm side of the authoring surface:
 pnpm --filter @zeroship/migrate test

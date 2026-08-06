@@ -188,7 +188,7 @@ wait_for_db() {
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB + zeroship-migrate + control (REAL Stripe) + stripe-listen forwarder ==="
+echo "=== Stage 1: dedicated DB + platform migrations + control (REAL Stripe) + stripe-listen forwarder ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -199,10 +199,10 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
-  pass "zeroship-migrate platform set applied (incl. 0042 invoicing, 0049 refunds, 0053 disputes, 0054 webhook follow-ups)"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then
+  pass "platform migration set applied (incl. 0042 invoicing, 0049 refunds, 0053 disputes, 0054 webhook follow-ups)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "platform migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # Capture a STABLE webhook signing secret BEFORE booting control, so control's

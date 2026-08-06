@@ -24,7 +24,7 @@
 #     event_summaries readback), the meter provisioned by THIS harness.
 #   * REAL zeroship StripeProvider/StripeClient (cyper) → https://api.stripe.com.
 #   * REAL dedicated zeroship Postgres (zeroship_stripe_meters_e2e on :5440) +
-#     the full zeroship-migrate platform set (the cron reads/writes usage_aggregates +
+#     the full platform migration set (the cron reads/writes usage_aggregates +
 #     metering_exports).
 #
 # DO NO HARM: dedicated DB `zeroship_stripe_meters_e2e` on :5440 — NEVER the real
@@ -178,7 +178,7 @@ AGG="$(echo "$METER_JSON" | jget default_aggregation.formula)"
 
 # ===========================================================================
 echo ""
-echo "=== Stage 2: dedicated zeroship DB ($DB on :$PGPORT) + zeroship-migrate ==="
+echo "=== Stage 2: dedicated zeroship DB ($DB on :$PGPORT) + platform migrations ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -189,10 +189,10 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (NOT the real zeroship DB / billing_test / others)"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
-  pass "zeroship-migrate platform set applied cleanly (incl. 0043 metering_exports)"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then
+  pass "platform migration set applied cleanly (incl. 0043 metering_exports)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "platform migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"

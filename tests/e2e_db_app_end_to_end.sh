@@ -30,8 +30,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   exit 0
 fi
 
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate zeroship-migrate-js zeroship-migrate-recorder-child zeroship-migrated; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — build release binaries first"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate zeroship-migrated; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null && command -v pnpm >/dev/null || {
   echo "need node/openssl/curl/pnpm"
@@ -100,26 +100,16 @@ NODE
 }
 
 write_apply_request(){
-  node --input-type=module - "$BIN/zeroship-migrate-js" "$APP_EXAMPLE/migrations" "$APP" > "$WORK/apply-migrations.json" <<'NODE'
-import { basename, join } from "node:path";
-import { readdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-const [bin, dir, appId] = process.argv.slice(2);
-const files = readdirSync(dir).filter((name) => name.endsWith(".ts")).sort();
+  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$APP_EXAMPLE/migrations" > "$WORK/apply-migrations.json" <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
 const documents = [];
-for (const name of files) {
-  const file = join(dir, name);
-  const out = spawnSync(bin, ["record", file, "--owner-app", appId], {
-    encoding: "utf8",
-    env: { ...process.env, ZEROSHIP_RECORDER_CHILD: bin.replace(/zeroship-migrate-js$/, "zeroship-migrate-recorder-child") },
-  });
-  if (out.status !== 0) {
-    process.stderr.write(out.stderr || out.stdout);
-    process.exit(out.status || 1);
-  }
+for (const migration of migrations) {
   documents.push({
-    filename: basename(name, ".ts") + ".ir.json",
-    body: JSON.parse(out.stdout),
+    filename: migration.stem + ".ir.json",
+    body: await recordMigration(migration.path),
   });
 }
 console.log(JSON.stringify({ kind: "ir", documents }));
@@ -149,9 +139,8 @@ echo ""
 echo "=== Stage 1: build migration-first db-hitcounter .zship ==="
 (
   cd "$APP_EXAMPLE" &&
-  "$BIN/zeroship-migrate-js" gen-types --dir migrations --out generated/zeroship --check &&
   pnpm typecheck &&
-  ZEROSHIP_MIGRATE_JS_BIN="$BIN/zeroship-migrate-js" pnpm build
+  pnpm build
 ) > "$WORK/appbuild.log" 2>&1
 ZSHIP="$APP_EXAMPLE/dist/app.zship"
 if [ -f "$ZSHIP" ]; then
@@ -186,8 +175,12 @@ for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healt
 docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
 
 MIG_LOG="$WORK/platform-migrate.log"
-ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" "$BIN/zeroship-migrate" migrate \
-  --dir "$ROOT/db/migrations-ts" --database-url "$DBURL" --profile platform --yes > "$MIG_LOG" 2>&1 \
+# Post-extraction: platform schema is applied by zeroship-platform-migrate
+# (adapter, platform-cli). It authors via its own built-in V8 (no recorder child)
+# and drives the published zero-migrate engine over CompioPgSession.
+"$BIN/zeroship-platform-migrate" \
+  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+  --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "platform migrate"; tail -30 "$MIG_LOG"; exit 1; }
 
 psql_exec >/dev/null 2>&1 <<SQL && pass "seeded plan + metric pricing for requests, db_reads, db_writes, and platform counters" || { fail "billing seed"; exit 1; }

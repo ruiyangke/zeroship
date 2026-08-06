@@ -23,7 +23,7 @@
 # streaming + large multipart) are invoked so a single harness covers both the
 # trait-level parity and the full V8→worker→gateway edge.
 #
-# Stack bring-up reuses tests/lib/e2e_stack.sh (ephemeral PG + zeroship-migrate +
+# Stack bring-up reuses tests/lib/e2e_stack.sh (ephemeral PG + platform migrations +
 # control/worker/gateway), overriding the blob-store to s3://<minio> and
 # adding the worker --storage-url s3://<minio>.
 #
@@ -60,8 +60,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + built example -----------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 ST_ZSHIP="$ROOT/examples/storage-gallery/dist/app.zship"
 [ -f "$ST_ZSHIP" ] || { echo "missing $ST_ZSHIP — (cd examples/storage-gallery && pnpm install && pnpm build)"; exit 2; }
@@ -140,13 +140,13 @@ unset AWS_SESSION_TOKEN 2>/dev/null || true
 # Override the shared bring-up to use s3:// for the blob store on ALL THREE
 # services and --storage-url s3:// on the worker. We re-implement the lib's
 # control/worker/gateway boot here because the lib hard-codes a local
-# --blob-store; everything else (PG + zeroship-migrate + PAT mint + deploy) reuses it.
+# --blob-store; everything else (PG + platform migrations + PAT mint + deploy) reuses it.
 # ---------------------------------------------------------------------------
 # shellcheck source=tests/lib/e2e_stack.sh
 . "$ROOT/tests/lib/e2e_stack.sh"
 
 echo ""
-echo "=== Stage 2: ephemeral PG + zeroship-migrate, then control/worker/gateway on s3:// ==="
+echo "=== Stage 2: ephemeral PG + platform migrations, then control/worker/gateway on s3:// ==="
 
 # Bring up only PG + migrations + signing key from the lib's stack_up would
 # also boot the binaries with a LOCAL blob store, so we inline the PG+migrate
@@ -170,14 +170,13 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephe
   && pass "applied deploy/ops/postgres-init.sql" || true
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-    "$BIN/zeroship-migrate" migrate \
-    --dir "$ROOT/db/migrations-ts" \
-    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-    --profile platform --yes > "$MIG_LOG" 2>&1; then
-  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
+if "$BIN/zeroship-platform-migrate" \
+    --database-url "$DBURL" \
+    --migrations-dir "$ROOT/db/migrations-ts" \
+    --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-platform-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null

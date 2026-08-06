@@ -10,7 +10,7 @@
 -- `relation "apps" does not exist`.
 --
 -- Setting the role default here (it's allowed to list a schema that doesn't
--- exist yet — it's created by the zeroship-migrate platform migration on first
+-- exist yet — it's created by the platform migration runner on first
 -- boot) gives every connection the right resolution order.
 --
 -- This covers `postgres` only — the role the `migrate` service
@@ -18,5 +18,5 @@
 -- per-service login roles (zeroship_{auth,control,gateway}; sandbox_{app,
 -- audit,gdpr}) get their OWN `ALTER ROLE … SET search_path = zeroship, public`
 -- inside migrations V0025/V0026, since those roles do not exist yet at
--- initdb time (zeroship-migrate creates them on first boot).
+-- initdb time (the platform migration runner creates them on first boot).
 ALTER ROLE postgres SET search_path = zeroship, public;

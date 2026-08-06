@@ -108,11 +108,12 @@ values today.
 1. **Run platform migrations** before any service starts:
 
    ```bash
-   zeroship-migrate migrate \
-     --dir ./db/migrations-ts \
+   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+   ./target/release/zeroship-platform-migrate \
      --database-url "$PLATFORM_ADMIN_DATABASE_URL" \
-     --profile platform \
-     --yes
+     --migrations-dir ./db/migrations-ts \
+     --project-schema zeroship \
+     --project-id zeroship
    ```
 
 2. **Verify the auth role can connect**:

@@ -59,9 +59,10 @@ dir, `npm install`s (`@zeroship:registry=http://localhost:4873`) — verified to
 resolve every `@zeroship/*` from Verdaccio with **no `workspace:`/`file:` links**
 — and runs `npm run build` → `dist/app.zship`. So the SDK-distribution mechanism
 works; the remaining *productization* step is hosting a real registry (npmjs or a
-hosted Verdaccio) instead of the local one. (DB-backed scaffolds that *regenerate*
-schema also need the `zeroship-migrate-js` toolchain on PATH; the committed
-template ships pre-generated `generated/zeroship/` so a first build doesn't.)
+hosted Verdaccio) instead of the local one. (DB-backed scaffolds regenerate
+schema artifacts in-process through `@zeroship/vite-plugin`; no authoring CLI is
+required on PATH. The committed template also ships pre-generated
+`generated/zeroship/`.)
 
 ### Deploy auth — unblocked for local/CI; real flow uses `zeroship login`
 App CRUD + deploy require a **PAT**, minted only by the platform's auth stack via

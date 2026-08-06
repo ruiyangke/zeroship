@@ -1,11 +1,12 @@
-# Database migrations (zeroship-migrate)
+# Database migrations (`zeroship-platform-migrate`)
 
 The platform's Postgres schema — the single `zeroship` schema that holds every
-platform/system table — is managed by
-**`zeroship-migrate`**, zeroship's own versioned migration engine, run under its
+platform/system table — is managed by **`zeroship-platform-migrate`**, the
+apply-only platform runner built from `zeroship-migrate-adapter` with its
+`platform-cli` feature. It drives the published `zero-migrate` engine under the
 **Platform** trust profile. The platform migration source is the committed JS
-DSL corpus in `db/migrations-ts/`. Each `.ts` file is recorded to transient IR at
-apply time; committed SQL/Flyway migrations are no longer a platform source.
+DSL corpus in `db/migrations-ts/`. Each `.ts` file is recorded to transient IR
+at apply time; committed SQL/Flyway migrations are no longer a platform source.
 The engine tracks what's applied in an append-only journal (in a meta schema,
 default `zeroship_migrations`), so `migrate` only ever runs pending work and is
 safe to re-run (idempotent no-op when everything is applied).
@@ -17,8 +18,9 @@ code in the Rust crates.
 
 ## Why our own engine (not Liquibase/Flyway)
 
-The platform schema used to run on Liquibase; it now runs on `zeroship-migrate`
-under the **Platform** profile from `db/migrations-ts/`. The trust separation
+The platform schema used to run on Liquibase; it now runs through
+`zeroship-platform-migrate` under the **Platform** profile from
+`db/migrations-ts/`. The trust separation
 that mattered (the creator migration path must never reach
 `control`/`auth`/`billing`) is preserved as a **call-site invariant**: the
 Platform profile is constructible only at the operator call site, and the
@@ -49,29 +51,41 @@ directory is `.ts` source only, not `.sql` and not committed `.ir.json`.
 
 ## Running migrations
 
-**In the compose stack** — automatic. The one-shot `migrate` service runs
-`zeroship-migrate migrate --dir /db/migrations-ts --profile platform` after
-Postgres is healthy and before control/auth start (they `depends_on` it with
-`service_completed_successfully`):
+**In the compose stack** — automatic. After Postgres is healthy, the one-shot
+`migrate` service runs the following before control/auth start (they
+`depends_on` it with `service_completed_successfully`):
+
+```bash
+zeroship-platform-migrate \
+  --database-url postgres://postgres:zeroship@postgres:5432/zeroship \
+  --migrations-dir /db/migrations-ts \
+  --project-schema zeroship \
+  --project-id zeroship
+```
 
 ```bash
 docker compose up -d            # migrate runs, then control/auth boot
 docker compose logs migrate     # see what was applied
 ```
 
-**By hand** against a running dev DB — `ops/db-migrate.sh` shells into the
-`zeroship-migrate` bin (via `cargo run`, or set `ZEROSHIP_MIGRATE_BIN` to a
-prebuilt binary). It targets the compose Postgres on `localhost:5440` by default
-(override with `ZEROSHIP_MIGRATE_DSN`):
+**By hand** against a running dev DB — `deploy/ops/db-migrate.sh` invokes
+`zeroship-platform-migrate` via `cargo run`, or uses the prebuilt path in
+`ZEROSHIP_MIGRATE_BIN`. It targets the compose Postgres on `localhost:5440` by
+default (override with `ZEROSHIP_MIGRATE_DSN`):
 
 ```bash
-ops/db-migrate.sh migrate           # apply pending platform JS DSL migrations
+deploy/ops/db-migrate.sh            # apply pending platform JS DSL migrations
 ```
 
-The generic `zeroship-migrate` CLI still has SQL/IR `status`, `validate`, and
-`rollback` verbs for non-platform corpora. The platform `.ts` runner path today
-is the apply path used by compose; the live-PG `platform_ir_apply_pg` suite is
-the regression gate for the platform corpus.
+To build the runner explicitly:
+
+```bash
+cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+```
+
+The platform runner is apply-only; it does not expose the retired standalone
+CLI's `status`, `validate`, or `rollback` verbs. The live-PG
+`platform_ir_apply_pg` suite is the regression gate for the platform corpus.
 
 ## Adding a migration
 
@@ -79,9 +93,17 @@ the regression gate for the platform corpus.
 2. Express the change with the `@zeroship/migrate` JS DSL. Use the platform-only
    Postgres helpers only for platform schema objects that cannot be represented
    portably; they are capability-gated by the engine, not by the import path.
-3. Run the platform apply gate on a fresh Postgres database before relying on the
-   change:
-   `zeroship-migrate migrate --dir db/migrations-ts --profile platform --yes`.
+3. Build and run the platform apply gate on a fresh Postgres database before
+   relying on the change:
+
+   ```bash
+   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+   ./target/release/zeroship-platform-migrate \
+     --database-url "$DATABASE_URL" \
+     --migrations-dir db/migrations-ts \
+     --project-schema zeroship \
+     --project-id zeroship
+   ```
 
 The loader picks the file up by its timestamp order — no master file to edit.
 **Never edit an already-applied migration** (the engine validates checksums and
@@ -245,4 +267,5 @@ itself:
 The control/auth integration tests connect to a **pre-migrated** database
 (`AUTH_DB_URL` / `CONTROL_TEST_DB`) — they no longer self-migrate. Bring the
 schema up once before running them: the compose `migrate` service does this for
-the compose DB, or run `ops/db-migrate.sh migrate` against your test DB.
+the compose DB, or set `ZEROSHIP_MIGRATE_DSN` and run
+`deploy/ops/db-migrate.sh` against your test DB.

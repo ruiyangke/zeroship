@@ -81,9 +81,10 @@ apps(
 )
 ```
 
-The schema is owned by zeroship-migrate (`db/migrations-ts/`,
-especially `20260702000200_control_tables.ts`); the registry consumes these
-tables but does not create them.
+The schema is owned by the platform migration corpus (`db/migrations-ts/`,
+especially `20260702000200_control_tables.ts`) and applied by
+`zeroship-platform-migrate`; the registry consumes these tables but does not
+create them.
 
 ## Route and version feeds
 
@@ -111,7 +112,7 @@ These feeds are polled rather than pushed so the control plane stays stateless w
 4. Per-app OAuth client reconcile + declared-scope validation.
 5. **Migrate phase (schema-authority §8 / P6).** BEFORE go-live, control
    reconstructs `manifest.migrations[]` from the blob store into a per-deploy
-   tmp dir and applies them via `zeroship-migrate`
+   tmp dir and applies them via the former in-control migration path
    (`deploy_migrate::apply_bundle_migrations`):
    - provision the per-app schema `"<app_id>"` (idempotent `CREATE SCHEMA`) +
      the least-privilege `migrator_<app_id>` role;
@@ -147,9 +148,10 @@ future revision MAY add an optional `--admin-db` (CREATEDB) config and run the
 shadow when present.
 
 **Build-side (P6b, follow-on).** Generating `manifest.migrations[]` from a
-creator's `schema.ts` via `zeroship-migrate-js generate` is the vite-plugin's
-creator-DX job and is NOT part of P6; P6 verifies the deploy path with
-hand-authored migration bundles.
+creator's `schema.ts` was assigned to the vite-plugin's creator-DX path. The
+former JS authoring CLI that supplied `generate` has since been removed, so
+that generation path is currently unavailable and is NOT part of P6; P6
+verifies the deploy path with hand-authored migration bundles.
 
 The blob-store ingest path is current. The older raw bundle upload path is gone.
 

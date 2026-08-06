@@ -5,7 +5,7 @@
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
 #   1. Stand up a fresh ephemeral Postgres + apply deploy/ops/postgres-init.sql +
-#      the full zeroship-migrate platform set (0001→0036). A migration failure here is
+#      the full platform migration set (0001→0036). A migration failure here is
 #      a finding — the migration set must apply cleanly from scratch.
 #   2. Boot control + worker + gateway with `--dev-insecure` (current code
 #      requires WORKER_KEY/SIGNING_KEY otherwise — ISS-53).
@@ -92,8 +92,8 @@ echo "  zeroship E2E — app primitives over the edge (ISS-54/G1)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 ZSHIP="$ROOT/examples/db-todos/dist/app.zship"
 [ -f "$ZSHIP" ] || { echo "missing $ZSHIP — run: (cd examples/db-todos && pnpm install && pnpm build)"; exit 2; }
@@ -119,15 +119,15 @@ if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
     && pass "applied deploy/ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-    "$BIN/zeroship-migrate" migrate \
-    --dir "$ROOT/db/migrations-ts" \
-    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-    --profile platform --yes > "$MIG_LOG" 2>&1; then
-  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
+if "$BIN/zeroship-platform-migrate" \
+    --database-url "$DBURL" \
+    --migrations-dir "$ROOT/db/migrations-ts" \
+    --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-platform-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # sanity: control tables + apps.system column
@@ -139,7 +139,6 @@ psql_q() { docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1" 2>
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 2: boot stack (--dev-insecure) ==="
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 
 # stable ed25519 PKCS#8 signing key so we can offline-mint a PAT the
 # control PatIssuer (built via --signing-key-file) will verify.
