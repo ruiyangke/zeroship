@@ -13,7 +13,45 @@
 
 use std::process::{Command, Stdio};
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
 use crate::{flag_str, resolve_bearer_token};
+
+const KEY_RULE: &str = "KEY must be 1-64 bytes, start with an ASCII uppercase letter, and contain only ASCII uppercase letters, digits, or underscores";
+
+// Encode every ASCII delimiter plus `.` so each value remains exactly one path
+// segment, including values that resemble dot segments or existing escapes.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'!')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'.')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 pub fn cmd_secret(args: &[String]) {
     run("secrets", args);
@@ -70,9 +108,10 @@ fn cmd_set(resource: &str, args: &[String]) {
             std::process::exit(1);
         }
     };
+    require_valid_key(key);
     let (app, control_url, token) = common(resource, args);
 
-    let url = format!("{control_url}/api/apps/{app}/{resource}");
+    let url = resource_url(&control_url, &app, resource, None);
     let body = serde_json::json!({ "key": key, "value": value }).to_string();
 
     let (status, body_out) = curl_json("POST", &url, &token, Some(&body));
@@ -86,7 +125,7 @@ fn cmd_set(resource: &str, args: &[String]) {
 
 fn cmd_list(resource: &str, args: &[String]) {
     let (app, control_url, token) = common(resource, args);
-    let url = format!("{control_url}/api/apps/{app}/{resource}");
+    let url = resource_url(&control_url, &app, resource, None);
     let (status, body) = curl_json("GET", &url, &token, None);
     if (200..300).contains(&status) {
         println!("{}", body);
@@ -105,8 +144,9 @@ fn cmd_rm(resource: &str, args: &[String]) {
         );
         std::process::exit(1);
     }
+    require_valid_key(&key);
     let (app, control_url, token) = common(resource, args);
-    let url = format!("{control_url}/api/apps/{app}/{resource}/{key}");
+    let url = resource_url(&control_url, &app, resource, Some(&key));
     let (status, body) = curl_json("DELETE", &url, &token, None);
     match status {
         204 => eprintln!("{resource}: removed {key} from {app}"),
@@ -119,6 +159,39 @@ fn cmd_rm(resource: &str, args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+fn require_valid_key(key: &str) {
+    if !valid_key(key) {
+        eprintln!("error: invalid KEY {key:?}: {KEY_RULE}");
+        std::process::exit(1);
+    }
+}
+
+fn valid_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() <= 64
+        && bytes
+            .first()
+            .is_some_and(u8::is_ascii_uppercase)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+fn resource_url(control_url: &str, app: &str, resource: &str, key: Option<&str>) -> String {
+    let app = encode_path_segment(app);
+    let resource = encode_path_segment(resource);
+    let mut url = format!("{control_url}/api/apps/{app}/{resource}");
+    if let Some(key) = key {
+        url.push('/');
+        url.push_str(&encode_path_segment(key));
+    }
+    url
+}
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string()
 }
 
 /// Run curl with the given method + URL + optional JSON body, returning
@@ -165,5 +238,53 @@ fn curl_json(method: &str, url: &str, token: &str, body: Option<&str>) -> (u16, 
             (status_str.parse().unwrap_or(0), body_out)
         }
         Err(e) => (0, format!("curl spawn error: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_validation_matches_control_grammar() {
+        assert!(valid_key("A"));
+        assert!(valid_key("FOO_123"));
+        assert!(valid_key(&format!("A{}", "_".repeat(63))));
+
+        for invalid in [
+            "",
+            "1FOO",
+            "_FOO",
+            "Foo",
+            "FOO?x",
+            "FOO#x",
+            "FOO-BAR",
+            "É",
+        ] {
+            assert!(!valid_key(invalid), "accepted invalid key {invalid:?}");
+        }
+        assert!(!valid_key(&format!("A{}", "_".repeat(64))));
+    }
+
+    #[test]
+    fn url_builder_percent_encodes_each_user_supplied_path_segment() {
+        assert_eq!(
+            resource_url(
+                "https://control.example.test",
+                "app/other?x#y",
+                "secrets",
+                Some("FOO?x#y/%2F")
+            ),
+            "https://control.example.test/api/apps/app%2Fother%3Fx%23y/secrets/FOO%3Fx%23y%2F%252F"
+        );
+        assert_eq!(
+            resource_url(
+                "https://control.example.test",
+                "..",
+                "secrets",
+                Some("FOO")
+            ),
+            "https://control.example.test/api/apps/%2E%2E/secrets/FOO"
+        );
     }
 }
