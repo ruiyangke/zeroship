@@ -387,6 +387,23 @@ function validateResources(
     }
   }
 
+  // Credentialed CORS requests require an exact allowed origin.
+  for (const [key, node] of Object.entries(flat)) {
+    const cors = node.cors;
+    if (!cors || typeof cors !== "object" || Array.isArray(cors)) continue;
+    const config = cors as Record<string, unknown>;
+    if (
+      config.allow_credentials === true &&
+      Array.isArray(config.allow_origins) &&
+      config.allow_origins.includes("*")
+    ) {
+      errors.push(
+        `resource ${JSON.stringify(key)}: \`cors.allow_credentials: true\` is incompatible ` +
+          `with the \`"*"\` wildcard origin; list the exact origins instead`,
+      );
+    }
+  }
+
   // Secure-by-default.
   for (const [key, node] of Object.entries(flat)) {
     if (node.auth === "anon" && node.publicly_accessible !== true) {

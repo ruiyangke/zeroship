@@ -251,6 +251,79 @@ export default defineApp({
     }
   });
 
+  test("rejects wildcard CORS origins when credentials are allowed", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `import { defineApp } from "@zeroship/server";
+export default defineApp({
+  resources: {
+    "/api/*": {
+      cors: { allowOrigins: ["*"], allowCredentials: true },
+    },
+  },
+});
+`,
+    });
+    try {
+      await assert.rejects(
+        () =>
+          computeManifestExtras({
+            root: fix.root,
+            procedures: [],
+            mode: "production",
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(
+            error.message.includes(
+              'resource "/api/*": `cors.allow_credentials: true` is incompatible with the `"*"` wildcard origin; list the exact origins instead',
+            ),
+          );
+          return true;
+        },
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("accepts wildcard CORS without credentials and exact origins with credentials", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `import { defineApp } from "@zeroship/server";
+export default defineApp({
+  resources: {
+    "/public/*": {
+      cors: { allowOrigins: ["*"], allowCredentials: false },
+    },
+    "/account/*": {
+      cors: {
+        allowOrigins: ["https://app.example.com"],
+        allowCredentials: true,
+      },
+    },
+  },
+});
+`,
+    });
+    try {
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures: [],
+        mode: "production",
+      });
+
+      assert.deepEqual(result.resources["/public/*"].cors, {
+        allow_origins: ["*"],
+        allow_credentials: false,
+      });
+      assert.deepEqual(result.resources["/account/*"].cors, {
+        allow_origins: ["https://app.example.com"],
+        allow_credentials: true,
+      });
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   // ── Item #6: src/server/config.ts is the only canonical config path ──
   //
   // Pre-cleanup the emitter accepted four candidate paths
