@@ -436,12 +436,12 @@ async fn record_squash_rejected_on_sqlite_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// SEAM PIN — precondition VALIDATION + EVALUATION route THROUGH the backend.
+// SEAM PIN - precondition VALIDATION + EVALUATION route THROUGH the backend.
 // A migration with NO preconditions is trivially `AllMet` (the descriptor-author
-// common case); a migration that DECLARES one fails closed (precondition
-// evaluation is a later-phase SQLite capability) rather than running `pg_query` /
-// `information_schema`. This pins that the generic apply path asks the backend —
-// the PG `pg_query`/`&Client` precondition leaf is never reached on SQLite.
+// common case); a migration that DECLARES one fails closed (SQLite ships no
+// precondition evaluator) rather than running `pg_query` / `information_schema`.
+// This pins that the generic apply path asks the backend - the PG
+// `pg_query`/`&Client` precondition leaf is never reached on SQLite.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn evaluate_preconditions_through_sqlite_backend() {

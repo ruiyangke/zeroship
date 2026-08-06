@@ -189,10 +189,9 @@ pub use guard::{
     MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
 pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
-// The policy PDP seal primitives (Phase 2 Step 3 — the `PolicyProfile`-era seal
-// machinery `seal_effective_profile`/`SealedProfile`/`SealVerifier`/`SealedPosture`
-// is deleted; the surviving seal is the `zero-migrate-policy` HMAC over a composed
-// `EffectivePolicy`).
+// The policy PDP seal primitives: an HMAC over a composed `EffectivePolicy`, bound
+// to the registry digest, the scope-matcher semantics, and the charter revision, so
+// a seal minted under any of them fails to verify under another.
 pub use model::table_shape::{
     effective_policy_from_charter_layers, effective_policy_from_charter_toml,
     resolve_create_table_policy, ResolvedInject, TableShapeError,
