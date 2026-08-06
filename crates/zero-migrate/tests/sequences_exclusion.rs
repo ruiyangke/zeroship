@@ -774,3 +774,74 @@ fn exclusion_operator_is_closed_at_deserialize() {
         "unexpected serde error: {err}"
     );
 }
+
+/// An authored index name PostgreSQL would truncate is refused, not emitted.
+///
+/// PostgreSQL caps identifiers at 63 bytes and truncates longer ones with only a
+/// NOTICE. Two names differing after byte 63 therefore become the same index, and
+/// since the engine emits `CREATE INDEX IF NOT EXISTS` the second create is a silent
+/// no-op that reports success - the snapshot records two indexes while the catalog
+/// holds one, and every later diff re-issues the same no-op.
+#[test]
+fn an_over_long_index_name_is_refused() {
+    let long = format!("idx_{}_alpha", "a".repeat(60));
+    assert!(
+        long.len() > 63,
+        "fixture must exceed the cap: {}",
+        long.len()
+    );
+
+    let op = Op::CreateIndex {
+        table: "t".into(),
+        columns: vec![IndexElement::Column {
+            name: "c".into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }],
+        name: Some(long),
+        unique: None,
+        using: None,
+        r#where: None,
+        only: None,
+        schema: None,
+        concurrently: None,
+        include: vec![],
+        with: None,
+        nulls_not_distinct: None,
+        existence_guard: None,
+    };
+    let err = validate_ir(&ir(vec![op]), Dialect::Postgres, &[])
+        .expect_err("an index name past the identifier cap must be refused");
+    assert!(
+        err.reason.contains("truncates identifiers"),
+        "expected the truncation reason, got {:?}",
+        err.reason
+    );
+
+    // A name that fits is still accepted.
+    let ok = format!("idx_{}", "a".repeat(50));
+    assert!(ok.len() <= 63);
+    let op_ok = Op::CreateIndex {
+        table: "t".into(),
+        columns: vec![IndexElement::Column {
+            name: "c".into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }],
+        name: Some(ok),
+        unique: None,
+        using: None,
+        r#where: None,
+        only: None,
+        schema: None,
+        concurrently: None,
+        include: vec![],
+        with: None,
+        nulls_not_distinct: None,
+        existence_guard: None,
+    };
+    validate_ir(&ir(vec![op_ok]), Dialect::Postgres, &[])
+        .expect("an index name within the cap stays valid");
+}

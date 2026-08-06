@@ -141,6 +141,58 @@ pub fn validate_ir_scoped(
     validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
+    validate_authored_index_name_lengths(ir, target_dialect, ts_locations)?;
+    Ok(())
+}
+
+/// Refuse an authored index name the target would silently truncate.
+///
+/// PostgreSQL caps identifiers at 63 bytes and truncates anything longer with only a
+/// NOTICE, so two authored names differing after byte 63 become the same index. The
+/// engine emits `CREATE INDEX IF NOT EXISTS`, so the second one is then a no-op that
+/// reports success: the snapshot records two indexes, the catalog holds one, and every
+/// later diff re-issues the same no-op create. No error surfaces at any point.
+///
+/// Refusing beats capping. `cap_ident_name` exists and is collision-safe, but every
+/// call site is an ENGINE-derived name; silently renaming a name the author chose
+/// would trade a visible failure for an invisible one. This mirrors
+/// [`validate_column_reference_constraint_name`], which bounds the one other
+/// author-supplied identifier for exactly this reason.
+///
+/// MySQL needs no help: it refuses an over-long identifier itself with
+/// `ER_TOO_LONG_IDENT`.
+fn validate_authored_index_name_lengths(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    let max = crate::plan::author::PG_MAX_IDENT_BYTES;
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        let Op::CreateIndex {
+            name: Some(name), ..
+        } = op
+        else {
+            continue;
+        };
+        if name.len() <= max {
+            continue;
+        }
+        return Err(partition_error(
+            CODE_OP_INVALID,
+            op_index,
+            ts_locations,
+            target_dialect,
+            format!(
+                "index name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
+                 bytes, so it would silently collide with any other name sharing its first \
+                 {max} bytes",
+                name.len()
+            ),
+            format!("use an index name of at most {max} bytes"),
+        ));
+    }
     Ok(())
 }
 
