@@ -9,7 +9,37 @@ cancellation mid-dispatch, bundle cache coherence across redeploy,
 exactly-once emission of the five platform counters, and reachable panics.
 
 Findings carry a concrete failure scenario and the assertion a regression test
-would make. NOT yet independently verified - triage before acting.
+would make. Except where a triage note says otherwise, they are NOT independently
+verified - triage before acting.
+
+## Triage notes
+
+**Finding 1 (CRITICAL, cross-isolate V8 handle during eviction): MECHANISM
+CONFIRMED by reading the code.** Every link holds:
+
+- `crates/runtime/src/rpc/abort.rs:62-65` declares `REGISTRY` inside
+  `thread_local!`, so one map is shared by every isolate on the worker thread.
+- `abort.rs:68-71` keys it `RegistryKey { app_id, request_id }`. There is no
+  isolate identity in the key.
+- `crates/worker/src/cache.rs:456,479-484` (`load_pinned_workflow_app`,
+  `max_pinned_isolates_per_app`, `pinned_count_for_app`) confirm that several
+  isolates for the SAME app coexist on one thread, which `AGENTS.md` also states
+  as an invariant: one isolate per (app, live deploy) plus pinned workflow
+  isolates per app.
+- `cache.rs:695-697` evicts by calling `entry.runtime.with_scope(...)` into
+  `abort::entered_for_eviction(scope, oldest_id)`, and `abort.rs:146-160` selects
+  every entry matching `k.app_id == app_id`, then `abort.rs:172` opens each stored
+  `v8::Global<v8::Object>` with `v8::Local::new(scope, ...)` using the EVICTING
+  isolate's scope.
+
+So evicting one isolate of an app opens V8 globals owned by that app's OTHER
+isolates under the wrong isolate. That is a cross-isolate handle use, which is
+undefined behaviour in V8 rather than a recoverable error.
+
+Not yet reproduced by a test - the mechanism is confirmed, the reachability under
+real traffic is not. A reproducer needs an app with both a live and a pinned
+workflow isolate on one thread, an in-flight RPC registered in the live one, and
+eviction of the pinned one.
 
 ---
 
