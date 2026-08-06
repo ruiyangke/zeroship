@@ -563,8 +563,7 @@ pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 /// the replication-slot empty-LSN twin fixed alongside it). The helper
 /// names the predicate in one place so every empty-RETURNING site
 /// emits the same `DbError::Internal { message: "<op>: returned no
-/// row" }` shape — preserving the regression test contract in
-/// `audit.rs::tests::insert_backfill_running_empty_returning_is_internal_error`.
+/// row" }` shape for every empty-`RETURNING` site.
 ///
 /// Generic over the row type so test code can exercise the helper
 /// without constructing a `compio_postgres::Row` (whose constructors
