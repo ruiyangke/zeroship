@@ -39,7 +39,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
-| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
+| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-adapter/` · `crates/migrated/` · `third_party/zero-migrate/` (vendored engine) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
@@ -115,7 +115,9 @@ crates/
 ├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
-├── zeroship-migrate/ Migration engine. Multi-dialect apply: native compio-postgres fast path (PG) + in-process SQLite + live MySQL via the JsDriverBackend (real mysql2 npm driver over node:net in a Trusted V8 isolate, zero compio-mysql). Carries V8 (depends on zeroship-runtime) for the JS authoring front-end + the MySQL driver isolate.
+├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
+├── zeroship-migrate-adapter/ Bridges the vendored zero-migrate engine (third_party/zero-migrate submodule) to compio-postgres via a SqlSession newtype. Multi-dialect apply: native compio-postgres fast path (PG) + in-process SQLite + live MySQL (mysql2 over node:net in a Trusted V8 isolate).
+├── migrated/         Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. (Engine itself: third_party/zero-migrate.)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── plugin-db/        env.db.* native ops
@@ -283,8 +285,8 @@ zeroship-gate    --port 80   --control http://localhost:9090 --control-key <k> -
 # Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<PAT>, or ZEROSHIP_TOKEN)
 zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>
 
-# Docker Compose
-docker compose up -d --scale worker=10
+# Docker Compose (all deploy config lives under deploy/)
+docker compose -f deploy/compose/docker-compose.yml up -d --scale worker=10
 
 # Tests (per crate)
 cargo test -p zeroship-core
