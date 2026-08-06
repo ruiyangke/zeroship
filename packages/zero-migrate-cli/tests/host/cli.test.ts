@@ -142,6 +142,24 @@ test("CLI valueless flags reject supplied values", () => {
   }
 });
 
+test("CLI value-taking flags reject a following flag as their value", () => {
+  // A forgotten value used to be filled in by the next flag, so `new add_users
+  // --dir --json` wrote the migration to ./--json and exited 0.
+  for (const invocation of [
+    ["new", "add_users", "--dir", "--json"],
+    ["status", "--database-url", "--json"],
+    ["apply", "--dir", "--approve"],
+  ]) {
+    const result = runCli(...invocation);
+    assert.equal(result.status, 1, `${invocation.join(" ")} must fail`);
+    assert.match(result.stderr, /needs a value, but the next argument is the flag/);
+  }
+
+  // The inline form still passes a literal dash-leading value.
+  const inline = runCli("new", "add_users", "--dir=--json");
+  assert.doesNotMatch(inline.stderr, /needs a value/);
+});
+
 test("CLI resolve parses commit and rollback and enforces its guards", () => {
   const url = "postgres://127.0.0.1:1/never_connect";
 

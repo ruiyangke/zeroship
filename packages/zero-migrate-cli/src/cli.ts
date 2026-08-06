@@ -194,6 +194,16 @@ function parseArgs(argv: string[]): Args {
       if (inlineVal !== undefined) return inlineVal;
       const next = argv[++i];
       if (next === undefined) throw new CliError(`flag --${key} needs a value`);
+      // A following flag is a forgotten value, not the value. Consuming it silently
+      // is worse than failing: `new add_users --dir --json` would write the migration
+      // to ./--json and still exit 0. The inline form passes a literal dash-leading
+      // value when one is genuinely meant.
+      if (next.startsWith("--")) {
+        throw new CliError(
+          `flag --${key} needs a value, but the next argument is the flag ${next}; ` +
+            `write --${key}=${next} to pass it as a literal value`,
+        );
+      }
       return next;
     };
     const rejectInlineVal = (): void => {
