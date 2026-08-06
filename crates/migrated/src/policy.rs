@@ -66,13 +66,22 @@ pub struct ManagedPolicyConfig {
 }
 
 impl ManagedPolicyConfig {
-    pub fn new(mac_key: impl Into<Vec<u8>>, catalog: ProfileCatalog) -> Result<Self, ManagedPolicyError> {
+    pub fn new(
+        mac_key: impl Into<Vec<u8>>,
+        catalog: ProfileCatalog,
+    ) -> Result<Self, ManagedPolicyError> {
+        let mac_key = mac_key.into();
+        if mac_key.len() < 32 {
+            return Err(ManagedPolicyError::SealKeyTooShort {
+                actual: mac_key.len(),
+            });
+        }
         // Prove the default ceiling loads + composes at construction time (fail fast
         // on a malformed embedded/operator ceiling rather than per-request).
         catalog
             .default_ceiling()
             .effective_for_app_schema("__zeroship_policy_validation__")?;
-        Ok(Self { catalog, mac_key: mac_key.into() })
+        Ok(Self { catalog, mac_key })
     }
 
     pub fn default_confined(
@@ -563,6 +572,8 @@ pub struct SealedManagedPolicy {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedPolicyError {
+    #[error("migration policy seal key must be at least 32 bytes (got {actual})")]
+    SealKeyTooShort { actual: usize },
     #[error("invalid policy draft filename {filename:?}: expected {MIGRATE_POLICY_FILENAME}")]
     InvalidDraftFilename { filename: String },
     #[error("parse {filename}: {message}")]
@@ -585,7 +596,9 @@ impl ManagedPolicyError {
             | Self::MalformedDraft { .. }
             | Self::Compose(_) => true,
             // A malformed OPERATOR ceiling is an operator/infra fault, not the creator's.
-            Self::CeilingLoad(_) | Self::CeilingCompose(_) => false,
+            Self::SealKeyTooShort { .. } | Self::CeilingLoad(_) | Self::CeilingCompose(_) => {
+                false
+            }
         }
     }
 }
@@ -598,6 +611,21 @@ mod tests {
 
     fn config() -> ManagedPolicyConfig {
         ManagedPolicyConfig::default_confined(KEY, 42).expect("test policy config")
+    }
+
+    #[test]
+    fn managed_policy_config_requires_at_least_32_byte_mac_key() {
+        let catalog = ProfileCatalog::default_confined(1).expect("test profile catalog");
+
+        for key_len in [0, 1, 31] {
+            assert!(
+                ManagedPolicyConfig::new(vec![0; key_len], catalog.clone()).is_err(),
+                "{key_len}-byte MAC key must be rejected"
+            );
+        }
+
+        ManagedPolicyConfig::new(vec![0; 32], catalog)
+            .expect("32-byte MAC key must be accepted");
     }
 
     #[test]
