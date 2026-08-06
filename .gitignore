@@ -9,6 +9,7 @@ result
 target/
 refs/
 test-results/
+blob-cache/
 perf.data
 perf-compio.data
 .worktrees/

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "crates/authz", "crates/compio-s3"]
+members = ["crates/*"]
 resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
