@@ -200,7 +200,7 @@ pub async fn onboard(
 }
 
 // ----------------------------------------------------------------
-// Stream-1 infra-billing setup (billing PR6)
+// Infrastructure-billing setup
 // ----------------------------------------------------------------
 
 /// `POST /api/creators/:id/billing/setup` — ensure the creator has a platform
@@ -208,9 +208,9 @@ pub async fn onboard(
 /// URL so the dashboard can collect + save a PaymentMethod.
 ///
 /// Idempotent on the Customer: if a `cus_…` already exists for the creator
-/// (`creator_billing.stripe_customer_id`), reuse it — a second call does NOT
-/// create a second Customer. This is the Stream-1 (infra cost) identity, wholly
-/// distinct from the Stream-2 Connect `acct_…` `onboard` flow above.
+/// (`billing_customer_refs`), reuse it — a second call does NOT
+/// create a second Customer. This infrastructure-cost identity is wholly
+/// distinct from the Connect `acct_…` `onboard` flow above.
 pub async fn billing_setup(
     req: web::HttpRequest,
     path: Path<String>,
@@ -853,9 +853,9 @@ struct StripeObject {
     application_fee_amount: Option<i64>,
     #[serde(default)]
     currency: Option<String>,
-    /// The Stripe Customer (`cus_…`) the invoice belongs to. Stream-1's
-    /// infra-billing invoices carry this; we reverse-resolve it to a creator via
-    /// `creator_billing.stripe_customer_id` when no metadata.creator_id is set.
+    /// The Stripe Customer (`cus_…`) the invoice belongs to. Infrastructure
+    /// billing invoices carry this; we reverse-resolve it to a creator via
+    /// `billing_customer_refs` when no `metadata.creator_id` is set.
     #[serde(default)]
     customer: Option<String>,
     /// Invoice's own metadata (generally empty — Stripe doesn't copy
@@ -1010,9 +1010,9 @@ fn extract_creator_id(obj: &StripeObject) -> Option<String> {
 
 /// `true` iff the invoice carries the platform's POSITIVE infra marker
 /// (`metadata.invoice_kind == "infra"`, stamped by the billing reconciler's
-/// `create_invoice`). This is the recovery gate (critic #6): an `invoice.paid`
+/// `create_invoice`). This is the recovery gate: an `invoice.paid`
 /// without this marker is NOT a platform infra invoice — even if its Stripe
-/// Customer reverse-resolves to a `creator_billing.stripe_customer_id` (a Connect
+/// Customer reverse-resolves through `billing_customer_refs` (a Connect
 /// end-user invoice could collide) — so it must NOT un-suspend a creator. The
 /// marker is checked across the same wire locations as `creator_id` because
 /// Stripe surfaces invoice metadata directly and via subscription details.
@@ -1258,15 +1258,13 @@ async fn dispatch_event(
         //   * Stream-2 (Connect revenue): the payout-ledger record below (only
         //     when `metadata.creator_id` is present).
         "invoice.paid" => {
-            // RECOVERY GATE (critic #6): only a PLATFORM INFRA invoice may
+            // RECOVERY GATE: only a PLATFORM INFRA invoice may
             // un-suspend a creator. Gate on the POSITIVE `invoice_kind=infra`
             // marker the reconciler stamps — NOT on the mere absence of Connect
             // metadata. A Connect end-user `invoice.paid` whose Stripe Customer
-            // happens to collide with a platform `creator_billing.stripe_customer_id`
+            // happens to collide with an id in `billing_customer_refs`
             // lacks this marker, so it can never falsely recover a suspension.
-            // (`billing_runs` match is the defense-in-depth alternative, but the
-            // marker is the load-bearing signal and is present on every
-            // reconciler-created invoice.)
+            // The marker is present on every reconciler-created invoice.
             if is_infra_invoice(obj) {
                 if let Some(cid) = resolve_infra_creator(state, obj).await {
                     let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
@@ -1666,9 +1664,9 @@ async fn handle_invoice_payment_failed(
 }
 
 /// Resolve the creator owning an infra-billing invoice: prefer
-/// `metadata.creator_id` (stamped on PR6 invoices), else reverse-resolve the
-/// Customer (`cus_…`) via `creator_billing` (the case PR6 infra invoices hit,
-/// where Stripe surfaces `customer` but no creator metadata on the invoice).
+/// `metadata.creator_id`, else reverse-resolve the Customer (`cus_…`) via
+/// `billing_customer_refs` when Stripe surfaces `customer` but no creator
+/// metadata on the invoice.
 async fn resolve_infra_creator(state: &AppState, obj: &StripeObject) -> Option<Uuid> {
     if let Some(cid) = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok()) {
         return Some(cid);

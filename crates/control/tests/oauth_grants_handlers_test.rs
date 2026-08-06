@@ -297,9 +297,9 @@ async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: 
         .expect("insert oauth grant");
 }
 
-/// Seed an `auth.app_user_identities` row with a minted relay alias keyed on
-/// `(client_id, user_id)` — the row the gateway writes (Slice 4) + the alias
-/// consent mints (5b). The relay revocation cascade (5c §6) revokes THIS row.
+/// Seed a `zeroship.app_user_identities` row with a minted relay alias keyed on
+/// `(client_id, user_id)` — the row the gateway writes and the alias consent
+/// mints. The relay revocation cascade revokes THIS row.
 async fn insert_identity_with_alias(
     state: &AppState,
     client_id: &str,
@@ -650,10 +650,10 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     pat.cleanup(&fx.state).await;
 }
 
-/// Seed the `control.app_oauth_clients` extension row carrying the app's apex
+/// Seed the `zeroship.app_oauth_clients` extension row carrying the app's apex
 /// `sector_identifier` — what the disconnect-app cascade reads (Batch A fix 4)
 /// to derive the per-app `pws_` before writing the token-family marker.
-/// `app_oauth_clients.app_id` FKs `control.apps`, so we seed a minimal app row
+/// `app_oauth_clients.app_id` FKs `zeroship.apps`, so we seed a minimal app row
 /// first. Returns the seeded `app_id` so the caller can clean it up.
 async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
     let app_id = Uuid::new_v4();
@@ -838,7 +838,7 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     // Re-grant, modeled as auth's `accept_consent` does it: re-insert the grant
     // ledger row AND clear the alias's revoked_at. The structural revoke gate
     // (BLOCKER fix) requires BOTH — `mint_alias_at_consent` un-revokes the alias
-    // row, and the grant upsert restores the live `control.oauth_grants` row the
+    // row, and the grant upsert restores the live `zeroship.oauth_grants` row the
     // alias's `EXISTS` gate consults. (Un-revoking the alias alone, without the
     // grant, leaves it correctly inert — that is the structural fix's whole
     // point and is asserted by the §10 race test.)
@@ -890,7 +890,7 @@ async fn grant_and_alias_state(
 /// keep forwarding third-party mail to the real inbox after the user revoked.
 ///
 /// The structural fix makes `resolve_active_alias` ALSO require a live
-/// `control.oauth_grants` row, so a deleted grant silences the alias regardless
+/// `zeroship.oauth_grants` row, so a deleted grant silences the alias regardless
 /// of the `revoked_at` write ordering. This test drives BOTH commit orders and
 /// asserts the load-bearing invariant in each: **grant-absent ⇒ alias-inert**
 /// (the alias does NOT resolve), even when `revoked_at` was left NULL by the

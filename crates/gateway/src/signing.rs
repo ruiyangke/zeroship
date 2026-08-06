@@ -1,10 +1,8 @@
 //! Gateway-issued JWT signing key.
 //!
-//! Phase 8 U1 (this commit) ships the v1 loader: read a PKCS#8 PEM or
-//! DER file from disk at boot and return an Ed25519 [`SigningKey`].
-//! Future phases swap the on-disk file for a KMS/HSM-backed signer; the
-//! consumer side (wrapper-token issuance, JWK thumbprint as `kid`) stays
-//! the same.
+//! When configured, the gateway loads an Ed25519 [`SigningKey`] from a PKCS#8
+//! PEM or DER file at boot. The key signs gateway session tokens; its RFC 7638
+//! JWK thumbprint is their `kid`. KMS/HSM-backed signing is not implemented.
 //!
 //! Why Ed25519: smallest signatures (64 bytes), constant-time
 //! verification, no curve-choice footgun, and a compact JOSE representation

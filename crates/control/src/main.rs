@@ -389,8 +389,8 @@ struct ControlCli {
     /// Apex domain hosted creator apps serve under. An app named `myapp`
     /// serves at `myapp.{app_base_domain}`; the per-app OAuth client's
     /// redirect_uris + sector_identifier are derived from that apex host
-    /// (Slice 1d, §1.1). Defaults to the prod apex; dev/compose set
-    /// `zeroship.localhost`.
+    /// by the client-provisioning path. Defaults to the prod apex; dev/compose
+    /// set `zeroship.localhost`.
     #[arg(long = "app-base-domain", env = "APP_BASE_DOMAIN", default_value = "zeroship.ai")]
     app_base_domain: String,
 
@@ -1260,8 +1260,8 @@ fn main() -> std::io::Result<()> {
     // `console.zeroship.localhost` → the gateway (the console is a gateway-fronted
     // app); the separate Vite builder service is retired.
     // Seed the built-in plan tiers (free/pro/unlimited) UNCONDITIONALLY at boot
-    // — independent of `--bootstrap-console`. PR4 made `apps.plan_id` an FK into
-    // `zeroship.plans`, so `create_app`/`set_plan` (and the console seed) all
+    // — independent of `--bootstrap-console`. Because `apps.plan_id` is an FK
+    // into `zeroship.plans`, `create_app`/`set_plan` (and the console seed) all
     // require the built-in plans to exist. Idempotent (ON CONFLICT DO UPDATE on
     // the deterministic `pln_…` ids), so a re-boot is a no-op.
     bootstrap_console::seed_plans(&registry)
@@ -1597,7 +1597,7 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/plan")
                     .route(web::put().to(api::set_plan)),
             )
-            // --- Spend-limit override (PR5, M4): creator-facing cap ---
+            // --- Spend-limit override: creator-facing cap ---
             .service(
                 web::resource("/api/apps/{id}/spend-limit")
                     .route(web::get().to(api::get_spend_limit))
@@ -1629,7 +1629,7 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/billing/payment-method")
                     .route(web::get().to(api::get_payment_method)),
             )
-            // --- Plan catalog (PR4): operator-editable pricing catalog ---
+            // --- Plan catalog: operator-editable pricing catalog ---
             .service(
                 web::resource("/api/plans")
                     .route(web::get().to(api::list_plans)),
@@ -1734,7 +1734,7 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/creators/{id}/fee-policy")
                     .route(web::put().to(stripe_handlers::set_fee_policy)),
             )
-            // --- Stream-1 infra-billing setup (PR6): platform Customer + card ---
+            // --- Infrastructure-billing setup: platform Customer + card ---
             .service(
                 web::resource("/api/creators/{id}/billing/setup")
                     .route(web::post().to(stripe_handlers::billing_setup)),

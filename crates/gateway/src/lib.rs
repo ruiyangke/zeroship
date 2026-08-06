@@ -65,8 +65,8 @@ pub struct GateConfig {
     /// `Forwarded` / `X-Forwarded-For` / similar headers and use only
     /// the peer socket address. Set true only behind a trusted L7 proxy.
     pub trust_proxy: bool,
-    /// Public URL the gateway advertises as its own `iss` in
-    /// gateway-issued wrapper tokens (Phase 8 U3). In production this is
+    /// Public URL the gateway advertises as its own `iss` in gateway-issued
+    /// session tokens. In production this is
     /// `https://api.zeroship.ai`; in dev it can be left at the default.
     /// Verifiers pin `iss` to this string, so the value MUST be stable
     /// across gateway restarts.
@@ -134,10 +134,9 @@ pub struct GateState {
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
     /// Short-TTL read-through cache for the per-app family-marker revocation
-    /// read (BFF reshape R1d). The cookie / Bearer arms each
-    /// run one per-request `is_family_revoked_since` DB read after the local
-    /// token verify; this cache makes the steady-state (no-revocation) hit
-    /// fully DB-free. It stores the family's latest `revoked_after`
+    /// read. The cookie and Bearer arms consult it after local token
+    /// verification. A miss performs one `is_family_revoked_since` DB read;
+    /// fresh hits are DB-free. It stores the family's latest `revoked_after`
     /// (`Option<i64>` epoch seconds, `None` = no marker — negative caching is
     /// mandatory) and the hot path re-judges `> iat` LOCALLY per request, so
     /// one entry serves every cookie in the family. A cross-node revocation is
@@ -151,14 +150,14 @@ pub struct GateState {
     /// the flag — the signed session cookie cannot be issued/verified, so the
     /// cookie auth arm fails closed, but every other gateway path keeps working.
     pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// PREVIOUS session-cookie signing key (auth-sdk Slice 1b-browser,
-    /// rotation overlap §8.5). Loaded from `--prev-signing-key-file` /
+    /// Previous session-cookie signing key for rotation overlap. Loaded from
+    /// `--prev-signing-key-file` /
     /// `GATEWAY_PREV_SIGNING_KEY_FILE` when an operator is mid-roll. `Some`
     /// only during the overlap window; `None` in steady state. The Issuer
     /// NEVER signs with this — it is for `session_token::Verifier::with_previous`
     /// (so a session cookie minted just before the roll still verifies).
     pub prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// Signed-session-cookie issuer (BFF redesign slice R1b). Mints the
+    /// Signed-session-cookie issuer. Mints the
     /// gateway-signed `zeroship-sess+jwt` written into `__Host-zeroship_app_session`,
     /// stamping the `zeroship-sess+jwt` typ. `None` exactly when `signing_key` is
     /// `None` (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
@@ -171,19 +170,18 @@ pub struct GateState {
     /// `Verifier::with_previous` during a rotation overlap.
     pub session_verifier: Option<Arc<session_token::Verifier>>,
     /// AES-256-GCM key encrypting the server-held refresh family at rest in
-    /// `zeroship.app_session_anchors.refresh_token_enc` (auth-sdk Slice
-    /// 1b-anchors, §8.1/§8.5). A `[u8; 32]` (so `Send + Sync`, unlike the
+    /// `zeroship.app_session_anchors.refresh_token_enc`. A `[u8; 32]` (so
+    /// `Send + Sync`, unlike the
     /// `!Send` pool / single-flight), derived once at boot from a stable
     /// server secret via `zeroship_core::crypto::derive_key`. The refresh
     /// family never leaves the gateway in plaintext — neither to the
     /// browser nor at rest in PG.
     pub anchor_enc_key: [u8; 32],
     /// Platform-wide pairwise salt for the per-app `pws_…` subject
-    /// projection (auth-sdk §6.2, F4-B). The browser-held wrapper's `sub`
-    /// is `derive_pairwise(global_user_id, route.sector_identifier)` keyed
-    /// on THIS salt, so app JS decoding its own access token reads a
-    /// per-app pseudonym, never the global user UUID (G4). A `[u8; 32]`
-    /// (Send + Sync), derived once at boot from a stable server secret via
+    /// projection. The gateway uses this salt to derive the pairwise subject
+    /// before emitting the worker header or browser identity projection, so
+    /// neither receives the global user UUID. A `[u8; 32]` (`Send + Sync`),
+    /// derived once at boot from a stable server secret via
     /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
     /// subjects (a deliberate break-glass).
     pub pairwise_salt: [u8; 32],

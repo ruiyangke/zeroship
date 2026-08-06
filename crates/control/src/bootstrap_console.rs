@@ -84,8 +84,8 @@ pub fn console_app_name(host: &str) -> String {
 }
 
 // The console app's plan id is the built-in **unlimited** tier — see
-// [`console_plan_id`] below (PR4 replaced the free-text `"enterprise"` const
-// with the seeded `pln_<base62>` catalog id so the new FK is satisfied).
+// [`console_plan_id`] below. Its seeded `pln_<base62>` catalog id satisfies the
+// `apps.plan_id` foreign key.
 
 /// How a console runtime env var lands in the per-app env store.
 ///
@@ -248,7 +248,7 @@ pub fn console_app_id(host: &str) -> Uuid {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in plan tiers (billing PR4)
+// Built-in plan tiers
 // ---------------------------------------------------------------------------
 
 /// Deterministic `pln_<base62>` id for a built-in tier. Derived from a fixed,
@@ -282,9 +282,8 @@ pub fn unlimited_plan_id() -> String {
 }
 
 /// The console app's plan id — the built-in **unlimited** tier (no CPU/wall
-/// cap; the console runs heavy SSE/AI work). PR4 replaced the free-text
-/// `"enterprise"` const with this real `pln_<base62>` catalog id so the new
-/// `apps.plan_id → plans.id` FK is satisfied at bootstrap.
+/// cap; the console runs heavy SSE/AI work). This real `pln_<base62>` catalog
+/// id satisfies the `apps.plan_id → plans.id` FK at bootstrap.
 #[must_use]
 pub fn console_plan_id() -> String {
     unlimited_plan_id()

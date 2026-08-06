@@ -1,5 +1,4 @@
-//! Integration tests for the billing-reconcile cron + Stripe client (billing
-//! PR6, ISS-31, Stream-1).
+//! Integration tests for the billing-reconcile cron + Stripe client.
 //!
 //! FAITHFUL by construction: the tests drive the REAL `cyper`-based
 //! [`StripeClient`] against a localhost **mock-Stripe HTTP server** (a small

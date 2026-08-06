@@ -78,8 +78,8 @@ pub struct EffectivePolicy {
     pub max_input_bytes: Option<u32>,
     pub middleware: Vec<String>,
     pub publicly_accessible: bool,
-    /// OAuth scopes a request MUST carry to reach this resource (auth-sdk
-    /// Slice 3c, §5.3). Accumulated by union along the inheritance chain
+    /// OAuth scopes a request MUST carry to reach this resource. Accumulated
+    /// by union along the inheritance chain
     /// (root → child): a scoped parent's requirement is inherited and a
     /// child can only ADD, never weaken it. Empty ⇒ no scope gate. The
     /// auth gate (`resolve_auth`) checks the authenticated principal's
@@ -1259,7 +1259,7 @@ mod tests {
     #[test]
     fn effective_policy_required_scopes_compiles_from_manifest() {
         // A route declaring `required_scopes` compiles them onto the
-        // EffectivePolicy verbatim (auth-sdk Slice 3c, §5.3). This is the
+        // EffectivePolicy verbatim. This is the
         // value the gateway auth gate checks the principal's scopes against.
         let mut resources = HashMap::new();
         resources.insert(

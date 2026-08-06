@@ -8,8 +8,7 @@
 //! (`__Host-zeroship_app_session`) — the OP ID token never reaches the creator
 //! app or the browser.
 //!
-//! Wiring into the dispatch pipeline lives in U5 — the gateway's
-//! dispatch handler calls `OidcRp::build_authorize_redirect` on
+//! The gateway's dispatch handler calls `OidcRp::build_authorize_redirect` on
 //! unauthenticated HTML requests and `OidcRp::finish_callback` from
 //! the `/__zeroship/auth/callback` handler.
 
@@ -70,8 +69,8 @@ pub struct OidcRp {
     /// HMAC-SHA256 key used to sign the `__Host-zs_oidc_stash` cookie body.
     /// Must be at least 32 random bytes in prod.
     pub stash_signing_key: Vec<u8>,
-    /// Shared circuit breaker for ALL outbound OP token/revoke calls
-    /// (auth-sdk §8.7, round-6 MAJOR #3). `Arc`-shared so an OP brownout
+    /// Shared circuit breaker for ALL outbound OP token/revoke calls.
+    /// `Arc`-shared so an OP brownout
     /// observed on one ntex worker thread trips the breaker for every thread —
     /// the reused `cyper::Client` itself is per-worker-thread (`!Send` in
     /// practice; see [`crate::op_client`]), but the breaker state is
@@ -205,8 +204,8 @@ impl OidcRp {
     /// ID token, and returns `(claims, original_path, granted_scopes)` on
     /// success. `granted_scopes` is the token endpoint's `scope` response
     /// (the scopes the user actually consented to), persisted onto the cookie
-    /// session row so the per-request cookie path can emit `WorkerUser.scopes`
-    /// (Slice 3, §1.4).
+    /// session row and included in the signed cookie so the per-request cookie
+    /// path can emit `WorkerUser.scopes` without reading that row.
     ///
     /// # Errors
     /// - [`OidcRpError::StashInvalid`] — stash cookie absent, malformed,
@@ -312,7 +311,7 @@ impl OidcRp {
         .await?;
         let _ = code;
 
-        // Granted scopes — what the user actually consented to (Slice 3, §1.4).
+        // Granted scopes — what the user actually consented to.
         // Persisted onto the cookie session so the per-request path emits
         // WorkerUser.scopes with no token to decode in the browser.
         //
@@ -348,8 +347,8 @@ impl OidcRp {
         Ok((claims, stash.original_path, granted_scopes))
     }
 
-    /// Exchange an authorization code for tokens as a brokered PKCE client
-    /// (auth-sdk Slice 1b, `POST /__zeroship/auth/token`). Unlike
+    /// Exchange an authorization code for tokens as a brokered PKCE client for
+    /// `POST /__zeroship/auth/session`. Unlike
     /// [`OidcRp::finish_callback`] (the interactive cookie flow), the browser
     /// SDK holds the PKCE verifier, but the gateway still authenticates the
     /// per-app `oac_` client by deriving its broker secret. The browser never
@@ -381,8 +380,8 @@ impl OidcRp {
         self.post_token(body).await
     }
 
-    /// Rotate a refresh family as a brokered PKCE client (the server-held
-    /// `?mint=1` refresh, auth-sdk Slice 1b-anchors). Posts
+    /// Rotate a refresh family as a brokered PKCE client for the server-held
+    /// `?mint=1` refresh. Posts
     /// `grant_type=refresh_token` with the per-app `client_id` and derived
     /// broker secret injected.
     /// Returns the rotated token set (new `access_token` + new
@@ -408,8 +407,8 @@ impl OidcRp {
         self.post_token(body).await
     }
 
-    /// Build the OP `/authorize` URL for the browser PKCE flow
-    /// (auth-sdk Slice 1b-browser, `GET /__zeroship/auth/authorize`, spec §1.2).
+    /// Build the OP `/authorize` URL for the browser PKCE flow served by
+    /// `GET /__zeroship/auth/authorize`.
     ///
     /// Unlike [`OidcRp::build_authorize_redirect`] (the interactive cookie
     /// flow, which generates the PKCE verifier/state/nonce server-side and
@@ -438,7 +437,7 @@ impl OidcRp {
         q.append_pair("code_challenge", p.code_challenge);
         q.append_pair("code_challenge_method", "S256");
         // `prompt` is optional — omitted in the common case so OP's
-        // SSO/`remember` skip path fires (spec §1.2 round-2). Passthrough
+        // SSO/`remember` skip path fires. Passthrough
         // when the browser explicitly asks for `login`/`consent` step-up.
         if let Some(prompt) = p.prompt {
             if !prompt.is_empty() {
@@ -461,8 +460,8 @@ impl OidcRp {
     }
 
     /// Best-effort revoke a token (refresh family) at the OP's RFC 7009
-    /// `/revoke` endpoint as a brokered client (auth-sdk Slice 1b-browser,
-    /// `POST /__zeroship/auth/signout`, spec §1.2). The per-app `client_id`
+    /// `/revoke` endpoint as a brokered client during
+    /// `POST /__zeroship/auth/signout`. The per-app `client_id`
     /// and derived broker secret are sent so the OP scopes the revoke to this
     /// client's family. `token_type_hint=refresh_token`
     /// because signout revokes the server-held refresh family.
@@ -545,8 +544,8 @@ impl OidcRp {
 
     /// Verify a **raw OP access JWT** (RFC 9068) locally against the
     /// gateway's JWKS cache — no remote validation round-trip. Used by the
-    /// Bearer arm's raw-OP path (§1.3, slice 1c) for non-browser
-    /// clients that hold a OP access token directly (CLI,
+    /// Bearer arm's raw-OP path for non-browser
+    /// clients that hold an OP access token directly (CLI,
     /// server-to-server). The browser never takes this path — it holds a
     /// gateway-signed session cookie, verified by `session_token::Verifier`.
     ///
@@ -591,9 +590,8 @@ fn op_base_url(auth_ui_url: &str) -> String {
 /// resource-server audience uniformly.
 #[derive(Debug, Clone)]
 pub struct AccessClaims {
-    /// Subject — the **global** OP UUID (`usr_…`). On the raw-OP
-    /// Bearer path Slice 4 projects this to a per-app `pws_`; Slice 1c
-    /// uses it directly (no pairwise derivation yet).
+    /// Subject. The raw-OP Bearer path treats this as the global OP user UUID
+    /// and projects it to a per-app `pws_` before building the worker header.
     pub sub: String,
     /// The OAuth `client_id` claim (RFC 9068 §3 mandates it; OP emits it).
     /// The Bearer arm's per-app authorized-party binding.
@@ -645,7 +643,7 @@ struct RawAccessClaims {
     amr: Option<Vec<String>>,
 }
 
-/// Resolve the cookie-arm `granted_scopes` (Slice 3, §1.4) from the two
+/// Resolve the cookie-arm `granted_scopes` from the two
 /// authoritative sources, in precedence order:
 ///
 /// 1. `token_response_scope` — the OAuth token-endpoint `scope` field. Per
@@ -850,7 +848,7 @@ struct TokenResponse {
 }
 
 /// Public token set returned by [`OidcRp::exchange_code_public`] /
-/// [`OidcRp::refresh_token_public`] (auth-sdk Slice 1b). `id_token` is
+/// [`OidcRp::refresh_token_public`]. `id_token` is
 /// `Option` because a `refresh_token` grant does not always re-issue one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenSet {
@@ -865,8 +863,8 @@ pub struct TokenSet {
     pub expires_in: Option<i64>,
 }
 
-/// Browser-supplied parameters for [`OidcRp::build_browser_authorize_url`]
-/// (auth-sdk Slice 1b-browser). Every value originates in the SDK and is
+/// Browser-supplied parameters for [`OidcRp::build_browser_authorize_url`].
+/// Every value originates in the SDK and is
 /// passed through to OP verbatim — the gateway holds no PKCE verifier
 /// (the browser does). `prompt` is optional (omitted ⇒ OP SSO skip).
 #[derive(Debug, Clone)]
@@ -886,7 +884,7 @@ pub struct BrowserAuthorizeParams<'a> {
     pub prompt: Option<&'a str>,
     /// Optional provider hint (`google`/`github`/`password`) passed through to
     /// OP as `idp_hint` so the login UI can pre-select / route to the named
-    /// upstream IdP (auth-sdk Slice 1b-browser, Phase-1 `SignInOptions.provider`).
+    /// upstream IdP selected by `SignInOptions.provider`.
     /// Omitted ⇒ OP/login-UI shows the default provider picker.
     pub idp_hint: Option<&'a str>,
 }
@@ -1095,11 +1093,11 @@ pub struct WorkerUser<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<&'a str>,
     pub email_verified: bool,
-    /// OAuth scopes granted to THIS app for this user (auth-sdk Slice 3,
-    /// spec §1.4). A PERMANENT kernel-contract field on the `ZeroShip-User`
+    /// OAuth scopes granted to THIS app for this user. A PERMANENT
+    /// kernel-contract field on the `ZeroShip-User`
     /// projection: app code reads it via `env.auth.getUser().scopes`. Sourced
-    /// from the token `scope` claim (Bearer wrapper + raw-OP arms) or the
-    /// session/anchor `granted_scopes` (cookie/anchor arms). Always present
+    /// from the raw-OP token's `scope` claim or signed session/anchor
+    /// `granted_scopes`. Always present
     /// (empty when the token/session carries no scopes), so the worker JSON
     /// shape is stable across every auth arm.
     #[serde(default)]
@@ -1180,7 +1178,7 @@ mod tests {
 
     #[test]
     fn browser_authorize_url_carries_browser_pkce_and_no_stash() {
-        // The browser flow (Slice 1b-browser): the gateway is HANDED the
+        // In the browser flow, the gateway is HANDED the
         // already-computed code_challenge + browser-chosen state/nonce, and
         // injects the per-app PUBLIC client_id. No stash cookie is minted
         // (the verifier lives in the browser). Assert every passthrough
@@ -1481,7 +1479,7 @@ mod tests {
         assert_eq!(parse_stash_cookie(header, true), None);
     }
 
-    // ----- Slice 3 §1.4: cookie-arm granted-scope resolution -----------------
+    // ----- Cookie-arm granted-scope resolution --------------------------------
 
     #[test]
     fn granted_scopes_prefers_token_response_scope() {

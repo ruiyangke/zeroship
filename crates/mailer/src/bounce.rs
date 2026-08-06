@@ -11,7 +11,7 @@
 //! act on; everything else falls into the [`PostmarkEvent::Other`] arm via
 //! `#[serde(other)]`.
 //!
-//! SES-SNS support is deferred to Phase 6.
+//! SES-SNS payload types and signature verification live in [`crate::sns`].
 
 use serde::Deserialize;
 

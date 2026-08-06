@@ -2,15 +2,17 @@
 //! `zeroship.gateway_sessions` per authenticated browser session per hosted app.
 //!
 //! Lifecycle:
-//!   - `create(...)` after successful OIDC callback exchange
-//!   - `validate(...)` on every authenticated request; slides `idle_expires_at` forward
-//!   - `revoke(...)` on /sign-out
+//!   - `create(...)` after a successful OIDC exchange or anchor refresh
+//!   - `validate(...)` for an explicit database-row check; successful checks
+//!     slide `idle_expires_at` forward (request authentication does not use it)
+//!   - the revoke helpers on signout and back-channel logout
 //!
-//! Hard limits per proposal §9.2:
+//! Stored-row lifetime limits:
 //!   - 30 min sliding idle
 //!   - 12 h absolute
 //!
-//! Wiring through `GateState` lives in P3-U5; this module is a leaf.
+//! This module is a leaf; request handlers own orchestration and pass database
+//! clients into these helpers.
 
 use compio_postgres::Client;
 use uuid::Uuid;
@@ -33,19 +35,17 @@ pub struct AppSession {
     pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub email_verified: bool,
-    /// OAuth scopes granted to this app for this user at consent (Slice 3,
-    /// §1.4). Read off the same row the cookie path already loads, so the
-    /// per-request `ZeroShip-User.scopes` needs no `zeroship.oauth_grants` join.
+    /// OAuth scopes granted to this app for this user at consent. Persisted in
+    /// the audit row and returned at creation so the signed cookie can carry
+    /// them; per-request auth needs neither this row nor an OAuth-grants join.
     pub granted_scopes: Vec<String>,
-    /// The OIDC `auth_time` claim (the authenticating-event instant) carried
-    /// onto the cookie session at create (BFF redesign §2.2 step 5b). Surfaced
-    /// to the SPA via the `{ user }` projection (`/session`) and used by the
-    /// step-up freshness gate (§5.3). `None` when the id_token omitted it.
+    /// The OIDC `auth_time` claim (the authenticating-event instant). Stored in
+    /// the audit row, copied into the signed session cookie after creation, and
+    /// preserved across anchor refresh. `None` when the ID token omitted it.
     pub auth_time: Option<chrono::DateTime<chrono::Utc>>,
-    /// The OIDC `amr` claim (authentication methods, e.g. `["pwd"]`) carried
-    /// onto the cookie session at create (BFF redesign §2.2 step 5b). Surfaced
-    /// to the SPA via the projection; the `amr ∋ "mfa"` step-up tightening is a
-    /// later MFA-enablement slice (§5.3).
+    /// The OIDC `amr` claim (authentication methods, e.g. `["pwd"]`). Stored in
+    /// the audit row, copied into the signed session cookie after creation, and
+    /// preserved across anchor refresh.
     pub amr: Vec<String>,
     pub idle_expires_at: chrono::DateTime<chrono::Utc>,
     pub abs_expires_at: chrono::DateTime<chrono::Utc>,
@@ -196,10 +196,10 @@ pub async fn validate(conn: &mut Client, id: Uuid, app_id: Uuid) -> Result<Optio
 //     back-channel-logout handler's no-per-app-match branch is a logged no-op
 //     rather than a cross-tenant nuke. See `backchannel_logout.rs`.
 
-/// Revoke every live session for `user_id` **at one app** (`app_id`, the app
-/// subdomain). Returns the count of rows updated.
+/// Revoke every live session for `user_id` **at one app**, identified by its
+/// stable `app_id`. Returns the count of rows updated.
 ///
-/// Per-app back-channel logout (auth-sdk Slice 1d, spec §1.2): each per-app
+/// For per-app back-channel logout, each per-app
 /// OAuth client registers its own `backchannel_logout_uri` with its own `aud`
 /// (= the per-app `client_id`). The BCL handler resolves the `app_id` from that
 /// `aud` and revokes only **that app's** sessions for the subject — not every

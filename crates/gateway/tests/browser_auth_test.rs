@@ -1,5 +1,5 @@
-//! Faithful integration tests for the auth-sdk Slice 1b-browser HTTP
-//! surface (`GET /__zeroship/auth/authorize`, `GET /__zeroship/auth/popup-callback`,
+//! Integration tests for the browser-auth HTTP surface
+//! (`GET /__zeroship/auth/authorize`, `GET /__zeroship/auth/popup-callback`,
 //! `POST /__zeroship/auth/signout`).
 //!
 //! These drive the REAL ntex handlers through `ntex::web::test`. The

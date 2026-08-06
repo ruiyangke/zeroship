@@ -1,4 +1,4 @@
-//! Spend engine (billing PR5, ISS-31) — derive + persist each app's
+//! Spend engine — derive + persist each app's
 //! [`SpendState`] from period spend vs its effective spend limit, with
 //! hysteresis so an app near its cap does not flap.
 //!
@@ -11,12 +11,12 @@
 //!   genuine limit change (creator raises the cap / plan change) bypasses the
 //!   deadband for that one tick so the app recovers immediately.
 //! * [`SpendEngine`] — PG-backed. `evaluate_all` prices each app's current
-//!   period usage via the PR4 catalog, resolves the effective limit, derives
+//!   period usage via the plan catalog, resolves the effective limit, derives
 //!   the new state vs the stored previous state, and on a transition UPSERTs
 //!   `app_spend_state` + appends a `spend_state_history` row. `set_limit`
-//!   upserts the per-app override (the M4 creator endpoint).
+//!   upserts the per-app override through the creator endpoint.
 //!
-//! Decision D1: enforcement rides the PULLed `RouteEntry.spend_state`
+//! Enforcement rides the PULLed `RouteEntry.spend_state`
 //! (registry JOINs `app_spend_state`), NOT a pushed `ControlEvent`. The cron
 //! constructs `ControlEvent::SpendState` only for the audit log / future SSE.
 
@@ -164,7 +164,7 @@ pub fn derive_state(
 }
 
 /// PG-backed spend engine. Shares the control plane's per-query connection
-/// model via [`Registry`]; prices usage with the PR4 catalog.
+/// model via [`Registry`]; prices usage with the plan catalog.
 #[derive(Clone, Debug)]
 pub struct SpendEngine {
     registry: Registry,

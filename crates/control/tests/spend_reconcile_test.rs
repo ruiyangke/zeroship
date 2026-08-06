@@ -1,4 +1,4 @@
-//! Integration tests for the spend-reconcile cron (billing PR5, ISS-31).
+//! Integration tests for the spend-reconcile cron.
 //!
 //! Runs the REAL `cron::spend_reconcile::tick` against a live Postgres: it takes
 //! the advisory lock (#2), runs `SpendEngine::evaluate_all`, and on a transition

@@ -1050,7 +1050,7 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
         Some(&1234),
         "usage_at_change captured the SERVER-SIDE cumulative total (not client-supplied)"
     );
-    // round 4 CRITICAL-1: the row freezes NO base fee — segment pricing reads the
+    // The row freezes NO base fee — segment pricing reads the
     // live catalog at reconcile time. The audit trail is the plan ids; the base fees
     // are recoverable from the catalog by those ids.
     assert_eq!(from_plan.as_deref(), Some(free.as_str()), "from_plan_id = Free (audit trail)");

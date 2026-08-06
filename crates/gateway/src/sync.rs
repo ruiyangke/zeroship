@@ -53,7 +53,7 @@ impl RouteCache {
 
     /// Replace the route table, recompiling each manifest.
     ///
-    /// Spend enforcement (PR5): each `CompiledRoute` carries the pulled
+    /// Each `CompiledRoute` carries the pulled spend state for enforcement:
     /// `entry.spend_state`. For every app whose Degrade flag flips between the
     /// previous and the new table, this calls `set_degraded`/`clear_degraded`
     /// on the rate + concurrency registries so a Degraded app is throttled
@@ -125,7 +125,7 @@ impl RouteCache {
 
     /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base62>`).
     ///
-    /// Per-app back-channel logout (auth-sdk Slice 1d, spec §1.2): the inbound
+    /// For per-app back-channel logout, the inbound
     /// `logout_token.aud` carries the per-app `client_id`; the BCL handler uses
     /// this to find which app the token belongs to (and thus its subdomain
     /// `name`) so it revokes only that app's sessions. Returns `None` when no
@@ -309,8 +309,8 @@ mod tests {
 
     #[test]
     fn required_scopes_plumb_from_manifest_json_through_to_compiled_route() {
-        // Faithful end-to-end of the wire path control `get_routes` uses
-        // (auth-sdk Slice 3c, §5.3): the per-route `required_scopes` ride
+        // Faithful end-to-end of the wire path control `get_routes` uses: the
+        // per-route `required_scopes` ride
         // INSIDE the app manifest (`ResourceEntry.required_scopes`), which
         // is exactly the `manifest_json` column control serialises and the
         // gateway parses. We serialise a manifest carrying a scoped resource
@@ -335,7 +335,7 @@ mod tests {
             version: 1,
             resources,
             // The route's `required_scopes` must reference a DECLARED scope
-            // (Slice 3c validate-time check) — declare it so the fixture is a
+            // at validation time; declare it so the fixture is a
             // genuinely valid manifest, exactly what control would deploy.
             auth: AuthConfig {
                 scopes: vec![ScopeDef {
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn lookup_by_oauth_client_id_resolves_provisioned_app_and_skips_unprovisioned() {
-        // Per-app BCL disambiguation (Slice 1d §1.2): the BCL handler resolves
+        // For per-app BCL disambiguation, the handler resolves
         // the app from the `logout_token.aud` (= per-app client_id). A
         // provisioned client resolves to its app's route (and subdomain name);
         // an un-provisioned app (oauth_client_id == None) never matches; an

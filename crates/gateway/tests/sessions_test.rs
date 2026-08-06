@@ -31,9 +31,8 @@ async fn create_validate_revoke_roundtrip() {
     })
     .detach();
 
-    // Defensive: U4.1 will have created the table earlier in any sane
-    // boot sequence, but running this test on a fresh DB should still
-    // work standalone.
+    // Migrations normally create the table before the gateway starts, but this
+    // test should still work standalone against a freshly migrated database.
 
     // Random ids — keeps the test repeatable on a shared DB. `app_id` is the
     // app's stable UUID (the column is UUID, bound natively).

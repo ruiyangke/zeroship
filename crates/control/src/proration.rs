@@ -1,5 +1,4 @@
-//! Full usage-segment proration (billing-ops gap #26, PR-4; design decision 1
-//! OVERRIDE). Two halves:
+//! Full usage-segment proration. Two halves:
 //!
 //! 1. **The write side** ([`record_plan_change`]) — invoked by `api.rs::set_plan`.
 //!    On every plan change it appends an append-only `plan_change_events` row that
@@ -8,22 +7,22 @@
 //!    marker, server-derived, never client-supplied. (It does NOT freeze the plan
 //!    base fee: segment pricing reads the live catalog at reconcile time exactly
 //!    like the base-usage path, and reproducibility comes from the `invoice_lines`
-//!    snapshot at finalize — round 4 CRITICAL-1.) Per-period change cap
+//!    snapshot at finalize). Per-period change cap
 //!    ([`MAX_PLAN_CHANGES_PER_PERIOD`]); past the cap
 //!    the plan still flips (the creator IS on the new plan) but NO snapshot is
-//!    recorded, so the tail prices under the actually-running plan (MAJOR-4). The
+//!    recorded, so the tail prices under the actually-running plan. The
 //!    whole write takes the per-creator advisory lock so it cannot interleave with
-//!    a month-end reconcile (MISSING-4), and a change whose effective period is
+//!    a month-end reconcile, and a change whose effective period is
 //!    already finalized is attributed to the NEXT period.
 //!
 //! 2. **The read/price side** ([`build_segments`]) — invoked by `bill_creator`.
 //!    An app with N change events in the period splits into N+1 segments (ordered
 //!    by `effective_at`). Each segment's usage is the cumulative DELTA between
-//!    consecutive snapshots, floored at `max(0, …)` (MAJOR-3). Day-spans are a
+//!    consecutive snapshots, floored at `max(0, …)`. Day-spans are a
 //!    half-open calendar-day partition that telescopes to `days_in_period`
-//!    exactly (CRITICAL-2). Base fee + included_units are day-weighted; the
+//!    exactly. Base fee + included_units are day-weighted; the
 //!    base-fee remainder cent lands on the last segment. Zero-day segments merge
-//!    into a neighbour (MINOR-6). N=0 degenerates to exactly one `segment_no=0`
+//!    into a neighbour. N=0 degenerates to exactly one `segment_no=0`
 //!    segment — byte-for-byte today's single-line behaviour.
 //!
 //! Zero tokio: all DB work is `compio-postgres` on the caller's connection/txn.
@@ -41,7 +40,7 @@ use crate::registry::{Registry, RegistryError};
 /// `set_plan` still flips `apps.plan_id` but records NO new `plan_change_events`
 /// snapshot — so a creator cannot manufacture an unbounded number of favourable
 /// micro-segments, and the over-cap tail merges into the final segment priced
-/// under the actually-running plan (MAJOR-4: never under a cheaper recorded plan).
+/// under the actually-running plan, never under a cheaper recorded plan.
 pub const MAX_PLAN_CHANGES_PER_PERIOD: i64 = 8;
 
 /// Outcome of [`record_plan_change`], surfaced for tests + observability.
@@ -71,7 +70,7 @@ pub fn period_date_of(unix_secs: i64) -> chrono::NaiveDate {
 
 /// The first-of-NEXT-month DATE after the month containing `period`. Used to
 /// attribute a change whose effective period is already finalized to the next
-/// period (MISSING-4).
+/// period.
 #[must_use]
 pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
     let (y, m) = if period.month() == 12 {
@@ -87,9 +86,9 @@ pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
 /// together). Takes the per-creator advisory lock FIRST so it serializes against
 /// a month-end reconcile for the same creator.
 ///
-/// `now_unix` is the effective instant. NOTE (round 4, CRITICAL-1): the row does
-/// NOT freeze either plan's base fee — segment pricing reads the live catalog at
-/// reconcile time (like the base-usage path) and is frozen into `invoice_lines`
+/// `now_unix` is the effective instant. The row does NOT freeze either plan's
+/// base fee — segment pricing reads the live catalog at reconcile time (like the
+/// base-usage path) and is frozen into `invoice_lines`
 /// at finalize. The plan-change audit trail is `from_plan_id`/`to_plan_id` +
 /// `effective_at`; the base fees are recoverable from the catalog by those ids.
 ///

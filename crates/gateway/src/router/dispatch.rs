@@ -966,8 +966,7 @@ pub async fn handle_subdomain(
 
     // OIDC callback for hosted creator apps. Intercepted *before*
     // manifest dispatch so the path can never collide with a route
-    // the creator wrote (the `/__zeroship/` prefix is reserved). See
-    // U5.3 / proposal §10.2.
+    // the creator wrote; the `/__zeroship/` prefix is reserved.
     if req.uri().path() == "/__zeroship/auth/callback" {
         return handle_auth_callback(req, state).await;
     }
@@ -1282,7 +1281,7 @@ async fn execute_resource_tree(
         return resp;
     }
 
-    // 1b. Spend gate (PR5, decision D1): hoisted to the TOP — BEFORE the action
+    // 1b. Spend gate: hoisted to the TOP — BEFORE the action
     //     match — so `Block` 402s every action class uniformly (worker forward,
     //     redirect, rewrite, AND static), not just the worker path. A Blocked
     //     app must not serve static assets / redirects either: that egress is
@@ -1980,7 +1979,7 @@ async fn handle_subscription_dispatch(
     _tail: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    // Spend gate (PR5): the `Block` 402 is enforced by `execute_resource_tree`
+    // The `Block` 402 is enforced by `execute_resource_tree`
     // (hoisted to the top, before the action match), so a Blocked subscription
     // never reaches this stub. Degrade is throttled by the degraded registries
     // below; Warn passes (no body header on the 501 stub path).
@@ -2108,7 +2107,7 @@ async fn handle_dispatch(
     user_header_value: Option<String>,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    // Spend gate (PR5, decision D1): the `Block` 402 is enforced by
+    // The `Block` 402 is enforced by
     // `execute_resource_tree` (hoisted to the top, before the action match) so
     // it covers worker forward / redirect / rewrite / static uniformly — a
     // Blocked app never reaches this worker-forwarding path. Here we only read
@@ -2252,7 +2251,7 @@ fn unauthenticated_response(
 
 /// `503 client_not_provisioned` — a request resolved a real authenticated
 /// user, but the route has no `sector_identifier` yet, so the gateway
-/// CANNOT derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2).
+/// CANNOT derive the per-app pairwise `pws_…`.
 /// We fail CLOSED — never project the global UUID into `ZeroShip-User.id`
 /// — and answer 503 with the same retryable `client_not_provisioned`
 /// shape the browser-token endpoints use (`auth_token.rs`). Once control
@@ -2268,7 +2267,7 @@ fn client_not_provisioned_response() -> HttpResponse {
 }
 
 /// `403 scope_required` — the request authenticated, but the matched
-/// route's `required_scopes` (auth-sdk Slice 3c, §5.3) are not a subset of
+/// route's `required_scopes` are not a subset of
 /// the principal's granted scopes.
 ///
 /// Two distinct contracts ride this response, and they use DIFFERENT tokens
@@ -2280,7 +2279,7 @@ fn client_not_provisioned_response() -> HttpResponse {
 ///   the value HTTP-aware clients / proxies read.
 /// * **JSON body** — the SDK contract. `sdks/auth` `mapError()` reads
 ///   `body.error` and maps it onto an `AuthErrorCode`; the registered code is
-///   `scope_required` (spec §5.3 / §error-table), and there is NO
+///   `scope_required`, and there is NO
 ///   `insufficient_scope` code. We therefore emit `{"error":"scope_required",
 ///   "scope":"<space-joined required>"}` so the SDK surfaces the typed error
 ///   (and the `scope` string tells the client exactly which scopes to request).
@@ -4447,8 +4446,8 @@ mod tests {
         assert!(wa.contains("Bearer"), "got www-authenticate = {wa:?}");
     }
 
-    /// `insufficient_scope_response` is the dispatch 403 shape (auth-sdk
-    /// Slice 3c, §5.3 / RFC 6750 §3.1). This pins BOTH wire contracts that
+    /// `insufficient_scope_response` uses RFC 6750 §3.1 for its challenge
+    /// header and an SDK-specific JSON body. This pins BOTH wire contracts that
     /// ride it, which use deliberately different error tokens:
     ///
     /// * `WWW-Authenticate` header → RFC 6750's registered `insufficient_scope`
@@ -4457,8 +4456,9 @@ mod tests {
     ///   (the `AuthErrorCode` the SDK `mapError()` recognizes; there is no
     ///   `insufficient_scope` code SDK-side).
     ///
-    /// Without this test the body-shape divergence from spec slipped through
-    /// (only transitively covered by the `resolve_auth` enum-level tests).
+    /// Without this test the distinct header and body shapes could diverge
+    /// unnoticed (they are only transitively covered by the `resolve_auth`
+    /// enum-level tests).
     #[compio::test]
     async fn insufficient_scope_response_403_shape() {
         let required = vec!["read:billing".to_string(), "write:projects".to_string()];
@@ -4597,7 +4597,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR5 — faithful spend-enforcement at the gateway edge.
+    // Spend enforcement at the gateway edge.
     //
     // These drive the REAL path: a `RouteEntry` (carrying the pulled
     // `spend_state`) is pushed through the REAL `RouteCache::update` (which

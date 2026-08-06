@@ -1,14 +1,13 @@
-//! Invoice payments — the append-only cash-collected side facts (billing-ops gap
-//! #26, PR-1; design round 2 CRITICAL-A).
+//! Invoice payments — the append-only cash-collected side facts.
 //!
 //! Cash-collected for a finalized invoice is `Σ(invoice_payments.amount_cents)`,
 //! NEVER a column on the frozen invoice — writing such a column is mechanically
 //! impossible against `invoices_immutable()` (which RAISEs on every
 //! finalized→finalized UPDATE). A payment is therefore an APPEND-ONLY SIDE FACT
-//! against the invoice: this module owns the two operations PR-1 needs —
+//! against the invoice: this module owns two operations —
 //!
 //!   * [`cash_collected`] — `Σ(amount_cents)` over an invoice's payment rows. This
-//!     is the over-refund anchor consumed by PR-3's `refunds_no_over_refund`
+//!     is the over-refund anchor consumed by the `refunds_no_over_refund`
 //!     trigger (which inlines the same SELECT) and the true-up bridge.
 //!   * [`append_charge`] — append a `charge` row recording the cash actually
 //!     collected, called by the payment-confirmation webhook WITHOUT touching the
@@ -27,7 +26,7 @@ use crate::registry::RegistryError;
 /// its `invoice_payments` rows (positive `charge`/`dispute_reversal`, negative
 /// `dispute_debit`). `0` when there are no rows (a fully credit-covered invoice).
 ///
-/// This is the authoritative over-refund anchor — PR-3's over-refund trigger
+/// This is the authoritative over-refund anchor — the over-refund trigger
 /// inlines the identical SELECT so the DB-level backstop is self-contained, and
 /// the Rust refund/true-up paths call THIS so they agree with the trigger.
 pub async fn cash_collected<C: GenericClient + Sync>(

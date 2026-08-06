@@ -1,6 +1,6 @@
-//! Live-PG smoke test for `gateway::sessions::revoke_app_sessions_for_user` —
-//! the revoke-side of the OIDC Back-Channel Logout 1.0 handler (Phase 7 U1.2),
-//! per-app under RLS (changeset 0025).
+//! Live-PG coverage for `gateway::sessions::revoke_app_sessions_for_user` —
+//! the per-app, RLS-scoped session-revocation path used by the OIDC
+//! Back-Channel Logout 1.0 handler.
 //!
 //! Skipped silently when `AUTH_DB_URL` is unset (same convention as
 //! the rest of the gateway PG smoke tests, e.g. `sessions_test.rs`).
@@ -18,9 +18,9 @@
 //!   - Calling it again returns 0 (idempotent — the `revoked_at IS NULL`
 //!     filter skips the already-revoked row).
 //!
-//! The handler-level path (verify + revoke) is exercised by the
-//! Phase 7 follow-up e2e against a real op; for the verifier-only
-//! check see `crates/core/src/logout_token.rs::tests`.
+//! The handler-level path is exercised below with signed logout tokens and a
+//! test JWKS endpoint; for verifier-only checks see
+//! `crates/core/src/logout_token.rs::tests`.
 
 use std::sync::Arc;
 

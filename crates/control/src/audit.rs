@@ -30,16 +30,16 @@ pub enum Action {
     UnlinkAccount,
     RecordPayout,
     /// A spend-enforcement state transition for an app, emitted by the
-    /// spend-reconcile cron (billing PR5). The detail JSON carries
+    /// spend-reconcile cron. The detail JSON carries
     /// `{ from, to, spend_cents, limit_cents }`.
     SpendStateChange,
-    /// A creator changed an app's spend-limit override via the M4 endpoint.
+    /// A creator changed an app's spend-limit override.
     SetSpendLimit,
     /// A creator finished the Checkout setup flow and now has a saved default
-    /// PaymentMethod (`setup_intent.succeeded` webhook, billing PR6 Stream-1).
+    /// PaymentMethod (`setup_intent.succeeded` webhook).
     SetupIntentSucceeded,
     /// A finalized infra-billing invoice could not be charged
-    /// (`invoice.payment_failed` webhook, billing PR6 Stream-1).
+    /// (`invoice.payment_failed` webhook).
     InvoicePaymentFailed,
     /// A creator payment/account-state transition (billing G2): the
     /// active→past_due→suspended→active dunning lifecycle. Written by the

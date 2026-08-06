@@ -1,5 +1,4 @@
-//! Faithful integration tests for the shared, breaker-guarded OP client
-//! (auth-sdk §8.7, round-6 MAJOR #3).
+//! Integration tests for the shared, breaker-guarded OP client.
 //!
 //! These drive the REAL `OidcRp` token path (`refresh_token_public` →
 //! `post_token` → `op_client::call`) against a loopback MOCK OP (an
@@ -316,8 +315,8 @@ async fn slow_upstream_hits_bounded_timeout_and_counts_as_failure() {
 
 #[ntex::test]
 async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
-    // Regression for the probe-slot leak (round-7 BLOCKER). The mint hot path
-    // drives a OP refresh inside a CANCELLABLE single-flight future; when the
+    // Regression for the probe-slot leak. The mint hot path
+    // drives an OP refresh inside a CANCELLABLE single-flight future; when the
     // breaker is HalfOpen and the sole leader is cancelled mid-probe (client
     // disconnect / ntex timeout, no follower), the probe slot must NOT leak —
     // otherwise every later admit() CAS fails and the breaker self-DoSes all

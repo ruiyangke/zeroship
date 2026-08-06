@@ -1,8 +1,8 @@
 //! Gateway-wide error type.
 //!
-//! Today this is consumed only by `sessions` (P3-U4); other modules
-//! continue to surface their own local error enums or `ntex` responses
-//! until the gateway's error story is consolidated.
+//! Used by the gateway's database helpers, signing-key loader, and session-token
+//! issuer and verifier. Request handlers translate runtime failures into
+//! endpoint-specific responses; signing and configuration failures abort startup.
 
 use thiserror::Error;
 
@@ -10,10 +10,9 @@ use thiserror::Error;
 pub enum GatewayError {
     #[error("database: {0}")]
     Db(String),
-    /// Boot-time configuration error — bad CLI flag, unreadable file,
-    /// malformed key, etc. Surfaced by `signing::load_from_path` when
-    /// the `--signing-key-file` argument points at something we can't
-    /// parse as a PKCS#8 Ed25519 private key (Phase 8 U1).
+    /// Boot-time signing-key configuration error — unreadable file, malformed
+    /// key, wrong key type, etc. Surfaced by `signing::load_from_path` when the
+    /// `--signing-key-file` argument does not name a usable PKCS#8 Ed25519 key.
     #[error("config: {0}")]
     Config(String),
     /// Refuse to boot with a credential file that can be read or

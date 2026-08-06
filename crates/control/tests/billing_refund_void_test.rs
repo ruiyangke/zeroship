@@ -1268,8 +1268,9 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
     assert_eq!(row.get::<_, i64>("amount_cents"), 2500);
     assert_eq!(row.get::<_, String>("dest"), "cash");
 
-    // Total cash refunds on B = $25 + $25 = $50 ≤ cash $60: the cap held (the round-1
-    // formula would have tried $50 and been rejected). Two Stripe refunds total.
+    // Total cash refunds on B = $25 + $25 = $50 ≤ cash $60: the cap held. A
+    // formula that ignored prior cash refunds would have tried $50 and been rejected.
+    // Two Stripe refunds total.
     assert_eq!(stripe.refund_count(), 2, "the pre-refund + the true-up = two Stripe Refunds");
     let total_cash_refunds =
         refund::refunds_total_for_destination(&*fx.state.control_pg, &inv_b, RefundDestination::Cash)

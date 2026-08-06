@@ -148,7 +148,7 @@ async fn insert_app(
     created_age: &str,
 ) {
     let api_key = format!("k-{}", id.simple());
-    // PR4: plan_id is an FK into zeroship.plans — use the built-in free-plan
+    // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
     let free = zeroship_control::bootstrap_console::free_plan_id();
     state
