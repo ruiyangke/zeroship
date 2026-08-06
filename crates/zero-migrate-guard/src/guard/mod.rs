@@ -1113,6 +1113,42 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         let is_table = r.rename_type == ObjectType::ObjectTable as i32;
         let is_column = r.rename_type == ObjectType::ObjectColumn as i32;
         if !is_table && !is_column {
+            // `RenameStmt` covers `ALTER <anything> RENAME TO`, and a role, database,
+            // or schema rename carries its target in `subname`/`newname` rather than
+            // in a relation or object list. Those scalar slots are invisible to
+            // `walk_schema_names`, so falling through to `Ok` here granted through a
+            // rename exactly the authority the other spellings hard-deny: `DROP
+            // SCHEMA control` is refused while `ALTER SCHEMA control RENAME TO x`
+            // was not. Route each back to the rule that owns it.
+            //
+            // Object types that name their target through `relation` or `object`
+            // (index, view, sequence, type, function, ...) still fall through: the
+            // cross-schema walk already reaches those and denies a foreign target.
+            if r.rename_type == ObjectType::ObjectRole as i32 {
+                if self
+                    .cfg
+                    .grants_global_bool(policy_registry::KEY_ACCESS_ROLE)
+                {
+                    return Ok(());
+                }
+                return Err(denied(rule::ROLE_MANAGEMENT, raw));
+            }
+            if r.rename_type == ObjectType::ObjectDatabase as i32 {
+                return Err(denied(rule::DATABASE_MANAGEMENT, raw));
+            }
+            if r.rename_type == ObjectType::ObjectSchema as i32 {
+                // Both ends matter: renaming a schema you do not own takes it away,
+                // and renaming your own onto another name claims that one.
+                for schema in [r.subname.trim(), r.newname.trim()] {
+                    if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                        return Err(GuardError::CrossSchema {
+                            schema: schema.to_string(),
+                            statement: raw.to_string(),
+                        });
+                    }
+                }
+                return Ok(());
+            }
             return Ok(());
         }
         // The object being renamed (its current name).

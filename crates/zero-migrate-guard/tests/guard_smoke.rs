@@ -149,3 +149,37 @@ fn analysis_reexports_are_reachable() {
         "a plain SELECT must classify without a parse error"
     );
 }
+
+#[test]
+fn renaming_a_role_database_or_foreign_schema_is_denied() {
+    // `RenameStmt` is one node for `ALTER <anything> RENAME TO`, and role, database,
+    // and schema renames carry their target in scalar slots the cross-schema walk
+    // never visits. Reaching a verdict only for TABLE and COLUMN let a rename confer
+    // exactly what the other spellings hard-deny.
+    let g = confined();
+    for sql in [
+        "ALTER ROLE postgres RENAME TO pwned",
+        "ALTER USER app1 RENAME TO postgres",
+        "ALTER DATABASE postgres RENAME TO pwned",
+        // Renaming a schema you do not own takes it away.
+        "ALTER SCHEMA control RENAME TO app_stolen",
+        // Renaming your own onto a name you do not own claims that one.
+        "ALTER SCHEMA app1 RENAME TO control",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("must not be admitted: {sql}"));
+        assert!(
+            matches!(
+                err,
+                GuardError::Denied { .. } | GuardError::CrossSchema { .. }
+            ),
+            "expected a deny/cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // A rename that names its target through `relation` was already covered, and a
+    // table rename inside the owned schema must still pass.
+    g.check("ALTER TABLE app1.widgets RENAME TO gadgets")
+        .expect("an owned-schema table rename stays allowed");
+}
