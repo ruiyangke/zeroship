@@ -24,7 +24,9 @@ BIN="$ROOT/target/release"
 # Dedicated, freshly-migrated DB per run (isolated from the shared `zeroship`
 # db) so the run is self-contained + reproducible and never re-provisions a
 # stale app.
-PG_CONTAINER="${PG_CONTAINER:-appbase-migrate-postgres-1}"
+# The container the dev compose stack creates for the Postgres on :5440. Override
+# PG_CONTAINER when running against a differently-named container.
+PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_golden}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
@@ -83,8 +85,14 @@ sleep 3
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --blob-store /tmp/gp-bundles --poll-interval 2 >/tmp/gp-worker.log 2>&1 & PIDS+=($!)
 sleep 2
+# The gateway refuses to boot without a broker secret; it signs the RP-initiated
+# login handshake, so there is no safe default and no dev fallback.
+GATE_BROKER_SECRET=/tmp/gp-gate-broker-secret
+openssl rand -base64 48 > "$GATE_BROKER_SECRET"
+chmod 600 "$GATE_BROKER_SECRET"
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles --poll-interval 2 >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles \
+  --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
