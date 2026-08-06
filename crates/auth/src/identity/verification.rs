@@ -21,7 +21,7 @@
 //! Distinct from [`crate::identity::magic_link`] (different TTL, different
 //! purpose, distinct `zeroship.email_verifications` table). The schema for the
 //! table is owned by zeroship-migrate (`db/migrations-ts`, applied by the compose
-//! `migrate` service / `ops/db-migrate.sh`).
+//! `migrate` service / `deploy/ops/db-migrate.sh`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;

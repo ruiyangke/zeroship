@@ -49,8 +49,8 @@ REAL vite-built `.zship` (not a hand-packed fixture):
 ### External build (`tests/external_chain.sh`) — gap #1 PROVEN closable
 An app **outside the monorepo** installs `@zeroship/*` **from a registry** and
 builds a deploy artifact, with zero workspace/file coupling. The script stands up
-the `verdaccio` compose service (`config/verdaccio/`), publishes all SDKs
-(`scripts/publish-sdks.sh`), scaffolds with `create-zeroship-app` into a temp
+the `verdaccio` compose service (`deploy/verdaccio/`), publishes all SDKs
+(`deploy/scripts/publish-sdks.sh`), scaffolds with `create-zeroship-app` into a temp
 dir, `npm install`s (`@zeroship:registry=http://localhost:4873`) — verified to
 resolve every `@zeroship/*` from Verdaccio with **no `workspace:`/`file:` links**
 — and runs `npm run build` → `dist/app.zship`. So the SDK-distribution mechanism

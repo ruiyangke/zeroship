@@ -1,12 +1,12 @@
 # 3-node Dragonfly cluster for integration tests.
 #
 # Usage:
-#   docker compose -f docker-compose.cluster.yml up -d
+#   docker compose -f deploy/compose/cluster.yml up -d
 #   # Wait ~2s for listeners, then bootstrap the cluster:
-#   ./scripts/bootstrap-dragonfly-cluster.sh
+#   ./deploy/scripts/bootstrap-dragonfly-cluster.sh
 #   DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
 #     cargo test -p compio-redis --test cluster -- --nocapture
-#   docker compose -f docker-compose.cluster.yml down -v
+#   docker compose -f deploy/compose/cluster.yml down -v
 
 services:
   dragonfly-0:

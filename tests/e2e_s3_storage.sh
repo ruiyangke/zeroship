@@ -166,8 +166,8 @@ docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
 for _ in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
 
-[ -f "$ROOT/ops/postgres-init.sql" ] && docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-  && pass "applied ops/postgres-init.sql" || true
+[ -f "$ROOT/deploy/ops/postgres-init.sql" ] && docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+  && pass "applied deploy/ops/postgres-init.sql" || true
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \

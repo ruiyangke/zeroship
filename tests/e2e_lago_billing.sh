@@ -12,7 +12,7 @@
 #     -> Lago current_usage[creator] reflects the usage         (billing rail)
 #     -> control spend_recompute -> usage_aggregates -> 402      (enforcement)
 #
-# Lago is stood up by docker-compose.lago.yml (api+worker+pg+redis); `db:prepare`
+# Lago is stood up by deploy/compose/lago.yml (api+worker+pg+redis); `db:prepare`
 # seeds a default "Hooli" org whose API key is lago_key-hooli-1234567890.
 #
 # Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves the
@@ -57,7 +57,7 @@ cleanup(){
     echo "  KEEP_WORK=1 → PG/$PGC redpanda/$RPC Lago(compose) + $WORK preserved"
   else
     docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true
-    docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/docker-compose.lago.yml" down -v >/dev/null 2>&1 || true
+    docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" down -v >/dev/null 2>&1 || true
     rm -rf "$WORK"; echo "  stack down, Lago down, $WORK cleaned"
   fi
 }
@@ -90,7 +90,7 @@ LAGO_ORG_API_KEY=$(openssl rand -hex 24)
 EOF
   chmod 600 "$ROOT/.env.lago"
 fi
-docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/docker-compose.lago.yml" up -d >/dev/null 2>&1 || { fail "lago compose up"; exit 1; }
+docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" up -d >/dev/null 2>&1 || { fail "lago compose up"; exit 1; }
 for _ in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health" 2>/dev/null)" = "200" ] && break; sleep 3; done
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health")" = "200" ] && pass "Lago api healthy on $LAGO_URL" || { fail "lago api"; docker logs billing-impl-lago-api-1 2>&1 | tail -20; exit 1; }
 docker exec billing-impl-lago-api-1 bundle exec rails db:prepare >/dev/null 2>&1 && pass "Lago DB prepared (seeded Hooli org + api key)" || { fail "lago db:prepare"; exit 1; }

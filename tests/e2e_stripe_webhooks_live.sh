@@ -123,7 +123,7 @@ psql1()   { psql_db -tA -c "$1" 2>/dev/null | tr -d '[:space:]'; }
 if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" >/dev/null 2>&1; then
   echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
 fi
-if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
+if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
   echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
@@ -199,7 +199,7 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
   pass "zeroship-migrate platform set applied (incl. 0042 invoicing, 0049 refunds, 0053 disputes, 0054 webhook follow-ups)"
 else
   fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1

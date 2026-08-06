@@ -1128,7 +1128,7 @@ async fn invoice_read_denied_via_shared_app_membership() {
 // owner's cross-app invoice HISTORY via `GET /api/apps/{ownerApp}/invoices`.
 //
 // The owner O owns app O. A VIEWER V is a member of app O — the viewer creator
-// policy DOES grant `billing:read` on the app (policies/creator/app_viewer.cedar),
+// policy DOES grant `billing:read` on the app (deploy/policies/creator/app_viewer.cedar),
 // so V clears the `BillingRead on App{O}` gate, but V is NOT the owner. Pre-fix
 // the handler gated ONLY that capability and returned
 // `list_invoices_for_creator(owner_of_app(O))` = O's whole history, so V saw O's

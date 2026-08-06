@@ -6,7 +6,7 @@
 # ISS-63 + ISS-66).
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
-#   1. Stand up a fresh ephemeral Postgres + ops/postgres-init.sql + the FULL
+#   1. Stand up a fresh ephemeral Postgres + deploy/ops/postgres-init.sql + the FULL
 #      zeroship-migrate platform set. (Control still needs a DB for app CRUD + deploy.)
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
@@ -126,9 +126,9 @@ docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/d
 for i in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
 docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && pass "ephemeral Redis ready on :$REDIS_PORT" || { fail "Redis never became ready"; exit 1; }
 
-if [ -f "$ROOT/ops/postgres-init.sql" ]; then
-  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-    && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
+if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+    && pass "applied deploy/ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
 MIG_LOG="$WORK/migrate.log"

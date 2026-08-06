@@ -4,10 +4,10 @@ use std::str::FromStr;
 use cedar_policy::PolicySet;
 
 fn main() {
-    println!("cargo:rerun-if-changed=../../policies");
+    println!("cargo:rerun-if-changed=../../deploy/policies");
 
     let mut policy_files = Vec::new();
-    walk_dir_for_cedar_files(Path::new("../../policies"), &mut policy_files);
+    walk_dir_for_cedar_files(Path::new("../../deploy/policies"), &mut policy_files);
     policy_files.sort();
 
     for path in policy_files {

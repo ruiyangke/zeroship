@@ -96,9 +96,9 @@ stack_up() {
     _stk_bad "PG never became ready"; return 1
   fi
 
-  if [ -f "$E2E_ROOT/ops/postgres-init.sql" ]; then
-    docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$E2E_ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-      && _stk_ok "applied ops/postgres-init.sql" || _stk_bad "postgres-init.sql failed"
+  if [ -f "$E2E_ROOT/deploy/ops/postgres-init.sql" ]; then
+    docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$E2E_ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+      && _stk_ok "applied deploy/ops/postgres-init.sql" || _stk_bad "postgres-init.sql failed"
   fi
 
   local mig_log="$WORK/migrate.log"

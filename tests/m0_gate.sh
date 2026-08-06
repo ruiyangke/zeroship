@@ -9,6 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
 SANDBOX_PROJECT_DIR="${SANDBOX_PROJECT_DIR:-$ROOT/../zeroship-sandbox}"
 APP_DIR="$ROOT/apps/zeroship-builder"
 PROMPTS_JSON="$APP_DIR/e2e/m0-prompts.json"

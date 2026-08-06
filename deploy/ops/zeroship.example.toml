@@ -1,4 +1,4 @@
-# zeroship shared config overlay. Copy to ops/zeroship.toml (one per environment)
+# zeroship shared config overlay. Copy to deploy/ops/zeroship.toml (one per environment)
 # and pass via --config / ZEROSHIP_CONFIG.
 #
 # Placing this file at the well-known path /etc/zeroship/zeroship.toml makes
@@ -66,7 +66,7 @@ log_format = "json"
 # the real secret lives (env var, file path, Vault, AWS Secrets Manager). A
 # plaintext literal here is rejected at startup — the config file must never
 # carry a secret. That keeps the file safe to commit per-environment alongside
-# the rest of ops/.
+# the rest of deploy/ops/.
 #
 # Precedence for every secret: CLI flag > env var > this file > compiled default.
 # References here are RESOLVED AT BOOT (the env var is read, the file is opened,

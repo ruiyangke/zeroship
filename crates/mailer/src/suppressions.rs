@@ -2,7 +2,7 @@
 //! every `Mailer` impl consults before transport.
 //!
 //! Schema (owned by zeroship-migrate — `db/migrations-ts`, applied by the compose
-//! `migrate` service / `ops/db-migrate.sh`):
+//! `migrate` service / `deploy/ops/db-migrate.sh`):
 //!
 //! ```sql
 //! CREATE TABLE zeroship.email_suppressions (

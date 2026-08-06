@@ -8,6 +8,9 @@
 #   NUM_WORKERS=10 ./tests/e2e_docker.sh
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
+
 NUM_WORKERS=${NUM_WORKERS:-3}
 GATE="http://localhost:8000"
 CONTROL="http://localhost:9090"

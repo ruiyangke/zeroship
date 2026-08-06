@@ -4,7 +4,7 @@
 # primitives through the REAL multi-node edge (gateway → worker → V8).
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
-#   1. Stand up a fresh ephemeral Postgres + apply ops/postgres-init.sql +
+#   1. Stand up a fresh ephemeral Postgres + apply deploy/ops/postgres-init.sql +
 #      the full zeroship-migrate platform set (0001→0036). A migration failure here is
 #      a finding — the migration set must apply cleanly from scratch.
 #   2. Boot control + worker + gateway with `--dev-insecure` (current code
@@ -114,9 +114,9 @@ docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
 for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
 
-if [ -f "$ROOT/ops/postgres-init.sql" ]; then
-  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-    && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
+if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+    && pass "applied deploy/ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
 MIG_LOG="$WORK/migrate.log"

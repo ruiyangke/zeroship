@@ -134,7 +134,7 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + the other demo DBs untouched)"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
   pass "zeroship-migrate platform set applied to $DB (plans, metric_weights, pricing_config, invoicing, proration)"
 else
   fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1

@@ -1550,7 +1550,7 @@ The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draf
 
 Services **never migrate themselves** — `control`/`auth` connect to an already-migrated DB. Two apply vectors, both driving the same engine:
 
-**(a) Compose one-shot `migrate` service** (`docker-compose.yml:92-112`) invokes `zeroship-migrate migrate --dir=/db/migrations-ts --database-url=… --profile=platform --yes`, records each `.ts` to transient IR, applies under Platform, exits 0. `control`/`auth` `depends_on` it with `service_completed_successfully`. `--yes` is required because the platform set contains reviewed in-place evolutions (DROP CONSTRAINT/COLUMN) the engine flags DESTRUCTIVE. `security_opt: [seccomp:unconfined]` because `io_uring_setup` needs it.
+**(a) Compose one-shot `migrate` service** (`deploy/compose/docker-compose.yml`, the `migrate` service) invokes `zeroship-migrate migrate --dir=/db/migrations-ts --database-url=… --profile=platform --yes`, records each `.ts` to transient IR, applies under Platform, exits 0. `control`/`auth` `depends_on` it with `service_completed_successfully`. `--yes` is required because the platform set contains reviewed in-place evolutions (DROP CONSTRAINT/COLUMN) the engine flags DESTRUCTIVE. `security_opt: [seccomp:unconfined]` because `io_uring_setup` needs it.
 
 **(b) By-hand wrapper `ops/db-migrate.sh`** shells the bin (via `cargo run` or `ZEROSHIP_MIGRATE_BIN`), targeting compose Postgres on `localhost:5440`. Subcommands: `migrate` (apply pending platform `.ts`) plus generic `status`/`validate`/`rollback` that "do not yet load platform `.ts`". It wires the recorder child (`ZEROSHIP_RECORDER_CHILD`), since recording untrusted `.ts` happens in a kernel-sandboxed child.
 

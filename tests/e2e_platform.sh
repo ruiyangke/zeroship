@@ -13,7 +13,7 @@
 #
 # Prerequisites:
 #   - cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker -p zeroship
-#   - docker compose up -d postgres (Postgres on port 5440 per docker-compose.yml)
+#   - docker compose -f deploy/compose/docker-compose.yml up -d postgres (Postgres on port 5440 per deploy/compose/docker-compose.yml)
 #
 # Usage:
 #   ./tests/e2e_platform.sh

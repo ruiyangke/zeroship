@@ -602,7 +602,7 @@ code on disk**.
 | Resource enum (App, Org, Any) | 🟢 | internal | `crates/authz/src/resource.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | Org for P11; no org CRUD yet. |
 | Condition library (IpRange/TimeWindow/Mfa) | 🟡 | internal | `crates/authz/src/condition.rs`, `lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | IpRange/TimeWindow work; MFA conditions not enforced; TimeWindow UTC-only. |
 | Cedar source lowering (lower()) | 🟢 | internal | `crates/authz/src/lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/injection_test.rs` | Injection-hardened. |
-| Static platform + creator Cedar policies | 🟢 | internal | `policies/platform/`, `policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 10 policies; build.rs parses at compile. |
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 10 policies; build.rs parses at compile. |
 | Entity assembly + LRU cache | 🟢 | internal | `crates/authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
 | enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
 | is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + PAT mint. |
@@ -613,8 +613,8 @@ code on disk**.
 | OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
 | OAuth consent UI with authz gate | 🟢 | internal | `crates/auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
 | Platform RBAC role management | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | admin grants; admin+support read. |
-| App audit-lock (set_app_audit_lock) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `policies/platform/audit_locked.cedar` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Cedar forbid blocks writes. |
-| App suspension (set_app_suspension) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `policies/platform/suspended_apps.cedar` | — | `crates/authz/tests/two_call_test.rs` | Reads allowed; writes blocked. |
+| App audit-lock (set_app_audit_lock) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `deploy/policies/platform/audit_locked.cedar` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Cedar forbid blocks writes. |
+| App suspension (set_app_suspension) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `deploy/policies/platform/suspended_apps.cedar` | — | `crates/authz/tests/two_call_test.rs` | Reads allowed; writes blocked. |
 | Operator platform policy CRUD | 🟡 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | — | Persisted but NOT merged into running engine. |
 | policy_hash (SHA-256 canonical) | 🟢 | internal | `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | Key-sorted; drift detection. |
 | Authorization audit log | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |

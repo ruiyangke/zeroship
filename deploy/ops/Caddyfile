@@ -1,4 +1,4 @@
-# ops/Caddyfile — dev reverse proxy for the zeroship stack on the
+# deploy/ops/Caddyfile — dev reverse proxy for the zeroship stack on the
 # *.zeroship.localhost domain. Browsers resolve any *.localhost name to
 # 127.0.0.1 automatically, so no /etc/hosts entries are needed.
 #

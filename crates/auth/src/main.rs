@@ -227,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .detach();
 
     // Schema is owned by zeroship-migrate (db/migrations-ts, applied by the
-    // compose `migrate` service / `ops/db-migrate.sh`) out of band before this
+    // compose `migrate` service / `deploy/ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 
     let auth_signing_key_file = cfg.auth_signing_key_file.as_deref().ok_or_else(|| {

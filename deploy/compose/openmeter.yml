@@ -1,11 +1,11 @@
 # ============================================================================
-# docker-compose.openmeter.yml — a DEDICATED, opt-in OpenMeter stack for the
+# deploy/compose/openmeter.yml — a DEDICATED, opt-in OpenMeter stack for the
 # zeroship metering-export FAITHFUL e2e (tests/e2e_openmeter_export.sh).
 #
 # ⚠️  This is OPT-IN and ISOLATED on purpose. It is a SEPARATE compose project
 #     (`name: zeroship-openmeter`) with its OWN network + volumes and its OWN
 #     127.0.0.1-bound port band — it shares NOTHING with the main
-#     docker-compose.yml stack. In particular its internal Postgres is OpenMeter
+#     deploy/compose/docker-compose.yml stack. In particular its internal Postgres is OpenMeter
 #     metadata only and is NOT published on :5440 (the zeroship billing PG the
 #     cargo integration tests use). Bringing this up does NOT touch the main
 #     stack; tearing it down does NOT touch :5440.
@@ -22,12 +22,12 @@
 # private 4xxxx band to avoid collisions.
 #
 # Usage:
-#   docker compose -f docker-compose.openmeter.yml up -d        # bring it up
-#   docker compose -f docker-compose.openmeter.yml down -v      # tear it down
+#   docker compose -f deploy/compose/openmeter.yml up -d        # bring it up
+#   docker compose -f deploy/compose/openmeter.yml down -v      # tear it down
 #   OpenMeter API:  http://127.0.0.1:48888  (ingest POST /api/v1/events,
 #                                            query GET /api/v1/meters/<slug>/query)
 #
-# DEV ONLY — weak passwords + insecure portal token, see ops/openmeter-config.yaml.
+# DEV ONLY — weak passwords + insecure portal token, see deploy/ops/openmeter-config.yaml.
 # ============================================================================
 name: zeroship-openmeter
 
@@ -112,7 +112,7 @@ services:
     image: ghcr.io/openmeterio/openmeter:latest
     command: "openmeter --address 0.0.0.0:8888 --config /etc/openmeter/config.yaml"
     volumes:
-      - ./ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
+      - ../ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
     ports:
       - "127.0.0.1:48888:8888"
     depends_on:
@@ -137,7 +137,7 @@ services:
     image: ghcr.io/openmeterio/openmeter:latest
     command: "openmeter-sink-worker --config /etc/openmeter/config.yaml"
     volumes:
-      - ./ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
+      - ../ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
     depends_on:
       kafka:
         condition: service_healthy
