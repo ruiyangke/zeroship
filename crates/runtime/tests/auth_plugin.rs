@@ -336,3 +336,89 @@ fn env_auth_namespace_is_exposed() {
     assert!(body.contains(r#""requireUserIsFn":true"#), "body: {body}");
     assert!(body.contains(r#""sameRef":true"#), "body: {body}");
 }
+
+/// Two concurrent dispatches in one isolate must each resolve their OWN user.
+///
+/// This currently FAILS and documents a confirmed defect: `current_user`
+/// (`src/auth.rs`) resolves through the isolate-global `executing_request_id`,
+/// while `call_rpc_inner` ends with an isolate-wide microtask checkpoint that
+/// drains every pending microtask, including continuations belonging to other
+/// requests. A continuation for request B therefore runs while the global still
+/// names request A, and `env.auth.getUser()` hands B request A's user. Since one
+/// isolate serves many concurrent end users of the same app, that is one end
+/// user receiving another's identity.
+///
+/// Ignored so the suite reflects reality without masking it: run with
+/// `cargo test -p zeroship-runtime --test auth_plugin -- --ignored` to see the
+/// failure. The fix removes this attribute; it is the acceptance gate.
+#[test]
+#[ignore = "documents a confirmed cross-request identity defect; remove with the fix"]
+fn concurrent_rpc_continuation_keeps_request_user() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseB;
+        let finishB;
+        const bFinished = new Promise((resolve) => { finishB = resolve; });
+        let bObservedUser;
+
+        async function suspendB() {
+            await new Promise((resolve) => { releaseB = resolve; });
+            bObservedUser = env.auth.getUser()?.id ?? null;
+            finishB();
+            return bObservedUser;
+        }
+
+        async function releaseFromA() {
+            const aObservedUser = env.auth.getUser()?.id ?? null;
+            releaseB();
+            await bFinished;
+            return { aObservedUser, bObservedUser };
+        }
+
+        export default {
+            rpc: { suspendB, releaseFromA },
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let b_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/suspendB",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_B_JSON.to_string()),
+    );
+    assert!(
+        matches!(b_outcome, FetchOutcome::Pending { .. }),
+        "request B must remain pending before request A releases it"
+    );
+
+    let a_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/releaseFromA",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = a_outcome else {
+        panic!("request A must settle while draining request B's continuation");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["json"]["aObservedUser"], "user-a", "body: {body}");
+    assert_eq!(
+        value["json"]["bObservedUser"], "user-b",
+        "request B's continuation must resolve request B's user; body: {body}"
+    );
+}
