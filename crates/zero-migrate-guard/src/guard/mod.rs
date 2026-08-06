@@ -1357,7 +1357,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
             let mut unqualified = false;
             walk_range_vars(&json, &mut |schema, relname| {
-                let is_pg_catalog = relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
+                let is_pg_catalog = has_pg_catalog_prefix(relname);
                 if schema.trim().is_empty() && !relname.trim().is_empty() && !is_pg_catalog {
                     unqualified = true;
                     return true;
@@ -1787,7 +1787,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         let mut found = false;
         walk_range_vars(json, &mut |schema, relname| {
             let catalog_schema = is_neutral_catalog_schema(schema);
-            let catalog_relname = relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
+            let catalog_relname = has_pg_catalog_prefix(relname);
             if catalog_schema || (schema.is_empty() && catalog_relname) {
                 found = true;
                 return true;
@@ -3355,6 +3355,19 @@ fn is_neutral_catalog_schema(schema: &str) -> bool {
     ["pg_catalog", "pg_temp", "pg_toast", "information_schema"]
         .iter()
         .any(|s| schema.eq_ignore_ascii_case(s))
+}
+
+/// Whether an identifier carries the `pg_` catalog prefix, which marks an
+/// unqualified relation as resolving to the server's own catalog.
+///
+/// Compares raw bytes. Identifiers reach here verbatim from the parse tree, so a
+/// `&str` slice at index 3 panics whenever the third byte lands inside a
+/// multi-byte character: `"abé"` is four bytes, and `[..3]` splits the `é`.
+fn has_pg_catalog_prefix(relname: &str) -> bool {
+    relname
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"pg_"))
 }
 
 /// Which kind of parse-tree slot a candidate schema name came from. Drives the

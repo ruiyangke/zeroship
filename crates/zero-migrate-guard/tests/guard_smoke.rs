@@ -120,6 +120,25 @@ fn extract_string_literals_is_multibyte_faithful() {
 }
 
 #[test]
+fn non_ascii_relation_name_reaches_a_verdict_instead_of_panicking() {
+    // The `pg_` catalog-prefix test byte-sliced `relname[..3]` behind a byte-length
+    // check, so an identifier whose third byte fell inside a multi-byte character
+    // aborted the process before any allow/deny decision. A guard that panics on
+    // untrusted input fails open by taking the caller down with it, so every
+    // well-formed UTF-8 identifier must produce a verdict.
+    let guard = confined();
+    for sql in [
+        r#"SELECT * FROM "abé""#,
+        r#"SELECT * FROM "a日本""#,
+        r#"INSERT INTO "abé" VALUES (1)"#,
+        r#"CREATE TABLE app1."abé" (x int)"#,
+        r#"SELECT 1; SELECT * FROM "abé""#,
+    ] {
+        let _ = guard.check(sql);
+    }
+}
+
+#[test]
 fn analysis_reexports_are_reachable() {
     // The engine re-exports these through the guard crate; assert they resolve.
     let advisories = zero_migrate_guard::analyze::analyze("CREATE INDEX i ON app1.t (a)");
