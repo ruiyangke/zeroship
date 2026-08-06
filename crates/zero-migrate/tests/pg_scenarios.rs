@@ -2062,6 +2062,118 @@ async fn non_transactional_two_phase_apply_and_recovery() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// An inflight marker whose checksum disagrees with the supplied migration aborts
+/// instead of replaying a different body.
+///
+/// The marker records the checksum of the body that half-ran. The tamper gate cannot
+/// vet it, because `compare_applied_to_set` skips every non-completed entry, and the
+/// recovery path never sees the marker at all - it only gets the migration now in the
+/// set. So editing a `transaction:false` migration in place after it half-applied
+/// used to re-run the edited body and then overwrite the marker, destroying the
+/// evidence.
+///
+/// The recovery test above plants a marker whose checksum MATCHES, so the
+/// disagreeing case had no coverage by construction.
+#[compio::test]
+async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v0 = MigrationId::generate();
+    let base = mig(
+        v0.clone(),
+        "base_items",
+        &format!(
+            "CREATE TABLE \"{}\".items (id int PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply base");
+
+    // The migration that half-ran, and the edited one the operator now supplies.
+    let v1 = MigrationId::generate();
+    let half_ran = mig_nontxn(
+        v1.clone(),
+        "idx_items",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS items_a_idx ON \"{}\".items (id)",
+            cfg.project_schema
+        ),
+    );
+    let edited = mig_nontxn(
+        v1.clone(),
+        "idx_items",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS items_b_idx ON \"{}\".items (id)",
+            cfg.project_schema
+        ),
+    );
+    assert_ne!(
+        half_ran.checksum.as_str(),
+        edited.checksum.as_str(),
+        "the edit must move the checksum for this test to mean anything"
+    );
+
+    // Arm the marker for the body that half-ran, then supply the edited one.
+    zero_migrate::record_started(
+        &session,
+        &cfg,
+        v1.as_str(),
+        "idx_items",
+        half_ran.checksum.as_str(),
+        "app_test",
+    )
+    .await
+    .expect("arm started marker");
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[base.clone(), edited.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect_err("a marker disagreeing with the supplied migration must abort");
+    match err {
+        ApplyError::ChecksumDrift {
+            version,
+            recorded,
+            expected,
+        } => {
+            assert_eq!(version, v1.as_str());
+            assert_eq!(recorded, half_ran.checksum.as_str());
+            assert_eq!(expected, edited.checksum.as_str());
+        }
+        other => panic!("expected ChecksumDrift, got {other:?}"),
+    }
+
+    // The marker survives the refusal, so the operator can still inspect it.
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
+    assert!(
+        applied
+            .iter()
+            .any(|e| e.version == v1.as_str() && e.checksum == half_ran.checksum.as_str()),
+        "the refusal must not overwrite the evidence: {applied:?}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 3 — journal ensure / record / read
 // ---------------------------------------------------------------------------
