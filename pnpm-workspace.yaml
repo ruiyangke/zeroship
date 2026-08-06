@@ -1,6 +1,5 @@
 packages:
   - "sdks/*"
-  - "apps/*"
   - "examples/*"
 
 # Centralised dependency versions — referenced as "catalog:" in package.json.
