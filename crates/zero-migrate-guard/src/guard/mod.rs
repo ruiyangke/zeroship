@@ -1717,7 +1717,6 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             NodeEnum::CreateStmt(_)
             | NodeEnum::IndexStmt(_)
             | NodeEnum::RenameStmt(_)
-            | NodeEnum::CommentStmt(_)
             | NodeEnum::CreateTrigStmt(_)
             | NodeEnum::ViewStmt(_)
             | NodeEnum::CreateTableAsStmt(_)
@@ -1746,7 +1745,52 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             | NodeEnum::TruncateStmt(_)
             | NodeEnum::VacuumStmt(_)
             | NodeEnum::ClusterStmt(_)
-            | NodeEnum::ReindexStmt(_) => {}
+            => {}
+
+            // `REINDEX SCHEMA <s>` / `REINDEX DATABASE <d>` name their target in a
+            // bare `name` string, not a relation or object list, so the cross-schema
+            // walk never sees it. That admitted `REINDEX SCHEMA control`: rebuilding
+            // every index in a schema you do not own takes an ACCESS EXCLUSIVE lock on
+            // each of its tables, which is a cross-tenant outage. `REINDEX DATABASE`
+            // is the same reach over everything at once.
+            //
+            // INDEX/TABLE kinds carry a `relation` and are already covered.
+            NodeEnum::ReindexStmt(r) => {
+                if r.kind == protobuf::ReindexObjectType::ReindexObjectDatabase as i32
+                    || r.kind == protobuf::ReindexObjectType::ReindexObjectSystem as i32
+                {
+                    return Err(denied(rule::DATABASE_MANAGEMENT, raw));
+                }
+                if r.kind == protobuf::ReindexObjectType::ReindexObjectSchema as i32 {
+                    let schema = r.name.trim();
+                    if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                        return Err(GuardError::CrossSchema {
+                            schema: schema.to_string(),
+                            statement: raw.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // `COMMENT ON SCHEMA <s>` carries its target as a bare string in `object`,
+            // the same slot the cross-schema walk skips, so commenting on another
+            // tenant's schema was admitted. Every other COMMENT target names a
+            // relation or a qualified list and is already covered.
+            NodeEnum::CommentStmt(c) => {
+                if c.objtype == ObjectType::ObjectSchema as i32 {
+                    if let Some(NodeEnum::String(s)) =
+                        c.object.as_ref().and_then(|o| o.node.as_ref())
+                    {
+                        let schema = s.sval.trim();
+                        if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                            return Err(GuardError::CrossSchema {
+                                schema: schema.to_string(),
+                                statement: raw.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
 
             // `DO [LANGUAGE lang] $$…$$` runs an anonymous block in an arbitrary
             // procedural language, so it needs the same language check as

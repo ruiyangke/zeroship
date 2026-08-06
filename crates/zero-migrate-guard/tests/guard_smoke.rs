@@ -241,3 +241,37 @@ fn an_anonymous_block_in_an_untrusted_language_is_denied() {
     g.check("DO $$ BEGIN NULL; END $$")
         .expect("a plain plpgsql block stays allowed");
 }
+
+#[test]
+fn a_bare_schema_name_is_confined_in_reindex_and_comment() {
+    // `REINDEX SCHEMA <s>` and `COMMENT ON SCHEMA <s>` carry their target as a bare
+    // string rather than a relation or a qualified list, which is the one slot shape
+    // the cross-schema walk does not visit. Both statement kinds sat in the
+    // unconditionally-safe list, so they reached any schema at all.
+    //
+    // REINDEX is the one that bites: rebuilding every index in a schema you do not own
+    // takes an ACCESS EXCLUSIVE lock on each of its tables, so it is a cross-tenant
+    // outage, not just a metadata write.
+    let g = confined();
+    for sql in ["REINDEX SCHEMA control", "COMMENT ON SCHEMA control IS 'x'"] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a foreign schema must not be reachable: {sql}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // `REINDEX DATABASE` / `REINDEX SYSTEM` reach past any schema at all.
+    let err = g
+        .check("REINDEX DATABASE postgres")
+        .expect_err("a database-wide reindex is out of a project migrator's remit");
+    assert!(matches!(err, GuardError::Denied { .. }), "got {err:?}");
+
+    // The owned schema stays reachable through both.
+    g.check("REINDEX SCHEMA app1")
+        .expect("reindexing the owned schema stays allowed");
+    g.check("COMMENT ON SCHEMA app1 IS 'x'")
+        .expect("commenting on the owned schema stays allowed");
+}
