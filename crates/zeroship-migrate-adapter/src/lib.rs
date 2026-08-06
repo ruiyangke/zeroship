@@ -132,21 +132,23 @@ impl ToSqlHolder {
     }
 }
 
-fn to_holder(bind: &Bind) -> ToSqlHolder {
+fn unsupported_bind_to_holder<T>(_: &T) -> Result<ToSqlHolder, DbError> {
+    Err(DbError::message("unsupported bind variant"))
+}
+
+fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
     match bind {
-        Bind::Null => ToSqlHolder::Null,
-        Bind::Bool(b) => ToSqlHolder::Bool(*b),
-        Bind::Int(n) => ToSqlHolder::Int(*n),
+        Bind::Null => Ok(ToSqlHolder::Null),
+        Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
+        Bind::Int(n) => Ok(ToSqlHolder::Int(*n)),
         // Decimal carried as text — PG infers the numeric target from context.
-        Bind::Decimal(s) => ToSqlHolder::Text(s.clone()),
-        Bind::Text(s) => ToSqlHolder::Text(s.clone()),
-        // `Bind` is `#[non_exhaustive]`; a future variant maps to a text NULL
-        // rather than panicking.
-        _ => ToSqlHolder::Null,
+        Bind::Decimal(s) => Ok(ToSqlHolder::Text(s.clone())),
+        Bind::Text(s) => Ok(ToSqlHolder::Text(s.clone())),
+        _ => unsupported_bind_to_holder(bind),
     }
 }
 
-fn bind_holders(params: &[Bind]) -> Vec<ToSqlHolder> {
+fn bind_holders(params: &[Bind]) -> Result<Vec<ToSqlHolder>, DbError> {
     params.iter().map(to_holder).collect()
 }
 
@@ -260,7 +262,7 @@ impl SqlSession for CompioPgSession {
     }
 
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError> {
-        let holders = bind_holders(binds);
+        let holders = bind_holders(binds)?;
         let refs = holder_refs(&holders);
         self.client
             .execute(sql, &refs)
@@ -280,7 +282,7 @@ impl SqlSession for CompioPgSession {
     }
 
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError> {
-        let holders = bind_holders(binds);
+        let holders = bind_holders(binds)?;
         let refs = holder_refs(&holders);
         let rows = self
             .client
@@ -291,7 +293,7 @@ impl SqlSession for CompioPgSession {
     }
 
     async fn query_one(&self, sql: &str, binds: &[Bind]) -> Result<Row, DbError> {
-        let holders = bind_holders(binds);
+        let holders = bind_holders(binds)?;
         let refs = holder_refs(&holders);
         let row = self
             .client
@@ -299,5 +301,25 @@ impl SqlSession for CompioPgSession {
             .await
             .map_err(|e| to_db_error(&e))?;
         row_to_neutral(&row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct UnrecognisedBind;
+
+    #[test]
+    fn unrecognised_bind_mapping_returns_error() {
+        let result = unsupported_bind_to_holder(&UnrecognisedBind);
+        let error = match result {
+            Ok(_) => panic!("unrecognised bind mapped to a SQL holder"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.message, "unsupported bind variant");
+        assert!(error.sqlstate.is_none());
     }
 }
