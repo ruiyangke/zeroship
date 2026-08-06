@@ -20,8 +20,18 @@ use zero_migrate::{
     MigrationEngine, PostgresBackend, SqlDialect,
 };
 
-fn effective_policy() -> EffectivePolicy {
-    support::confined_charter()
+/// The charter every stage of the deploy runs under, scoped to this run's project
+/// schema and carrying no inject rule.
+///
+/// Both halves matter. Each test isolates itself behind a per-run schema, so the
+/// grants have to name that schema or apply refuses every statement as
+/// `CrossSchema`. And the charter must leave the schema uninjected: a declarative
+/// deploy reaches the database as rendered DDL, which `gate_raw_create` denies
+/// outright wherever an inject rule covers the target, because injection cannot
+/// rewrite raw text. This is the same policy `guard_cfg` builds, so the guard and
+/// the executor now agree on one charter instead of two.
+fn effective_policy(cfg: &ExecutorConfig) -> EffectivePolicy {
+    support::no_inject(&cfg.project_schema)
 }
 
 fn token() -> String {
@@ -107,10 +117,9 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
     row.try_get::<_, bool>("present").expect("decode present")
 }
 
-/// A declarative deploy of a fresh collection creates the table (with the injected
-/// system fields + the declared column), and a re-introspection of live PG then
-/// round-trips to the desired snapshot with ZERO structural drift — the
-/// type-fidelity proof, over the shipped seam.
+/// A declarative deploy of a fresh collection creates the table, and a
+/// re-introspection of live PG then round-trips to the desired snapshot with ZERO
+/// structural drift - the type-fidelity proof, over the shipped seam.
 #[compio::test]
 async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     let url = skip_if_no_pg!();
@@ -128,7 +137,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     let desired = desired_snapshot(
         &cfg.project_schema,
         std::slice::from_ref(&desc),
-        &effective_policy(),
+        &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
 
@@ -151,7 +160,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
             &author,
             &[],
             &guard_cfg(&cfg),
-            &effective_policy(),
+            &effective_policy(&cfg),
         )
         .expect("plan_declarative");
     assert!(plan.renames.is_empty(), "an additive create has no renames");
@@ -159,7 +168,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     engine
         .apply_declarative(
             &plan,
-            &effective_policy(),
+            &effective_policy(&cfg),
             Approval::Approved,
             &backend,
             &cfg,
@@ -200,7 +209,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
             &author,
             &[],
             &guard_cfg(&cfg),
-            &effective_policy(),
+            &effective_policy(&cfg),
         )
         .expect("plan_declarative 2");
     assert!(
@@ -231,7 +240,7 @@ async fn declarative_add_column_diff_applies() {
     let desired_v1 = desired_snapshot(
         &cfg.project_schema,
         std::slice::from_ref(&v1_desc),
-        &effective_policy(),
+        &effective_policy(&cfg),
     )
     .expect("desired v1");
     let live0 = snapshot_schema(&session, &cfg.project_schema)
@@ -245,14 +254,14 @@ async fn declarative_add_column_diff_applies() {
             &author,
             &[],
             &guard_cfg(&cfg),
-            &effective_policy(),
+            &effective_policy(&cfg),
         )
         .expect("plan v1");
     let backend = PostgresBackend::new_generic(&session);
     engine
         .apply_declarative(
             &plan1,
-            &effective_policy(),
+            &effective_policy(&cfg),
             Approval::Approved,
             &backend,
             &cfg,
@@ -285,7 +294,7 @@ async fn declarative_add_column_diff_applies() {
     let desired_v2 = desired_snapshot(
         &cfg.project_schema,
         std::slice::from_ref(&v2_desc),
-        &effective_policy(),
+        &effective_policy(&cfg),
     )
     .expect("desired v2");
     let live1 = snapshot_schema(&session, &cfg.project_schema)
@@ -299,7 +308,7 @@ async fn declarative_add_column_diff_applies() {
             &author,
             &[],
             &guard_cfg(&cfg),
-            &effective_policy(),
+            &effective_policy(&cfg),
         )
         .expect("plan v2");
     assert!(
@@ -310,7 +319,7 @@ async fn declarative_add_column_diff_applies() {
     engine
         .apply_declarative(
             &plan2,
-            &effective_policy(),
+            &effective_policy(&cfg),
             Approval::Approved,
             &backend2,
             &cfg,
