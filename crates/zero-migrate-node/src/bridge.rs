@@ -315,7 +315,13 @@ fn field_dto_to_engine(
         enum_values: dto.enum_values,
         id_prefix: dto.id_prefix,
         vector_dims: dto.vector_dims,
+        // The width facets stay unset on this path. The descriptor source only ever
+        // reaches `gen_artifacts_from_descriptors`, which renders TypeScript types
+        // and runtime JSON; `gen_types` reads neither the bounded length nor the
+        // MySQL unbounded-TEXT spelling, both of which exist for DDL alone.
         char_len: None,
+        max_length: None,
+        unbounded_text: false,
         vector_metric: dto.vector_metric,
         case_sensitive: dto.case_sensitive,
         encrypted: dto.encrypted,
