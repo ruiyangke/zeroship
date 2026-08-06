@@ -845,7 +845,7 @@ mod tests {
     /// message that identifies the operation. This test cannot drive
     /// a real `Pool` from a unit test (it would need a live Postgres),
     /// so we exercise the `ok_or_else` value-level closure that the
-    /// fix wires in, mirroring `audit::tests::insert_backfill_running_empty_returning_is_internal_error`.
+    /// fix wires in.
     /// The matching integration test (`c1_setup_creates_then_idempotent`
     /// in `tests/integration.rs`) covers the success path against a
     /// real server.

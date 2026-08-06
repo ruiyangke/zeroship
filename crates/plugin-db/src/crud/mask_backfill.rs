@@ -667,8 +667,8 @@ fn classify_label_from_name(name: &str) -> &'static str {
 /// Best-effort — invoked from the heartbeat path; failure doesn't
 /// abort the data write.
 ///
-/// Mirrors `audit::update_backfill_progress` but takes `&Pool`
-/// instead of a borrowed `&Client` — the backfill loop doesn't hold
+/// Takes `&Pool` instead of a borrowed `&Client` — the mask-backfill
+/// loop doesn't hold
 /// a dedicated client (no advisory lock; the deploy pipeline's
 /// register_model lock is the broader coordination boundary).
 async fn update_backfill_cursor(
