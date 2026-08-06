@@ -590,6 +590,25 @@ impl BlobStore for S3BlobStore {
         Ok(bytes)
     }
 
+    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError> {
+        let key = Self::manifest_key(app_id, deploy_hash);
+        let existed = self
+            .client
+            .head_object(&key)
+            .await
+            .map_err(|e| map_s3(&key, e))?
+            .is_some();
+        if !existed {
+            return Ok(false);
+        }
+        match self.client.delete(&key).await {
+            Ok(()) => {}
+            Err(S3Error::NotFound) => return Ok(false),
+            Err(e) => return Err(map_s3(&key, e)),
+        }
+        Ok(true)
+    }
+
     async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError> {
         let prefix = Self::manifest_prefix(app_id);
         // List every manifest object under the app prefix, paging until the

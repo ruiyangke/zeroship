@@ -87,6 +87,8 @@ fn manifest_for(
         transformer: None,
         assets: a,
         runtime_assets: HashMap::new(),
+        schedules: Vec::new(),
+        workflows: None,
         asset_version: 0,
         sourcemaps: HashMap::new(),
         auth: Default::default(),

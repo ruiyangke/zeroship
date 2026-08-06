@@ -18,6 +18,8 @@ use super::APP_ROLE_TEMPLATE;
 use super::{ADMIN_SCHEMA, PLATFORM_ROLE};
 use crate::error::DbError;
 
+const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
+
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the bootstrap layer was doing when the SQL
 /// failed. The SQLSTATE classification still drives the `.code`
@@ -242,6 +244,10 @@ async fn create_role_if_missing(
         .await
         .map_err(|e| coded_sql(&format!("CREATE ROLE {name}"), e))?;
     Ok(true)
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1515,11 +1521,14 @@ pub struct PerAppRoleOutcome {
 /// 2. `GRANT USAGE, CREATE ON SCHEMA "<app_id>"` — the role may use and
 ///    add objects to its own schema.
 /// 3. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
-///    "<app_id>"` + matching `GRANT USAGE ON ALL SEQUENCES` — CRUD on
-///    existing tables.
+///    "<app_id>"`, immediately followed by a revoke on reserved
+///    `__zeroship_*` tables, plus matching `GRANT USAGE ON ALL SEQUENCES`
+///    — CRUD on existing creator tables only.
 /// 4. `ALTER DEFAULT PRIVILEGES IN SCHEMA "<app_id>" GRANT … ON
 ///    TABLES/SEQUENCES` — so tables/sequences the role (or the platform
 ///    migrator) creates LATER are auto-granted, no re-run needed.
+///    Reserved workflow journals are created under the platform owner role,
+///    so these caller-role default privileges do not cover them.
 ///
 /// Explicitly does NOT grant `REPLICATION`, nor any privilege on another
 /// app's schema, nor on `__zeroship_admin` tables (the template already
@@ -1576,6 +1585,7 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     )
     .await
     .map_err(|e| coded_sql(&format!("GRANT table CRUD ON SCHEMA {app_id}"), e))?;
+    revoke_reserved_system_table_privileges(pool, app_id, &role).await?;
     pool.execute(
         &format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {qrole}"),
         &[],
@@ -1608,6 +1618,44 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     Ok(PerAppRoleOutcome {
         created_role: created,
     })
+}
+
+async fn revoke_reserved_system_table_privileges(
+    pool: &Pool,
+    app_id: &str,
+    role: &str,
+) -> Result<(), DbError> {
+    let schema_literal = sql_string_literal(app_id);
+    let role_literal = sql_string_literal(role);
+    let prefix_literal = sql_string_literal(RESERVED_SYSTEM_TABLE_PREFIX);
+    pool.execute(
+        &format!(
+            "DO $$ \
+             DECLARE \
+               rel record; \
+             BEGIN \
+               FOR rel IN \
+                 SELECT n.nspname, c.relname \
+                   FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE n.nspname = {schema_literal} \
+                    AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                    AND left(c.relname, {prefix_len}) = {prefix_literal} \
+               LOOP \
+                 EXECUTE format( \
+                   'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
+                   rel.nspname, rel.relname, {role_literal} \
+                 ); \
+               END LOOP; \
+             END \
+             $$",
+            prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("REVOKE reserved table privileges {app_id}"), e))?;
+    Ok(())
 }
 
 /// Drop the per-app role. Called by the §17.7 drop-namespace sequence

@@ -7,6 +7,7 @@ use uuid::Uuid;
 use zeroship_bundle::blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
+use zeroship_bundle::WorkflowBlobStore;
 
 fn tmpdir() -> PathBuf {
     let base = std::env::temp_dir();
@@ -138,6 +139,21 @@ async fn local_disk_round_trip_manifest() {
 
     let got = store.get_manifest(&app_id, &deploy_hash).await.unwrap();
     assert_eq!(got.as_ref(), json);
+
+    assert!(store
+        .delete_manifest(&app_id, &deploy_hash)
+        .await
+        .expect("delete manifest"));
+    assert!(matches!(
+        store.get_manifest(&app_id, &deploy_hash).await,
+        Err(BlobError::NotFound(_))
+    ));
+    assert!(!store
+        .delete_manifest(&app_id, &deploy_hash)
+        .await
+        .expect("repeat delete manifest"));
+
+    store.put_manifest(&app_id, &deploy_hash, json).await.unwrap();
 
     // Missing manifest → NotFound.
     let other = Uuid::new_v4();
@@ -323,6 +339,31 @@ async fn local_disk_put_blob_stream_rejects_size_underflow() {
         other => panic!("expected Backend size mismatch, got {other:?}"),
     }
     assert!(!store.has_blob(&h).await.unwrap());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[compio::test]
+async fn local_workflow_blob_store_uses_separate_verified_namespace() {
+    let root = tmpdir();
+    let deploy = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let workflow = zeroship_bundle::LocalWorkflowBlobStore::new(root.clone()).unwrap();
+
+    let data = b"workflow-output";
+    let hash = sha256_hex(data);
+    workflow.put_blob(&hash, data).await.unwrap();
+
+    let roundtrip = workflow.get_blob(&hash).await.unwrap();
+    assert_eq!(roundtrip.as_ref(), data);
+    assert!(!deploy.has_blob(&hash).await.unwrap());
+    assert!(root.join("wfblob").exists());
+    assert!(root.join("blobs").exists());
+
+    workflow.delete_blob(&hash).await.unwrap();
+    assert!(matches!(
+        workflow.get_blob(&hash).await.unwrap_err(),
+        BlobError::NotFound(_)
+    ));
 
     let _ = std::fs::remove_dir_all(&root);
 }

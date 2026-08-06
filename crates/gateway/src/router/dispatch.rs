@@ -18,8 +18,12 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use chrono::{DateTime, Utc};
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
@@ -81,6 +85,690 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
     }
 
     Some(subdomain.to_string())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStepRequest {
+    run_id: String,
+    app_id: Uuid,
+}
+
+/// Internal durable-workflow advance edge.
+///
+/// This is deliberately mounted before the public app catch-all and rejects
+/// requests whose Host resolves as a creator app. The topology is still one
+/// ntex app today; a dedicated internal listener can mount this same handler
+/// without changing the transport contract.
+pub async fn workflow_advance_internal(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+    body: Bytes,
+) -> HttpResponse {
+    if req.method() != ntex::http::Method::POST {
+        return HttpResponse::NotFound().finish();
+    }
+    if extract_app_name(&req, None).is_some() {
+        return HttpResponse::NotFound().finish();
+    }
+
+    let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
+        Ok(request) => request,
+        Err(e) => {
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}));
+        }
+    };
+    if request.run_id.is_empty() {
+        return HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "workflow dispatch request requires runId and appId"
+        }));
+    }
+
+    let Some(compiled_route) = state.routes.lookup_by_app_id(&request.app_id) else {
+        return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
+    };
+
+    if let Err(resp) = enforce::check_account(compiled_route.entry.account_state) {
+        return resp;
+    }
+    if let Err(resp) = enforce::check_spend(compiled_route.entry.spend_state) {
+        return resp;
+    }
+
+    let worker_body = match serde_json::to_vec(&request) {
+        Ok(body) => body,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}));
+        }
+    };
+
+    // TODO(DW-signed-transport): verify a control-plane signature/nonce before
+    // accepting this internal StepRequest, then sign the gateway->worker hop.
+    // For DW-05b the worker's unsigned test-flag route is the intentional seam.
+    let request_id = Uuid::new_v4();
+    let worker_response = match proxy::forward_workflow_advance(
+        &state.hash_ring,
+        &request.app_id,
+        &compiled_route.entry.plan_id,
+        &request_id,
+        &worker_body,
+        &state.config.worker_key,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            return HttpResponse::BadGateway()
+                .json(&serde_json::json!({"error": format!("worker error: {e}")}));
+        }
+    };
+
+    if !worker_response.status().is_success() {
+        return worker_response;
+    }
+
+    let (_buffered, worker_bytes) = buffer_response_body(worker_response).await;
+    match workflow_worker_advance_response(&worker_bytes) {
+        Ok(response) => HttpResponse::Ok().json(&response),
+        Err(e) => HttpResponse::BadGateway()
+            .json(&serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")})),
+    }
+}
+
+fn workflow_worker_advance_response(worker_bytes: &[u8]) -> Result<Value, String> {
+    let response: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
+    let ack = response
+        .get("ack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let nack = response
+        .get("nack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if ack == nack {
+        return Err("response must set exactly one of ack or nack".to_string());
+    }
+    if response.get("runId").and_then(Value::as_str).is_none() {
+        return Err("response missing runId".to_string());
+    }
+    if ack
+        && response
+            .get("registrations")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        return Err("ack response missing registrations".to_string());
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+fn workflow_worker_result_to_step_result(
+    request: &WorkflowStepRequest,
+    worker_bytes: &[u8],
+) -> Result<Value, String> {
+    let result: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
+    if result.get("runUpdate").is_some() && result.get("dispatchNonce").is_some() {
+        let normalized = normalize_workflow_step_result(result)?;
+        let outcomes = legacy_step_result_to_outcomes(&normalized)?;
+        return Ok(serde_json::json!({
+            "runId": normalized
+                .get("runId")
+                .and_then(Value::as_str)
+                .unwrap_or(request.run_id.as_str()),
+            "dispatchNonce": normalized
+                .get("dispatchNonce")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            "outcomes": outcomes,
+        }));
+    }
+
+    let run_id = result
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or(request.run_id.as_str());
+    let nonce = result
+        .get("dispatchNonce")
+        .or_else(|| result.get("nonce"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let outcomes = if let Some(outcomes) = result.get("outcomes") {
+        let outcomes = outcomes
+            .as_array()
+            .ok_or_else(|| "outcomes must be an array".to_string())?
+            .clone();
+        normalize_workflow_outcomes(outcomes, result.get("error").cloned())?
+    } else {
+        normalize_workflow_outcomes(vec![single_worker_result_to_outcome(&result)?], None)?
+    };
+
+    Ok(serde_json::json!({
+        "runId": run_id,
+        "dispatchNonce": nonce,
+        "outcomes": outcomes,
+    }))
+}
+
+#[cfg(test)]
+fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
+    let kind = result
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing kind".to_string())?;
+    match kind {
+        "StepCompleted" => {
+            let mut outcome = serde_json::json!({
+                "kind": "StepCompleted",
+                "ordinal": required_i64(result, "ordinal")?,
+                "name": required_str(result, "name")?,
+                "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "stepKind": workflow_step_kind_or_run(result)?,
+                "compensable": result.get("compensable").and_then(Value::as_bool).unwrap_or(false),
+                "compensationMaxAttempts": result.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1),
+            });
+            copy_workflow_output(result, &mut outcome);
+            Ok(outcome)
+        }
+        "RunCompleted" => {
+            let mut outcome = serde_json::json!({ "kind": "RunCompleted" });
+            copy_workflow_output(result, &mut outcome);
+            Ok(outcome)
+        }
+        "ContinueAsNew" => {
+            let mut outcome = serde_json::json!({ "kind": "ContinueAsNew" });
+            copy_continue_as_new_input(result, &mut outcome);
+            Ok(outcome)
+        }
+        "RunFailed" => {
+            let mut outcome = serde_json::json!({
+                "kind": "RunFailed",
+                "error": workflow_error_or_default(result.get("error"), "workflow run failed"),
+            });
+            if result.get("ordinal").is_some() && result.get("name").is_some() {
+                outcome["ordinal"] = serde_json::json!(required_i64(result, "ordinal")?);
+                outcome["name"] = serde_json::json!(required_str(result, "name")?);
+                outcome["nameOccurrence"] =
+                    serde_json::json!(result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+            }
+            Ok(outcome)
+        }
+        "Sleep" => Ok(serde_json::json!({
+            "kind": "Sleep",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+        })),
+        "Wait" => Ok(serde_json::json!({
+            "kind": "Wait",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "signalType": result.get("signalType")
+                .cloned()
+                .unwrap_or_else(|| result.get("name").cloned().unwrap_or(Value::Null)),
+            "timeout": result.get("timeout").cloned().unwrap_or(Value::Null),
+            "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+            "maxSignalAge": result.get("maxSignalAge").cloned().unwrap_or(Value::Null),
+            "maxSignalAgeMs": result.get("maxSignalAgeMs").cloned().unwrap_or(Value::Null),
+            "topic": result.get("topic").cloned().unwrap_or(Value::Null),
+        })),
+        "Child" => Ok(serde_json::json!({
+            "kind": "Child",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "childWorkflowName": result.get("childWorkflowName")
+                .cloned()
+                .or_else(|| result.get("workflowName").cloned())
+                .unwrap_or(Value::Null),
+            "input": result.get("input").cloned().unwrap_or(Value::Null),
+            "options": result.get("options").cloned().unwrap_or_else(|| serde_json::json!({})),
+        })),
+        "CompensationCompleted" => Ok(serde_json::json!({
+            "kind": "CompensationCompleted",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+        })),
+        "CompensationFailed" => Ok(serde_json::json!({
+            "kind": "CompensationFailed",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "error": workflow_error_or_default(result.get("error"), "workflow compensator failed"),
+        })),
+        other => Err(format!("unknown worker workflow result kind {other:?}")),
+    }
+}
+
+#[cfg(test)]
+fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
+    let step_kind = value
+        .get("stepKind")
+        .filter(|value| !value.is_null())
+        .and_then(Value::as_str)
+        .unwrap_or("run");
+    match step_kind {
+        "run" | "sideEffect" | "child" => Ok(Value::String(step_kind.to_string())),
+        other => Err(format!("unknown workflow stepKind {other:?}")),
+    }
+}
+
+#[cfg(test)]
+fn copy_workflow_output(source: &Value, target: &mut Value) {
+    if let Some(output_ref) = source.get("outputRef").filter(|value| !value.is_null()) {
+        target["outputRef"] = output_ref.clone();
+    } else {
+        target["output"] = source.get("output").cloned().unwrap_or(Value::Null);
+    }
+}
+
+#[cfg(test)]
+fn copy_continue_as_new_input(source: &Value, target: &mut Value) {
+    if let Some(input_ref) = source.get("inputRef").filter(|value| !value.is_null()) {
+        target["inputRef"] = input_ref.clone();
+    } else {
+        target["input"] = source.get("input").cloned().unwrap_or(Value::Null);
+    }
+}
+
+#[cfg(test)]
+fn ensure_workflow_output(outcome: &mut Value) {
+    let has_ref = outcome
+        .get("outputRef")
+        .is_some_and(|value| !value.is_null());
+    let has_output = outcome.get("output").is_some();
+    if !has_ref && !has_output {
+        outcome["output"] = Value::Null;
+    }
+}
+
+#[cfg(test)]
+fn ensure_continue_as_new_input(outcome: &mut Value) {
+    let has_ref = outcome
+        .get("inputRef")
+        .is_some_and(|value| !value.is_null());
+    let has_input = outcome.get("input").is_some();
+    if !has_ref && !has_input {
+        outcome["input"] = Value::Null;
+    }
+}
+
+#[cfg(test)]
+fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
+    error
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type": "Error", "message": message}))
+}
+
+#[cfg(test)]
+fn normalize_workflow_outcomes(
+    mut outcomes: Vec<Value>,
+    fallback_error: Option<Value>,
+) -> Result<Vec<Value>, String> {
+    if outcomes.is_empty() {
+        return Err("workflow outcome batch is empty".to_string());
+    }
+    let fallback_error = fallback_error.filter(|value| !value.is_null());
+    let last = outcomes.len() - 1;
+    for (idx, outcome) in outcomes.iter_mut().enumerate() {
+        let kind = outcome
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "outcome missing kind".to_string())?;
+        // StepCompleted and Child may appear non-trailing: a dispatch can settle
+        // multiple concurrent steps and spawn multiple children (startMany) in one
+        // batch. A true suspension/terminal is mutually exclusive and must be the
+        // trailing entry. Compensation is a serial reverse-frontier outcome and is
+        // trailing too.
+        if kind != "StepCompleted" && kind != "Child" && idx != last {
+            return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
+        }
+        match kind {
+            "StepCompleted" => {
+                let step_kind = workflow_step_kind_or_run(outcome)?;
+                outcome["stepKind"] = step_kind;
+                outcome["compensable"] = serde_json::json!(
+                    outcome.get("compensable").and_then(Value::as_bool).unwrap_or(false)
+                );
+                outcome["compensationMaxAttempts"] = serde_json::json!(
+                    outcome.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1)
+                );
+                ensure_workflow_output(outcome);
+            }
+            "RunCompleted" => ensure_workflow_output(outcome),
+            "ContinueAsNew" => ensure_continue_as_new_input(outcome),
+            "RunFailed" => {
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
+                        "workflow step failed"
+                    } else {
+                        "workflow run failed"
+                    };
+                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), message);
+                }
+            }
+            "Sleep" => {
+                let wake_at = normalize_workflow_wake_at(outcome.get("wakeAt"))
+                    .ok_or_else(|| "invalid sleep wakeAt".to_string())?;
+                outcome["wakeAt"] = wake_at;
+            }
+            "Wait" => {
+                let wake_at = normalize_workflow_wake_at(
+                    outcome.get("wakeAt").filter(|value| !value.is_null()).or_else(|| outcome.get("timeout")),
+                )
+                .ok_or_else(|| "invalid wait timeout".to_string())?;
+                outcome["wakeAt"] = wake_at;
+                outcome["signalType"] = outcome
+                    .get("signalType")
+                    .cloned()
+                    .unwrap_or_else(|| outcome.get("name").cloned().unwrap_or(Value::Null));
+                outcome["maxSignalAgeMs"] = normalize_workflow_duration_ms(
+                    outcome
+                        .get("maxSignalAgeMs")
+                        .filter(|value| !value.is_null())
+                        .or_else(|| outcome.get("maxSignalAge")),
+                )
+                .ok_or_else(|| "invalid wait maxSignalAge".to_string())?;
+            }
+            "Child" => {
+                // Child spawn (parent parks) — a trailing suspension outcome.
+                // Fields (ordinal/name/childWorkflowName/input/options) pass through;
+                // the engine's StepOutcome::Child fold spawns the child run + parks
+                // the parent. The runtime emits both childWorkflowName and the base
+                // workflowName; keep only childWorkflowName (StepOutcome::Child aliases
+                // workflowName → child_workflow_name, so both present = a serde
+                // "duplicate field" error).
+                if let Some(obj) = outcome.as_object_mut() {
+                    if !obj.contains_key("childWorkflowName") {
+                        if let Some(wn) = obj.get("workflowName").cloned() {
+                            obj.insert("childWorkflowName".to_string(), wn);
+                        }
+                    }
+                    obj.remove("workflowName");
+                }
+            }
+            "CompensationCompleted" => {
+                let _ = required_i64(outcome, "ordinal")?;
+                let _ = required_str(outcome, "name")?;
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+            }
+            "CompensationFailed" => {
+                let _ = required_i64(outcome, "ordinal")?;
+                let _ = required_str(outcome, "name")?;
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), "workflow compensator failed");
+                }
+            }
+            other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
+        }
+    }
+    Ok(outcomes)
+}
+
+#[cfg(test)]
+fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> {
+    let mut outcomes = Vec::new();
+    let mut failed_checkpoint_encoded = false;
+    for checkpoint in result
+        .get("checkpoints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "legacy StepResult missing checkpoints".to_string())?
+    {
+        let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
+        match (kind, state) {
+            ("run" | "sideEffect", "completed") => {
+                let compensable = checkpoint
+                    .get("compensable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| {
+                        checkpoint
+                            .get("compensationState")
+                            .and_then(Value::as_str)
+                            .is_some_and(|state| {
+                                matches!(state, "pending" | "running" | "completed" | "failed")
+                            })
+                    });
+                let mut outcome = serde_json::json!({
+                    "kind": "StepCompleted",
+                    "ordinal": required_i64(checkpoint, "ordinal")?,
+                    "name": required_str(checkpoint, "name")?,
+                    "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                    "stepKind": kind,
+                    "compensable": compensable,
+                    "compensationMaxAttempts": checkpoint
+                        .get("compensationMaxAttempts")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(1),
+                });
+                copy_workflow_output(checkpoint, &mut outcome);
+                outcomes.push(outcome);
+            }
+            ("run", "failed") => {
+                failed_checkpoint_encoded = true;
+                outcomes.push(serde_json::json!({
+                    "kind": "RunFailed",
+                    "ordinal": required_i64(checkpoint, "ordinal")?,
+                    "name": required_str(checkpoint, "name")?,
+                    "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                    "error": checkpoint.get("error").cloned().unwrap_or_else(|| {
+                        serde_json::json!({"type": "Error", "message": "workflow step failed"})
+                    }),
+                }));
+            }
+            ("sleep", "running") => outcomes.push(serde_json::json!({
+                "kind": "Sleep",
+                "ordinal": required_i64(checkpoint, "ordinal")?,
+                "name": required_str(checkpoint, "name")?,
+                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "wakeAt": checkpoint.get("wakeAt").cloned().unwrap_or(Value::Null),
+            })),
+            ("wait_signal", "running") => outcomes.push(serde_json::json!({
+                "kind": "Wait",
+                "ordinal": required_i64(checkpoint, "ordinal")?,
+                "name": required_str(checkpoint, "name")?,
+                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "wakeAt": checkpoint.get("wakeAt").cloned().unwrap_or(Value::Null),
+                "signalType": checkpoint.get("signalType").cloned().unwrap_or(Value::Null),
+                "maxSignalAgeMs": checkpoint.get("maxSignalAgeMs").cloned().unwrap_or(Value::Null),
+                "consumedSignalId": checkpoint.get("consumedSignalId").cloned().unwrap_or(Value::Null),
+            })),
+            _ => {}
+        }
+    }
+
+    match result.pointer("/runUpdate/state").and_then(Value::as_str) {
+        Some("completed") => outcomes.push(serde_json::json!({
+            "kind": "RunCompleted",
+            "output": result.pointer("/runUpdate/output").cloned().unwrap_or(Value::Null),
+        })),
+        Some("failed") if !failed_checkpoint_encoded => outcomes.push(serde_json::json!({
+            "kind": "RunFailed",
+            "error": result.pointer("/runUpdate/error").cloned().unwrap_or_else(|| {
+                serde_json::json!({"type": "Error", "message": "workflow run failed"})
+            }),
+        })),
+        _ => {}
+    }
+
+    normalize_workflow_outcomes(outcomes, None)
+}
+
+#[cfg(test)]
+fn required_i64(value: &Value, key: &str) -> Result<i64, String> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("missing {key}"))
+}
+
+#[cfg(test)]
+fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing {key}"))
+}
+
+#[cfg(test)]
+fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
+    let state = result
+        .pointer("/runUpdate/state")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if state == "sleeping" {
+        let wake_at = normalize_workflow_wake_at(result.pointer("/runUpdate/wakeAt"))
+            .filter(|value| !value.is_null())
+            .or_else(|| {
+                result
+                    .get("checkpoints")
+                    .and_then(Value::as_array)
+                    .and_then(|checkpoints| {
+                        checkpoints.iter().find_map(|checkpoint| {
+                            let is_sleep =
+                                checkpoint.get("kind").and_then(Value::as_str) == Some("sleep");
+                            let is_running =
+                                checkpoint.get("state").and_then(Value::as_str) == Some("running");
+                            (is_sleep && is_running)
+                                .then(|| normalize_workflow_wake_at(checkpoint.get("wakeAt")))
+                                .flatten()
+                                .filter(|value| !value.is_null())
+                        })
+                    })
+            })
+            .ok_or_else(|| "sleeping workflow StepResult missing wakeAt".to_string())?;
+
+        if let Some(update) = result.get_mut("runUpdate").and_then(Value::as_object_mut) {
+            update.insert("wakeAt".to_string(), wake_at.clone());
+        }
+        if let Some(checkpoints) = result.get_mut("checkpoints").and_then(Value::as_array_mut) {
+            for checkpoint in checkpoints {
+                let is_sleep = checkpoint.get("kind").and_then(Value::as_str) == Some("sleep");
+                let is_running = checkpoint.get("state").and_then(Value::as_str) == Some("running");
+                if is_sleep && is_running {
+                    checkpoint["wakeAt"] = wake_at.clone();
+                }
+            }
+        }
+    } else if state == "waiting" {
+        let wake_at = normalize_workflow_wake_at(result.pointer("/runUpdate/wakeAt"))
+            .ok_or_else(|| "invalid waiting workflow wakeAt".to_string())?;
+        if let Some(update) = result.get_mut("runUpdate").and_then(Value::as_object_mut) {
+            update.insert("wakeAt".to_string(), wake_at.clone());
+        }
+        if let Some(checkpoints) = result.get_mut("checkpoints").and_then(Value::as_array_mut) {
+            for checkpoint in checkpoints {
+                let is_wait =
+                    checkpoint.get("kind").and_then(Value::as_str) == Some("wait_signal");
+                let is_running = checkpoint.get("state").and_then(Value::as_str) == Some("running");
+                if is_wait && is_running {
+                    checkpoint["wakeAt"] = wake_at.clone();
+                    checkpoint["maxSignalAgeMs"] =
+                        normalize_workflow_duration_ms(checkpoint.get("maxSignalAgeMs"))
+                            .ok_or_else(|| "invalid wait maxSignalAgeMs".to_string())?;
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+fn normalize_workflow_wake_at(raw: Option<&Value>) -> Option<Value> {
+    let value = raw?;
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    let Some(s) = value.as_str() else {
+        return Some(value.clone());
+    };
+    if DateTime::parse_from_rfc3339(s).is_ok() {
+        return Some(Value::String(s.to_string()));
+    }
+    let ms = parse_iso8601_duration_ms(s)?;
+    let wake_at = Utc::now() + chrono::Duration::milliseconds(ms);
+    Some(Value::String(wake_at.to_rfc3339()))
+}
+
+#[cfg(test)]
+fn normalize_workflow_duration_ms(raw: Option<&Value>) -> Option<Value> {
+    let Some(value) = raw else {
+        return Some(Value::Null);
+    };
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    if let Some(ms) = value.as_i64() {
+        return Some(Value::Number(ms.into()));
+    }
+    let s = value.as_str()?;
+    let ms = parse_iso8601_duration_ms(s)?;
+    Some(Value::Number(ms.into()))
+}
+
+#[cfg(test)]
+fn parse_iso8601_duration_ms(raw: &str) -> Option<i64> {
+    let s = raw.strip_prefix('P')?;
+    let (date_part, time_part) = match s.split_once('T') {
+        Some((date, time)) => (date, time),
+        None => (s, ""),
+    };
+    let mut total_ms = 0_i64;
+    let mut num = String::new();
+    for ch in date_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        let value = parse_duration_number(&num)?;
+        num.clear();
+        match ch {
+            'D' => total_ms = total_ms.checked_add((value * 86_400_000.0).round() as i64)?,
+            _ => return None,
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    for ch in time_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        let value = parse_duration_number(&num)?;
+        num.clear();
+        match ch {
+            'H' => total_ms = total_ms.checked_add((value * 3_600_000.0).round() as i64)?,
+            'M' => total_ms = total_ms.checked_add((value * 60_000.0).round() as i64)?,
+            'S' => total_ms = total_ms.checked_add((value * 1_000.0).round() as i64)?,
+            _ => return None,
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    Some(total_ms.max(0))
+}
+
+#[cfg(test)]
+fn parse_duration_number(raw: &str) -> Option<f64> {
+    if raw.is_empty() {
+        return None;
+    }
+    let value = raw.parse::<f64>().ok()?;
+    value.is_finite().then_some(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1933,7 +2621,7 @@ mod tests {
 
     use ntex::http::body::{Body, MessageBody, ResponseBody};
     use ntex::util::Bytes;
-    use ntex::web::HttpResponse;
+    use ntex::web::{self, HttpResponse};
 
     use crate::compiled::{CompiledManifest, EffectivePolicy};
     use zeroship_bundle::{
@@ -1953,6 +2641,17 @@ mod tests {
             resources,
             ..Manifest::default()
         }
+    }
+
+    fn usage_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
     }
 
     /// Drain a `ResponseBody<Body>` to bytes — the dispatch tests need
@@ -2029,6 +2728,13 @@ mod tests {
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
+        async fn delete_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+        ) -> Result<bool, zeroship_bundle::BlobError> {
+            Ok(false)
+        }
         async fn delete_app_manifests(
             &self,
             _app_id: &uuid::Uuid,
@@ -2037,7 +2743,7 @@ mod tests {
         }
     }
 
-    fn build_idempotency_state() -> Arc<GateState> {
+    fn build_test_state_with_workers(worker_urls: Vec<String>) -> Arc<GateState> {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -2045,7 +2751,7 @@ mod tests {
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
-                worker_urls: vec![],
+                worker_urls: worker_urls.clone(),
                 poll_interval_secs: 5,
                 worker_key: String::new(),
                 auth_ui_url: String::new(),
@@ -2054,7 +2760,7 @@ mod tests {
                 public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),
-            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
+            hash_ring: crate::proxy::HashRing::new(worker_urls, 1),
             rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
             per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
             concurrency: crate::enforce::ConcurrencyRegistry::new(1),
@@ -2078,6 +2784,506 @@ mod tests {
             pairwise_salt: [0u8; 32],
             meter: Arc::new(zeroship_metering::Meter::new()),
         })
+    }
+
+    fn build_idempotency_state() -> Arc<GateState> {
+        build_test_state_with_workers(vec!["http://0.0.0.0:0".into()])
+    }
+
+    fn workflow_step_request(app_id: Uuid) -> Value {
+        serde_json::json!({
+            "runId": "run_test",
+            "appId": app_id,
+        })
+    }
+
+    async fn workflow_mock_worker(
+        seen: web::types::State<Arc<std::sync::Mutex<Vec<Value>>>>,
+        body: Bytes,
+    ) -> HttpResponse {
+        let request: Value = serde_json::from_slice(body.as_ref()).expect("worker request json");
+        seen.lock().expect("seen lock").push(request.clone());
+        HttpResponse::Ok().json(&serde_json::json!({
+            "ack": true,
+            "runId": request["runId"],
+            "registrations": [{
+                "runId": request["runId"],
+                "appId": request["appId"],
+                "terminal": true
+            }]
+        }))
+    }
+
+    fn install_workflow_route(
+        state: &GateState,
+        app_id: Uuid,
+        spend_state: zeroship_core::types::SpendState,
+        account_state: zeroship_core::types::AccountState,
+    ) {
+        let mut entry = worker_spend_route(spend_state);
+        entry.account_state = account_state;
+        let mut routes = zeroship_core::types::RouteMap::new();
+        routes.insert(app_id, entry);
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+    }
+
+    #[ntex::test]
+    async fn internal_workflow_advance_routes_to_worker_and_returns_ack() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let server_seen = Arc::clone(&seen);
+        let worker = ntex::web::test::server(move || {
+            let seen = Arc::clone(&server_seen);
+            async move {
+                web::App::new().state(seen).service(
+                    web::resource("/workflow-advance-unsigned/{app_id}")
+                        .route(web::post().to(workflow_mock_worker)),
+                )
+            }
+        })
+        .await;
+
+        let state = build_test_state_with_workers(vec![worker.url("/")]);
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-advance")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        let body = ntex::web::test::read_body(resp).await;
+        let result: Value = serde_json::from_slice(&body).expect("workflow advance ack JSON");
+        assert_eq!(result["ack"], true);
+        assert_eq!(result["runId"], "run_test");
+        assert_eq!(result["registrations"][0]["runId"], "run_test");
+        assert_eq!(result["registrations"][0]["appId"], app_id.to_string());
+        assert_eq!(result["registrations"][0]["terminal"], true);
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["runId"], "run_test");
+        assert_eq!(seen[0]["appId"], app_id.to_string());
+        let keys = seen[0].as_object().expect("worker request object");
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn workflow_sleep_frontier_normalizes_duration_wake_at() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "Sleep",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "ordinal": 1,
+            "name": "sleep",
+            "nameOccurrence": 0,
+            "wakeAt": "PT1S"
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("sleep result");
+
+        let wake_at = result["outcomes"][0]["wakeAt"]
+            .as_str()
+            .expect("sleep wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(result["outcomes"][0]["kind"], "Sleep");
+    }
+
+    #[test]
+    fn workflow_wait_frontier_normalizes_timeout_and_max_signal_age() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "Wait",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "ordinal": 1,
+            "name": "go",
+            "nameOccurrence": 0,
+            "signalType": "go",
+            "timeout": "PT30S",
+            "maxSignalAge": "PT5S"
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("wait result");
+
+        let wake_at = result["outcomes"][0]["wakeAt"]
+            .as_str()
+            .expect("wait wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(result["outcomes"][0]["kind"], "Wait");
+        assert_eq!(result["outcomes"][0]["signalType"], "go");
+        assert_eq!(result["outcomes"][0]["maxSignalAgeMs"], 5_000);
+    }
+
+    #[test]
+    fn workflow_step_completed_preserves_side_effect_step_kind() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "StepCompleted",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "ordinal": 0,
+            "name": "v",
+            "nameOccurrence": 0,
+            "stepKind": "sideEffect",
+            "output": {"value": 1}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("sideEffect completed result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][0]["stepKind"], "sideEffect");
+        assert_eq!(result["outcomes"][0]["name"], "v");
+    }
+
+    #[test]
+    fn workflow_continue_as_new_preserves_seed_input() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "ContinueAsNew",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "input": {"generation": 1}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("continue-as-new result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "ContinueAsNew");
+        assert_eq!(result["outcomes"][0]["input"], serde_json::json!({"generation": 1}));
+    }
+
+    #[test]
+    fn workflow_run_failed_batch_uses_batch_error_when_outcome_error_missing() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "RunFailed",
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "workflowName": "Checkout",
+            "error": {
+                "type": "NondeterministicError",
+                "message": "workflow journal mismatch at ordinal 0"
+            },
+            "outcomes": [{
+                "kind": "RunFailed"
+            }]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("run failed result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "RunFailed");
+        assert_eq!(result["outcomes"][0]["error"]["type"], "NondeterministicError");
+        assert_eq!(
+            result["outcomes"][0]["error"]["message"],
+            "workflow journal mismatch at ordinal 0"
+        );
+    }
+
+    #[test]
+    fn workflow_batch_normalizes_only_trailing_suspension() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "output": "A"
+                },
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "output": "B"
+                },
+                {
+                    "kind": "Sleep",
+                    "ordinal": 2,
+                    "name": "cooldown",
+                    "nameOccurrence": 0,
+                    "wakeAt": "PT1S"
+                }
+            ]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("batch result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][1]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][2]["kind"], "Sleep");
+        let wake_at = result["outcomes"][2]["wakeAt"]
+            .as_str()
+            .expect("sleep wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+    }
+
+    #[test]
+    fn workflow_batch_preserves_compensable_on_every_completed_step() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "stepKind": "run",
+                    "compensable": true,
+                    "compensationMaxAttempts": 1,
+                    "output": "A"
+                },
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "stepKind": "run",
+                    "compensable": true,
+                    "compensationMaxAttempts": 3,
+                    "output": "B"
+                },
+                {
+                    "kind": "RunFailed",
+                    "ordinal": 2,
+                    "name": "c",
+                    "nameOccurrence": 0,
+                    "error": {"type": "Error", "message": "c failed"}
+                }
+            ]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("compensable batch result");
+
+        assert_eq!(result["outcomes"][0]["compensable"], true);
+        assert_eq!(result["outcomes"][0]["compensationMaxAttempts"], 1);
+        assert_eq!(result["outcomes"][1]["compensable"], true);
+        assert_eq!(result["outcomes"][1]["compensationMaxAttempts"], 3);
+        assert_eq!(result["outcomes"][2]["kind"], "RunFailed");
+    }
+
+    #[test]
+    fn workflow_legacy_checkpoints_preserve_compensation_metadata() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [
+                {
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "A",
+                    "compensable": true,
+                    "compensationMaxAttempts": 1
+                },
+                {
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "B",
+                    "compensationState": "pending",
+                    "compensationMaxAttempts": 2
+                },
+                {
+                    "ordinal": 2,
+                    "name": "plain",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "plain"
+                }
+            ],
+            "runUpdate": {"state": "queued"}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("legacy checkpoint result");
+
+        assert_eq!(result["outcomes"][0]["compensable"], true);
+        assert_eq!(result["outcomes"][0]["compensationMaxAttempts"], 1);
+        assert_eq!(result["outcomes"][1]["compensable"], true);
+        assert_eq!(result["outcomes"][1]["compensationMaxAttempts"], 2);
+        assert_eq!(result["outcomes"][2]["compensable"], false);
+        assert_eq!(result["outcomes"][2]["compensationMaxAttempts"], 1);
+    }
+
+    #[test]
+    fn workflow_step_result_sleep_normalizes_duration_wake_at() {
+        let result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [{
+                "ordinal": 1,
+                "name": "sleep",
+                "nameOccurrence": 0,
+                "kind": "sleep",
+                "state": "running",
+                "output": null,
+                "error": null,
+                "wakeAt": "PT1S",
+                "signalType": null,
+                "maxSignalAgeMs": null,
+                "consumedSignalId": null
+            }],
+            "runUpdate": {"state": "sleeping", "wakeAt": null}
+        });
+        let normalized = normalize_workflow_step_result(result).expect("normalized StepResult");
+        let wake_at = normalized["runUpdate"]["wakeAt"]
+            .as_str()
+            .expect("runUpdate wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(
+            normalized["checkpoints"][0]["wakeAt"],
+            normalized["runUpdate"]["wakeAt"]
+        );
+    }
+
+    #[test]
+    fn workflow_step_result_wait_normalizes_duration_fields() {
+        let result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [{
+                "ordinal": 1,
+                "name": "go",
+                "nameOccurrence": 0,
+                "kind": "wait_signal",
+                "state": "running",
+                "output": null,
+                "error": null,
+                "wakeAt": "PT30S",
+                "signalType": "go",
+                "maxSignalAgeMs": "PT5S",
+                "consumedSignalId": null
+            }],
+            "runUpdate": {"state": "waiting", "wakeAt": "PT30S"}
+        });
+        let normalized = normalize_workflow_step_result(result).expect("normalized StepResult");
+        let wake_at = normalized["runUpdate"]["wakeAt"]
+            .as_str()
+            .expect("runUpdate wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(
+            normalized["checkpoints"][0]["wakeAt"],
+            normalized["runUpdate"]["wakeAt"]
+        );
+        assert_eq!(normalized["checkpoints"][0]["maxSignalAgeMs"], 5_000);
+    }
+
+    #[ntex::test]
+    async fn internal_workflow_advance_spend_blocked_app_returns_402() {
+        let state = build_test_state_with_workers(Vec::new());
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Block,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-advance")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
+        let body = ntex::web::test::read_body(resp).await;
+        let json: Value = serde_json::from_slice(&body).expect("402 JSON");
+        assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    #[ntex::test]
+    async fn public_vhost_workflow_advance_path_is_404() {
+        let state = build_test_state_with_workers(Vec::new());
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-advance")
+            .header("host", "spend-app.zeroship.localhost")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
     }
 
     // -----------------------------------------------------------------------
@@ -3669,18 +4875,16 @@ mod tests {
         let served = collect_body(resp.take_body()).await;
         assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
 
-        let snap = meter.drain();
-        let usage = snap
-            .get(&app_id)
-            .expect("gateway recorded usage for the static route's app");
+        let events = meter.drain();
         assert_eq!(
-            usage.custom.get("gateway_egress_bytes").copied(),
+            usage_value(&events, app_id, "gateway_egress_bytes"),
             Some(served.len() as u64),
             "static (gateway-owned) egress must be metered as gateway_egress_bytes \
              equal to the served body length",
         );
         assert_eq!(
-            usage.egress_bytes, 0,
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
             "the gateway must NEVER touch the worker-owned egress_bytes metric",
         );
     }
@@ -3719,17 +4923,13 @@ mod tests {
         )
         .await;
 
-        let snap = meter.drain();
-        // Either the app has no entry at all, or it has one but with NO
-        // gateway_egress_bytes — the gateway must not meter the worker arm.
-        if let Some(usage) = snap.get(&app_id) {
-            assert_eq!(
-                usage.custom.get("gateway_egress_bytes").copied(),
-                None,
-                "the gateway must NOT meter a worker-proxied response body as \
-                 gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
-            );
-        }
+        let events = meter.drain();
+        assert_eq!(
+            usage_value(&events, app_id, "gateway_egress_bytes"),
+            None,
+            "the gateway must NOT meter a worker-proxied response body as \
+             gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
+        );
     }
 
     /// A worker RPC route that caps input at `max` bytes, so a body over the
@@ -3820,33 +5020,41 @@ mod tests {
         let body = collect_body(resp.take_body()).await;
         assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
 
-        let snap = meter.drain();
+        let events = meter.drain();
         // The gateway must record NOTHING for an error envelope: no
         // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
-        if let Some(usage) = snap.get(&app_id) {
-            assert_eq!(
-                usage.custom.get("gateway_egress_bytes").copied(),
-                None,
-                "a gateway error/4xx envelope is platform overhead and must NOT \
-                 be metered as gateway_egress_bytes",
-            );
-            assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
-        }
+        assert_eq!(
+            usage_value(&events, app_id, "gateway_egress_bytes"),
+            None,
+            "a gateway error/4xx envelope is platform overhead and must NOT \
+             be metered as gateway_egress_bytes",
+        );
+        assert_eq!(
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
+            "the gateway never touches egress_bytes",
+        );
     }
 
-    /// Restart-safety (§2.3 / the boot-nonce lesson): two
-    /// `boot_worker_id("gate-…")` calls for the SAME stable base must differ,
-    /// so the gateway's per-process `SequenceSource` resetting to 1 each boot
-    /// can't collide with pre-restart `(producer_id, sequence)` rows and be
-    /// dropped as a phantom duplicate (silent under-bill).
+    /// Restart-safety under the usage-event model: event IDs, rather than a
+    /// process-local sequence, are the provider dedup identity. Two process
+    /// instances using the same stable source must still emit distinct IDs.
     #[test]
-    fn gateway_producer_id_is_restart_unique() {
-        let base = "gate-pod-3";
-        let a = zeroship_metering::boot_worker_id(base);
-        let b = zeroship_metering::boot_worker_id(base);
-        assert_ne!(a, b, "each gateway boot must get a fresh metering identity");
-        assert!(a.starts_with(&format!("{base}-")));
-        assert!(b.starts_with(&format!("{base}-")));
+    fn gateway_usage_event_ids_are_restart_unique() {
+        let app_id = Uuid::new_v4();
+        let first = zeroship_metering::Meter::with_source("gate-pod-3");
+        let second = zeroship_metering::Meter::with_source("gate-pod-3");
+        first.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+        second.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+
+        let first_event = first.drain().pop().expect("first usage event");
+        let second_event = second.drain().pop().expect("second usage event");
+        assert_eq!(first_event.source, "gate-pod-3");
+        assert_eq!(second_event.source, "gate-pod-3");
+        assert_ne!(
+            first_event.event_id, second_event.event_id,
+            "separate gateway boots must not collide at provider dedup",
+        );
     }
 
     /// Allow → the gate passes (so dispatch proceeds to the proxy, which fails

@@ -12,7 +12,9 @@ use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
     CheckValue,
 };
-use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_bundle::{
+    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+};
 use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
 
@@ -65,6 +67,14 @@ struct WorkerCli {
     #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
     max_isolates: usize,
 
+    /// Maximum deploy-pinned workflow replay isolates kept per app.
+    #[arg(
+        long = "max-pinned-isolates-per-app",
+        env = "MAX_PINNED_ISOLATES_PER_APP",
+        default_value = "4"
+    )]
+    max_pinned_isolates_per_app: usize,
+
     /// Control-plane polling interval in seconds.
     #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
     poll_interval: u64,
@@ -112,6 +122,20 @@ struct WorkerCli {
     #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
     storage_url: String,
 
+    /// Test-only unsigned durable-workflow replay ingress. Hidden because
+    /// signed workflow advance is the production transport; DW-07 uses this
+    /// flag to exercise the real replay path before that signing task lands.
+    #[arg(long = "workflow-advance-unsigned", hide = true, default_value_t = false)]
+    workflow_advance_unsigned: bool,
+
+    /// Maximum persisted bytes for one workflow step output blob.
+    #[arg(
+        long = "max-step-blob-bytes",
+        env = "ZEROSHIP_MAX_STEP_BLOB_BYTES",
+        default_value = "67108864"
+    )]
+    max_step_blob_bytes: u64,
+
     /// HTTP bind host.
     #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
     bind: String,
@@ -154,6 +178,10 @@ impl std::fmt::Debug for WorkerCli {
             .field("control_key", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("max_isolates", &self.max_isolates)
+            .field(
+                "max_pinned_isolates_per_app",
+                &self.max_pinned_isolates_per_app,
+            )
             .field("poll_interval", &self.poll_interval)
             .field("db", &"<redacted>")
             .field("worker_key", &"<redacted>")
@@ -162,6 +190,8 @@ impl std::fmt::Debug for WorkerCli {
             // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
             .field("storage_url", &self.storage_url)
+            .field("workflow_advance_unsigned", &self.workflow_advance_unsigned)
+            .field("max_step_blob_bytes", &self.max_step_blob_bytes)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
             .field("config_path", &self.config_path)
@@ -210,6 +240,7 @@ pub struct WorkerConfig {
     /// (inherently shared) — see `WorkerCli::storage_url`.
     pub storage_backend: Option<StorageBackendConfig>,
     pub max_isolates: usize,
+    pub max_pinned_isolates_per_app: usize,
     pub poll_interval_secs: u64,
     /// Shared secret with the gateway. When non-empty, every /dispatch call
     /// must present `Authorization: Bearer <worker_key>` and the
@@ -229,6 +260,12 @@ pub struct WorkerConfig {
     /// each crate keeps its own `Arc` over a shared remote backend
     /// (for example S3 with an on-disk LRU).
     pub blob_store: Arc<dyn BlobStore>,
+    pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
+    pub max_step_blob_bytes: u64,
+    /// Test-only unsigned durable-workflow replay ingress. Production boot
+    /// never exposes a CLI/env switch for this; signed control-plane advance
+    /// replaces it in a later durable-workflows task.
+    pub workflow_advance_unsigned: bool,
 }
 
 fn main() -> std::io::Result<()> {
@@ -264,6 +301,7 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let max_isolates = cli.max_isolates;
+    let max_pinned_isolates_per_app = cli.max_pinned_isolates_per_app;
     let poll_interval = cli.poll_interval;
     let db_url = zeroship_core::config::obtain_secret(
         "DATABASE_URL / --db",
@@ -393,6 +431,10 @@ fn main() -> std::io::Result<()> {
         report.field("worker_threads", CheckValue::Count(workers_count));
         report.field("max_isolates", CheckValue::Count(max_isolates));
         report.field(
+            "max_pinned_isolates_per_app",
+            CheckValue::Count(max_pinned_isolates_per_app),
+        );
+        report.field(
             "poll_interval_secs",
             CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
         );
@@ -405,6 +447,10 @@ fn main() -> std::io::Result<()> {
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
+        report.field(
+            "max_step_blob_bytes",
+            CheckValue::Count(usize::try_from(cli.max_step_blob_bytes).unwrap_or(usize::MAX)),
+        );
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
         report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
         // Surface the kernel-namespace wiring without leaking the KV URL
@@ -462,6 +508,8 @@ fn main() -> std::io::Result<()> {
 
     let blob_store: Arc<dyn BlobStore> =
         build_blob_store(&store_url).expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
+        .expect("failed to initialise workflow blob store");
     tracing::info!(
         blob_store_root = %blob_store_root,
         blob_store_remote = blob_store_is_remote,
@@ -500,10 +548,14 @@ fn main() -> std::io::Result<()> {
         kv_url: kv_url_opt,
         storage_backend,
         max_isolates,
+        max_pinned_isolates_per_app,
         poll_interval_secs: poll_interval,
         worker_key,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
+        workflow_blob_store,
+        max_step_blob_bytes: cli.max_step_blob_bytes,
+        workflow_advance_unsigned: cli.workflow_advance_unsigned,
     });
 
     let bind_addr = format!("{bind_host}:{port}");
@@ -523,6 +575,7 @@ fn main() -> std::io::Result<()> {
         bind = %bind_addr,
         threads = workers_count,
         max_isolates = config.max_isolates,
+        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
         shutdown_timeout_secs = config.shutdown_timeout_secs,
         "worker listening"
     );
@@ -614,7 +667,10 @@ fn main() -> std::io::Result<()> {
         let logs = shared_logs.clone();
         cache::init_cache(
             config.max_isolates,
+            config.max_pinned_isolates_per_app,
             cache::KernelConfig {
+                control_url: config.control_url.clone(),
+                control_key: config.control_key.clone(),
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
@@ -631,6 +687,10 @@ fn main() -> std::io::Result<()> {
             .state(envs)
             .state(logs)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
+            .service(
+                web::resource("/workflow-advance-unsigned/{app_id}")
+                    .route(web::post().to(handler::workflow_advance_unsigned)),
+            )
             .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)

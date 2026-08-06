@@ -123,6 +123,7 @@ criterion = { workspace = true }
 # 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
 # it pre-commit.
 tracing-subscriber = { workspace = true }
+zeroship-plugin-workflow = { workspace = true }
 # P3 PR 4: cross-backend session-payload equivalence test in
 # `tests/sqlite_integration.rs` needs to recompute HMAC-SHA256 over
 # the canonical payload independently of the production code path so

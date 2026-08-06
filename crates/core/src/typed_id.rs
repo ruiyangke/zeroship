@@ -464,6 +464,174 @@ pub fn new_reconcile_finding_id() -> String {
     generate(RECONCILE_FINDING_PREFIX)
 }
 
+/// Workflow-run typed-id prefix. `zeroship.workflow_runs.id` stores the full
+/// `run_<base62>` string because workflow runs are creator-visible handles.
+pub const WORKFLOW_RUN_PREFIX: &str = "run";
+
+/// Workflow-signal typed-id prefix. `zeroship.workflow_signals.id` stores the
+/// full `sig_<base62>` string.
+pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
+
+/// Workflow cron handle prefix reserved by the durable-workflows M0 surface.
+pub const WORKFLOW_CRON_PREFIX: &str = "cron";
+
+/// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
+/// the full `sch_<base62>` string.
+pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
+
+/// Workflow dispatch/batch typed-id prefix. Deliberately `wfd`, not `dsp`
+/// (billing disputes).
+pub const WORKFLOW_DISPATCH_PREFIX: &str = "wfd";
+
+/// Workflow inbound-signal signing-key typed-id prefix.
+pub const WORKFLOW_SIGNAL_KEY_PREFIX: &str = "wsk";
+
+/// Workflow topic-subscription typed-id prefix. Deliberately `wsb`, not `sub`
+/// (Stripe subscription ids).
+pub const WORKFLOW_SUBSCRIPTION_PREFIX: &str = "wsb";
+
+/// Workflow broadcast typed-id prefix.
+pub const WORKFLOW_BROADCAST_PREFIX: &str = "wbc";
+
+/// Stateless per-run/per-topic signal capability token prefix. Unlike normal
+/// row ids, `wst_…` is not UUID-backed; it encodes signed claims.
+pub const WORKFLOW_SIGNAL_TOKEN_PREFIX: &str = "wst";
+
+/// Canonical claims signed into a stateless `wst_…` workflow signal token.
+///
+/// Exactly one of `run_id` or `topic` must be set. Expiration enforcement and
+/// signal-epoch lookup happen at the control-plane ingress terminus; this codec
+/// only defines the signed string shape and verifies integrity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowSignalTokenClaims {
+    pub app_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    pub types: Vec<String>,
+    pub exp: i64,
+    pub epoch: i64,
+}
+
+impl WorkflowSignalTokenClaims {
+    fn validate_shape(&self) -> Result<(), String> {
+        match (self.run_id.as_ref(), self.topic.as_ref()) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => {
+                return Err(
+                    "workflow signal token claims must set exactly one of run_id or topic"
+                        .to_string(),
+                )
+            }
+        }
+        if self.app_id.is_empty() {
+            return Err("workflow signal token app_id must not be empty".to_string());
+        }
+        if self.types.is_empty() {
+            return Err("workflow signal token types must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Sign canonical workflow signal-token claims as `wst_<claims>.<hmac>`.
+///
+/// The payload and HMAC are base64url-no-pad. The HMAC covers the encoded
+/// payload bytes, so callers can verify without reparsing first.
+pub fn sign_workflow_signal_token(
+    claims: &WorkflowSignalTokenClaims,
+    key: &[u8],
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use hmac::{Hmac, Mac};
+
+    claims.validate_shape()?;
+    let payload = serde_json::to_vec(claims)
+        .map_err(|e| format!("serialize workflow signal token claims: {e}"))?;
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
+        .map_err(|e| format!("workflow signal token hmac key: {e}"))?;
+    mac.update(payload_b64.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Ok(format!("{WORKFLOW_SIGNAL_TOKEN_PREFIX}_{payload_b64}.{sig_b64}"))
+}
+
+/// Verify and decode a `wst_…` workflow signal token.
+pub fn verify_workflow_signal_token(
+    token: &str,
+    key: &[u8],
+) -> Result<WorkflowSignalTokenClaims, String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use hmac::{Hmac, Mac};
+
+    let body = token
+        .strip_prefix(WORKFLOW_SIGNAL_TOKEN_PREFIX)
+        .and_then(|s| s.strip_prefix('_'))
+        .ok_or_else(|| format!("workflow signal token must start with {WORKFLOW_SIGNAL_TOKEN_PREFIX}_"))?;
+    let (payload_b64, sig_b64) = body
+        .split_once('.')
+        .ok_or_else(|| "workflow signal token missing signature separator".to_string())?;
+    let sig = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|e| format!("decode workflow signal token signature: {e}"))?;
+
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
+        .map_err(|e| format!("workflow signal token hmac key: {e}"))?;
+    mac.update(payload_b64.as_bytes());
+    mac.verify_slice(&sig)
+        .map_err(|_| "workflow signal token signature mismatch".to_string())?;
+
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|e| format!("decode workflow signal token claims: {e}"))?;
+    let claims: WorkflowSignalTokenClaims = serde_json::from_slice(&payload)
+        .map_err(|e| format!("parse workflow signal token claims: {e}"))?;
+    claims.validate_shape()?;
+    Ok(claims)
+}
+
+/// Generate a new workflow-run ID: `run_{base62(uuidv7)}`.
+pub fn new_workflow_run_id() -> String {
+    generate(WORKFLOW_RUN_PREFIX)
+}
+
+/// Generate a new workflow-signal ID: `sig_{base62(uuidv7)}`.
+pub fn new_workflow_signal_id() -> String {
+    generate(WORKFLOW_SIGNAL_PREFIX)
+}
+
+/// Generate a new workflow cron ID: `cron_{base62(uuidv7)}`.
+pub fn new_workflow_cron_id() -> String {
+    generate(WORKFLOW_CRON_PREFIX)
+}
+
+/// Generate a new workflow-schedule ID: `sch_{base62(uuidv7)}`.
+pub fn new_workflow_schedule_id() -> String {
+    generate(WORKFLOW_SCHEDULE_PREFIX)
+}
+
+/// Generate a new workflow dispatch/batch ID: `wfd_{base62(uuidv7)}`.
+pub fn new_workflow_dispatch_id() -> String {
+    generate(WORKFLOW_DISPATCH_PREFIX)
+}
+
+/// Generate a new workflow signal-key ID: `wsk_{base62(uuidv7)}`.
+pub fn new_workflow_signal_key_id() -> String {
+    generate(WORKFLOW_SIGNAL_KEY_PREFIX)
+}
+
+/// Generate a new workflow subscription ID: `wsb_{base62(uuidv7)}`.
+pub fn new_workflow_subscription_id() -> String {
+    generate(WORKFLOW_SUBSCRIPTION_PREFIX)
+}
+
+/// Generate a new workflow broadcast ID: `wbc_{base62(uuidv7)}`.
+pub fn new_workflow_broadcast_id() -> String {
+    generate(WORKFLOW_BROADCAST_PREFIX)
+}
+
 /// Provider-dead-letter surrogate-id prefix. Dead-letter rows are operator
 /// audit facts, not notification transition sources.
 pub const PROVIDER_DEAD_LETTER_PREFIX: &str = "pdl";
@@ -692,6 +860,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn workflow_prefixes_roundtrip() {
+        let cases = [
+            (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX, 26usize),
+            (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX, 26),
+            (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX, 27),
+            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX, 26),
+            (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX, 26),
+            (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX, 26),
+            (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX, 26),
+            (new_workflow_broadcast_id as fn() -> String, WORKFLOW_BROADCAST_PREFIX, 26),
+        ];
+        for (mk, want, len) in cases {
+            let id = mk();
+            assert!(id.starts_with(&format!("{want}_")), "got {id}");
+            assert_eq!(id.len(), len, "{want}_ + base62 length mismatch: {id}");
+            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            assert_eq!(prefix, want);
+        }
+    }
+
+    #[test]
+    fn workflow_prefixes_are_pairwise_disjoint() {
+        let prefixes = [
+            ("workflow_runs", WORKFLOW_RUN_PREFIX),
+            ("workflow_signals", WORKFLOW_SIGNAL_PREFIX),
+            ("workflow_crons", WORKFLOW_CRON_PREFIX),
+            ("workflow_schedules", WORKFLOW_SCHEDULE_PREFIX),
+            ("workflow_dispatches", WORKFLOW_DISPATCH_PREFIX),
+            ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
+            ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
+            ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
+        ];
+        for (i, (name_a, pa)) in prefixes.iter().enumerate() {
+            for (name_b, pb) in &prefixes[i + 1..] {
+                assert_ne!(
+                    pa, pb,
+                    "workflow prefixes must be pairwise-disjoint: {name_a} and {name_b} both use {pa}"
+                );
+            }
+        }
+        assert_ne!(
+            WORKFLOW_DISPATCH_PREFIX, DISPUTE_PREFIX,
+            "workflow dispatch/batch id must not collide with billing dispute dsp_"
+        );
+        assert_ne!(
+            WORKFLOW_SUBSCRIPTION_PREFIX, "sub",
+            "workflow subscription id must not collide with Stripe subscription sub_"
+        );
+    }
+
+    #[test]
+    fn workflow_signal_token_codec_roundtrips_and_rejects_tamper() {
+        let claims = WorkflowSignalTokenClaims {
+            app_id: "app_0123456789ABCDEFGHIJKL".to_string(),
+            run_id: Some("run_0123456789ABCDEFGHIJKL".to_string()),
+            topic: None,
+            types: vec!["approved".to_string(), "payment.succeeded".to_string()],
+            exp: 1_899_999_999,
+            epoch: 7,
+        };
+        let token = sign_workflow_signal_token(&claims, b"bearer-signing-secret")
+            .expect("claims should sign");
+        assert!(token.starts_with("wst_"), "got {token}");
+        let decoded = verify_workflow_signal_token(&token, b"bearer-signing-secret")
+            .expect("signed token should verify");
+        assert_eq!(decoded, claims);
+
+        let mut tampered = token.clone();
+        tampered.push('A');
+        assert!(verify_workflow_signal_token(&tampered, b"bearer-signing-secret").is_err());
+        assert!(verify_workflow_signal_token(&token, b"wrong-secret").is_err());
     }
 
     #[test]

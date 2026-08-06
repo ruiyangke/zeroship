@@ -4,15 +4,20 @@
 //! control-side writer for `zeroship.usage_aggregates` is the periodic spend
 //! recompute cron: it scans the retained stream for the current billing period,
 //! computes `SUM(value)` per `(app_id, metric)`, and overwrites this table as an
-//! idempotent period snapshot. There is no worker report endpoint, no
-//! `(worker_id, sequence)` dedup ledger, and no per-report `+=` fold.
+//! idempotent period snapshot. Trusted control-plane work emits through the same
+//! durable usage-event stream via [`Metering::record_direct`]. Dev deployments
+//! without a stream retain an immediate `usage_aggregates += delta` fallback,
+//! because no recompute cron exists there. There is no worker report endpoint,
+//! no `(worker_id, sequence)` dedup ledger, and no per-report `+=` fold.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 use uuid::Uuid;
+use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 
 use crate::registry::{Registry, RegistryError};
+use crate::BillingStreamConfig;
 
 pub mod provider;
 
@@ -72,6 +77,101 @@ impl Metering {
         Self { registry }
     }
 
+    /// Record trusted control-plane usage in the current billing period.
+    pub async fn record_direct(
+        &self,
+        app_id: &Uuid,
+        deltas: &[(String, i64)],
+        billing_stream: Option<&BillingStreamConfig>,
+    ) -> Result<(), RegistryError> {
+        self.record_direct_at(app_id, deltas, Utc::now().timestamp(), billing_stream)
+            .await
+    }
+
+    /// Apply trusted control-plane usage deltas at an explicit event time.
+    ///
+    /// With a billing stream, accepted positive deltas become ordinary durable
+    /// [`UsageEvent`]s, so both provider forwarding and repeated local snapshot
+    /// recomputes observe the same source of truth. Without a stream, the
+    /// aggregate table is incremented directly as a dev-only fallback.
+    pub async fn record_direct_at(
+        &self,
+        app_id: &Uuid,
+        deltas: &[(String, i64)],
+        event_time_unix_secs: i64,
+        billing_stream: Option<&BillingStreamConfig>,
+    ) -> Result<(), RegistryError> {
+        let mut conn = self.registry.conn().await?;
+        let tx = conn.transaction().await?;
+        let period = period_date(event_time_unix_secs);
+        let mut accepted = Vec::with_capacity(deltas.len());
+        for (metric, delta) in deltas {
+            if *delta <= 0 {
+                continue;
+            }
+            if !Self::register_metric(&tx, app_id, metric).await? {
+                tracing::warn!(
+                    app_id = %app_id,
+                    metric = %metric,
+                    billing_event = "custom_metric_cap_refused",
+                    "metering: custom metric refused at per-app cap — dropping direct delta"
+                );
+                continue;
+            }
+            let value = u64::try_from(*delta).map_err(|_| {
+                RegistryError::InvalidInput(format!(
+                    "positive direct usage delta for metric {metric} must fit u64"
+                ))
+            })?;
+            accepted.push((metric.clone(), value));
+            if billing_stream.is_none() {
+                tx.execute(
+                    "INSERT INTO zeroship.usage_aggregates AS u \
+                       (app_id, period, metric, total, updated_at) \
+                     VALUES ($1, $2::date, $3, $4, NOW()) \
+                     ON CONFLICT (app_id, period, metric) \
+                     DO UPDATE SET total = u.total + EXCLUDED.total, updated_at = NOW()",
+                    &[app_id, &period, metric, delta],
+                )
+                .await?;
+            }
+        }
+        tx.commit().await?;
+
+        let Some(billing_stream) = billing_stream else {
+            return Ok(());
+        };
+        if accepted.is_empty() {
+            return Ok(());
+        }
+
+        let events: Vec<_> = accepted
+            .into_iter()
+            .map(|(meter, value)| UsageEvent {
+                event_id: Uuid::now_v7().to_string(),
+                source: "zeroship-control".to_string(),
+                subject: UsageSubject {
+                    app: Some(*app_id),
+                    creator: Uuid::nil(),
+                },
+                meter,
+                value,
+                event_time: event_time_unix_secs,
+                dims: BTreeMap::new(),
+            })
+            .collect();
+        let outbox = billing_stream.control_usage_outbox().map_err(|error| {
+            RegistryError::Database(format!("initialize control usage outbox: {error}"))
+        })?;
+        outbox.enqueue_events(&events).map_err(|error| {
+            RegistryError::Database(format!("enqueue control usage events: {error}"))
+        })?;
+        billing_stream.start_control_usage_outbox().map_err(|error| {
+            RegistryError::Database(format!("start control usage outbox: {error}"))
+        })?;
+        Ok(())
+    }
+
     /// Replace every `usage_aggregates` row for `period_start_unix_secs` with
     /// the provided full-period snapshot.
     ///
@@ -110,9 +210,7 @@ impl Metering {
             }
             let cache_key = (aggregate.app_id, aggregate.metric.clone());
             if !resolved_cache.contains(&cache_key) {
-                if !Self::register_metric_for_snapshot(&tx, &aggregate.app_id, &aggregate.metric)
-                    .await?
-                {
+                if !Self::register_metric(&tx, &aggregate.app_id, &aggregate.metric).await? {
                     tracing::warn!(
                         app_id = %aggregate.app_id,
                         metric = %aggregate.metric,
@@ -145,7 +243,7 @@ impl Metering {
         Ok(written)
     }
 
-    async fn register_metric_for_snapshot<C: compio_postgres::GenericClient + Sync>(
+    async fn register_metric<C: compio_postgres::GenericClient + Sync>(
         conn: &C,
         owner_app: &Uuid,
         metric: &str,

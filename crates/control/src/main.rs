@@ -14,10 +14,13 @@ use zeroship_core::config::{
     bootstrap_or_exit, env_is_truthy, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
-use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_bundle::{
+    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+};
 use zeroship_control::{
     admin_handlers, api, bootstrap_console, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
+    workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -99,6 +102,20 @@ struct ControlCli {
         default_value = "https://api.stripe.com"
     )]
     stripe_base_url: String,
+
+    /// Gateway internal base URL used by the workflow engine dispatch seam.
+    #[arg(
+        long = "gateway-url",
+        env = "ZEROSHIP_GATEWAY_URL",
+        default_value = "http://localhost"
+    )]
+    gateway_url: String,
+
+    /// Test harness only: do not spawn durable-workflow background work.
+    /// The e2e harness drives the scheduler path explicitly from its test
+    /// process while this control process serves sync/deploy state.
+    #[arg(long = "disable-workflow-engine", hide = true, default_value_t = false)]
+    disable_workflow_engine: bool,
 
     /// Provider used as the usage meter.
     #[arg(long = "meter-provider", env = "METER_PROVIDER", default_value = "lite")]
@@ -423,6 +440,7 @@ impl std::fmt::Debug for ControlCli {
             .field("worker_key", &"<redacted>")
             .field("signing_key_file", &self.signing_key_file)
             .field("stripe_webhook_secret", &"<redacted>")
+            .field("gateway_url", &self.gateway_url)
             .field("legacy_master_keys", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("trust_proxy", &self.trust_proxy)
@@ -743,6 +761,7 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let workers_str = cli.workers;
+    let gateway_url = cli.gateway_url.trim_end_matches('/').to_string();
     let worker_key = zeroship_core::config::obtain_secret(
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
@@ -1071,6 +1090,7 @@ fn main() -> std::io::Result<()> {
             CheckValue::Secret(!pairwise_salt.is_empty()),
         );
         report.field("workers_count", CheckValue::Count(workers_count));
+        report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
 
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
@@ -1142,6 +1162,8 @@ fn main() -> std::io::Result<()> {
     // `BlobStore::delete_app_manifests`.
     let blob_store: Arc<dyn BlobStore> =
         build_blob_store(&store_url).expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
+        .expect("failed to initialise workflow blob store");
 
     if !legacy_keys.is_empty() {
         tracing::info!(
@@ -1384,8 +1406,7 @@ fn main() -> std::io::Result<()> {
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        // Matches zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC (control does not
-        // link the metering crate).
+        // Matches zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.
         let topic = file_metering
             .usage_events_topic
             .as_deref()
@@ -1429,6 +1450,13 @@ fn main() -> std::io::Result<()> {
                         tracing::error!(error = %e, "control: refusing to start — stream transport invalid");
                         std::process::exit(1);
                     }
+                    if let Err(e) = streams.start_control_usage_outbox() {
+                        tracing::error!(
+                            error = %e,
+                            "control: refusing to start — control usage outbox unavailable"
+                        );
+                        std::process::exit(1);
+                    }
                     tracing::info!(
                         stream = streams.transport_id(),
                         forwarder_group_id = streams.forwarder_group_id(),
@@ -1462,11 +1490,13 @@ fn main() -> std::io::Result<()> {
         env_store,
         stripe_store,
         blob_store,
+        workflow_blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
         stripe_base_url,
+        gateway_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)
@@ -1508,11 +1538,17 @@ fn main() -> std::io::Result<()> {
     //     platform console.
     // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
     // connections.
-    zeroship_control::cron::spawn_all(
+    zeroship_control::cron::spawn_all_with_options(
         Arc::clone(&state),
         audit_retention_months,
         audit_retention_check_secs,
         spend_recompute_interval,
+        zeroship_control::cron::SpawnOptions {
+            workflow_scan: !cli.disable_workflow_engine,
+            workflow_reaper: !cli.disable_workflow_engine,
+            workflow_sweeps: !cli.disable_workflow_engine,
+            scheduler_authoritative: false,
+        },
     );
     tracing::info!(
         retention_months = audit_retention_months,
@@ -1728,6 +1764,7 @@ fn main() -> std::io::Result<()> {
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
             )
+            .configure(workflow_instance_api::configure)
             .service(
                 web::resource("/internal/billing/reconcile")
                     .route(web::post().to(internal::force_reconcile)),

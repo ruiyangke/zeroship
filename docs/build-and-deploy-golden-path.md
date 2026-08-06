@@ -25,6 +25,10 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   validated with zod via `@zeroship/server`) with a `CLAUDE.md` that teaches an
   AI agent the deploy contract, the `env.*` primitives, and the build+deploy
   steps. Copy it, point Claude Code/Codex at it, iterate.
+- **Workflow starter:** `examples/workflows-order/` — a raw workflow app with
+  `step.run`, `step.sleep`, `step.waitForSignal`, a child workflow, and
+  compensators. It is the copyable durable-workflow counterpart to the starter
+  scaffold.
 - **Build:** `pnpm build` (= `vite build`); the `@zeroship/vite-plugin` discovers
   `"use server"` RPC functions, bundles the server module, and writes
   `dist/app.zship`.
@@ -75,6 +79,8 @@ For the **real agent flow** against a deployed platform, the path is
 
 - ✅ Starter scaffold + agent `CLAUDE.md` (`examples/starter/`), incl. the SEC-5
   RPC-auth default + public opt-in (`src/server/config.ts`).
+- ✅ Durable workflow starter (`examples/workflows-order/`) covering steps,
+  sleeps, signals, child calls, and compensation.
 - ✅ Real build → `.zship` (vite-plugin) — proven.
 - ✅ In-monorepo chain: migrate → stack → deploy → serve + RPC — **9/9**
   (`tests/golden_path.sh`).

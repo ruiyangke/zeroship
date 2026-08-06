@@ -146,6 +146,29 @@ export interface DeployOptions {
   contentType?: string;
 }
 
+export interface WorkflowSignalTokenInput {
+  appId: string;
+  types: string[];
+  ttl: string;
+}
+
+export interface WorkflowSignalTokenResult {
+  token: string;
+  expiresAt: string;
+}
+
+export interface WorkflowTopicBroadcastInput {
+  appId: string;
+  type: string;
+  payload?: unknown;
+  idempotencyKey?: string;
+}
+
+export interface WorkflowTopicBroadcastResult {
+  id: string;
+  topic: string;
+}
+
 export class ControlClient {
   readonly #options: ControlClientOptions;
   readonly #fetch: typeof fetch;
@@ -225,6 +248,46 @@ export class ControlClient {
     ): Promise<ListAuditResult> =>
       this.request(`/api/apps/${pathPart(appId)}/audit`, {
         query: { limit: options.limit },
+      }),
+  };
+
+  readonly workflows = {
+    createSignalToken: (
+      runId: string,
+      input: WorkflowSignalTokenInput,
+    ): Promise<WorkflowSignalTokenResult> =>
+      this.request(`/internal/workflows/runs/${pathPart(runId)}/signal-token`, {
+        method: "POST",
+        headers: { "x-zeroship-app-id": input.appId },
+        body: {
+          types: input.types,
+          ttl: input.ttl,
+        },
+      }),
+    createTopicSignalToken: (
+      topic: string,
+      input: WorkflowSignalTokenInput,
+    ): Promise<WorkflowSignalTokenResult> =>
+      this.request(`/internal/workflows/topics/${pathPart(topic)}/signal-token`, {
+        method: "POST",
+        headers: { "x-zeroship-app-id": input.appId },
+        body: {
+          types: input.types,
+          ttl: input.ttl,
+        },
+      }),
+    publishTopic: (
+      topic: string,
+      input: WorkflowTopicBroadcastInput,
+    ): Promise<WorkflowTopicBroadcastResult> =>
+      this.request(`/internal/workflows/topics/${pathPart(topic)}/broadcast`, {
+        method: "POST",
+        headers: { "x-zeroship-app-id": input.appId },
+        body: {
+          type: input.type,
+          payload: input.payload,
+          idempotencyKey: input.idempotencyKey,
+        },
       }),
   };
 

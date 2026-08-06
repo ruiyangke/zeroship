@@ -230,6 +230,40 @@ pub async fn forward_dispatch(
     result
 }
 
+/// Forward a durable-workflow StepRequest JSON body to the worker replay host.
+///
+/// DW-05b intentionally uses the worker's unsigned workflow ingress; signed
+/// gateway→worker workflow transport is a later hardening task.
+pub async fn forward_workflow_advance(
+    ring: &HashRing,
+    app_id: &Uuid,
+    plan_id: &str,
+    request_id: &Uuid,
+    body: &[u8],
+    worker_key: &str,
+) -> Result<HttpResponse, String> {
+    if ring.num_workers() == 0 {
+        return Err("no workers configured".into());
+    }
+
+    let (idx, worker_url) = ring.select(app_id);
+    ring.acquire(idx);
+    let path = format!("/workflow-advance-unsigned/{app_id}");
+    let result = forward_to_worker_path(
+        worker_url,
+        &path,
+        app_id,
+        plan_id,
+        request_id,
+        body,
+        None,
+        worker_key,
+    )
+    .await;
+    ring.release(idx);
+    result
+}
+
 /// Timeout for connecting and reading from workers.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -243,8 +277,32 @@ async fn forward_to_worker_dispatch(
     user_header: Option<&str>,
     worker_key: &str,
 ) -> Result<HttpResponse, String> {
-    let key = pool_key(worker_url);
     let path = format!("/dispatch/{app_id}");
+
+    forward_to_worker_path(
+        worker_url,
+        &path,
+        app_id,
+        plan_id,
+        request_id,
+        body,
+        user_header,
+        worker_key,
+    )
+    .await
+}
+
+async fn forward_to_worker_path(
+    worker_url: &str,
+    path: &str,
+    app_id: &Uuid,
+    plan_id: &str,
+    request_id: &Uuid,
+    body: &[u8],
+    user_header: Option<&str>,
+    worker_key: &str,
+) -> Result<HttpResponse, String> {
+    let key = pool_key(worker_url);
 
     let host = extract_host(worker_url);
 

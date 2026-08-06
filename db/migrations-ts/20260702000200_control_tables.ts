@@ -114,6 +114,7 @@ export function up() {
       env_version: t.bigInt().notNull().default(0),
       suspended: t.boolean().notNull().default(false),
       audit_locked: t.boolean().notNull().default(false),
+      workflows_enabled: t.boolean().notNull().default(false),
       manifest_json: t.text(),
       created_at: t.timestamp().notNull().default(now()),
       updated_at: t.timestamp().notNull().default(now()),

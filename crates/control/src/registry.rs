@@ -57,6 +57,8 @@ impl From<compio_postgres::Error> for RegistryError {
     fn from(e: compio_postgres::Error) -> Self {
         if matches!(e.code(), Some(code) if code == &SqlState::UNIQUE_VIOLATION) {
             Self::AlreadyExists("resource already exists".into())
+        } else if e.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
+            Self::Database(format!("retryable deadlock: {e}"))
         } else {
             let msg = e.to_string();
             let full = match source_chain(&e) {
@@ -139,6 +141,10 @@ impl Registry {
     /// the store types (e.g. `EnvStore::__raw_ciphertext_for_test`).
     pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
+    }
+
+    pub(crate) fn workflow_store_db_url(&self) -> &str {
+        &self.db_url
     }
 
     /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
@@ -396,15 +402,44 @@ impl Registry {
         deploy_hash: &str,
         manifest_json: &str,
     ) -> Result<bool, RegistryError> {
-        let conn = self.conn().await?;
-        let n = conn
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        let n = tx
             .execute(
                 "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
                  updated_at = NOW() WHERE id = $3",
                 &[&deploy_hash, &manifest_json, id],
             )
             .await?;
-        Ok(n > 0)
+        if n == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let deploy_id = format!("dep_{}", uuid::Uuid::new_v4().simple());
+        let row = tx
+            .query_one(
+                "INSERT INTO zeroship.app_deploys \
+                    (id, app_id, deploy_hash, manifest_json, activated_at) \
+                 VALUES ($1, $2, $3, $4, now()) \
+                 ON CONFLICT (app_id, deploy_hash) DO UPDATE SET \
+                    manifest_json = EXCLUDED.manifest_json, \
+                    activated_at = now() \
+                 RETURNING id",
+                &[&deploy_id, id, &deploy_hash, &manifest_json],
+            )
+            .await?;
+        let deploy_id: String = row.get("id");
+        crate::cron::workflow_schedules::reconcile_deploy_schedules(
+            &tx,
+            id,
+            &deploy_id,
+            deploy_hash,
+            manifest_json,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Fetch the raw manifest JSON for an app, if it has one. Used by

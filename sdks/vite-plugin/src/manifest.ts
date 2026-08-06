@@ -76,6 +76,7 @@ export interface DiscoveredProcedure {
 export interface ManifestExtrasInput {
   root: string;
   procedures: DiscoveredProcedure[];
+  schedules?: DiscoveredSchedule[];
   /** Production: throw on validation errors. Development: warn. */
   mode: "production" | "development";
   /**
@@ -94,6 +95,8 @@ export interface ManifestExtras {
   resources: Record<string, WireResource>;
   transformer: "superjson" | "json";
   net?: NetConfig;
+  schedules?: WireScheduleRegistration[];
+  workflows?: unknown;
   /** Hint for the manifest schema version (1 — the initial published shape). */
   versionHint: 1;
 }
@@ -111,6 +114,25 @@ export interface NetConfig {
 interface DefineAppConfig {
   resources?: Record<string, Record<string, unknown>>;
   net?: NetConfig;
+}
+
+export interface DiscoveredSchedule {
+  filePath: string;
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input?: unknown;
+  overlap?: "allow" | "skipIfRunning";
+  catchUp?: { mode: "skip" | "backfill"; max?: number };
+}
+
+export interface WireScheduleRegistration {
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input: unknown;
+  overlap: "allow" | "skipIfRunning";
+  catchUp: { mode: "skip" } | { mode: "backfill"; max: number };
 }
 
 // ── camelCase → snake_case rename map ──────────────────────────────────────
@@ -434,6 +456,108 @@ function validateResources(
   }
 }
 
+type ScheduleCompilerModule = {
+  compileSchedule(input: unknown, options?: unknown): unknown;
+};
+
+let scheduleCompiler: Promise<ScheduleCompilerModule> | undefined;
+
+async function loadScheduleCompiler(): Promise<ScheduleCompilerModule> {
+  if (!scheduleCompiler) {
+    scheduleCompiler = (async () => {
+      const dynamicImport = new Function("specifier", "return import(specifier)") as (
+        specifier: string,
+      ) => Promise<ScheduleCompilerModule>;
+      try {
+        return await dynamicImport("@zeroship/workflows/schedule");
+      } catch (packageError) {
+        try {
+          return await dynamicImport(new URL("../../workflows/dist/schedule.js", import.meta.url).href);
+        } catch {
+          const message = packageError instanceof Error ? packageError.message : String(packageError);
+          throw new Error(
+            `[zeroship:manifest] cannot load @zeroship/workflows/schedule to compile schedules: ${message}`,
+          );
+        }
+      }
+    })();
+  }
+  return scheduleCompiler;
+}
+
+async function compileSchedules(
+  schedules: DiscoveredSchedule[] | undefined,
+): Promise<WireScheduleRegistration[] | undefined> {
+  if (!schedules || schedules.length === 0) return undefined;
+
+  const byName = new Map<string, DiscoveredSchedule[]>();
+  for (const schedule of schedules) {
+    const group = byName.get(schedule.name);
+    if (group) group.push(schedule);
+    else byName.set(schedule.name, [schedule]);
+  }
+  const duplicates: string[] = [];
+  for (const [name, group] of byName) {
+    if (group.length < 2) continue;
+    const files = [...new Set(group.map((s) => s.filePath))].join(", ");
+    duplicates.push(`${JSON.stringify(name)} in ${files}`);
+  }
+  if (duplicates.length > 0) {
+    throw new Error(
+      `[zeroship:manifest] duplicate workflow schedule name(s): ${duplicates.join("; ")}`,
+    );
+  }
+
+  const compiler = await loadScheduleCompiler();
+  return schedules.map((registration) => {
+    let compiled: unknown;
+    try {
+      compiled = compiler.compileSchedule(registration.schedule, {
+        overlap: registration.overlap,
+        catchUp: registration.catchUp,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)} ` +
+          `in ${registration.filePath}: ${message}`,
+      );
+    }
+    const schedule = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
+    const overlap = schedule.overlap;
+    const catchUp = schedule.catchUp;
+    if (overlap !== "allow" && overlap !== "skipIfRunning") {
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +
+          `compiled overlap policy is invalid`,
+      );
+    }
+    if (!isCompiledCatchUp(catchUp)) {
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +
+          `compiled catchUp policy is invalid`,
+      );
+    }
+    return {
+      name: registration.name,
+      workflowName: registration.workflowName,
+      schedule,
+      input: registration.input ?? {},
+      overlap,
+      catchUp,
+    };
+  });
+}
+
+function isCompiledCatchUp(
+  value: unknown,
+): value is { mode: "skip" } | { mode: "backfill"; max: number } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.mode === "skip") return record.max === undefined;
+  return record.mode === "backfill" && Number.isInteger(record.max) && Number(record.max) > 0;
+}
+
 /**
  * Walk up to the parent resource key. For URL paths we drop the last
  * segment (`/api/admin/users` → `/api/admin`). For RPC ids we drop the
@@ -669,7 +793,7 @@ function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
 export async function computeManifestExtras(
   input: ManifestExtrasInput,
 ): Promise<ManifestExtras> {
-  const { root, procedures, mode, configPath } = input;
+  const { root, procedures, schedules, mode, configPath } = input;
   const onWarn = input.onWarn ?? ((msg) => console.warn(`[zeroship:manifest] ${msg}`));
 
   // 1. Resolve every procedure's wireId, building both the auto-derived
@@ -777,6 +901,10 @@ export async function computeManifestExtras(
   };
   const net = normalizeNetConfig(appConfig?.net);
   if (net) extras.net = net;
+  const compiledSchedules = await compileSchedules(schedules);
+  if (compiledSchedules && compiledSchedules.length > 0) {
+    extras.schedules = compiledSchedules;
+  }
   return extras;
 }
 

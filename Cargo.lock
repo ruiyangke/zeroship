@@ -764,6 +764,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf 0.12.1",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1033,7 +1043,7 @@ dependencies = [
  "log",
  "parking_lot",
  "percent-encoding",
- "phf",
+ "phf 0.13.1",
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
@@ -3831,6 +3841,15 @@ dependencies = [
 
 [[package]]
 name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
+]
+
+[[package]]
+name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
@@ -3844,6 +3863,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
 ]
@@ -4855,6 +4883,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b90c488738ecb4fb0262f41f43bc40efc5868d9fb744319ddf5f5317f417bfac"
 dependencies = [
  "darling",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "serial_test"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "699f4197115b8a7e7ff19c9a315a4bd6fffec26cc4626ef45ecaea389e081c6d"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "log",
+ "once_cell",
+ "parking_lot",
+ "serial_test_derive",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e153fc76e1c6a068703d6d29c508a0b15c061c4b7e43da59cc097bc342673c"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn",
@@ -6716,6 +6769,7 @@ dependencies = [
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
+ "zeroship-plugin-workflow",
  "zeroship-runtime",
 ]
 
@@ -6820,6 +6874,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "chrono",
+ "chrono-tz",
  "clap",
  "compio",
  "compio-postgres",
@@ -6834,12 +6889,15 @@ dependencies = [
  "mimalloc",
  "ntex",
  "rand 0.8.5",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2 0.10.9",
  "subtle",
  "tar",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "url",
@@ -6852,7 +6910,10 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
+ "zeroship-plugin-workflow",
+ "zeroship-runtime",
  "zeroship-stream",
+ "zeroship-workflow-scheduler",
  "zstd",
 ]
 
@@ -7041,6 +7102,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-schema",
@@ -7081,6 +7143,28 @@ dependencies = [
  "v8",
  "zeroship-metering",
  "zeroship-runtime",
+]
+
+[[package]]
+name = "zeroship-plugin-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "compio",
+ "compio-postgres",
+ "cyper",
+ "percent-encoding",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "v8",
+ "zeroship-core",
+ "zeroship-runtime",
+ "zeroship-runtime-macros",
 ]
 
 [[package]]
@@ -7166,6 +7250,7 @@ dependencies = [
  "base64",
  "clap",
  "compio",
+ "compio-postgres",
  "cyper",
  "futures",
  "hex",
@@ -7174,6 +7259,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tracing",
  "url",
@@ -7184,8 +7270,27 @@ dependencies = [
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
+ "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-stream",
+ "zstd",
+]
+
+[[package]]
+name = "zeroship-workflow-scheduler"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "compio",
+ "compio-postgres",
+ "flume 0.11.1",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
