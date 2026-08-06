@@ -3490,15 +3490,19 @@ pub struct DeclarativeDeployOutcome {
     /// Empty when the deploy had no renames. These are gated
     /// (`requires_approval`; C2 is `destructive`).
     pub pending_contract: Vec<Migration>,
-    /// The cross-deploy pending-contract OBLIGATIONS this plan opened
-    /// (one per online-rename EXPAND that recorded a fresh `pending` row this
-    /// invocation). The control-layer IR loop accumulates these across all files in
-    /// a deploy and — if a LATER file fails at apply — drives the SHARED
-    /// `build_abort_steps` over exactly THIS deploy's obligations
-    /// ([`MigrationEngine::abort_same_deploy_expands`]) to roll back the
-    /// half-renamed table BEFORE surfacing the creator's 4xx (no half-state). Empty
-    /// when the plan opened no new obligation (no rename, or an idempotent re-run
-    /// that net-applied-skipped the EXPAND).
+    /// The cross-deploy pending-contract OBLIGATIONS this plan opened (one per
+    /// online-rename EXPAND that recorded a fresh `pending` row this invocation).
+    /// Empty when the plan opened no new obligation (no rename, or an idempotent
+    /// re-run that net-applied-skipped the EXPAND).
+    ///
+    /// Rolling these back is the CALLER's job, and this engine ships no driver for
+    /// it. A host that applies several envelopes as one deploy accumulates these
+    /// across the whole bundle and, if a later envelope fails, discharges exactly
+    /// this deploy's obligations before surfacing the error, so a refused bundle
+    /// leaves no half-renamed table. The durable half of that flow is on the backend
+    /// seam: `mark_deploy_recovery_committed_batch` promotes a deploy's recovery rows
+    /// on success, and `outstanding_deploy_recoveries` reports the rows a crashed
+    /// deploy left behind so the next one can reconcile them first.
     pub opened_obligations: Vec<crate::apply::journal::PendingContract>,
 }
 

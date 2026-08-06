@@ -241,4 +241,3 @@ fn an_anonymous_block_in_an_untrusted_language_is_denied() {
     g.check("DO $$ BEGIN NULL; END $$")
         .expect("a plain plpgsql block stays allowed");
 }
-
