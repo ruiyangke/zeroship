@@ -7194,7 +7194,7 @@
       ]
     },
     "PreconditionCheck": {
-      "description": "One precondition + its unmet policy, carried by a [`Migration`](crate::migration::Migration).",
+      "description": "One precondition + its unmet policy, carried by a\n[`Migration`](crate::migration::Migration).",
       "type": "object",
       "properties": {
         "check": {
@@ -7408,12 +7408,12 @@
       "description": "What to do when a precondition is **unmet** (evaluates false).",
       "oneOf": [
         {
-          "description": "Abort the whole apply (fail-closed): return [`PreconditionFailed`] and\napply NOTHING for THIS migration. The default — an unmet precondition\nusually means the world is not as the migration assumes, and silently\nskipping could leave the schema inconsistent.\n\n**Scope of \"halt\":** this stops the batch going FORWARD — no\nlater-in-order migration is applied after the failing one. It does NOT\nundo migrations already committed earlier in the same batch: each\nmigration commits independently (per-migration commit), so the migrations\nthat succeeded before the halt stay applied. Halt is fail-forward-stop,\nnot a batch-wide rollback.\n\n[`PreconditionFailed`]: crate::executor::ApplyError::PreconditionFailed",
+          "description": "Abort the whole apply (fail-closed): return `PreconditionFailed` and\napply NOTHING for THIS migration. The default - an unmet precondition\nusually means the world is not as the migration assumes, and silently\nskipping could leave the schema inconsistent.\n\n**Scope of \"halt\":** this stops the batch going FORWARD - no\nlater-in-order migration is applied after the failing one. It does NOT\nundo migrations already committed earlier in the same batch: each\nmigration commits independently (per-migration commit), so the migrations\nthat succeeded before the halt stay applied. Halt is fail-forward-stop,\nnot a batch-wide rollback.\n\nAn unmet precondition surfaces as\n`zero_migrate::apply::executor::ApplyError::PreconditionFailed`. That type\nlives in the engine crate, which depends on this one, so it cannot be linked\nfrom here.",
           "type": "string",
           "const": "Halt"
         },
         {
-          "description": "Skip THIS migration this run (do not apply it, do not journal it — it\nstays pending and is re-evaluated on the next deploy), and continue with\nthe rest of the batch. The \"apply this once the DB reaches shape X\"\nidempotent-deploy primitive. A skipped migration's dependents do not run\nthis batch either (a dependent of a not-yet-applied migration is blocked\nby the dependency ordering — see [`crate::executor::order_pending`]).\n\n**Skip relies on COMPLETE `depends_on`.** The transitive-skip above only\nfollows DECLARED dependencies: a later migration that actually depends on\nthe skipped one but does NOT declare it in `depends_on` is NOT held back —\nit will still run, against a schema the skipped migration was supposed to\nshape first, and will either fail or (worse) succeed against a stale\nshape. This makes `Skip` MORE dangerous than [`OnUnmet::Halt`] when deps\nare incomplete: `Halt` aborts the batch forward loudly, whereas `Skip`\nsilently no-ops the gated migration and lets an undeclared dependent\nproceed. Authors choosing `Skip` MUST declare every real dependency.",
+          "description": "Skip THIS migration this run (do not apply it, do not journal it — it\nstays pending and is re-evaluated on the next deploy), and continue with\nthe rest of the batch. The \"apply this once the DB reaches shape X\"\nidempotent-deploy primitive. A skipped migration's dependents do not run\nthis batch either (a dependent of a not-yet-applied migration is blocked by\nthe dependency ordering, in the engine crate's `order_pending`).\n\n**Skip relies on COMPLETE `depends_on`.** The transitive-skip above only\nfollows DECLARED dependencies: a later migration that actually depends on\nthe skipped one but does NOT declare it in `depends_on` is NOT held back —\nit will still run, against a schema the skipped migration was supposed to\nshape first, and will either fail or (worse) succeed against a stale\nshape. This makes `Skip` MORE dangerous than [`OnUnmet::Halt`] when deps\nare incomplete: `Halt` aborts the batch forward loudly, whereas `Skip`\nsilently no-ops the gated migration and lets an undeclared dependent\nproceed. Authors choosing `Skip` MUST declare every real dependency.",
           "type": "string",
           "const": "Skip"
         }

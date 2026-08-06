@@ -47,7 +47,7 @@
 //!   grants + union-up require/inject/validate + compose-time collision blame + the
 //!   creatable-scope lint), the SOLE untrusted trust-boundary crossing, deliberately
 //!   apart from the trusted combinators.
-//! - [`seal`] — [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
+//! - [`mod@seal`] - [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
 //!   the sealed inject total order) ‖ registry digest ‖ `(dialect, matcher_version)`
 //!   ‖ `charter_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
 //!   tamper or binding mismatch.
