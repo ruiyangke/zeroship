@@ -275,3 +275,31 @@ fn a_bare_schema_name_is_confined_in_reindex_and_comment() {
     g.check("COMMENT ON SCHEMA app1 IS 'x'")
         .expect("commenting on the owned schema stays allowed");
 }
+
+#[test]
+fn a_body_hiding_a_privilege_verb_is_denied() {
+    // The body token scan is the backstop for PL/pgSQL text that never parses as
+    // top-level SQL. It carried needles for `CREATE ROLE` and friends but none for
+    // the privilege verbs the top level also hard-denies, so `GRANT` hidden in
+    // EXECUTE text passed while `CREATE ROLE` in the same shape was caught.
+    let g = confined();
+    for sql in [
+        "DO $$ BEGIN EXECUTE 'GRANT ALL ON app1.t ' || 'TO PUBLIC'; END $$",
+        "DO $$ BEGIN EXECUTE 'REVOKE ALL ON app1.t ' || 'FROM app1'; END $$",
+        "DO $$ BEGIN EXECUTE 'ALTER FUNCTION app1.f() SECURITY DEFINER'; END $$",
+        "DO $$ BEGIN EXECUTE 'ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC'; END $$",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a hidden privilege verb must be denied: {sql}"));
+        assert!(
+            matches!(err, GuardError::Denied { .. }),
+            "expected a hard Denied for `{sql}`, got {err:?}"
+        );
+    }
+
+    // Identifier boundaries, so an ordinary column name carrying a needle as a
+    // substring does not trip the scan.
+    g.check("CREATE TABLE app1.t (grant_total int, revoked_at timestamptz)")
+        .expect("a column named grant_total is not a GRANT");
+}

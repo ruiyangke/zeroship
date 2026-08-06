@@ -2146,6 +2146,30 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 return Err(denied(rule::BODY_INSPECTION, raw));
             }
         }
+        // The privilege verbs the top level hard-denies but this backstop had no
+        // needle for. `CREATE ROLE` hidden in EXECUTE text was caught while `GRANT`
+        // in the same shape was not, which is an inconsistency rather than a
+        // decision.
+        //
+        // Matched on identifier boundaries, so `grant` does not fire on a column
+        // named `grant_total`. Relaxed under Platform alongside role management,
+        // whose bootstrap legitimately GRANTs.
+        //
+        // A lexical scan is a backstop, not a boundary, and it is worth being precise
+        // about what it cannot do. It only sees CONTIGUOUS text, so a body that
+        // splits the verb across a concatenation defeats it: `'ALTER TABLE t OWNER '
+        // || 'TO postgres'` never contains `owner to`. Catching that would need the
+        // bare word `owner`, which collides with ordinary column names (`owner_app`
+        // appears throughout this engine's own schema), so the false-positive cost
+        // is worse than the hole. Runtime-constructed SQL is the migrator role's
+        // problem, not the parser's.
+        if !allow_role {
+            for needle in ["grant", "revoke", "security definer", "default privileges"] {
+                if word_present(&lower, needle) {
+                    return Err(denied(rule::BODY_INSPECTION, raw));
+                }
+            }
+        }
         if !allow_role && lower.contains("search_path") {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
