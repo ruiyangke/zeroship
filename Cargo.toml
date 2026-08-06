@@ -222,10 +222,12 @@ zero-migrate-ir = { path = "third_party/zero-migrate/crates/zero-migrate-ir" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
+zeroship-plugin-workflow = { path = "crates/plugin-workflow" }
 zeroship-metering = { path = "crates/metering" }
 zeroship-stream = { path = "crates/stream" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-workflow-scheduler = { path = "crates/workflow-scheduler" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }

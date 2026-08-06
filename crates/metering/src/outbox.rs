@@ -173,11 +173,19 @@ impl UsageOutbox {
         &self.topic
     }
 
+    /// Durably append usage events to the local WAL without touching the
+    /// configured stream. Producers on latency-sensitive request paths can
+    /// acknowledge once this returns and leave publishing to one background
+    /// drainer.
+    pub fn enqueue_events(&self, events: &[UsageEvent]) -> Result<(), OutboxWalError> {
+        self.wal.append(events)
+    }
+
     /// Persist a drained window, then publish every unacked WAL event. Each
     /// `UsageEvent` is one stream record because the forwarder decodes each
     /// record payload as a single event.
     pub async fn publish_events(&self, events: &[UsageEvent]) -> OutboxPublishResult {
-        let append_failures = match self.wal.append(events) {
+        let append_failures = match self.enqueue_events(events) {
             Ok(()) => Vec::new(),
             Err(error) => {
                 let error = error.to_string();

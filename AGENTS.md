@@ -42,6 +42,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-adapter/` · `crates/migrated/` · `third_party/zero-migrate/` (vendored engine) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/plugin-workflow/` · `crates/control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
@@ -153,7 +154,7 @@ Per-crate READMEs (where present) carry the responsibility statement and list of
 These don't change. If you're about to violate one, stop and ask.
 
 - **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`).
-- **V8 per thread, one isolate per app.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
+- **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
@@ -182,6 +183,8 @@ env.auth.*     getUser/requireUser — per-request identity (AuthPlugin, registe
                on the worker + CLI `zeroship serve` vectors). Fed in prod by the
                gateway's `ZeroShip-User` header; in dev by the dev-auth provider
                (see `docs/reference/auth-dev-tier.md`).
+env.workflows.* durable workflow run start/control handles (`WorkflowPlugin`,
+               registered on the worker + CLI `zeroship serve` vectors).
 ```
 
 Planned or platform-internal namespaces must be documented as such until the
@@ -209,6 +212,7 @@ import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
 import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
+import { Workflow } from "@zeroship/workflows";
 import { query, mutation } from "@zeroship/rpc/server";
 
 // Author schema changes as committed op.* migrations. The toolchain folds
@@ -255,6 +259,7 @@ Stable contracts, live in `docs/reference/`:
 - `db.md` — `@zeroship/db`: generated `env.db` typing, CRUD, aggregation, naming strategy
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
+- `workflows.md` — `@zeroship/workflows`: replayable workflow classes, steps, sleeps, signals, children, schedules, outputs, and compensation
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `auth-dev-tier.md` — the self-contained `pnpm dev` auth provider (the peer of `env.db`→SQLite / `env.kv`→redb): contract parity, the dev impl, the dev-only-by-construction guarantee
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits

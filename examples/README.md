@@ -52,3 +52,4 @@ Platform SDK examples:
 | [`kv-dashboard/`](./kv-dashboard/) | `@zeroship/kv` JSON values, TTL, counters, leases, namespaced list, and cleanup |
 | [`db-todos/`](./db-todos/) | `@zeroship/db` schema discovery, relations, RPC procedures, and live snapshots |
 | [`db-chat/`](./db-chat/) | reactive DB queries and broker-driven updates |
+| [`workflows-order/`](./workflows-order/) | `@zeroship/workflows` steps, sleeps, signals, child calls, and compensation |

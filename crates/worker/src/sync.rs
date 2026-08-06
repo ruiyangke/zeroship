@@ -798,7 +798,10 @@ mod tests {
 
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -811,6 +814,10 @@ mod tests {
             let blob_root = tmpdir("blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let blob_hash = hex::encode(Sha256::digest(source));
             blob_store.put_blob(&blob_hash, source).await.expect("seed blob");
 
@@ -855,10 +862,14 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(

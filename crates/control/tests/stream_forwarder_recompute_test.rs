@@ -164,6 +164,110 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
 }
 
 #[compio::test]
+async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
+    let url = db_url("control_direct_usage_event_survives_repeated_snapshot_recompute");
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let app = seed_app(&client).await;
+    let period = chrono::Utc
+        .with_ymd_and_hms(2043, 6, 1, 0, 0, 0)
+        .unwrap()
+        .timestamp();
+    let suffix = unique_suffix();
+    let topic = format!("zeroship-control-direct-{suffix}");
+    let wal_dir = tempfile::tempdir().expect("control usage WAL tempdir");
+
+    let mut stream_registry = StreamRegistry::default();
+    adapters::register_builtin(&mut stream_registry);
+    let streams = zeroship_control::BillingStreamConfig::new(
+        Arc::new(stream_registry),
+        "memory",
+        StreamConfig::from(json!({
+            "topic": topic,
+            "group.id": "base-group-overridden",
+            "partitions": 2
+        })),
+        format!("billing-forwarder-{suffix}"),
+        format!("spend-recompute-witness-{suffix}"),
+    )
+    .expect("billing stream config builds")
+    .with_control_usage_outbox_wal_path(wal_dir.path().join("control-usage.redb"));
+
+    let metering = zeroship_control::metering::Metering::new(registry.clone());
+    metering
+        .record_direct_at(
+            &app,
+            &[("storage_ops".to_string(), 7)],
+            period + 30,
+            Some(&streams),
+        )
+        .await
+        .expect("direct usage durably enqueues through control outbox");
+    assert_eq!(
+        metering
+            .total(&app, period, "storage_ops")
+            .await
+            .expect("read pre-recompute total"),
+        0,
+        "stream mode does not bypass the retained witness with a direct aggregate write"
+    );
+
+    let inspector = streams.build_forwarder().expect("inspection consumer");
+    let mut records = Vec::new();
+    for _ in 0..200 {
+        records = inspector.poll(10).await.expect("poll direct usage event");
+        if !records.is_empty() {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(records.len(), 1, "one direct delta becomes one usage event");
+    let direct_event: UsageEvent =
+        serde_json::from_slice(&records[0].payload).expect("decode direct usage event");
+    assert_eq!(direct_event.source, "zeroship-control");
+    assert_eq!(direct_event.subject.app, Some(app));
+    assert!(direct_event.subject.creator.is_nil());
+    assert_eq!(direct_event.meter, "storage_ops");
+    assert_eq!(direct_event.value, 7);
+    assert_eq!(direct_event.event_time, period + 30);
+    assert_eq!(
+        Uuid::parse_str(&direct_event.event_id)
+            .expect("event id is UUID")
+            .get_version_num(),
+        7,
+        "control usage events use UUIDv7 ids"
+    );
+
+    let recompute = streams.build_recompute().expect("recompute consumer");
+    let recompute_cfg = spend_recompute::SpendRecomputeConfig {
+        interval: Duration::from_secs(1),
+        settle_window: Duration::from_secs(1),
+        batch_max: 10,
+    };
+    let first = spend_recompute::recompute_usage_aggregates(
+        &registry,
+        recompute.as_ref(),
+        period,
+        &recompute_cfg,
+    )
+    .await
+    .expect("first spend recompute");
+    assert_eq!(first.polled, 1);
+    assert_total(&client, app, period, "storage_ops", 7).await;
+
+    let second = spend_recompute::recompute_usage_aggregates(
+        &registry,
+        recompute.as_ref(),
+        period,
+        &recompute_cfg,
+    )
+    .await
+    .expect("repeated spend recompute");
+    assert_eq!(second.polled, 1);
+    assert_total(&client, app, period, "storage_ops", 7).await;
+}
+
+#[compio::test]
 async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() {
     let suffix = unique_suffix();
     let topic = format!("zeroship-control-f4-crash-{suffix}");

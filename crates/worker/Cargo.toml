@@ -17,12 +17,14 @@ zeroship-plugin-kv = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-plugin-storage = { workspace = true, features = ["s3"] }
+zeroship-plugin-workflow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 futures = { workspace = true }
 mimalloc = { workspace = true }
 sha2 = { workspace = true }
@@ -37,6 +39,8 @@ tracing = { workspace = true }
 # temp LocalFs storage dir + blob dir per run (KV uses the real Redis backend at
 # REDIS_TEST_URL); tempfile gives each test an isolated dir for the FS legs.
 tempfile = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true

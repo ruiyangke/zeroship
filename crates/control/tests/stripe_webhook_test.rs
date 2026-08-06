@@ -93,6 +93,10 @@ impl Fixture {
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+            zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                .expect("workflow blob store"),
+        );
         let (control_pg_client, control_pg_conn) =
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
@@ -107,11 +111,13 @@ impl Fixture {
             env_store,
             stripe_store,
             blob_store,
+            workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
             stripe_webhook_secret: SecretString::new(webhook_secret.to_string()),
             stripe_secret_key: SecretString::new(stripe_secret_key.to_string()),
             stripe_base_url: stripe_base_url.to_string(),
+            gateway_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),

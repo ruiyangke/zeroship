@@ -11,7 +11,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use uuid::Uuid;
-use zeroship_core::types::AppUsage;
+use zeroship_core::usage_event::UsageEvent;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{
     EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
@@ -69,6 +69,13 @@ fn lock_env() -> MutexGuard<'static, ()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|err| err.into_inner())
+}
+
+fn usage_value(events: &[UsageEvent], app_id: Uuid, meter: &str) -> Option<u64> {
+    events
+        .iter()
+        .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+        .map(|event| event.value)
 }
 
 #[derive(Clone, Copy)]
@@ -868,13 +875,14 @@ return await new Promise((resolve) => {{
         "expected egress cap destroy, got: {}",
         result.body
     );
-    let usage: AppUsage = meter
-        .drain()
-        .remove(&app_id)
-        .expect("net egress should feed the spend meter");
-    assert_eq!(usage.egress_bytes, 40, "accepted socket egress must feed fixed spend metric");
+    let events = meter.drain();
     assert_eq!(
-        usage.custom.get("net_egress_bytes").copied(),
+        usage_value(&events, app_id, "egress_bytes"),
+        Some(40),
+        "accepted socket egress must feed fixed spend metric"
+    );
+    assert_eq!(
+        usage_value(&events, app_id, "net_egress_bytes"),
         Some(40),
         "net-specific attribution metric should also be stamped"
     );
@@ -918,13 +926,14 @@ return await new Promise((resolve) => {{
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert_eq!(result.body, "hello");
-    let usage: AppUsage = meter
-        .drain()
-        .remove(&app_id)
-        .expect("net ingress should feed the spend meter");
-    assert_eq!(usage.ingress_bytes, 5, "accepted socket reads feed fixed ingress metric");
+    let events = meter.drain();
     assert_eq!(
-        usage.custom.get("net_ingress_bytes").copied(),
+        usage_value(&events, app_id, "ingress_bytes"),
+        Some(5),
+        "accepted socket reads feed fixed ingress metric"
+    );
+    assert_eq!(
+        usage_value(&events, app_id, "net_ingress_bytes"),
         Some(5),
         "net-specific ingress attribution metric should also be stamped"
     );

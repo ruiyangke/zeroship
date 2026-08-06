@@ -118,6 +118,11 @@ impl RouteCache {
         routes.get(app_id).map(|r| (*app_id, r.clone()))
     }
 
+    pub fn lookup_by_app_id(&self, app_id: &Uuid) -> Option<Arc<CompiledRoute>> {
+        let routes = self.routes.read().unwrap();
+        routes.get(app_id).cloned()
+    }
+
     /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base62>`).
     ///
     /// Per-app back-channel logout (auth-sdk Slice 1d, spec §1.2): the inbound

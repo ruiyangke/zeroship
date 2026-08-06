@@ -36,7 +36,10 @@ zeroship-auth = { workspace = true }
 # the same `email_suppressions` contract auth uses. PR-0 deliberately left control
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
+zeroship-plugin-workflow = { workspace = true }
+zeroship-workflow-scheduler = { workspace = true }
 zeroship-stream = { workspace = true }
+zeroship-metering = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
@@ -81,6 +84,7 @@ tracing = { workspace = true }
 # verifier); reuse it here for the stash cookie HMAC envelope.
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
@@ -92,16 +96,15 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
-# Metering coverage (#27): the faithful gateway-egress ingest test builds a
-# REAL gateway `Meter`, records `gateway_egress_bytes`, drains + `build_report`
-# with a `gate-…` producer id, and ingests through the real `Metering` path —
-# exercising the producer→ingest seam end to end, not a hand-built report.
-zeroship-metering = { workspace = true }
 # Webhook HTTP-boundary tests (#9/#2/#7) compute a REAL Stripe `v1=` HMAC so the
 # multi-v1 OR-fold and the signed-but-large-header paths exercise the production
 # `verify_stripe_signature`, not a hand-faked header. Same crates the lib uses.
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+serial_test = "3"
+zeroship-runtime = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+tempfile = { workspace = true }
 [lints]
 workspace = true

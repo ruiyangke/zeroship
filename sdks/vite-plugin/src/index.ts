@@ -136,6 +136,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   const state: TransformState = {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
+    discoveredSchedules: [],
   };
 
   return [

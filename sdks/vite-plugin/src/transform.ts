@@ -22,6 +22,12 @@ const WRAPPER_NAMES = new Set([
   "subscription",
 ]);
 
+const SCHEDULE_SOURCES = new Set([
+  "@zeroship/workflows",
+  "@zeroship/workflows/schedule",
+]);
+const SCHEDULE_IMPORT_NAMES = new Set(["schedule", "every", "cronExpr"]);
+
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
@@ -82,6 +88,16 @@ export interface DiscoveredProcedureRecord {
   lazy?: boolean;
 }
 
+export interface DiscoveredScheduleRecord {
+  filePath: string;
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input?: unknown;
+  overlap?: "allow" | "skipIfRunning";
+  catchUp?: { mode: "skip" | "backfill"; max?: number };
+}
+
 export interface TransformState {
   /**
    * Map from project-relative file path to the set of exported server
@@ -95,6 +111,7 @@ export interface TransformState {
    * transform runs in multiple environments (`ssr` + dev `zeroship`).
    */
   discoveredProcedures: DiscoveredProcedureRecord[];
+  discoveredSchedules: DiscoveredScheduleRecord[];
 }
 
 // --- AST helpers (work with Rolldown's Oxc/ESTree AST) ---
@@ -320,6 +337,10 @@ function quickHasUseServerDirective(code: string): boolean {
   return head === '"use server"' || head === "'use server'";
 }
 
+function quickMayHaveScheduleRegistration(code: string): boolean {
+  return code.includes("@zeroship/workflows") && /\bschedule\b/.test(code);
+}
+
 /**
  * Per-file symbol table mapping locally-bound identifiers to the
  * wrapper marker name they resolve to.
@@ -347,6 +368,25 @@ function collectWrapperBindings(astBody: any[]): Map<string, WrapperKind> {
       if (!imported || !local) continue;
       if (!WRAPPER_NAMES.has(imported)) continue;
       bindings.set(local, imported as WrapperKind);
+    }
+  }
+  return bindings;
+}
+
+function collectScheduleBindings(astBody: any[]): Map<string, "schedule" | "every" | "cronExpr"> {
+  const bindings = new Map<string, "schedule" | "every" | "cronExpr">();
+  for (const node of astBody) {
+    if (node.type !== "ImportDeclaration") continue;
+    const sourceLit = node.source;
+    if (!sourceLit || typeof sourceLit.value !== "string") continue;
+    if (!SCHEDULE_SOURCES.has(sourceLit.value)) continue;
+    for (const spec of node.specifiers || []) {
+      if (spec.type !== "ImportSpecifier") continue;
+      const imported = spec.imported?.name;
+      const local = spec.local?.name;
+      if (!imported || !local) continue;
+      if (!SCHEDULE_IMPORT_NAMES.has(imported)) continue;
+      bindings.set(local, imported as "schedule" | "every" | "cronExpr");
     }
   }
   return bindings;
@@ -557,6 +597,365 @@ function inspectLazy(node: any): "true" | "false" | "non-literal" | "absent" {
   return "absent";
 }
 
+function collectScheduleRegistrations(
+  astBody: any[],
+  filePath: string,
+): DiscoveredScheduleRecord[] {
+  const bindings = collectScheduleBindings(astBody);
+  if (![...bindings.values()].includes("schedule")) return [];
+
+  const out: DiscoveredScheduleRecord[] = [];
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "CallExpression" && isScheduleCallee(node.callee, bindings)) {
+      out.push(extractScheduleRegistration(node, bindings, filePath));
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "type" || key === "loc" || key === "range" || key === "start" || key === "end") {
+        continue;
+      }
+      const value = node[key];
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child);
+      } else if (value && typeof value === "object") {
+        visit(value);
+      }
+    }
+  };
+
+  for (const stmt of astBody) visit(stmt);
+  return out;
+}
+
+function isScheduleCallee(
+  callee: any,
+  bindings: Map<string, "schedule" | "every" | "cronExpr">,
+): boolean {
+  return callee?.type === "Identifier" && bindings.get(callee.name) === "schedule";
+}
+
+function extractScheduleRegistration(
+  call: any,
+  bindings: Map<string, "schedule" | "every" | "cronExpr">,
+  filePath: string,
+): DiscoveredScheduleRecord {
+  const arg = call.arguments?.[0];
+  if (!arg || arg.type !== "ObjectExpression") {
+    throw scheduleBuildError(filePath, "schedule(...) requires a literal object argument");
+  }
+  const props = objectProperties(arg, filePath);
+  const name = stringLiteral(props.get("name"));
+  if (!name || name.trim() === "") {
+    throw scheduleBuildError(filePath, "schedule.name must be a non-empty string literal");
+  }
+  const scheduleNode = props.get("schedule");
+  if (!scheduleNode) {
+    throw scheduleBuildError(filePath, "schedule.schedule is required");
+  }
+  const workflowName = workflowNameFromNode(props.get("workflow"));
+  if (!workflowName) {
+    throw scheduleBuildError(filePath, "schedule.workflow must be a Workflow class reference");
+  }
+
+  const overlapNode = props.get("overlap");
+  const overlap = overlapNode === undefined ? undefined : literalize(overlapNode);
+  if (overlap !== undefined && overlap !== "allow" && overlap !== "skipIfRunning") {
+    throw scheduleBuildError(filePath, "schedule.overlap must be \"allow\" or \"skipIfRunning\"");
+  }
+
+  const catchUpNode = props.get("catchUp");
+  const catchUp = catchUpNode === undefined ? undefined : literalize(catchUpNode);
+  if (catchUp !== undefined && !isCatchUpLiteral(catchUp)) {
+    throw scheduleBuildError(filePath, "schedule.catchUp must be a literal skip/backfill policy");
+  }
+
+  const inputNode = props.get("input");
+  const input = inputNode === undefined ? {} : literalize(inputNode);
+  if (input === undefined) {
+    throw scheduleBuildError(filePath, "schedule.input must be a literal JSON-compatible value");
+  }
+
+  return {
+    filePath,
+    name,
+    workflowName,
+    schedule: lowerScheduleExpression(scheduleNode, bindings, filePath),
+    input,
+    ...(overlap === undefined ? {} : { overlap }),
+    ...(catchUp === undefined ? {} : { catchUp }),
+  };
+}
+
+function objectProperties(node: any, filePath: string): Map<string, any> {
+  const props = new Map<string, any>();
+  for (const p of node.properties ?? []) {
+    if (p.type !== "Property" || p.computed) {
+      throw scheduleBuildError(filePath, "schedule(...) options must not use spread or computed keys");
+    }
+    const key =
+      p.key?.type === "Identifier"
+        ? p.key.name
+        : p.key?.type === "Literal"
+          ? String(p.key.value)
+          : undefined;
+    if (!key) {
+      throw scheduleBuildError(filePath, "schedule(...) option key must be literal");
+    }
+    props.set(key, p.value);
+  }
+  return props;
+}
+
+function stringLiteral(node: any): string | undefined {
+  if (!node) return undefined;
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  if (node.type === "TemplateLiteral" && node.expressions.length === 0 && node.quasis.length === 1) {
+    return node.quasis[0].value.cooked ?? node.quasis[0].value.raw;
+  }
+  return undefined;
+}
+
+function workflowNameFromNode(node: any): string | undefined {
+  if (!node) return undefined;
+  if (node.type === "Identifier") return node.name;
+  if (node.type === "MemberExpression" && !node.computed && node.property?.type === "Identifier") {
+    return node.property.name;
+  }
+  if (node.type === "MemberExpression" && node.computed && node.property?.type === "Literal") {
+    return typeof node.property.value === "string" ? node.property.value : undefined;
+  }
+  return undefined;
+}
+
+function isCatchUpLiteral(value: unknown): value is { mode: "skip" | "backfill"; max?: number } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.mode === "skip") return record.max === undefined;
+  return record.mode === "backfill" && Number.isInteger(record.max) && Number(record.max) > 0;
+}
+
+function lowerScheduleExpression(
+  node: any,
+  bindings: Map<string, "schedule" | "every" | "cronExpr">,
+  filePath: string,
+): Record<string, unknown> {
+  const raw = stringLiteral(node);
+  if (raw !== undefined) {
+    return { kind: "cron", cron_expr: raw, tz: "UTC" };
+  }
+  let lowered: ScheduleEvalValue;
+  try {
+    lowered = evalScheduleExpression(node, bindings, filePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith("[zeroship:schedule]")) throw error;
+    throw scheduleBuildError(filePath, message);
+  }
+  if (!isLoweredSchedule(lowered)) {
+    throw scheduleBuildError(filePath, "schedule.schedule must be every(...), cronExpr(...), or a cron string");
+  }
+  return lowered;
+}
+
+type ScheduleEvalValue =
+  | Record<string, unknown>
+  | ((...args: unknown[]) => ScheduleEvalValue);
+
+function evalScheduleExpression(
+  node: any,
+  bindings: Map<string, "schedule" | "every" | "cronExpr">,
+  filePath: string,
+): ScheduleEvalValue {
+  if (!node) {
+    throw scheduleBuildError(filePath, "empty schedule expression");
+  }
+  if (node.type === "Identifier") {
+    const binding = bindings.get(node.name);
+    if (binding === "every") return everyEval;
+    if (binding === "cronExpr") return cronExprEval;
+    throw scheduleBuildError(filePath, "schedule expression uses an unsupported identifier");
+  }
+  if (node.type === "MemberExpression") {
+    const object = evalScheduleExpression(node.object, bindings, filePath);
+    const property = memberPropertyName(node);
+    if (!property || object == null || typeof object !== "object" && typeof object !== "function") {
+      throw scheduleBuildError(filePath, "schedule expression uses an unsupported member");
+    }
+    const value = (object as Record<string, unknown>)[property];
+    if (value === undefined) {
+      throw scheduleBuildError(filePath, `unsupported schedule cadence: ${property}`);
+    }
+    return value as ScheduleEvalValue;
+  }
+  if (node.type === "CallExpression") {
+    const callee = evalScheduleExpression(node.callee, bindings, filePath);
+    if (typeof callee !== "function") {
+      throw scheduleBuildError(filePath, "schedule expression calls a non-terminal cadence");
+    }
+    const args = (node.arguments ?? []).map((arg: any) => literalScheduleArg(arg, filePath));
+    return callee(...args);
+  }
+  throw scheduleBuildError(filePath, "schedule expression must be a literal fluent schedule");
+}
+
+function memberPropertyName(node: any): string | undefined {
+  if (node.computed) {
+    return node.property?.type === "Literal" && typeof node.property.value === "string"
+      ? node.property.value
+      : undefined;
+  }
+  return node.property?.type === "Identifier" ? node.property.name : undefined;
+}
+
+function literalScheduleArg(node: any, filePath: string): unknown {
+  const value = literalize(node);
+  if (value === undefined) {
+    throw scheduleBuildError(filePath, "schedule expression arguments must be literal");
+  }
+  return value;
+}
+
+function isLoweredSchedule(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.kind === "cron" || record.kind === "interval";
+}
+
+function everyEval(n?: unknown, unit?: unknown): ScheduleEvalValue {
+  if (n === undefined) return emptyEveryEval();
+  if (unit === undefined) return countEveryEval(n);
+  return intervalEval(n, unit);
+}
+
+function emptyEveryEval(): Record<string, unknown> {
+  return {
+    minute: () => cronEval("* * * * *", "UTC"),
+    hour: () => hourEval(0),
+    day: () => dayEval("*"),
+    month: () => monthEval(),
+    sunday: () => dayEval(0),
+    monday: () => dayEval(1),
+    tuesday: () => dayEval(2),
+    wednesday: () => dayEval(3),
+    thursday: () => dayEval(4),
+    friday: () => dayEval(5),
+    saturday: () => dayEval(6),
+  };
+}
+
+Object.assign(everyEval, {
+  minute: () => cronEval("* * * * *", "UTC"),
+  hour: () => hourEval(0),
+  day: dayEval("*"),
+  month: monthEval(),
+  sunday: dayEval(0),
+  monday: dayEval(1),
+  tuesday: dayEval(2),
+  wednesday: dayEval(3),
+  thursday: dayEval(4),
+  friday: dayEval(5),
+  saturday: dayEval(6),
+});
+
+function countEveryEval(n: unknown): Record<string, unknown> {
+  return {
+    seconds: () => intervalEval(n, "seconds"),
+    minutes: () => intervalEval(n, "minutes"),
+    hours: () => intervalEval(n, "hours"),
+    days: () => intervalEval(n, "days"),
+  };
+}
+
+function dayEval(dayOfWeek: "*" | number): Record<string, unknown> {
+  return {
+    at(time: unknown, tz = "UTC") {
+      const { hour, minute } = parseScheduleTime(time);
+      return cronEval(`${minute} ${hour} * * ${dayOfWeek}`, tz);
+    },
+  };
+}
+
+function hourEval(minute: number): Record<string, unknown> {
+  const descriptor = cronEval(`${normalizeScheduleMinute(minute)} * * * *`, "UTC");
+  return Object.assign(descriptor, {
+    at(m: unknown) {
+      return cronEval(`${normalizeScheduleMinute(m)} * * * *`, "UTC");
+    },
+  });
+}
+
+function monthEval(): Record<string, unknown> {
+  return {
+    on(day: unknown) {
+      const dayOfMonth = normalizeScheduleDay(day);
+      return {
+        at(time: unknown, tz = "UTC") {
+          const { hour, minute } = parseScheduleTime(time);
+          return cronEval(`${minute} ${hour} ${dayOfMonth} * *`, tz);
+        },
+      };
+    },
+  };
+}
+
+function cronExprEval(expr: unknown, tz: unknown = "UTC"): Record<string, unknown> {
+  if (typeof expr !== "string" || typeof tz !== "string") {
+    throw new Error("cronExpr requires literal string arguments");
+  }
+  return cronEval(expr, tz);
+}
+
+function cronEval(expr: unknown, tz: unknown): Record<string, unknown> {
+  if (typeof expr !== "string" || typeof tz !== "string") {
+    throw new Error("cron schedule requires string expression and timezone");
+  }
+  return { kind: "cron", cron_expr: expr, tz };
+}
+
+function intervalEval(n: unknown, unit: unknown): Record<string, unknown> {
+  const units: Record<string, number> = {
+    seconds: 1_000,
+    minutes: 60_000,
+    hours: 3_600_000,
+    days: 86_400_000,
+  };
+  if (!Number.isInteger(n) || Number(n) <= 0 || typeof unit !== "string" || !(unit in units)) {
+    throw new Error("interval schedule requires a positive integer count and supported unit");
+  }
+  return { kind: "interval", interval_ms: Number(n) * units[unit], anchor: "epoch" };
+}
+
+function parseScheduleTime(value: unknown): { hour: number; minute: number } {
+  if (typeof value !== "string" || !/^\d\d:\d\d$/.test(value)) {
+    throw new Error("schedule time must be HH:MM");
+  }
+  const hour = Number(value.slice(0, 2));
+  const minute = Number(value.slice(3, 5));
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    throw new Error("schedule time must be a valid 24-hour HH:MM value");
+  }
+  return { hour, minute };
+}
+
+function normalizeScheduleMinute(value: unknown): number {
+  if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 59) {
+    throw new Error("schedule minute must be an integer from 0 through 59");
+  }
+  return Number(value);
+}
+
+function normalizeScheduleDay(value: unknown): number {
+  if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 28) {
+    throw new Error("schedule day of month must be an integer from 1 through 28");
+  }
+  return Number(value);
+}
+
+function scheduleBuildError(filePath: string, message: string): Error {
+  return new Error(`[zeroship:schedule] ${filePath}: ${message}`);
+}
+
 /**
  * Walk module body, collecting `<fnName>.config = { ... }` and
  * `export const $config = { ... }` assignments. Returns:
@@ -690,7 +1089,9 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    the first non-trivial token after the BOM / whitespace /
         //    comments. This avoids the AST parse cost on the >99% of
         //    source files that don't open with `"use server"`.
-        if (!quickHasUseServerDirective(code)) {
+        const mayHaveServerDirective = quickHasUseServerDirective(code);
+        const mayHaveScheduleRegistration = quickMayHaveScheduleRegistration(code);
+        if (!mayHaveServerDirective && !mayHaveScheduleRegistration) {
           // Friendly hint for code still laid out like the legacy
           // `src/server.{ts,...}` / `src/server/**` shape: a file that's
           // missing the directive is almost certainly an unmigrated
@@ -722,6 +1123,20 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // 2. Parse AST with Rolldown's built-in parser.
         const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
         const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });
+
+        if (isServerEnv && mayHaveScheduleRegistration) {
+          const schedules = collectScheduleRegistrations(ast.body, id);
+          if (schedules.length > 0) {
+            if (!state.discoveredSchedules) state.discoveredSchedules = [];
+            for (const record of schedules) {
+              const existingIdx = state.discoveredSchedules.findIndex(
+                (s) => s.filePath === record.filePath && s.name === record.name,
+              );
+              if (existingIdx >= 0) state.discoveredSchedules[existingIdx] = record;
+              else state.discoveredSchedules.push(record);
+            }
+          }
+        }
 
         // 3. Server-module gate — file-level `"use server"` directive.
         //    The path convention is gone; only this directive opts a

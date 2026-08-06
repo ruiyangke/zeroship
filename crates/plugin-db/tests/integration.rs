@@ -5,6 +5,7 @@
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[path = "parity/mod.rs"]
 mod parity;
@@ -6364,6 +6365,89 @@ async fn per_app_role_created_at_provision() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .expect("workflow provision pg client");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    let app_id = Uuid::new_v4();
+    let app_schema = zeroship_plugin_workflow::store::pg::app_schema_for(&app_id);
+    let tables = zeroship_plugin_workflow::store::pg::WorkflowTables::for_app_id(&app_id);
+    let schema_role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_schema);
+    let uuid_role = format!("app_{}_role", app_id.as_hyphenated());
+
+    let _ = pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app_schema}\" CASCADE"), &[])
+        .await;
+    for role in [&schema_role, &uuid_role] {
+        let _ = pool
+            .execute(&format!("DROP OWNED BY \"{role}\""), &[])
+            .await;
+        let _ = pool
+            .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+            .await;
+    }
+
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure platform role");
+    zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
+        .await
+        .expect("provision app-local workflow journal");
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app_schema)
+        .await
+        .expect("redeploy plugin-db per-app role grants");
+
+    for table in tables.all() {
+        let rows = pool
+            .query_text_params(
+                "SELECT \
+                    has_table_privilege($1, $2, 'SELECT') AS sel, \
+                    has_table_privilege($1, $2, 'INSERT') AS ins, \
+                    has_table_privilege($1, $2, 'UPDATE') AS upd, \
+                    has_table_privilege($1, $2, 'DELETE') AS del",
+                &[schema_role.as_str(), table],
+            )
+            .await
+            .expect("check journal table privileges");
+        let row = &rows[0];
+        assert!(!row.get::<_, bool>("sel"), "app role must not SELECT {table}");
+        assert!(!row.get::<_, bool>("ins"), "app role must not INSERT {table}");
+        assert!(!row.get::<_, bool>("upd"), "app role must not UPDATE {table}");
+        assert!(!row.get::<_, bool>("del"), "app role must not DELETE {table}");
+
+        let owner_rows = pool
+            .query_text_params(
+                "SELECT pg_get_userbyid(c.relowner) AS owner \
+                   FROM pg_class c \
+                  WHERE c.oid = to_regclass($1)",
+                &[table],
+            )
+            .await
+            .expect("check journal table owner");
+        let owner: String = owner_rows[0].get("owner");
+        assert_eq!(owner, "__zeroship_platform_role", "journal owner for {table}");
+    }
+
+    let _ = pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app_schema}\" CASCADE"), &[])
+        .await;
+    for role in [&schema_role, &uuid_role] {
+        let _ = pool
+            .execute(&format!("DROP OWNED BY \"{role}\""), &[])
+            .await;
+        let _ = pool
+            .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+            .await;
+    }
 }
 
 #[compio::test]
