@@ -8153,13 +8153,52 @@ fn mysql_fk_policy_tail(definition: &str) -> String {
     tail.replace(" DEFERRABLE INITIALLY DEFERRED", "")
 }
 
+/// Re-spell a constraint `definition` body from its PostgreSQL quoting into MySQL's.
+///
+/// Constraint bodies are built once in PostgreSQL spelling so the desired snapshot
+/// round-trips byte-for-byte against `pg_get_constraintdef` (see
+/// [`constraintdef_cols`]); MySQL needs the same body with backtick-quoted
+/// identifiers.
+///
+/// The rewrite tracks three states, because the escaping rules differ in each and
+/// conflating them turns an identifier into SQL structure:
+///
+/// - Outside any quote, `"` opens an identifier and `'` opens a string.
+/// - Inside a `"`-quoted identifier, `'` is an ordinary character, a doubled `""`
+///   is one literal `"`, and a backtick MUST be doubled, since it is the delimiter
+///   in the target spelling.
+/// - Inside a `'`-quoted string, `"` is an ordinary character and `''` is one
+///   literal quote.
+///
+/// Treating `'` as a string delimiter while inside an identifier is what breaks: a
+/// column named `it's` swallows the identifier's closing `"`, and a column carrying
+/// a backtick emits it undoubled, so `` a`), KEY `k2` (`id `` closes the identifier
+/// early and contributes an index the author never declared.
 fn mysql_requote_sql(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut in_string = false;
+    let mut in_ident = false;
     while let Some(c) = chars.next() {
         match c {
-            '\'' => {
+            '"' if in_ident => {
+                if chars.peek() == Some(&'"') {
+                    // `""` inside a PostgreSQL identifier is one literal `"`, which
+                    // needs no escaping between backticks.
+                    chars.next();
+                    out.push('"');
+                } else {
+                    in_ident = false;
+                    out.push('`');
+                }
+            }
+            '"' if !in_string => {
+                in_ident = true;
+                out.push('`');
+            }
+            '`' if in_ident => out.push_str("``"),
+            '\'' if in_ident => out.push('\''),
+            '\'' if !in_ident => {
                 out.push(c);
                 if in_string && chars.peek() == Some(&'\'') {
                     if let Some(next) = chars.next() {
@@ -8169,7 +8208,6 @@ fn mysql_requote_sql(sql: &str) -> String {
                     in_string = !in_string;
                 }
             }
-            '"' if !in_string => out.push('`'),
             _ => out.push(c),
         }
     }
