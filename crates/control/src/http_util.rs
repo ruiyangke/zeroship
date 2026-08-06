@@ -4,10 +4,14 @@
 //! handlers — env_handlers and stripe_handlers used to duplicate this
 //! code 1:1, which a critic flagged as a drift hazard.
 
+use std::net::IpAddr;
+
 use ntex::web::{self, HttpRequest};
 use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 
 use crate::rate_limit::Quota;
+
+const UNRESOLVED_CLIENT_IDENTITY: &str = "unresolved";
 
 /// Resolve the source IP for audit + rate-limit purposes.
 ///
@@ -23,29 +27,38 @@ use crate::rate_limit::Quota;
 /// The first entry is what the client itself CLAIMED, which is
 /// untrusted. Operators must only set --trust-proxy when the control
 /// plane is bound behind a load balancer they trust to overwrite XFF.
+/// A last entry that is not a valid IP is ignored in favor of `peer_addr`.
 pub fn source_ip(req: &HttpRequest, trust_proxy: bool) -> Option<String> {
+    let xff = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok());
+    resolve_source_ip(xff, req.peer_addr().map(|addr| addr.ip()), trust_proxy)
+}
+
+fn resolve_source_ip(
+    xff: Option<&str>,
+    peer_ip: Option<IpAddr>,
+    trust_proxy: bool,
+) -> Option<String> {
     if trust_proxy {
-        if let Some(xff) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(xff) = xff {
             // Last entry = closest hop = the trusted proxy's view.
             if let Some(last) = xff.rsplit(',').next() {
                 let trimmed = last.trim();
-                if !trimmed.is_empty() {
+                if trimmed.parse::<IpAddr>().is_ok() {
                     return Some(trimmed.to_string());
                 }
             }
         }
     }
-    req.peer_addr().map(|a| a.ip().to_string())
+    peer_ip.map(|ip| ip.to_string())
 }
 
 /// DB-backed token-bucket gate. Returns `Some(429)` if the IP is over
 /// quota, `Some(503)` if the shared rate-limit store is unavailable,
-/// and `None` to let the request proceed. Uses `source_ip` so the
-/// rate-limit "client identity" matches the audit-log identity.
+/// and `None` to let the request proceed. Resolved clients use the same
+/// identity as audit logs; unresolved clients share a bounded bucket.
 pub async fn rate_limit(
     req: &HttpRequest,
     db: &compio_postgres::Client,
@@ -53,11 +66,9 @@ pub async fn rate_limit(
     quota: Quota,
     trust_proxy: bool,
 ) -> Option<web::HttpResponse> {
-    let Some(ip_str) = source_ip(req, trust_proxy) else { return None };
-    if ip_str.parse::<std::net::IpAddr>().is_err() {
-        return None;
-    }
-    let key = format!("control:{namespace}:ip:{ip_str}");
+    let identity = source_ip(req, trust_proxy)
+        .unwrap_or_else(|| UNRESOLVED_CLIENT_IDENTITY.to_string());
+    let key = format!("control:{namespace}:ip:{identity}");
     let bucket = Bucket {
         capacity: quota.capacity,
         refill_per_sec: quota.refill_per_sec,
@@ -103,7 +114,8 @@ mod tests {
     use super::*;
 
     async fn pg() -> Option<compio_postgres::Client> {
-        let db_url = std::env::var("AUTH_DB_URL")
+        let db_url = std::env::var("CONTROL_TEST_DB")
+            .or_else(|_| std::env::var("AUTH_DB_URL"))
             .or_else(|_| std::env::var("PG_TEST_URL"))
             .ok()?;
         let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -116,10 +128,117 @@ mod tests {
         Some(client)
     }
 
+    #[test]
+    fn malformed_trusted_xff_falls_back_to_peer_identity() {
+        let peer: IpAddr = "203.0.113.10".parse().unwrap();
+
+        assert_eq!(
+            resolve_source_ip(Some("not-an-ip"), Some(peer), true),
+            Some(peer.to_string())
+        );
+    }
+
+    #[test]
+    fn well_formed_trusted_xff_wins_over_peer_identity() {
+        let forwarded: IpAddr = "198.51.100.20".parse().unwrap();
+        let peer: IpAddr = "203.0.113.20".parse().unwrap();
+
+        assert_eq!(
+            resolve_source_ip(Some("198.51.100.20"), Some(peer), true),
+            Some(forwarded.to_string())
+        );
+    }
+
+    #[compio::test]
+    async fn unresolved_identity_uses_shared_rate_limit_bucket() {
+        let Some(pg) = pg().await else {
+            eprintln!(
+                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
+            );
+            return;
+        };
+        let namespace = format!("http-util-unresolved-{}", Uuid::new_v4().simple());
+        let key = format!("control:{namespace}:ip:unresolved");
+        pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
+            .await
+            .expect("cleanup unresolved rate-limit bucket");
+
+        let first_req = TestRequest::default().to_http_request();
+        let second_req = TestRequest::default().to_http_request();
+        let quota = Quota::per_minute(1, 1);
+
+        assert!(
+            rate_limit(&first_req, &pg, &namespace, quota, false)
+                .await
+                .is_none()
+        );
+        let response = rate_limit(&second_req, &pg, &namespace, quota, false)
+            .await
+            .expect("second unresolved request is throttled");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
+            .await
+            .expect("cleanup unresolved rate-limit bucket");
+    }
+
+    #[compio::test]
+    async fn distinct_resolvable_identities_use_independent_rate_limit_buckets() {
+        let Some(pg) = pg().await else {
+            eprintln!(
+                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
+            );
+            return;
+        };
+        let namespace = format!("http-util-distinct-{}", Uuid::new_v4().simple());
+        let first_ip = "198.51.100.31";
+        let second_ip = "198.51.100.32";
+        let first_key = format!("control:{namespace}:ip:{first_ip}");
+        let second_key = format!("control:{namespace}:ip:{second_ip}");
+        for key in [&first_key, &second_key] {
+            pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[key])
+                .await
+                .expect("cleanup rate-limit bucket");
+        }
+
+        let first_req = TestRequest::default()
+            .header("x-forwarded-for", first_ip)
+            .to_http_request();
+        let second_req = TestRequest::default()
+            .header("x-forwarded-for", second_ip)
+            .to_http_request();
+        let quota = Quota::per_minute(1, 1);
+
+        assert!(rate_limit(&first_req, &pg, &namespace, quota, true).await.is_none());
+        let first_response = rate_limit(&first_req, &pg, &namespace, quota, true)
+            .await
+            .expect("second request from first identity is throttled");
+        assert_eq!(first_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        assert!(
+            rate_limit(&second_req, &pg, &namespace, quota, true)
+                .await
+                .is_none(),
+            "second identity has an independent bucket"
+        );
+        let second_response = rate_limit(&second_req, &pg, &namespace, quota, true)
+            .await
+            .expect("second request from second identity is throttled");
+        assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        for key in [&first_key, &second_key] {
+            pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[key])
+                .await
+                .expect("cleanup rate-limit bucket");
+        }
+    }
+
     #[compio::test]
     async fn db_backed_rate_limit_throttles_across_calls() {
         let Some(pg) = pg().await else {
-            eprintln!("[http_util::tests] AUTH_DB_URL/PG_TEST_URL not set - skipping");
+            eprintln!(
+                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
+            );
             return;
         };
         let namespace = format!("http-util-test-{}", Uuid::new_v4().simple());
@@ -132,19 +251,16 @@ mod tests {
         // ntex's `TestRequest::peer_addr` does NOT propagate through
         // `to_http_request()` (see ntex-3.7.2/src/web/test.rs: the builder
         // stores `peer_addr` but `to_http_request` drops it, and ntex's own
-        // unit test asserts `req.peer_addr() == None`). So `source_ip(req,
-        // trust_proxy=false)` resolves to `None` and `rate_limit` short-circuits
-        // to "allowed" on every call — the original test never exercised
-        // throttling at all. Drive the client identity through the supported
-        // `X-Forwarded-For` + `trust_proxy=true` path instead, which `source_ip`
-        // reads deterministically and which yields the same bucket key.
+        // unit test asserts `req.peer_addr() == None`). Drive this resolved-IP
+        // case through the supported `X-Forwarded-For` + `trust_proxy=true`
+        // path, which `source_ip` reads deterministically and which yields the
+        // expected bucket key.
         let req = TestRequest::default()
             .header("x-forwarded-for", ip.to_string())
             .to_http_request();
         let quota = Quota::per_minute(1, 1);
 
-        // Sanity-check the precondition this test depends on: the identity the
-        // gate will key on must resolve, otherwise `rate_limit` no-ops.
+        // Sanity-check the resolved identity this test expects the gate to use.
         assert_eq!(source_ip(&req, true).as_deref(), Some(ip.to_string().as_str()));
 
         // First call consumes the single token in the bucket → allowed.
