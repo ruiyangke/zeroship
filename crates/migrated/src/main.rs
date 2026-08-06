@@ -362,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn policy_config_refuses_one_byte_key_without_dev_insecure() {
+        let result = build_policy_config("x", 1, false);
+        assert!(result.is_err(), "one-byte policy seal key must fail closed");
+        let err = result.expect_err("one-byte policy seal key must fail closed");
+
+        assert!(err.contains("at least 32 bytes"));
+        assert!(err.contains("got 1"));
+    }
+
+    #[test]
     fn policy_config_allows_missing_key_with_explicit_dev_insecure() {
         build_policy_config("", 1, true)
             .expect("explicit dev-insecure allows dev policy seal key");
