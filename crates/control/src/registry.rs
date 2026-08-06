@@ -120,7 +120,7 @@ impl Registry {
     ///
     /// The schema is owned by zeroship-migrate (`db/migrations-ts`, platform
     /// profile), applied out of band before the service boots (the `migrate`
-    /// compose step / `ops/db-migrate.sh`).
+    /// compose step / `deploy/ops/db-migrate.sh`).
     /// `Registry` never creates or alters tables.
     pub async fn new(db_url: &str) -> Result<Self, String> {
         // Fail fast if the database is unreachable; the schema must already

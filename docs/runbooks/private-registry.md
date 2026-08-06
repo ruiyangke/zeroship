@@ -7,20 +7,20 @@ Phase 1 runs a Verdaccio registry for publishing and consuming ZeroShip SDK pack
 From the repo root:
 
 ```bash
-pnpm dlx verdaccio --config config/verdaccio/config.yaml
+pnpm dlx verdaccio --config deploy/verdaccio/config.yaml
 ```
 
-The committed config writes local state under `config/verdaccio/storage/`, which is ignored by git.
+The committed config writes local state under `deploy/verdaccio/storage/`, which is ignored by git.
 
 ## Start Verdaccio In Compose
 
 ```bash
-docker compose up -d verdaccio
-docker compose ps verdaccio
+docker compose -f deploy/compose/docker-compose.yml up -d verdaccio
+docker compose -f deploy/compose/docker-compose.yml ps verdaccio
 curl -fsS http://localhost:4873/-/ping
 ```
 
-The compose service persists registry state in the `verdaccio_storage` volume and uses the same committed config at `config/verdaccio/config.yaml`.
+The compose service persists registry state in the `verdaccio_storage` volume and uses the same committed config at `deploy/verdaccio/config.yaml`.
 
 ## Create A Publish User
 
@@ -133,7 +133,7 @@ Compose-network option, if you intentionally want Docker DNS instead of the
 host-gateway route:
 
 ```bash
-docker network connect zeroship-sandbox-net "$(docker compose ps -q verdaccio)"
+docker network connect zeroship-sandbox-net "$(docker compose -f deploy/compose/docker-compose.yml ps -q verdaccio)"
 ZEROSHIP_SDK_REGISTRY=http://verdaccio:4873
 ```
 
@@ -157,7 +157,7 @@ compose; Docker Compose refuses to take ownership of that pre-existing network.
 Run the no-OpenAI Phase 2 acceptance harness:
 
 ```bash
-scripts/e2e-private-registry-sandbox.sh
+deploy/scripts/e2e-private-registry-sandbox.sh
 ```
 
 The harness starts/reuses compose Verdaccio, creates a temporary publish user,

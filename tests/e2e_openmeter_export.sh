@@ -12,7 +12,7 @@
 #     -> control spend_recompute -> usage_aggregates -> 402       (enforcement)
 #
 # OpenMeter is METER-only (never invoices), so the stack pairs it with `lite` as
-# the (unused-here) invoicer. The `requests` meter is in ops/openmeter-config.yaml.
+# the (unused-here) invoicer. The `requests` meter is in deploy/ops/openmeter-config.yaml.
 #
 # Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves logs.
 # ============================================================================
@@ -48,7 +48,7 @@ cleanup(){
     echo "  KEEP_WORK=1 → PG/$PGC redpanda/$RPC OpenMeter(compose) + $WORK preserved"
   else
     docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true
-    docker compose -f "$ROOT/docker-compose.openmeter.yml" down -v >/dev/null 2>&1 || true
+    docker compose -f "$ROOT/deploy/compose/openmeter.yml" down -v >/dev/null 2>&1 || true
     rm -rf "$WORK"; echo "  stack down, OpenMeter down, $WORK cleaned"
   fi
 }
@@ -70,13 +70,13 @@ for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healt
 docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
 
 # Real OpenMeter (kafka + clickhouse + sink-worker). Slow to become ready.
-docker compose -f "$ROOT/docker-compose.openmeter.yml" up -d >/dev/null 2>&1 || { fail "openmeter compose up"; exit 1; }
+docker compose -f "$ROOT/deploy/compose/openmeter.yml" up -d >/dev/null 2>&1 || { fail "openmeter compose up"; exit 1; }
 OM_READY=0
 for _ in $(seq 1 60); do
   if curl -sf "$OM_URL/api/v1/meters" 2>/dev/null | grep -q '"slug":"requests"'; then OM_READY=1; break; fi
   sleep 3
 done
-[ "$OM_READY" = "1" ] && pass "OpenMeter healthy on $OM_URL (requests meter present)" || { fail "openmeter never ready"; docker compose -f "$ROOT/docker-compose.openmeter.yml" logs openmeter 2>&1 | tail -20; exit 1; }
+[ "$OM_READY" = "1" ] && pass "OpenMeter healthy on $OM_URL (requests meter present)" || { fail "openmeter never ready"; docker compose -f "$ROOT/deploy/compose/openmeter.yml" logs openmeter 2>&1 | tail -20; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
 ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" "$BIN/zeroship-migrate" migrate \

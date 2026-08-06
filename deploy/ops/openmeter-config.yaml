@@ -1,6 +1,6 @@
 # OpenMeter configuration for the zeroship metering-export FAITHFUL e2e.
 #
-# Stood up by docker-compose.openmeter.yml and consumed by the `openmeter` API
+# Stood up by deploy/compose/openmeter.yml and consumed by the `openmeter` API
 # + `sink-worker` services. This is a DEV-ONLY local config (weak ClickHouse /
 # Postgres passwords, no TLS, an insecure portal token) — it exists purely so
 # the zeroship OpenMeterProvider's REAL cyper client can be exercised against a

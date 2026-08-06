@@ -6,16 +6,16 @@ use sha2::{Digest, Sha256};
 use crate::{lower, AuthzError, Policy};
 
 const PLATFORM_POLICY_SOURCES: &[&str] = &[
-    include_str!("../../../policies/platform/admin.cedar"),
-    include_str!("../../../policies/platform/support.cedar"),
-    include_str!("../../../policies/platform/billing.cedar"),
-    include_str!("../../../policies/platform/readonly.cedar"),
-    include_str!("../../../policies/platform/self_service.cedar"),
-    include_str!("../../../policies/platform/suspended_apps.cedar"),
-    include_str!("../../../policies/platform/audit_locked.cedar"),
-    include_str!("../../../policies/creator/app_owner.cedar"),
-    include_str!("../../../policies/creator/app_editor.cedar"),
-    include_str!("../../../policies/creator/app_viewer.cedar"),
+    include_str!("../../../deploy/policies/platform/admin.cedar"),
+    include_str!("../../../deploy/policies/platform/support.cedar"),
+    include_str!("../../../deploy/policies/platform/billing.cedar"),
+    include_str!("../../../deploy/policies/platform/readonly.cedar"),
+    include_str!("../../../deploy/policies/platform/self_service.cedar"),
+    include_str!("../../../deploy/policies/platform/suspended_apps.cedar"),
+    include_str!("../../../deploy/policies/platform/audit_locked.cedar"),
+    include_str!("../../../deploy/policies/creator/app_owner.cedar"),
+    include_str!("../../../deploy/policies/creator/app_editor.cedar"),
+    include_str!("../../../deploy/policies/creator/app_viewer.cedar"),
 ];
 
 #[derive(Debug)]

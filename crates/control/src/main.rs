@@ -1234,7 +1234,7 @@ fn main() -> std::io::Result<()> {
     // Docker `sdks` stage and COPYed to `/opt/zeroship/console/app.zship`; the
     // control service runs with `--bootstrap-console --console-host
     // console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship`,
-    // ordered after the `migrate` service. `ops/Caddyfile` routes
+    // ordered after the `migrate` service. `deploy/ops/Caddyfile` routes
     // `console.zeroship.localhost` → the gateway (the console is a gateway-fronted
     // app); the separate Vite builder service is retired.
     // Seed the built-in plan tiers (free/pro/unlimited) UNCONDITIONALLY at boot

@@ -23,7 +23,7 @@
 #   sign_zeroship_user_header_at / verify_zeroship_user_header_for_request_at.)
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
-#   1. Ephemeral Postgres + ops/postgres-init.sql + the full zeroship-migrate platform set
+#   1. Ephemeral Postgres + deploy/ops/postgres-init.sql + the full zeroship-migrate platform set
 #      (control needs a DB for app CRUD + deploy).
 #   2. Throwaway Redis (auth-notes scopes notes in env.kv → Redis backend).
 #   3. control + worker + gateway with `--dev-insecure`; worker gets `--kv-url`.
@@ -178,9 +178,9 @@ docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/d
 for i in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
 docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && pass "ephemeral Redis ready on :$REDIS_PORT" || { fail "Redis never became ready"; exit 1; }
 
-if [ -f "$ROOT/ops/postgres-init.sql" ]; then
-  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-    && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
+if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+    && pass "applied deploy/ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
 MIG_LOG="$WORK/migrate.log"

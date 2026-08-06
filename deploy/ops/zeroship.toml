@@ -1,9 +1,9 @@
-# ops/zeroship.toml -- cross-binary domain config. Hand-edited; in git.
+# deploy/ops/zeroship.toml -- cross-binary domain config. Hand-edited; in git.
 # One file PER ENVIRONMENT. Secrets never live here.
 
 [auth]
 # The native OP issuer is supplied to the auth service through AUTH_PUBLIC_URL
-# in docker-compose.yml. This shared overlay does not define that key.
+# in deploy/compose/docker-compose.yml. This shared overlay does not define that key.
 #
 # First-party trusted OAuth client(s) that skip native OP consent. This is the
 # FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule
@@ -17,7 +17,7 @@
 #
 # Value = client_id_for_app(console_app_id("console.zeroship.localhost")), the
 # deterministic per-app PKCE client id for THIS compose's --console-host
-# (docker-compose.yml: control `--console-host console.zeroship.localhost`).
+# (deploy/compose/docker-compose.yml: control `--console-host console.zeroship.localhost`).
 # Derivation (crates/control/src/{bootstrap_console.rs,app_oauth_client.rs}):
 #   console_app_id(host)   = uuid8(SHA-256("zeroship:console:app:v1\0" || host))
 #                          = 5819848e-dc81-819a-bb81-7ef736a413d5
@@ -54,7 +54,7 @@ log_format = "json"
 # resolved from AUTH_DB_URL) so it can diverge from the worker/control/gateway
 # `--db` slot if ever needed.
 #
-# DEV ONLY: these resolve to the weak dev secrets supplied by docker-compose.yml
+# DEV ONLY: these resolve to the weak dev secrets supplied by deploy/compose/docker-compose.yml
 # (every service runs --dev-insecure). The point is that the values flow through
 # this file's reference indirection, not that they are strong.
 [secrets]

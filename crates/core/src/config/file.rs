@@ -37,7 +37,7 @@ pub enum ConfigError {
     },
 }
 
-/// Optional cross-binary domain configuration loaded from `ops/zeroship.toml`.
+/// Optional cross-binary domain configuration loaded from `deploy/ops/zeroship.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
@@ -341,9 +341,10 @@ log_format = "json"
 
     #[test]
     fn load_ops_zeroship_toml_parses() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ops/zeroship.toml");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/ops/zeroship.toml");
 
-        let config = FileConfig::load(Some(&path)).expect("load ops/zeroship.toml");
+        let config = FileConfig::load(Some(&path)).expect("load deploy/ops/zeroship.toml");
 
         assert_eq!(
             config.observability.log_filter.as_deref(),

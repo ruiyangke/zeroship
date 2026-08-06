@@ -7,7 +7,7 @@
 //!
 //! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise. The DB must
 //! have changeset 0039 applied (drop+recreate `zeroship_billing_test`, re-run
-//! `ops/db-migrate.sh update`).
+//! `deploy/ops/db-migrate.sh update`).
 
 mod common;
 

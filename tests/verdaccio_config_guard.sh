@@ -4,12 +4,12 @@
 # port must stay loopback-bound.
 #
 # Parses the committed files (no live registry needed) and asserts:
-#   1. config/verdaccio/config.yaml auth.htpasswd.max_users == -1
+#   1. deploy/verdaccio/config.yaml auth.htpasswd.max_users == -1
 #      (self-registration disabled; publisher accounts are provisioned
 #      out of band by an operator editing the htpasswd file)
 #   2. packages['@zeroship/*'] and packages['**'] grant publish/unpublish
 #      to a named principal only — never $authenticated / $all / $anonymous
-#   3. docker-compose.yml publishes Verdaccio on 127.0.0.1 only, not 0.0.0.0
+#   3. deploy/compose/docker-compose.yml publishes Verdaccio on 127.0.0.1 only, not 0.0.0.0
 #
 # The live behaviours (npm adduser rejected with registration disabled,
 # publish rejected for a non-publisher user) need a running registry to
@@ -17,8 +17,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG="$ROOT/config/verdaccio/config.yaml"
-COMPOSE="$ROOT/docker-compose.yml"
+CONFIG="$ROOT/deploy/verdaccio/config.yaml"
+COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 
 PASS=0
 FAIL=0

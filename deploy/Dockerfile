@@ -20,8 +20,9 @@
 #      (crates/runtime/src/core/init.rs → "../../../../sdks/bootstrap/dist/…"),
 #      so they MUST exist before cargo touches zeroship-runtime.
 #   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
-#      policies/ tree (crates/authz/build.rs parses ../../policies/*.cedar
-#      at build time) and compiles all seven binaries.
+#      deploy/policies/ tree (crates/authz/build.rs parses
+#      ../../deploy/policies/*.cedar at build time) and compiles all seven
+#      binaries.
 #   3. final (ubuntu) ships the six binaries.
 
 # ---------------------------------------------------------------------------
@@ -71,8 +72,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-# Cedar authz policies — crates/authz/build.rs parses these at build time.
-COPY policies/ policies/
+# Cedar authz policies — crates/authz/build.rs parses these at build time
+# (and engine.rs include_str!s them), both via `../../deploy/policies`.
+COPY deploy/policies/ deploy/policies/
 # sdks/ WITH the dist emitted by the node stage, so the runtime crate's
 # include_str!("../../../../sdks/bootstrap/dist/{runtime-entry,dispatcher}.js")
 # resolves against /build/sdks/bootstrap/dist/.

@@ -2,24 +2,26 @@
 
 ## Platform stack
 
-`docker-compose.yml` is the day-to-day local platform stack — the whole
-zeroship stack, fronted by a Caddy reverse proxy on the `*.zeroship.localhost`
-dev domain. From the repo root:
+`deploy/compose/docker-compose.yml` is the day-to-day local platform stack — the
+whole zeroship stack, fronted by a Caddy reverse proxy on the
+`*.zeroship.localhost` dev domain. Run from the repo root and point compose at
+the file (or `export COMPOSE_FILE=deploy/compose/docker-compose.yml` once to drop
+the `-f` from every call):
 
 ```bash
 # Build everything ahead (so `up` never builds): the single shared image
 # (control/gateway/worker/auth/sandbox + the `zeroship` CLI) plus the external
 # images (postgres, caddy, verdaccio, redpanda).
-docker compose build                   # all Dockerfile-based services
-docker compose pull                    # external images
+docker compose -f deploy/compose/docker-compose.yml build   # all Dockerfile-based services
+docker compose -f deploy/compose/docker-compose.yml pull     # external images
 
-docker compose up -d                   # boot the whole stack (build-free)
-docker compose up -d --scale worker=10
-docker compose logs -f
-docker compose down -v
+docker compose -f deploy/compose/docker-compose.yml up -d    # boot the whole stack (build-free)
+docker compose -f deploy/compose/docker-compose.yml up -d --scale worker=10
+docker compose -f deploy/compose/docker-compose.yml logs -f
+docker compose -f deploy/compose/docker-compose.yml down -v
 ```
 
-`docker compose up --build` also works (builds on the fly the first time). The
+`docker compose -f deploy/compose/docker-compose.yml up --build` also works (builds on the fly the first time). The
 single image compiles the SDKs (needed by the runtime crate) and all the native
 binaries incl. `zeroship-auth` — see [Image build](#image-build). There is no
 separate frontend image: the AI builder is now the **console**, a regular
@@ -48,7 +50,7 @@ stack is up, open:
 Caddy chooses the most-specific matching site, so the explicit hosts above
 always win over the `*.zeroship.localhost` catch-all. Site addresses use the
 `http://` scheme so Caddy serves plain HTTP and never tries to provision TLS
-for `.localhost`. Config: `ops/Caddyfile`.
+for `.localhost`. Config: `deploy/ops/Caddyfile`.
 
 #### Caddy network-alias trick (container-side OIDC)
 
@@ -91,26 +93,26 @@ The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
    the runtime stage copies to `/opt/zeroship/console/app.zship` for control's
    `--bootstrap-console` seed.
 2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
-   `policies/` tree (`crates/authz/build.rs` parses `policies/*.cedar` at build
-   time) and compiles the six binaries.
+   `deploy/policies/` tree (`crates/authz/build.rs` parses
+   `../../deploy/policies/*.cedar` at build time) and compiles the six binaries.
 3. The runtime stage copies all six binaries plus the docker CLI (for the
    sandbox's Docker-out-of-Docker).
 
 Because the SDK dist files are gitignored and absent from a fresh checkout, the
-image must be (re)built with `--build` the first time; `docker compose build`
+image must be (re)built with `--build` the first time; `docker compose -f deploy/compose/docker-compose.yml build`
 regenerates them inside the image.
 
 ### OpenAI key (console)
 
 The console's AI codegen calls OpenAI to generate apps. Export `OPENAI_API_KEY`
-before `docker compose up`; the `control` service reads it from its own process
+before `docker compose -f deploy/compose/docker-compose.yml up`; the `control` service reads it from its own process
 env and `--bootstrap-console` writes it onto the seeded console app's server-side
 env store (never the browser). Absent, the stack still boots — the console's AI
 features degrade.
 
 ```bash
 export OPENAI_API_KEY=sk-...
-docker compose up --build
+docker compose -f deploy/compose/docker-compose.yml up --build
 ```
 
 ### Bind addresses
@@ -135,7 +137,7 @@ service can publish signing metadata and initialize first-boot state.
 token `iss` use `https://auth.zeroship.localhost/oauth2`. The DB DSN comes from
 `[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
 the service's `AUTH_DB_URL` env), not a literal `--db-url`. The shared
-`ops/zeroship.toml` overlay supplies `trusted_oauth_clients` and
+`deploy/ops/zeroship.toml` overlay supplies `trusted_oauth_clients` and
 `frame_ancestor_origins`.
 
 ### Blob store
@@ -213,7 +215,7 @@ were removed in the R5 cutover.
 
 ### Configuration overlay
 
-`docker-compose.yml` mounts `./ops/zeroship.toml` into `control`, `gateway`,
+`deploy/compose/docker-compose.yml` mounts `../ops/zeroship.toml` into `control`, `gateway`,
 `worker`, and `auth` at the well-known path `/etc/zeroship/zeroship.toml`. The
 compose stack relies on auto-discovery: because the file lives at the system
 well-known path, no service passes `--config` — each binary's config resolver
@@ -242,8 +244,8 @@ defined ONCE instead of being repeated as per-service flags:
 
 Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file — keep config-covered
-values OFF the command lines. Copy `ops/zeroship.example.toml` to
-`ops/zeroship.toml` when customizing an environment. The file itself stays
+values OFF the command lines. Copy `deploy/ops/zeroship.example.toml` to
+`deploy/ops/zeroship.toml` when customizing an environment. The file itself stays
 secret-free: it carries only `urn:`/`arn:` references, never a plaintext secret
 (a literal in `[secrets]` is rejected at resolve). The actual secret VALUES live
 in the compose `environment:` blocks (dev) or a real secret store (prod).
@@ -258,23 +260,23 @@ zeroship-<bin> --check-config --config <file> <normal required flags>
 
 ## Redis cluster test stack
 
-`docker-compose.cluster.yml` is separate. It does **not** boot the platform stack; it only starts a 3-node Dragonfly cluster for `compio-redis` integration tests:
+`deploy/compose/cluster.yml` is separate. It does **not** boot the platform stack; it only starts a 3-node Dragonfly cluster for `compio-redis` integration tests:
 
 ```bash
-docker compose -f docker-compose.cluster.yml up -d
-./scripts/bootstrap-dragonfly-cluster.sh
+docker compose -f deploy/compose/cluster.yml up -d
+./deploy/scripts/bootstrap-dragonfly-cluster.sh
 DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
   cargo test -p compio-redis --test cluster -- --nocapture
-docker compose -f docker-compose.cluster.yml down -v
+docker compose -f deploy/compose/cluster.yml down -v
 ```
 
 The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
 
 ## OpenMeter metering-export test stack
 
-`docker-compose.openmeter.yml` is a **separate, opt-in** stack used only by the
+`deploy/compose/openmeter.yml` is a **separate, opt-in** stack used only by the
 faithful OpenMeter metering-export e2e (`tests/e2e_openmeter_export.sh`). It does
-**not** boot the platform stack and shares **nothing** with `docker-compose.yml`:
+**not** boot the platform stack and shares **nothing** with `deploy/compose/docker-compose.yml`:
 it is a distinct compose project (`name: zeroship-openmeter`) with its own
 network, volumes, and a private `127.0.0.1`-only port band. In particular its
 internal Postgres is OpenMeter metadata only and is **not** published on `:5440`
@@ -283,20 +285,20 @@ tearing it down never touches the main stack or the billing tests.
 
 It stands up the minimal real OpenMeter pipeline — Kafka + ClickHouse + Redis +
 Postgres + the OpenMeter API + a sink-worker — with a single `compute_units`
-meter pre-provisioned in `ops/openmeter-config.yaml` to match exactly what
+meter pre-provisioned in `deploy/ops/openmeter-config.yaml` to match exactly what
 `crates/control/src/metering/provider/openmeter.rs` emits (`eventType` /
 `slug` = `compute_units`, `aggregation: SUM` over `$.value`).
 
 ```bash
 # Bring it up (pulls ~1 GB of images on first run); the API lands on :48888.
-docker compose -f docker-compose.openmeter.yml up -d
+docker compose -f deploy/compose/openmeter.yml up -d
 curl -s http://127.0.0.1:48888/api/v1/meters | grep compute_units   # meter live?
 
 # Run the faithful e2e (owns its OWN ephemeral zeroship PG on :5481, NOT :5440):
 ./tests/e2e_openmeter_export.sh
 
 # Tear it down (volumes too):
-docker compose -f docker-compose.openmeter.yml down -v
+docker compose -f deploy/compose/openmeter.yml down -v
 ```
 
 The e2e script brings the stack up/down for you; run the raw compose only when
@@ -317,7 +319,7 @@ control/auth start. The source of truth is the committed JS DSL corpus in
 applies that plan. control/auth `depends_on` it with
 `service_completed_successfully`, so they only ever boot against a fully-migrated
 schema. See [Database migrations](db-migrations.md) for the layout,
-`ops/db-migrate.sh`, and how to add a migration.
+`deploy/ops/db-migrate.sh`, and how to add a migration.
 
 ## Related docs
 

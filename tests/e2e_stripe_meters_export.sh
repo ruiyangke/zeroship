@@ -80,7 +80,7 @@ DB=zeroship_stripe_meters_e2e
 command -v curl  >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
 command -v node  >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required (JSON extraction)."; exit 0; }
 command -v cargo >/dev/null 2>&1 || { echo "  ⚠ SKIP: cargo required."; exit 0; }
-if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
+if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
   echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
@@ -189,7 +189,7 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (NOT the real zeroship DB / billing_test / others)"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
   pass "zeroship-migrate platform set applied cleanly (incl. 0043 metering_exports)"
 else
   fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1

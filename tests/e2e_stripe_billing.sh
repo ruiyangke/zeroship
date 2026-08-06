@@ -104,7 +104,7 @@ psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
 if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" >/dev/null 2>&1; then
   echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
 fi
-if [ -f "$ROOT/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
+if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
   echo "  ⚠ SKIP: docker required step."; exit 0
 fi
 
@@ -155,7 +155,7 @@ MIG_LOG="$WORK/migrate.log"
 # Use the PREBUILT release binary (like the other billing e2es) so we never
 # rebuild zeroship-migrate from source — the libpg_query C build needs the nix
 # dev shell's headers, which a plain shell lacks (`sys/types.h' not found`).
-if ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-migrate" ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+if ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-migrate" ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
   pass "zeroship-migrate platform set applied to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
 else
   fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1

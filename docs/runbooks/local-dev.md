@@ -111,7 +111,7 @@ Notes:
   location — no CWD/env redirect). Pass `--no-config` to disable discovery and
   use compiled defaults even if that file exists. A missing well-known file is
   fine (defaults apply); a present-but-broken one is a hard startup error. Dev
-  usually just passes `--config ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
+  usually just passes `--config deploy/ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
   rather than installing into `/etc`.
 - To seed the console (the AI app-builder, now a gateway-fronted zeroship app)
   in local dev, start control with `--bootstrap-console` (env

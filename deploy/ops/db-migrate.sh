@@ -16,7 +16,7 @@
 # exposed by this bin.)
 #
 # Examples:
-#   ops/db-migrate.sh
+#   deploy/ops/db-migrate.sh
 #
 # Targets the compose Postgres on its host-mapped port by default. Override the
 # connection + behaviour with env vars:
@@ -27,7 +27,7 @@
 #   ZEROSHIP_MIGRATE_BIN     (a prebuilt binary path; if unset, runs via `cargo run`)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MIGRATIONS_DIR="${ZEROSHIP_MIGRATIONS_DIR:-$ROOT/db/migrations-ts}"
 DSN="${ZEROSHIP_MIGRATE_DSN:-postgres://postgres:zeroship@localhost:5440/zeroship}"
 PROJECT_SCHEMA="${ZEROSHIP_PROJECT_SCHEMA:-zeroship}"

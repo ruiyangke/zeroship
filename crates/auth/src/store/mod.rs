@@ -1,6 +1,6 @@
 //! `auth.*` schema CRUD. The schema itself is owned by zeroship-migrate
 //! (`db/migrations-ts`, applied by the compose `migrate` service /
-//! `ops/db-migrate.sh`); these modules are the per-table read/write helpers.
+//! `deploy/ops/db-migrate.sh`); these modules are the per-table read/write helpers.
 
 pub mod audit;
 pub mod identities;

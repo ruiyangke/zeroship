@@ -68,7 +68,7 @@ cleanup(){
     echo "  KEEP_WORK=1 → PG/$PGC redpanda/$RPC Lago(compose) + $WORK preserved"
   else
     docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true
-    docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/docker-compose.lago.yml" down -v >/dev/null 2>&1 || true
+    docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" down -v >/dev/null 2>&1 || true
     rm -rf "$WORK"; echo "  stack down, Lago down, $WORK cleaned"
   fi
 }
@@ -104,7 +104,7 @@ LAGO_ORG_API_KEY=$(openssl rand -hex 24)
 EOF
   chmod 600 "$ROOT/.env.lago"
 fi
-docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/docker-compose.lago.yml" up -d >/dev/null 2>&1 || { fail "lago compose up"; exit 1; }
+docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" up -d >/dev/null 2>&1 || { fail "lago compose up"; exit 1; }
 for _ in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health" 2>/dev/null)" = "200" ] && break; sleep 3; done
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health")" = "200" ] && pass "Lago api healthy" || { fail "lago api"; exit 1; }
 docker exec billing-impl-lago-api-1 bundle exec rails db:prepare >/dev/null 2>&1 && pass "Lago DB prepared" || { fail "lago db:prepare"; exit 1; }

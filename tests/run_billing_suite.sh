@@ -142,10 +142,10 @@ if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   # The platform set legitimately contains destructive expand-contract steps
   # (DROP CONSTRAINT / DROP TABLE / NOT-NULL ADD COLUMN). The engine refuses a
   # destructive plan without --yes; the compose `migrate` service passes --yes
-  # for exactly this reason (docker-compose.yml). The test bootstrap is a clean
+  # for exactly this reason (deploy/compose/docker-compose.yml). The test bootstrap is a clean
   # build from empty, so applying the full history with --yes is correct + safe.
   ZEROSHIP_MIGRATE_DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}" \
-    ops/db-migrate.sh migrate --yes >/dev/null
+    deploy/ops/db-migrate.sh migrate --yes >/dev/null
   echo "==> Migration complete"
 else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"

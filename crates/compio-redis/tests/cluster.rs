@@ -1,8 +1,8 @@
 //! Cluster integration tests against a live 3-node Dragonfly.
 //!
 //! Bring up the cluster first:
-//!   docker compose -f docker-compose.cluster.yml up -d
-//!   ./scripts/bootstrap-dragonfly-cluster.sh
+//!   docker compose -f deploy/compose/cluster.yml up -d
+//!   ./deploy/scripts/bootstrap-dragonfly-cluster.sh
 //!
 //! Then:
 //!   DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \

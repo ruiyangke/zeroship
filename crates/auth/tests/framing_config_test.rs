@@ -8,11 +8,13 @@
 
 use std::path::PathBuf;
 
-/// Workspace root = the crate manifest dir (`crates/auth`) climbed two parents.
+/// Workspace root = the crate manifest dir (`crates/auth`) climbed two parents;
+/// ops config now lives under `deploy/ops/`.
 fn ops_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
+        .join("deploy")
         .join("ops")
         .join(file)
 }
@@ -48,7 +50,7 @@ fn caddy_proxy_injects_no_x_frame_options_on_auth_origin() {
     let caddy = read_ops("Caddyfile").to_lowercase();
     assert!(
         !caddy.contains("x-frame-options"),
-        "ops/Caddyfile must NOT inject `x-frame-options` on the auth origin"
+        "deploy/ops/Caddyfile must NOT inject `x-frame-options` on the auth origin"
     );
 }
 
@@ -57,6 +59,6 @@ fn caddy_proxy_injects_no_frame_ancestors_on_auth_origin() {
     let caddy = read_ops("Caddyfile").to_lowercase();
     assert!(
         !caddy.contains("frame-ancestors"),
-        "ops/Caddyfile must NOT inject `frame-ancestors` on the auth origin"
+        "deploy/ops/Caddyfile must NOT inject `frame-ancestors` on the auth origin"
     );
 }

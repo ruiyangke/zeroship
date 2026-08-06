@@ -153,8 +153,8 @@ for _ in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/de
 docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
   && pass "ephemeral PG ready on :$PG_PORT (dedicated)" || { fail "PG never became ready"; exit 1; }
 
-[ -f "$ROOT/ops/postgres-init.sql" ] && psql_exec < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-  && pass "applied ops/postgres-init.sql" || true
+[ -f "$ROOT/deploy/ops/postgres-init.sql" ] && psql_exec < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
+  && pass "applied deploy/ops/postgres-init.sql" || true
 
 # Redpanda — the durable usage-event stream. Needs an explicit advertised
 # listener so the worker producer + control consumers reach it at $RP_BROKERS.

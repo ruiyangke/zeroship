@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+export COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
 
 REGISTRY="${ZEROSHIP_NPM_REGISTRY:-http://localhost:4873}"
 PUBLISH_USER="${ZEROSHIP_NPM_PUBLISH_USER:-zeroship-publisher}"
@@ -198,7 +199,7 @@ npm whoami --registry "$REGISTRY" --userconfig "$TMP_NPMRC"
 log "3. Build + publish SDKs to local Verdaccio"
 pnpm install
 pnpm build
-NPM_CONFIG_USERCONFIG="$TMP_NPMRC" ZEROSHIP_NPM_REGISTRY="$REGISTRY" "$ROOT/scripts/publish-sdks.sh"
+NPM_CONFIG_USERCONFIG="$TMP_NPMRC" ZEROSHIP_NPM_REGISTRY="$REGISTRY" "$ROOT/deploy/scripts/publish-sdks.sh"
 printf 'npm view @zeroship/rpc version: '
 npm view @zeroship/rpc version --registry "$REGISTRY"
 printf 'npm view @zeroship/migrate version: '
