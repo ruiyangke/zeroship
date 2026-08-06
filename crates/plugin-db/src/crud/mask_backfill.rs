@@ -66,10 +66,8 @@ use crate::diff::{Classification, MaskKind};
 use crate::error::DbError;
 use crate::query::quote_ident;
 
-/// Default batch size for backfill / rewrite loops. Matches the cap on
-/// `crate::migrations::exec_fetch_batch` (10_000) at the low end of
-/// what the SDK typically requests — the JS-driven migration loop
-/// defaults to 500-1000. We use 1000 here as a middle ground between
+/// Default batch size for backfill / rewrite loops. We use 1000 here
+/// as a middle ground between
 /// per-batch UPDATE round-trip overhead (smaller = more chatter) and
 /// memory footprint per batch (larger = bigger Rust-side Vec<Value>
 /// allocation).

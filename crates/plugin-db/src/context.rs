@@ -1,11 +1,9 @@
 //! Per-isolate DB context — single typed home for every plug-in
-//! thread-local. Before Stage 8d-R4 the plug-in carried ten separate
+//! thread-local. Before Stage 8d-R4 the plug-in carried several separate
 //! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `REGISTERED_MODELS`,
-//! `TX_CONN`, `PENDING_EMITS` in `lib.rs`; `MIG_LOCK` in
-//! `migrations.rs`; `RUNNING_CONSUMERS` in `replication_ops.rs`). Each had
-//! its own borrow/take/replace ritual; lifecycle invariants (e.g.
-//! "MIG_LOCK never holds two `MigrationLock` snapshots") were enforced by
-//! convention only.
+//! `TX_CONN`, `PENDING_EMITS` in `lib.rs`; `RUNNING_CONSUMERS` in
+//! `replication_ops.rs`). Each had its own borrow/take/replace ritual;
+//! lifecycle invariants were enforced by convention only.
 //!
 //! This module folds all of those slots into a single
 //! [`IsolateDbContext`] stashed in one [`thread_local!`]. Typed
@@ -35,7 +33,7 @@ use std::sync::Arc;
 use compio_postgres::{Client, Pool};
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
-use crate::backend::{BackendHandle, BrokerPauseGuard, PostgresBackend};
+use crate::backend::{BackendHandle, PostgresBackend};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
 
@@ -47,68 +45,6 @@ pub(crate) enum BackendInitState {
     Acquired,
     /// Another request is currently building the backend.
     InProgress,
-}
-
-/// Lock state for the in-flight migration. The `client` is held in
-/// an `Option` so callers can `take()` it across an await and
-/// `replace()` it back — the same pattern the transaction slot uses.
-///
-/// Defined here (not in `crate::migrations`) so `compio_postgres::Client`
-/// stays out of consumer modules — the Backend abstraction (Stage 8e-R2)
-/// allows only `context.rs` and `backend/postgres.rs` to name the
-/// underlying driver type.
-pub(crate) struct MigrationLock {
-    /// Owning app. A worker thread hosts many isolates (one per app);
-    /// migration ops presented by app B must never observe — let alone
-    /// drive — a lock app A parked here (SEC-1 sibling hazard).
-    pub(crate) app_id: String,
-    pub(crate) name: String,
-    pub(crate) collection: String,
-    pub(crate) audit_id: i64,
-    /// Dry-run runs do not persist `validate_cursor`, dead_letter_pks,
-    /// or processed updates (proposal B1.6).
-    pub(crate) dry_run: bool,
-    /// `audit_generation` snapshot captured at `exec_begin`. The
-    /// audit row's generation is bumped by `exec_reset`; any
-    /// subsequent `commit_batch` whose stored generation no longer
-    /// matches the row's must ROLLBACK and surface
-    /// `migration_reset_externally` (Gap X). Lives in the lock so
-    /// `exec_commit_batch` reads it without an extra round-trip.
-    pub(crate) start_generation: i64,
-    pub(crate) client: Option<Client>,
-    /// Backfill-window broker-pause guard (P2 tail — wires the
-    /// [`BrokerPauseGuard`] into the migration orchestrator per design
-    /// §16.7 / plan §7). Acquired by `exec_begin` immediately after
-    /// the advisory lock is parked into [`Self::client`]; released
-    /// when the slot itself drops (terminal `exec_commit_batch` or any
-    /// error rail that calls `clear_mig_lock`).
-    ///
-    /// **Lifecycle choice (option A)**: the guard's lifetime spans the
-    /// *whole* migration window — from `exec_begin` through the final
-    /// `exec_commit_batch{is_done=true}` (or a `clear_mig_lock` driven
-    /// error path). Backfill is the "design treats this as a known DDL
-    /// + bulk-write window" case; subscribers see exactly one `Resync`
-    /// when the guard drops (§16.7). Holding it across many V8-driven
-    /// `fetchBatch`/`commitBatch` calls is intentional: legitimate
-    /// user CRUD writes overlapping the migration would also have
-    /// their CDC events suppressed and folded into the single closing
-    /// `Resync`, which matches §16.7's "one resync ends the window"
-    /// contract.
-    ///
-    /// `Option<_>` to support `pause_broker_for_tests`-style fixtures
-    /// that synthesise a [`MigrationLock`] without going through
-    /// `exec_begin` (e.g. the warn-shape-pin unit tests in
-    /// [`context.rs`] below). Production `exec_begin` populates this
-    /// unconditionally.
-    //
-    // Compiler can't see the load-bearing `Drop` semantics — the field
-    // is "written but never read" from the type-checker's point of view,
-    // yet the Drop is the entire contract (unsuppress flag + emit
-    // Resync). The `#[allow]` here parallels the one previously on
-    // `BrokerPauseGuard` itself; removing it would trip
-    // `-D unused_fields` builds.
-    #[allow(dead_code)]
-    pub(crate) broker_pause: Option<BrokerPauseGuard>,
 }
 
 /// Pinned transaction client parked in the per-isolate tx slot.
@@ -173,7 +109,7 @@ impl Drop for TxClientSlotGuard {
 ///
 /// All fields are private. Every consumer goes through an accessor
 /// method on this `impl` — [`Self::pool`], [`Self::savepoint_depth`],
-/// [`Self::set_mig_lock`], etc. Direct field access from inside the
+/// etc. Direct field access from inside the
 /// crate is rejected at compile time. This closes deferred [I16]
 /// (api-surface r3 M1+M2; r9 ceiling step "privatise context fields").
 #[allow(missing_debug_implementations)]
@@ -247,19 +183,6 @@ pub struct IsolateDbContext {
     /// dropping A's). A missing entry means no events are queued for
     /// that app.
     pending_emits: HashMap<String, Vec<ChangeEvent>>,
-
-    /// Active migration owner state. `Some` after a successful
-    /// `migrationBegin`; `None` once `migrationCommitBatch` with
-    /// `isDone=true` (or `migrationCancel` on the owner thread)
-    /// clears it. Single-isolate invariant — only one migration may
-    /// be active per V8 thread at a time. The slot carries
-    /// [`MigrationLock::app_id`] so the per-op accessors
-    /// ([`Self::mig_lock_snapshot_for`] / [`Self::take_mig_client_for`]
-    /// / [`Self::return_mig_client_for`]) can refuse a stale wrapper
-    /// owned by a *different* app (SEC-1): the capacity gate
-    /// ([`Self::has_mig_lock`]) stays app-agnostic, but app B must
-    /// never drive SQL on app A's parked lock client.
-    mig_lock: Option<MigrationLock>,
 
     /// Per-thread "is the consumer already running for this app?"
     /// guard. Keyed by app_id (a single worker may host multiple
@@ -385,7 +308,6 @@ impl IsolateDbContext {
             tx_conns: HashMap::new(),
             savepoint_depths: HashMap::new(),
             pending_emits: HashMap::new(),
-            mig_lock: None,
             running_consumers: HashSet::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
@@ -815,102 +737,6 @@ impl IsolateDbContext {
         self.pending_emits.remove(app_id);
     }
 
-    // ----- MIG_LOCK ---------------------------------------------------
-
-    /// True iff a migration run is active on this isolate.
-    pub(crate) fn has_mig_lock(&self) -> bool {
-        self.mig_lock.is_some()
-    }
-
-    /// Install a fresh migration lock state. Returns the previous
-    /// state if any (callers should ensure this is `None` — every
-    /// begin path checks [`Self::has_mig_lock`] first).
-    ///
-    /// If a prior lock is shadowed, log it at `error` (state-machine
-    /// drift the begin path should have caught via `has_mig_lock`)
-    /// and proceed with `replace` so a worker is recoverable by the
-    /// next operator-driven reset rather than panicking. The slot's
-    /// unit tests deliberately exercise the swap-on-replace shape;
-    /// the log keeps them passing while still surfacing the drift in
-    /// production logs.
-    pub(crate) fn set_mig_lock(&mut self, lock: MigrationLock) -> Option<MigrationLock> {
-        if let Some(prev) = self.mig_lock.as_ref() {
-            tracing::error!(
-                prev_name = %prev.name,
-                prev_audit_id = prev.audit_id,
-                new_name = %lock.name,
-                new_audit_id = lock.audit_id,
-                "set_mig_lock called while another lock is active — begin path should gate on has_mig_lock",
-            );
-        }
-        self.mig_lock.replace(lock)
-    }
-
-    /// Drop the active migration lock state. Best-effort —
-    /// idempotent.
-    pub(crate) fn clear_mig_lock(&mut self) {
-        self.mig_lock = None;
-    }
-
-    /// **Test-only forced teardown** — take whatever lock client is
-    /// parked, regardless of owner, so `clear_migration_lock_for_tests`
-    /// can ROLLBACK + unlock and reset the slot between tests. Never
-    /// reachable from a production path (the owner-scoped
-    /// [`Self::take_mig_client_for`] is the only production drain).
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn take_mig_client_any_for_tests(&mut self) -> Option<Client> {
-        self.mig_lock.as_mut().and_then(|l| l.client.take())
-    }
-
-    /// Take the lock client out of the active migration state for an
-    /// await, **only if the active migration is owned by `app_id`**;
-    /// the caller's future is responsible for putting it back via
-    /// [`Self::return_mig_client_for`]. Returns `None` when no migration
-    /// is active or a *different* app owns it (SEC-1: a stale wrapper
-    /// from app B must not drive SQL on app A's parked lock client).
-    pub(crate) fn take_mig_client_for(&mut self, app_id: &str) -> Option<Client> {
-        self.mig_lock
-            .as_mut()
-            .filter(|l| l.app_id == app_id)
-            .and_then(|l| l.client.take())
-    }
-
-    /// Restore the lock client after an await to `app_id`'s active
-    /// migration. No-op if the migration state has been cleared in the
-    /// meantime (e.g. by an operator cancel) or is now owned by a
-    /// different app. The slot-empty / not-owner case is observable but
-    /// rare — log it at `warn` so we can distinguish a real cancel race
-    /// from a state-machine bug that silently dropped the client (paired
-    /// with the `tracing::error!` on `set_mig_lock`'s shadow-replace
-    /// branch above).
-    pub(crate) fn return_mig_client_for(&mut self, app_id: &str, client: Client) {
-        match self.mig_lock.as_mut().filter(|l| l.app_id == app_id) {
-            Some(lock) => lock.client = Some(client),
-            None => tracing::warn!(
-                "return_mig_client_for: mig_lock slot empty or owned by another app — client dropped (expected only on operator-cancel race)",
-            ),
-        }
-    }
-
-    /// Snapshot the migration lock's identifying fields (name,
-    /// collection, audit_id, dry_run, start_generation) **only when the
-    /// active migration is owned by `app_id`**. Returns `None` outside
-    /// an active run, or when a different app owns it (SEC-1).
-    pub(crate) fn mig_lock_snapshot_for(
-        &self,
-        app_id: &str,
-    ) -> Option<(String, String, i64, bool, i64)> {
-        self.mig_lock.as_ref().filter(|l| l.app_id == app_id).map(|l| {
-            (
-                l.name.clone(),
-                l.collection.clone(),
-                l.audit_id,
-                l.dry_run,
-                l.start_generation,
-            )
-        })
-    }
-
     // ----- RUNNING_CONSUMERS -----------------------------------------
 
     /// True iff a replication consumer is already running for this
@@ -996,8 +822,8 @@ mod tests {
     //!
     //! ## Why some accessors aren't covered here
     //!
-    //! The slots that store a live transaction/migration client
-    //! (`tx_conn`, `MigrationLock::client`) need a real backend handle to
+    //! The slots that store a live transaction client
+    //! (`tx_conn`) need a real backend handle to
     //! exercise. The Postgres side still needs a `compio_postgres::Client`
     //! (`Client::new` is `pub(crate)` on the driver), and the SQLite side
     //! would need a live session actor. These unit tests stay pure-state;
@@ -1013,12 +839,6 @@ mod tests {
     //! * The `debug_assert!` inside [`IsolateDbContext::push_savepoint`]
     //!   that a savepoint requires an active `tx_conn` — same constraint;
     //!   the pop/reset arms (no such precondition) are unit-tested.
-    //! * [`IsolateDbContext::set_mig_lock`] /
-    //!   [`IsolateDbContext::take_mig_client`] /
-    //!   [`IsolateDbContext::return_mig_client`] / `mig_lock_snapshot`
-    //!   *with* a client present — we test the snapshot/clear paths
-    //!   using a `MigrationLock { client: None, .. }` because the
-    //!   snapshot deliberately doesn't read `client`.
     //!
     //! For [`IsolateDbContext::set_pool`] / [`IsolateDbContext::backend`]
     //! we need an `Rc<Pool>`, which only `Pool::connect` produces. Those
@@ -1052,8 +872,6 @@ mod tests {
         assert!(ctx.db_url().is_none());
         assert!(!ctx.has_tx_for("a"));
         assert_eq!(ctx.savepoint_depth_for("a"), 0);
-        assert!(!ctx.has_mig_lock());
-        assert!(ctx.mig_lock_snapshot_for("a").is_none());
         // pending_emits starts empty (each app's queue is allocated
         // lazily on first push).
         assert!(ctx.pending_emits.is_empty());
@@ -1070,7 +888,6 @@ mod tests {
         assert_eq!(a.pool_initialised(), b.pool_initialised());
         assert_eq!(a.savepoint_depth_for("a"), b.savepoint_depth_for("a"));
         assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
-        assert_eq!(a.has_mig_lock(), b.has_mig_lock());
         assert_eq!(a.db_url(), b.db_url());
     }
 
@@ -1299,132 +1116,6 @@ mod tests {
         assert!(ctx.pending_emits.is_empty());
     }
 
-    // ----- MIG_LOCK state machine ----------------------------------------
-
-    fn mig_lock(name: &str, collection: &str, audit_id: i64, dry_run: bool) -> MigrationLock {
-        mig_lock_for_app("app_t", name, collection, audit_id, dry_run)
-    }
-
-    fn mig_lock_for_app(
-        app_id: &str,
-        name: &str,
-        collection: &str,
-        audit_id: i64,
-        dry_run: bool,
-    ) -> MigrationLock {
-        MigrationLock {
-            app_id: app_id.to_string(),
-            name: name.to_string(),
-            collection: collection.to_string(),
-            audit_id,
-            dry_run,
-            start_generation: 7,
-            client: None,
-            // Unit-test fixture skips the BrokerPauseGuard wire-up; the
-            // slot-state-machine assertions below don't depend on the
-            // guard's suppression behaviour. P2-tail orchestrator-side
-            // verification lives in the `sqlite_integration` test.
-            broker_pause: None,
-        }
-    }
-
-    #[test]
-    fn set_mig_lock_install_then_snapshot() {
-        let mut ctx = IsolateDbContext::new();
-        assert!(!ctx.has_mig_lock());
-        let prev = ctx.set_mig_lock(mig_lock("m1", "users", 42, false));
-        assert!(prev.is_none());
-        assert!(ctx.has_mig_lock());
-
-        let snap = ctx.mig_lock_snapshot_for("app_t").expect("snapshot present");
-        assert_eq!(snap.0, "m1");
-        assert_eq!(snap.1, "users");
-        assert_eq!(snap.2, 42);
-        assert!(!snap.3);
-        assert_eq!(snap.4, 7); // start_generation
-    }
-
-    #[test]
-    fn set_mig_lock_dry_run_flag_round_trips() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_mig_lock(mig_lock("dry", "msgs", 1, true));
-        let snap = ctx.mig_lock_snapshot_for("app_t").unwrap();
-        assert!(snap.3, "dry_run flag should round-trip via snapshot");
-    }
-
-    #[test]
-    fn set_mig_lock_replaces_existing_returns_previous() {
-        // The accessor uses `replace` so callers can detect a pre-
-        // existing occupant. Production code calls `has_mig_lock` first
-        // and refuses to overwrite, but the state machine still allows
-        // the swap and reports the previous holder via the return
-        // value.
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_mig_lock(mig_lock("first", "c", 1, false));
-        let prev = ctx.set_mig_lock(mig_lock("second", "c", 2, false));
-        let prev = prev.expect("previous lock returned");
-        assert_eq!(prev.name, "first");
-        assert_eq!(prev.audit_id, 1);
-
-        let snap = ctx.mig_lock_snapshot_for("app_t").unwrap();
-        assert_eq!(snap.0, "second");
-        assert_eq!(snap.2, 2);
-    }
-
-    #[test]
-    fn clear_mig_lock_drops_state() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_mig_lock(mig_lock("m1", "c", 1, false));
-        assert!(ctx.has_mig_lock());
-        ctx.clear_mig_lock();
-        assert!(!ctx.has_mig_lock());
-        assert!(ctx.mig_lock_snapshot_for("app_t").is_none());
-    }
-
-    #[test]
-    fn clear_mig_lock_is_idempotent() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.clear_mig_lock(); // empty -> empty
-        ctx.clear_mig_lock();
-        assert!(!ctx.has_mig_lock());
-        // Install then clear twice.
-        ctx.set_mig_lock(mig_lock("m1", "c", 1, false));
-        ctx.clear_mig_lock();
-        ctx.clear_mig_lock();
-        assert!(!ctx.has_mig_lock());
-    }
-
-    #[test]
-    fn mig_lock_snapshot_outside_run_returns_none() {
-        let ctx = IsolateDbContext::new();
-        assert!(ctx.mig_lock_snapshot_for("app_t").is_none());
-    }
-
-    #[test]
-    fn take_mig_client_on_empty_lock_returns_none() {
-        // No active migration: take is a no-op.
-        let mut ctx = IsolateDbContext::new();
-        assert!(ctx.take_mig_client_for("app_t").is_none());
-        // With a lock present but `client: None` (our test mig_lock
-        // helper), take still returns None — there is nothing to take.
-        ctx.set_mig_lock(mig_lock("m", "c", 1, false));
-        assert!(ctx.take_mig_client_for("app_t").is_none());
-    }
-
-    #[test]
-    fn return_mig_client_after_cancel_is_silent_noop() {
-        // The documented contract: `return_mig_client` is a no-op when
-        // the migration state has been cleared in the meantime (e.g.
-        // operator cancel). We can't construct a real Client here, but
-        // we can exercise the early-return branch: clear the lock,
-        // then call return — the function must not panic and must not
-        // resurrect the lock.
-        let mut ctx = IsolateDbContext::new();
-        ctx.clear_mig_lock();
-        // (Skipped: actually passing a Client; see module-level note.)
-        assert!(!ctx.has_mig_lock());
-    }
-
     // ----- RUNNING_CONSUMERS state machine -------------------------------
 
     #[test]
@@ -1482,95 +1173,15 @@ mod tests {
         assert!(!ctx.is_consumer_running("a"));
     }
 
-    // ----- Warn/error-shape contracts ([I23] mig_lock tracing) ---------
-    //
-    // The two `set_mig_lock` / `return_mig_client` log sites carry an
-    // operator-grep contract — field names + level + the
-    // shadow-replace-vs-empty-slot discriminator. Pin the shape so a
-    // future refactor that renames `prev_audit_id`, drops the
-    // `error`-level signal on shadow-replace, or otherwise weakens
-    // the contract fails at unit-test time. test-coverage r13
-    // NEW-R13-* called this out explicitly.
-
-    #[test]
-    fn set_mig_lock_shadow_replace_emits_error_with_prev_and_new() {
-        use crate::test_support::capture;
-        use tracing::Level;
-
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_mig_lock(mig_lock("first", "users", 11, false));
-
-        let ((), events) = capture(|| {
-            // Shadow-replace path — the begin path should have gated
-            // on `has_mig_lock` first; reaching here means a
-            // state-machine bug. Contract: ONE error-level event,
-            // four named fields identifying both the displaced and
-            // the incoming lock.
-            ctx.set_mig_lock(mig_lock("second", "users", 22, false));
-        });
-
-        assert_eq!(events.len(), 1, "expected exactly one tracing event");
-        let ev = &events[0];
-        assert_eq!(
-            ev.level,
-            Level::ERROR,
-            "shadow-replace must surface at error level (state-machine drift)"
-        );
-        assert_eq!(
-            ev.fields.get("prev_name").map(String::as_str),
-            Some("first"),
-            "prev_name must identify the displaced lock",
-        );
-        assert_eq!(
-            ev.fields.get("prev_audit_id").map(String::as_str),
-            Some("11"),
-            "prev_audit_id must identify the displaced audit row",
-        );
-        assert_eq!(
-            ev.fields.get("new_name").map(String::as_str),
-            Some("second"),
-            "new_name must identify the incoming lock",
-        );
-        assert_eq!(
-            ev.fields.get("new_audit_id").map(String::as_str),
-            Some("22"),
-            "new_audit_id must identify the incoming audit row",
-        );
-        assert!(
-            ev.message.contains("set_mig_lock"),
-            "message must name the accessor for log-grep: {}",
-            ev.message,
-        );
-    }
-
-    #[test]
-    fn set_mig_lock_first_install_emits_no_event() {
-        // The shadow-replace log is gated on `mig_lock.is_some()` —
-        // a first install must stay silent so log streams don't fill
-        // with noise on every successful migrationBegin. Pinning the
-        // negative case keeps the gate intact across refactors.
-        use crate::test_support::capture;
-
-        let mut ctx = IsolateDbContext::new();
-        let ((), events) = capture(|| {
-            ctx.set_mig_lock(mig_lock("only", "c", 1, false));
-        });
-        assert!(
-            events.is_empty(),
-            "first install must not emit; got {events:?}"
-        );
-    }
-
-    // ----- SEC-1: per-app scoping of the tx / savepoint / emit / mig slots
+    // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
 
     // A worker thread multiplexes up to ~200 isolates (one per app).
     // Every slot below used to be a single per-OS-thread cell shared by
     // ALL co-resident apps: app B could observe and drain app A's
     // parked transaction client (running B's SQL inside A's
     // transaction, snapshot, and per-app role), corrupt A's savepoint
-    // bookkeeping, drain A's pre-commit broker queue, and take A's
-    // migration lock client. These tests pin the per-app ownership
-    // contract.
+    // bookkeeping, and drain A's pre-commit broker queue. These tests
+    // pin the per-app ownership contract.
 
     fn run_async<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -1683,43 +1294,4 @@ mod tests {
         );
         assert_eq!(drained_a[0].app_id, "app_a");
     }
-
-    #[test]
-    fn sec1_mig_lock_snapshot_is_owner_scoped() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_mig_lock(mig_lock_for_app("app_a", "m1", "users", 42, false));
-
-        assert!(
-            ctx.mig_lock_snapshot_for("app_a").is_some(),
-            "the owning app must see its own migration lock",
-        );
-        assert!(
-            ctx.mig_lock_snapshot_for("app_b").is_none(),
-            "SEC-1: app_b must NOT see app_a's migration lock \
-             (a hit hands app_b the platform-role lock client)",
-        );
-        // The any-app capacity gate (one migration per worker thread)
-        // is intentionally app-agnostic and unchanged.
-        assert!(ctx.has_mig_lock());
-    }
-
-    // ----- `return_mig_client` empty-slot WARN -------------------------
-    //
-    // The empty-slot path on `return_mig_client` ([I23] state-machine
-    // pair with `set_mig_lock`) emits a `tracing::warn!` whose message
-    // names the slot-empty case. We cannot exercise this end-to-end
-    // here: `return_mig_client(client: Client)` requires a real
-    // `compio_postgres::Client`, and the `test-utils` feature on
-    // compio-postgres exposes only `Row` / `Column` / `Statement`
-    // builders — no `Client` synthesiser. Constructing one would
-    // require either touching `compio-postgres`'s private fields
-    // (out of scope for this commit) or spinning up a real Postgres
-    // (lives in `tests/integration.rs`).
-    //
-    // The end-to-end shape is covered by `tests/integration.rs`
-    // (operator-cancel race). The PROACTIVE unit-test coverage —
-    // catching a future rename of the message string at unit-test
-    // time — is supplied by `warn_shape_pin::return_mig_client_message`
-    // in the dedicated module below, which pins the literal message
-    // payload by re-emitting the same syntax under the capture layer.
 }

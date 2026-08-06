@@ -7,7 +7,7 @@
 //!   returning a `Collection` v8_class wrapper, plus the native
 //!   `transaction(fn)` orchestrator. The platform-internal entry points
 //!   (`registerModel`, `setMaskPolicy`, `startReplicationConsumer`,
-//!   `migrations`, `replication`) moved to [`db_platform`] in P9 PR 4.
+//!   `replication`) moved to [`db_platform`] in P9 PR 4.
 //! - [`db_platform`] — **P9 PR 4**: `DbPlatform`, the capability handle
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
 //!   platform-internal callables; unreachable from creator JS.
@@ -23,13 +23,6 @@
 //!   collections routes through the open transaction connection
 //!   (`IsolateDbContext::tx_conn`) automatically, since the orchestrator
 //!   sets that slot for the transaction's duration.
-//! - [`migrations`] — `env.db.migrations` (v8_getter) is the
-//!   `Migrations` namespace exposing `.start / .status / .cancel /
-//!   .reset(spec)`. `.start(spec)` returns a [`migration::Migration`]
-//!   wrapper whose GC finalizer auto-cancels (transitions the audit
-//!   row to `cancelled` + releases the advisory lock) if user code
-//!   drops the handle without `.cancel()` / `.reset()` / a terminal
-//!   `.commitBatch(isDone=true)`.
 //! - [`subscription`] — `env.db.<collection>.openSubscription()` (P9 PR 1:
 //!   the duplicate `env.db.openSubscription(name)` entry was removed)
 //!   returns a `Subscription` wrapper. GC finalizer closes the broker
@@ -40,8 +33,6 @@ pub mod collection;
 pub mod db;
 pub mod db_platform;
 pub mod masked_value;
-pub mod migration;
-pub mod migrations;
 pub mod replication;
 pub mod subscription;
 pub mod transaction;

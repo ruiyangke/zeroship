@@ -363,12 +363,6 @@ interface ZeroshipTxView {
   [collection: string]: ZeroshipCollection;
 }
 
-// **P9 PR 4** — `ZeroshipMigrationStatus` / `ZeroshipMigration` /
-// `ZeroshipMigrations` moved to `@zeroship/bootstrap`'s framework-
-// internal `internal.d.ts` (reached via `__platform.migrations`, not
-// `env.db.migrations`). They are absent from this published surface so
-// creator IDE hover doesn't see the migration cursor lifecycle.
-
 /** One event emitted by a subscription's `next()`. */
 type ZeroshipSubscriptionEvent =
   | {

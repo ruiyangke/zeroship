@@ -895,60 +895,6 @@ The procedure wrappers `query()`, `mutation()`, and `action()` from
 `db.transaction()` when a handler needs multiple database operations to
 commit or roll back as a unit.
 
-## Migrations (`@zeroship/migrations`)
-
-Schema changes come from the op.* migration set and the generated
-`schema.runtime.json` descriptor. The platform installer calls
-`registerModel` (on the platform-internal `__platform` handle, not a method
-you call) for every collection in that descriptor. **Data backfills** are the
-asynchronous part: a separate orchestrator iterates rows in batches with
-resume, dry-run, cancel, and a dead-letter queue.
-
-```ts
-import { defineMigration, migrations } from "@zeroship/migrations";
-
-export const backfillRole = defineMigration({
-  name: "users.backfill_role",
-  collection: "users",
-  batchSize: 200,
-  migrateOne: async (row) => {
-    if (row.role == null) return { role: "user" };
-    return undefined;                     // skip — already migrated
-    // return null;                       // dead-letter this row
-  },
-});
-
-// Run it
-const { data } = await migrations.run(backfillRole);
-// data.status: "applied" | "applied_with_dead_letter" | "failed" | "cancelled"
-// data.processed, data.cursor, data.deadLetters
-
-// Dry-run — every UPDATE rolls back; audit state is not advanced
-await migrations.run(backfillRole, { dryRun: true });
-
-// Reset from a cancelled/failed run
-await migrations.run(backfillRole, { reset: true });
-
-// Inspect / cancel by name
-const { data: status } = await migrations.status(backfillRole);
-if (status?.status === "running") await migrations.cancel(backfillRole);
-```
-
-`migrateOne` semantics:
-- return an object → patch the row
-- return `undefined` → skip, no change
-- return `null` → dead-letter the row (audited, not patched)
-
-Errors have a `.code` string property:
-
-| Code                         | When                                                        |
-|------------------------------|-------------------------------------------------------------|
-| `MIGRATION_ALREADY_RUNNING`  | Another worker holds the advisory lock.                     |
-| `MIGRATION_CANCELLED`        | The audit row was cancelled before this run completed.      |
-| `MIGRATION_NOT_ACTIVE`       | The Migration wrapper has been finalised/cancelled/reset.   |
-| `MIGRATION_NOT_CANCELLABLE`  | Audit row is already in a terminal state.                   |
-| `NO_ACTIVE_MIGRATION`        | Internal — `commitBatch`/`fetchBatch` outside of a run.     |
-
 ## Live queries (`db.live`)
 
 `db.live(queryFn)` is the creator-facing reactive API. The lower-level

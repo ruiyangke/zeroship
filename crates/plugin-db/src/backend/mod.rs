@@ -69,7 +69,6 @@ use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
-pub(crate) mod owned_lock_guard;
 pub mod postgres;
 // SQLite module — crate-private by default; under `test-helpers` it
 // becomes `pub` so the integration target
@@ -86,7 +85,6 @@ pub mod sqlite;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) use lock_guard::LockGuard;
-pub(crate) use owned_lock_guard::OwnedLockGuard;
 pub use postgres::PostgresBackend;
 pub use sqlite::SqliteBackend;
 
@@ -269,29 +267,6 @@ impl LockScope {
         }
     }
 
-    /// Constructor for the migration-progress lock scope.
-    ///
-    /// Encodes the `"mig:"` prefix as the migration-specific
-    /// lock-name invariant. Every migration `acquire` / `release`
-    /// pair across `exec_begin` (acquisition), the pre-validation
-    /// reject path in `exec_commit_batch`, and the `is_done`
-    /// finalise path in `exec_commit_batch` MUST go through this
-    /// constructor so the `(key1, key2)` shape derived by
-    /// [`Self::to_keys`] stays identical across the three sites
-    /// (§7.2 / §10.5). The resulting scope is always
-    /// [`Self::GlobalApp`] — migrations are cluster-wide.
-    ///
-    /// `pub(crate)` on purpose: the migration lock is an internal
-    /// orchestration primitive, not part of the public surface.
-    /// Adopted in arch r13 I-R13-1 / api-surface r13 MINOR-R13-2
-    /// to centralise the `"mig:"` literal that was previously
-    /// reconstructed at 3 sites in `migrations.rs`.
-    pub(crate) fn migration(app_id: impl Into<String>, name: &str) -> LockScope {
-        LockScope::GlobalApp {
-            app_id: app_id.into(),
-            name: format!("mig:{name}"),
-        }
-    }
 }
 
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
@@ -527,9 +502,8 @@ pub trait LockManager: SqlExecutor {
 
     /// **Legacy string-key primitive**: try to acquire the same
     /// session-scoped advisory lock; return `Ok(false)` if the lock
-    /// is already held by a different session. Used by
-    /// [`crate::migrations::exec_begin`] so a second worker observes
-    /// "migration already running" instead of blocking.
+    /// is already held by a different session, so a second acquirer
+    /// observes "already held" instead of blocking.
     ///
     /// Prefer [`Self::try_acquire`] at new call sites.
     #[doc(hidden)]
@@ -1087,12 +1061,10 @@ pub trait ChangeStream: 'static {
 /// the call site — the pause/resume contract is the *duration* of the
 /// guard's binding, not its construction.
 #[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
-// P2 tail — wired by `migrations::exec_begin` (option A lifecycle:
-// guard parked in the `MigrationLock` slot for the whole migration
-// window; released by `clear_mig_lock` on terminal `exec_commit_batch`
-// or any error rail). `register_model` Pass 1 is the remaining follow-up
-// caller — when that lands the construction site list will gain a
-// second member but the `pub(crate)` constructor stays internal.
+// Constructed via the `ChangeStream` adapters' `pause_broker(app_id)`
+// — the general "suppress CDC for a known DDL/bulk-write window, emit
+// one closing `Resync`" primitive (§16.7). The `pub(crate)`
+// constructor stays internal.
 #[derive(Debug)]
 pub struct BrokerPauseGuard {
     app_id: String,
@@ -1685,13 +1657,13 @@ impl<T> RegisterBackend for T where
 /// Lifetime invariants (preserved from the pre-carving shape):
 ///
 /// - Methods that take `&Self::Client` use it borrow-only; the caller
-///   owns the client (e.g. the migration lock holds it across awaits,
-///   the audit free functions borrow it for one operation).
+///   owns the client (e.g. the audit free functions borrow it for one
+///   operation).
 /// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
-///   on the per-isolate context (e.g. `MigrationLock::client`,
+///   on the per-isolate context (e.g.
 ///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
-///   of a session-scoped lock.
+///   of a transaction.
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait Backend:
     SqlExecutor
@@ -1792,7 +1764,7 @@ impl BackendHandle {
     /// let pg = backend
     ///     .as_postgres()
     ///     .ok_or_else(unsupported_backend_op_error)?;
-    /// crate::migrations::exec_status(pg, …).await
+    /// pg.acquire_dedicated_client().await
     /// ```
     ///
     /// Returns `Some(&PostgresBackend)` unconditionally in P0 (the
