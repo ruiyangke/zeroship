@@ -41,6 +41,33 @@ real traffic is not. A reproducer needs an app with both a live and a pinned
 workflow isolate on one thread, an in-flight RPC registered in the live one, and
 eviction of the pinned one.
 
+**Finding 2 (CRITICAL, unbounded streaming bridge): MECHANISM CONFIRMED, and this
+one needs no unusual configuration to reach.** The runtime accounts stream bytes
+against two caps - per-stream `DEFAULT_STREAM_BUFFER_CAP` = 4 MiB
+(`crates/runtime/src/core/channel.rs:89`) and process-wide
+`DEFAULT_STREAM_GLOBAL_CAP` = 512 MiB (`channel.rs:99`).
+
+`StreamReader::pop` (`channel.rs:288-296`) removes a chunk and **decrements both
+counters**: `inner.buffered_bytes -= n` and
+`STREAM_GLOBAL_BUFFERED.fetch_sub(n, ...)`.
+
+The worker's drain loop (`crates/worker/src/handler.rs:1168-1173`) pops in a tight
+`while let Some(chunk) = reader.pop()` and forwards each chunk with
+`tx.send(...)`, where `tx` comes from `ntex::channel::mpsc::channel()`
+(`handler.rs:1129`). That constructor is documented by ntex itself as creating
+"a unbounded in-memory channel with buffered storage", backed by a `VecDeque`
+with no capacity, and its `send` is synchronous - it can never report fullness,
+so there is no backpressure signal to propagate.
+
+Net effect: bytes are laundered out of both caps into a queue bounded by nothing.
+A client that reads more slowly than the app produces grows resident memory
+without limit and without appearing in either accounting figure. Unlike finding 1
+this needs no pinned-isolate configuration - an ordinary slow consumer on a
+streaming endpoint is enough.
+
+Reachability still unproven by test. A reproducer produces chunks continuously
+while never polling the response body, and asserts queued bytes stay bounded.
+
 ---
 
 1. **CRITICAL — eviction can use a V8 handle in the wrong isolate.**  
