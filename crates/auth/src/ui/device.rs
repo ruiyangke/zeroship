@@ -123,14 +123,6 @@ pub async fn post(
     let insecure_dev = cfg.insecure_dev;
 
     if cfg.auth_provider() == AuthProviderKind::Supabase {
-        if !csrf_valid(&req, &form, insecure_dev) {
-            return render_supabase_form(
-                cfg.as_ref(),
-                form.user_code.trim(),
-                Some("invalid request"),
-                StatusCode::FORBIDDEN,
-            );
-        }
         return render_supabase_form(
             cfg.as_ref(),
             form.user_code.trim(),
@@ -465,7 +457,6 @@ fn render_supabase_form(
     error: Option<&str>,
     status: StatusCode,
 ) -> HttpResponse {
-    let csrf_token = csrf::generate_token();
     let script_nonce = csrf::generate_token();
     let supabase_auth_url = format!(
         "{}/auth/v1",
@@ -481,7 +472,6 @@ fn render_supabase_form(
     let page = SupabaseDevicePage {
         user_code,
         error,
-        csrf: &csrf_token,
         script_nonce: &script_nonce,
         supabase_auth_url_json: &supabase_auth_url_json,
         supabase_anon_key_json: &supabase_anon_key_json,
@@ -492,7 +482,6 @@ fn render_supabase_form(
         .unwrap_or_else(|_| "<h1>device authorization</h1>".to_string());
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     let csp = supabase_device_csp(&script_nonce, &supabase_auth_url, &control_approve_url);
     if let Ok(value) = HeaderValue::from_str(&csp) {
         resp.header("Content-Security-Policy", value);
@@ -581,7 +570,6 @@ mod tests {
         let body = SupabaseDevicePage {
             user_code: "BCDF-GHJK-LMNP",
             error: None,
-            csrf: "csrf-token",
             script_nonce: "script-nonce",
             supabase_auth_url_json: &json_for_script(supabase_auth_url),
             supabase_anon_key_json: &json_for_script("anon-test-key"),
@@ -591,14 +579,13 @@ mod tests {
         .expect("render supabase device template");
         assert!(body.contains("Authorize device"), "{body}");
         assert!(body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#), "{body}");
-        assert!(body.contains(r#"name="csrf""#), "{body}");
-        assert!(body.contains(r#"value="csrf-token""#), "{body}");
+        assert!(!body.contains(r#"name="csrf""#), "{body}");
         assert!(body.contains("https://project.supabase.test/auth/v1"), "{body}");
         assert!(
             body.contains("https://control.zeroship.test/api/device/approve"),
             "{body}"
         );
-        assert!(body.contains("x-zeroship-csrf"), "{body}");
+        assert!(!body.contains("x-zeroship-csrf"), "{body}");
         assert!(
             !body.contains("/oauth2/device/verify"),
             "Supabase render must not reference native device verification: {body}"

@@ -221,7 +221,6 @@ pub struct DeviceScopeView {
 pub struct SupabaseDevicePage<'a> {
     pub user_code: &'a str,
     pub error: Option<&'a str>,
-    pub csrf: &'a str,
     pub script_nonce: &'a str,
     pub supabase_auth_url_json: &'a str,
     pub supabase_anon_key_json: &'a str,
