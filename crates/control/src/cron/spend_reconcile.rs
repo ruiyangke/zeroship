@@ -1,14 +1,14 @@
-//! Spend-reconcile cron (billing PR5, ISS-31).
+//! Spend-reconcile cron.
 //!
 //! Every ~60s it runs the [`SpendEngine::evaluate_all`] sweep: price each
 //! app's current-period usage, derive the new [`SpendState`] with hysteresis,
 //! and persist transitions to `zeroship.app_spend_state` (+ history). The
 //! gateway picks up the new state on its next `/internal/routes` pull (the
-//! registry JOINs `app_spend_state`) — decision D1: enforcement rides the
-//! PULLed `RouteEntry.spend_state`, NOT a pushed event.
+//! registry JOINs `app_spend_state`); enforcement rides the PULLed
+//! `RouteEntry.spend_state`, NOT a pushed event.
 //!
 //! For each transition this cron ALSO writes an audit row and constructs a
-//! `ControlEvent::SpendState`. Per D1 there is no live `ControlEvent` delivery
+//! `ControlEvent::SpendState`. There is no live `ControlEvent` delivery
 //! path today; the event is built for the audit log / future SSE fan-out only.
 //! It is logged (and dropped) here so the wire variant has a producer and the
 //! transition is observable.

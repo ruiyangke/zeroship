@@ -1,7 +1,7 @@
 //! PKCE (RFC 7636) verifier + S256 challenge generation.
 //!
-//! Shared by the gateway OIDC RP module (Phase 3 U3) and the auth crate's
-//! integration tests so the helpers live in one place.
+//! Shared by the gateway OIDC RP and the auth service's OAuth flows,
+//! authorization-code verification, and integration tests.
 //!
 //! Per RFC 7636 §4.1 the `code_verifier` is 43-128 characters drawn from
 //! `[A-Z][a-z][0-9]-._~`. 32 random bytes base64url-encoded yields 43

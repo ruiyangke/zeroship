@@ -30,8 +30,8 @@ pub struct CreateAppBody {
 }
 
 /// Default plan for a `create_app` with no explicit `plan_id`: the built-in
-/// free tier's catalog id (`pln_…`). PR4 dropped the free-text `"free"` —
-/// the plan must be a real catalog id so the FK + server-side gate accept it.
+/// free tier's catalog id (`pln_…`). The plan must be a real catalog id so
+/// the FK + server-side gate accept it.
 fn default_plan() -> String {
     crate::bootstrap_console::free_plan_id()
 }
@@ -175,12 +175,11 @@ pub async fn create_app(
             // of the app just created) sees the fresh owner membership instead
             // of a stale "no memberships" snapshot.
             EntityCache::invalidate(authz.principal_id);
-            // Slice 1d (§1.1): provision the per-app public PKCE OAuth client
-            // BEFORE the app is routable, so the route-sync push that makes the
-            // host live already carries Some(oauth_client_id) — no cold-start
-            // 503. Best-effort relative to the create response: a DB
-            // hiccup here is logged + metered, and the next deploy re-provisions
-            // (ensure_app_client is idempotent). The app still exists.
+            // Provision the per-app public PKCE OAuth client immediately after
+            // creating the app. This is best-effort relative to the create
+            // response: a DB hiccup here is logged + metered, and the next
+            // deploy re-provisions (`ensure_app_client` is idempotent). The app
+            // still exists.
             // No manifest exists at create, so no declared scopes yet — the
             // client gets the baseline allowlist; the first deploy mirrors the
             // manifest's `auth.scopes`.
@@ -504,21 +503,16 @@ pub async fn deploy(
 
     match result {
         Ok(success) => {
-            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
-            // manifest commit so the route-sync invariant holds without a
-            // cold-start window. The manifest commit (below) is what makes the
-            // app's host resolvable to the gateway's 5s route-sync pull; doing
-            // the OAuth provisioning first means that by the time the route is
-            // published, the client (and its control.app_oauth_clients row that
-            // get_routes LEFT-JOINs into oauth_client_id) already exists — so a
-            // route-sync pull can never observe a live route with
-            // oauth_client_id=None. Reconcile is idempotent. Best-effort
-            // relative to the deploy response: a DB hiccup is logged and the next deploy
-            // re-provisions; the deploy 200 does NOT imply provisioning
-            // succeeded (the SDK relies on retryable-503 client_not_provisioned
-            // handling for that rare window).
-            // Slice 3 (§5.1/§5.2): re-parse the ingested manifest to extract its
-            // declared `auth.scopes`. `ingest` only enforces scope-id FORMAT
+            // Reconcile the per-app OAuth client before the manifest commit.
+            // When reconciliation succeeds, the gateway's next 5s route-sync
+            // pull sees the client through `get_routes`' LEFT JOIN on
+            // `zeroship.app_oauth_clients`. Reconcile is idempotent and
+            // best-effort relative to the deploy response: a DB
+            // hiccup is logged and the next deploy retries, so deploy 200 does
+            // NOT imply provisioning succeeded. The SDK handles that rare
+            // window with a retryable 503 `client_not_provisioned` response.
+            // Re-parse the ingested manifest to extract its declared
+            // `auth.scopes`. `ingest` only enforces scope-id FORMAT
             // (ScopeDef::validate_id_format inside Manifest::validate), NOT the
             // platform-vocabulary collision rule — so the deploy handler MUST run
             // the full `validate_app_scopes` guard here and HARD-FAIL the deploy
@@ -561,11 +555,10 @@ pub async fn deploy(
                 }));
             }
 
-            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
-            // manifest commit so the route-sync invariant holds. Scopes are
-            // already validated above, so `ensure_app_client`'s internal
-            // `validate_app_scopes` cannot reject; any error here is a DB hiccup
-            // and stays best-effort relative to the deploy response.
+            // Attempt OAuth-client reconciliation BEFORE the manifest commit.
+            // Scopes are already validated above, so `ensure_app_client`'s
+            // internal `validate_app_scopes` cannot reject; a DB error is logged
+            // and the deploy proceeds with the documented retryable-503 window.
             match state.registry.get_app(&uid).await {
                 Ok(Some(app)) => {
                     if let Err(e) = state
@@ -714,12 +707,11 @@ pub async fn set_plan(
         }
     }
 
-    // PR-4 (full usage-segment proration): record a plan-change-events row with
-    // A cumulative usage_at_change snapshot IN THE SAME TXN as the apps.plan_id
+    // Record a plan-change event with a cumulative usage_at_change snapshot IN
+    // THE SAME TXN as the apps.plan_id
     // flip, under the per-creator advisory lock. The target plan must be a real,
     // non-archived plan; validate it via the catalog (segment pricing reads the
-    // live catalog at reconcile time — the row freezes NO base fee, round 4
-    // CRITICAL-1).
+    // live catalog at reconcile time — the row freezes NO base fee).
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     match catalog.get(&body.plan_id).await {
         Ok(Some(_)) => {}
@@ -793,7 +785,7 @@ pub async fn set_plan(
 }
 
 // ---------------------------------------------------------------------------
-// Spend-limit override (billing PR5, M4) — the creator-facing cap.
+// Spend-limit override — the creator-facing cap.
 //
 // `PUT /api/apps/:id/spend-limit` body `{ "cents": <u64|null> }` sets (or, with
 // null, clears back to the plan default) the per-app spend-limit override.
@@ -801,7 +793,7 @@ pub async fn set_plan(
 // BillingRead on `Resource::App(id)` — the same app-membership gate `set_plan`
 // uses.
 //
-// REDUCTION-ONLY by design (#9): the override is bounded above by the plan's
+// REDUCTION-ONLY by design: the override is bounded above by the plan's
 // `spend_limit_default_cents`, so a creator can only LOWER their effective cap,
 // never raise it above what the plan already grants. This is intentional and
 // safe — there is NO privilege-escalation path: raising your effective headroom
@@ -1247,7 +1239,7 @@ async fn resolve_plan_default_cents(
 }
 
 // ---------------------------------------------------------------------------
-// Plan catalog (billing PR4) — operator-editable, server-side pricing catalog.
+// Plan catalog — operator-editable, server-side pricing catalog.
 //
 // Reads (`GET /api/plans`, `GET /api/plans/:id`) require BillingRead on
 // `Resource::Any` (a fleet-wide read — the catalog is global operator config,

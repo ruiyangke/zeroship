@@ -445,8 +445,8 @@ fn main() -> std::io::Result<()> {
         Some(Arc::new(key))
     };
 
-    // auth-sdk Slice 1b-browser — load the PREVIOUS session-cookie signing key
-    // for the rotation overlap (§8.5). Set ONLY during a key roll. When present,
+    // Load the PREVIOUS session-cookie signing key for the rotation overlap.
+    // Set ONLY during a key roll. When present,
     // the session Verifier is built via `Verifier::with_previous` (accepts
     // session cookies signed by EITHER key). Ignored (with a warning) when no
     // current key is configured, since there is nothing to overlap with.
@@ -626,8 +626,8 @@ fn main() -> std::io::Result<()> {
     // built at the dispatch site.
     let stash_signing_key_bytes = stash_signing_key.into_bytes();
 
-    // auth-sdk Slice 1b-anchors — AES-256-GCM key for the server-held refresh
-    // family at rest in `zeroship.app_session_anchors.refresh_token_enc` (§8.1).
+    // AES-256-GCM key for the server-held refresh family at rest in
+    // `zeroship.app_session_anchors.refresh_token_enc`.
     // Derived from the (server-only) stash signing key via
     // `core::crypto::derive_key` so no new CLI flag is needed and the
     // refresh family never sits in PG in plaintext. Domain-separated by the
@@ -795,7 +795,7 @@ fn main() -> std::io::Result<()> {
                     ))
                     .route(web::post().to(signal_ingress::public_signal_ingress)),
             )
-            // auth-sdk BFF redesign slice R1b — the ONE identity-session
+            // The ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on
             // `/__zeroship/auth/session`:
             //   - POST = code→token exchange + create anchor + ISSUE the signed
@@ -809,11 +809,11 @@ fn main() -> std::io::Result<()> {
                     .route(web::post().to(auth_token::session_post))
                     .route(web::get().to(auth_token::session)),
             )
-            // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
+            // The browser-facing auth HTTP
             // surface. Same mounting discipline (BEFORE the subdomain
             // catch-all). `/authorize` 302s to OP (the one cross-site
             // hop); `/popup-callback` serves the same-origin relay page;
-            // `/signout` revokes + clears (fixes the live bug).
+            // `/signout` revokes + clears the session state.
             .service(
                 web::resource("/__zeroship/auth/authorize")
                     .route(web::get().to(browser_auth::authorize)),

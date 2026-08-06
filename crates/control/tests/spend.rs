@@ -1,7 +1,7 @@
 //! Integration tests for the spend engine against a live Postgres.
 //!
 //! Exercises the REAL `SpendEngine` path (price current-period usage via the
-//! PR4 catalog → derive SpendState with hysteresis → persist transitions to
+//! plan catalog → derive SpendState with hysteresis → persist transitions to
 //! `zeroship.app_spend_state` + `zeroship.spend_state_history`), not the pure
 //! `derive_state` (that is unit-tested in `src/spend.rs`).
 //!

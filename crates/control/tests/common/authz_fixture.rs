@@ -60,7 +60,7 @@ pub async fn non_admin_pat(state: &AppState) -> AdminPat {
 /// A PAT for an EXISTING user (the app's owner) carrying ONLY the creator deploy
 /// grants — `apps:deploy` / `apps:write` / `apps:read` on `Resource::Any` — and
 /// NO platform role. This is the "creator with only `apps:deploy`" principal the
-/// PR9c operator-vs-creator separation must refuse at the `migrations:approve`
+/// operator-vs-creator separation must refuse at the `migrations:approve`
 /// gate: the wrapper grants deploy authority and the user OWNS the app (so the
 /// deploy route's `AppsDeploy` check and the EXPAND both reach the gate), but the
 /// `app_owner` cedar policy EXCLUDES `migrations:approve`, so a non-empty
@@ -193,7 +193,7 @@ fn admin_policy() -> Policy {
                 Action::AppsRead,
                 Action::AppsWrite,
                 Action::AppsDeploy,
-                // PR9c: the operator-only go-live approval action. The admin PAT
+                // The operator-only go-live approval action. The admin PAT
                 // must carry it in its wrapper (the wrapper is a NARROWING filter:
                 // `enforce` requires the wrapper AND cedar to allow), so an admin
                 // approving a `?approved_versions=` go-live is not narrowed away.

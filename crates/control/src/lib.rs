@@ -372,8 +372,8 @@ pub struct AppState {
     /// Stripe webhook signing secret. Required in prod; empty +
     /// `insecure_dev=true` skips verification.
     pub stripe_webhook_secret: SecretString,
-    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing PR6
-    /// reconciler + `billing/setup`). Required in prod; empty allowed only
+    /// Stripe secret API key (`sk_…`) for outbound reconciliation and
+    /// `billing/setup` calls. Required in prod; empty allowed only
     /// under `insecure_dev`. Never logged — `SecretString`.
     pub stripe_secret_key: SecretString,
     /// Stripe REST API base URL the outbound client targets. Defaults to
@@ -437,8 +437,7 @@ pub struct AppState {
     /// Apex domain hosted creator apps serve under, e.g. `zeroship.ai`
     /// (prod) or `zeroship.localhost` (dev). An app named `myapp` serves
     /// at `myapp.{app_base_domain}`; the per-app OAuth client's
-    /// redirect_uris / sector_identifier are derived from that apex host
-    /// (Slice 1d, spec §1.1).
+    /// redirect_uris / sector_identifier are derived from that apex host.
     pub app_base_domain: String,
     /// OAuth client IDs that get `skip_consent=true` when registered.
     pub trusted_oauth_clients: HashSet<String>,
@@ -534,7 +533,7 @@ impl AppState {
 
     /// The apex host an app named `name` serves at:
     /// `{name}.{app_base_domain}`. The per-app OAuth client's
-    /// redirect_uris / sector_identifier anchor here (Slice 1d, §1.1).
+    /// redirect_uris / sector_identifier anchor here.
     #[must_use]
     pub fn apex_host_for_app(&self, name: &str) -> String {
         format!("{name}.{}", self.app_base_domain)
@@ -543,12 +542,12 @@ impl AppState {
     /// Idempotently provision (or reconcile) the per-app OAuth
     /// client for `app_id` named `name`, using the apex host derived from
     /// `app_base_domain`. Wraps [`app_oauth_client::ensure_app_client`] with
-    /// a fresh control-DB connection. Slice 1d (spec §1.1). On success returns the per-app `client_id`
-    /// (`oac_<base62-app-id>`).
+    /// a fresh control-DB connection. On success returns the per-app
+    /// `client_id` (`oac_<base62-app-id>`).
     ///
-    /// `declared_scopes` are the app's manifest `auth.scopes` (Slice 3,
-    /// spec §5.1): validated + mirrored into `control.oauth_clients.scopes`
-    /// and `control.app_scope_defs` atomically. Pass `&[]` at app
+    /// `declared_scopes` are the app's manifest `auth.scopes`: validated and
+    /// mirrored into `zeroship.oauth_clients.scopes` and
+    /// `zeroship.app_scope_defs` atomically. Pass `&[]` at app
     /// **create** (no manifest yet); the deploy path passes the deployed
     /// manifest's declared scopes.
     ///

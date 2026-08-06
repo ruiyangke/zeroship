@@ -1,9 +1,8 @@
-//! Void + reissue + the negative-invoice true-up bridge (billing-ops gap #26, PR-3;
-//! design flow C "void + reissue" + the "Negative-invoice / true-up bridge" section).
-//! This is the PR-1-deferred half of the void lifecycle — PR-1 landed the `0042`
-//! partial-unique-index reshape (a void releases the `(creator, period)` claim) + the
-//! `0046 invoice_payments` side table; the actual operator void path, the
-//! `void_reversal` credit-conservation entry, the reissue, and the true-up land HERE.
+//! Void + reissue + the negative-invoice true-up bridge.
+//!
+//! A void releases the `(creator, period)` claim, while `invoice_payments` stores
+//! cash-collected side facts. This module owns the operator void path, the
+//! `void_reversal` credit-conservation entry, the reissue, and the true-up.
 //!
 //! ## The correction model
 //!
@@ -12,7 +11,7 @@
 //! equal). To correct a wrong bill, an operator VOIDS it and the reconciler reissues a
 //! fresh, re-priced invoice into the released period slot.
 //!
-//! ## Re-drivable to completion (MAJOR-2)
+//! ## Re-drivable to completion
 //!
 //! The sequence is three phases — Phase 1 (void + `void_reversal`), Phase 2 (reissue),
 //! Phase 3 (true-up) — and each MONEY mutation is individually serialized per creator:
@@ -35,7 +34,7 @@
 //!     double-refunds).
 //! So a re-invocation observes the same `VoidReissueOutcome` and the balance is conserved.
 //!
-//! ## void_reversal — conserving consumed credit (CRITICAL-2)
+//! ## void_reversal — conserving consumed credit
 //!
 //! When the voided invoice consumed credit, voiding it WITHOUT restoring that credit
 //! would leave the reissue re-consuming from a balance that is short by the voided
@@ -46,7 +45,7 @@
 //! invoice consumed anything; the reissue re-draws from the restored balance and the
 //! balance is conserved end-to-end.
 //!
-//! ## The true-up bridge (CRITICAL-B + H1)
+//! ## The true-up bridge
 //!
 //! A reissue can be LOWER than what was already collected on the voided invoice. The
 //! over-collection must come back to the creator. The bridge auto-issues a cash refund
@@ -56,18 +55,19 @@
 //! over = cash_paid(old) − cash_refunds_already_issued(old) − total(new), floored at 0
 //! ```
 //!
-//! The `cash_refunds_already_issued` subtraction is the CRITICAL-B fix: round 1 used
-//! `cash_paid(old) − total(new)` and IGNORED earlier refunds, so on an invoice already
-//! partially cash-refunded the bridge over-refunded — and its own over-refund trigger
-//! then REJECTED the bridge refund, leaving the over-collection stuck. Subtracting the
-//! already-issued cash refunds makes the cap satisfied by construction:
+//! The `cash_refunds_already_issued` subtraction is required: a calculation of
+//! `cash_paid(old) − total(new)` would IGNORE earlier refunds, so on an invoice
+//! already partially cash-refunded the bridge would over-refund — and its own
+//! over-refund trigger would then REJECT the bridge refund, leaving the
+//! over-collection stuck. Subtracting the already-issued cash refunds makes the cap
+//! satisfied by construction:
 //! `cash_refunds_already_issued + over = cash_paid(old) − total(new) ≤ cash_paid(old)`.
 //!
-//! H1: that `over` is recomputed INSIDE `refund::issue_true_up_refund`'s per-creator-locked
-//! claim txn from the live cash anchor — Phase 3 passes only the immutable `reissued_total`
-//! and never pre-reads the cash. A concurrent refund/dispute landing between Phase 2 and the
-//! claim therefore cannot make the claimed amount stale (which previously could trip the
-//! over-refund trigger's "impossible by construction" abort, or under-refund).
+//! That `over` is recomputed INSIDE `refund::issue_true_up_refund`'s
+//! per-creator-locked claim transaction from the live cash anchor — Phase 3 passes
+//! only the immutable `reissued_total` and never pre-reads the cash. A concurrent
+//! refund/dispute landing between Phase 2 and the claim therefore cannot make the
+//! claimed amount stale, trip the over-refund trigger, or under-refund.
 
 use compio_postgres::GenericClient;
 

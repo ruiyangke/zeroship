@@ -37,7 +37,7 @@
 //! (enforced when present). `?mint=1` additionally REQUIRES `X-ZS-Auth` so
 //! a top-level navigation cannot trigger a family rotation.
 //!
-//! ## Reload-recovery single-flight (round-6 BLOCKER)
+//! ## Reload-recovery single-flight
 //!
 //! Concurrent `?mint=1` callers for the same anchor on one worker thread
 //! coalesce into ONE OP refresh via a per-thread in-process single-flight
@@ -998,8 +998,7 @@ async fn rotate_family(
     // We are the leader: build the refresh future and register it. Removal of
     // the single-flight entry is tied to the SHARED future's resolution, NOT to
     // this leader task's survival: an `EntryGuard` owned by the future body
-    // removes the entry when the future is dropped (the round-6 BLOCKER
-    // invariant `remove single_flight.entry once fut resolves`). So if this
+    // removes the entry when the shared future resolves or is dropped. So if this
     // leader's request future is cancelled mid-flight (client disconnect / ntex
     // timeout) after `insert`, a surviving follower still drives the shared
     // future to completion, and the guard fires on drop — the entry is cleared

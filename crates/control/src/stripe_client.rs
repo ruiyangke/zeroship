@@ -1,9 +1,10 @@
-//! Thin `cyper`-based Stripe REST client (billing PR6, ISS-31, Stream-1).
+//! Thin `cyper`-based Stripe REST client.
 //!
-//! Stream-1 (infra-cost billing) talks to the PLATFORM's own Stripe account:
+//! Infrastructure-cost billing talks to the PLATFORM's own Stripe account:
 //! it creates a Customer (`cus_…`) per creator, a Checkout setup-mode session to
 //! save a PaymentMethod, and — at month close — invoice items + a finalized
-//! invoice on that Customer. NO Connect, NO `application_fee` (that is Stream-2).
+//! invoice on that Customer. Connect and `application_fee` are handled
+//! separately.
 //!
 //! Zero tokio: HTTP is `cyper::Client` + `compio::time::timeout`, the SAME idiom
 //! the control plane already uses for outbound provider calls
@@ -14,19 +15,18 @@
 //! object-minting MUTATING calls that the caller may retry under a deterministic
 //! key (invoice item / invoice / finalize / refund / meter event / connect
 //! PaymentIntent) carry an `Idempotency-Key` header (defense in depth on top of
-//! the `billing_runs` per-period claim) so an at-least-once retry replays the
+//! the `invoices` per-period claim) so an at-least-once retry replays the
 //! same Stripe object instead of creating a duplicate. The lazily-created,
 //! caller-deduped objects (customer, connect account, account_link, checkout
 //! setup session) do NOT carry one — at-most-once is enforced by the caller's
 //! own `creator_billing` / `creator_accounts` row check, and an account_link /
-//! checkout session is a short-lived hosted URL where a duplicate is harmless
-//! (m2).
+//! checkout session is a short-lived hosted URL where a duplicate is harmless.
 //!
-//! C1: EVERY request — GET, POST, DELETE — sends a pinned `Stripe-Version`
+//! EVERY request — GET, POST, DELETE — sends a pinned `Stripe-Version`
 //! header ([`STRIPE_API_VERSION`]) so the response wire shape is the one these
 //! parsers target, independent of the account's dashboard-default API version.
 //! A forced/dashboard bump cannot silently re-shape the payload under us (the
-//! exact failure mode of the D2/Basil `payment_intent`/`charge` removal).
+//! exact failure mode of the Basil `payment_intent`/`charge` removal).
 //!
 //! [`StripeApi`] is a trait so unit tests inject a recording fake; the
 //! integration tests drive the REAL [`StripeClient`] against a localhost
@@ -42,15 +42,15 @@ use crate::SecretString;
 pub const DEFAULT_STRIPE_BASE_URL: &str = "https://api.stripe.com";
 
 /// The Stripe API version this code is WRITTEN AGAINST, sent as the
-/// `Stripe-Version` header on EVERY outbound request (C1). Without it, a call
+/// `Stripe-Version` header on EVERY outbound request. Without it, a call
 /// renders against the account's *default* version, so a dashboard / forced
-/// version bump (exactly how the Basil `payment_intent`/`charge` removal —
-/// D2 — silently re-broke parsing) would change the response shape under us.
+/// version bump (exactly how the Basil `payment_intent`/`charge` removal
+/// silently re-broke parsing) would change the response shape under us.
 /// Pinning the header here means the wire shape is the one our parsers expect,
 /// independent of the account's dashboard setting.
 ///
 /// `2025-09-30.clover` (Basil 2025-03-31+) is the version whose Invoice shape
-/// the D2 settlement parsers target (`payments.data[].payment.payment_intent`,
+/// the settlement parsers target (`payments.data[].payment.payment_intent`,
 /// top-level `payment_intent`/`charge` removed). Verified at
 /// docs.stripe.com/api/versioning and the Basil changelog.
 pub const STRIPE_API_VERSION: &str = "2025-09-30.clover";
@@ -139,9 +139,10 @@ pub struct StripeDispute {
     pub evidence_due_by: Option<i64>,
 }
 
-/// The Stripe billing surface PR6 needs. A trait so unit tests can inject a
-/// recording fake; [`StripeClient`] is the production `cyper` impl, and the
-/// integration tests use that real impl against a localhost mock server.
+/// The Stripe billing surface used by infrastructure billing. A trait so unit
+/// tests can inject a recording fake; [`StripeClient`] is the production `cyper`
+/// impl, and the integration tests use that real impl against a localhost mock
+/// server.
 #[allow(async_fn_in_trait)]
 pub trait StripeApi {
     /// Create a Customer in the platform account for a creator. `creator_id` is
@@ -162,8 +163,8 @@ pub trait StripeApi {
     /// `idempotency_key` makes the create replay-safe. `lookup_key` is stamped
     /// into `metadata.zs_item_key` so a >24h re-drive (after the
     /// Idempotency-Key window has expired) can FIND an already-posted item via
-    /// [`StripeApi::find_invoice_item_by_key`] instead of blindly re-posting it
-    /// (C1). Returns the `ii_…` id.
+    /// [`StripeApi::find_invoice_item_by_key`] instead of blindly re-posting it.
+    /// Returns the `ii_…` id.
     ///
     /// `metadata` carries the FULL CU/usage derivation (`compute_units`,
     /// `billable_units`, `included_units`, `fx_pico_cents_per_unit`,
@@ -188,7 +189,7 @@ pub trait StripeApi {
 
     /// Delete a PENDING (not-yet-finalized-onto-an-invoice) invoice item by id
     /// (`DELETE /v1/invoiceitems/{id}`). Used by the reconcile's draft-orphan
-    /// reconciliation (round 4, MAJOR-1): when a re-drive builds FEWER segments than
+    /// reconciliation: when a re-drive builds FEWER segments than
     /// a prior crashed drive posted, the stale higher-segment items must be removed
     /// BEFORE the draft sweeps them, or the finalized subtotal disagrees with the
     /// Stripe total (an over-charge). Deleting an item that is already gone (a prior
@@ -200,7 +201,7 @@ pub trait StripeApi {
     /// `metadata.zs_item_key` equals `lookup_key`. Returns the `ii_…` id if one
     /// exists, else `None`.
     ///
-    /// C1: when the per-app ledger has an intent row with a NULL `stripe_item_id`
+    /// When the per-app ledger has an intent row with a NULL `stripe_item_id`
     /// (the prior drive crashed between the Stripe POST and the ledger commit)
     /// AND Stripe's 24h Idempotency-Key window has expired, the deterministic key
     /// no longer dedupes — so we must look the item up by its deterministic
@@ -214,7 +215,7 @@ pub trait StripeApi {
     /// Create a DRAFT invoice sweeping `customer`'s pending invoice items.
     /// Returns the draft `in_…` id. `creator_id` is stamped into
     /// `metadata.creator_id` so the `invoice.payment_failed` webhook can resolve
-    /// the creator directly. The caller PERSISTS this id (C2) BEFORE calling
+    /// the creator directly. The caller PERSISTS this id BEFORE calling
     /// [`StripeApi::finalize_invoice`], so a crash before finalize re-drives by
     /// finalizing THIS draft (which carries the real items) rather than creating
     /// a fresh empty draft.

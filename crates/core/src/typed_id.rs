@@ -191,13 +191,13 @@ pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> 
 pub const USER_PREFIX: &str = "usr";
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
-/// C-7-LT-PR2: wake-job typed-id prefix. Three chars to match the
-/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
-/// (api-surface-r16 R16-API2). The pg `wake_jobs.wake_id` column
-/// stores the full typed-id string (`wak_<base62>`).
+/// Wake-job typed-id prefix. Three chars to preserve the common
+/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape. The PostgreSQL
+/// `wake_jobs.wake_id` column stores the full typed-id string
+/// (`wak_<base62>`).
 pub const WAKE_PREFIX: &str = "wak";
 
-/// Per-app OAuth `client_id` prefix (auth-sdk Slice 1d, spec §1.1): the
+/// Per-app OAuth `client_id` prefix: the
 /// deterministic, stable-for-app-life OAuth client id is `oac_<base62-app-id>`.
 /// Distinct from [`APP_PREFIX`] (the app *entity* typed_id) on purpose — the
 /// OAuth `client_id` is a derived identifier, not a typed_id.
@@ -208,11 +208,10 @@ pub const WAKE_PREFIX: &str = "wak";
 /// through this constant so they can never drift.
 pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
 
-/// Pricing-plan typed-id prefix (billing PR4). Three chars to match the
-/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
-/// (R16-API2). The `zeroship.plans.id` column stores the full typed-id
-/// string (`pln_<base62>`); `apps.plan_id` is an FK into it (no more
-/// free-text self-escalation — CT-A1). The catalog mints ids via
+/// Pricing-plan typed-id prefix. Three chars to preserve the common
+/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape. The `zeroship.plans.id` column stores
+/// the full typed-id string (`pln_<base62>`); `apps.plan_id` is an FK into it,
+/// preventing free-text self-escalation. The catalog mints ids via
 /// [`new_plan_id`] and the built-in tiers are seeded with real `pln_…` ids
 /// at control bootstrap.
 pub const PLAN_PREFIX: &str = "pln";
@@ -341,7 +340,7 @@ pub fn new_wake_id() -> String {
 
 /// Generate a new pricing-plan ID: `pln_{base62(uuidv7)}`. Minted by the
 /// plan-catalog `upsert` and by the bootstrap seeder for the built-in
-/// tiers (billing PR4).
+/// tiers.
 pub fn new_plan_id() -> String {
     generate(PLAN_PREFIX)
 }
@@ -472,7 +471,7 @@ pub const WORKFLOW_RUN_PREFIX: &str = "run";
 /// full `sig_<base62>` string.
 pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
 
-/// Workflow cron handle prefix reserved by the durable-workflows M0 surface.
+/// Workflow cron handle typed-id prefix, distinct from the workflow-schedule prefix.
 pub const WORKFLOW_CRON_PREFIX: &str = "cron";
 
 /// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
@@ -736,8 +735,7 @@ mod tests {
         assert_eq!(prefix, "pln");
     }
 
-    /// C-7-LT-PR2 / R16-API2: every typed-id prefix in this crate is
-    /// 3 chars. `wak_` (not `wake_`) keeps the global
+    /// The wake-job prefix is 3 chars. `wak_` (not `wake_`) preserves the
     /// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape dashboards/log filters key
     /// on. Re-asserted as an invariant test so a future "looks like
     /// 4 chars would be clearer" suggestion fails CI.

@@ -37,7 +37,7 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     )
     .await
     .expect("seed owner user");
-    // PR4: plan_id is an FK into zeroship.plans — seed the built-in tiers and
+    // plan_id is an FK into zeroship.plans — seed the built-in tiers and
     // use the real free-plan catalog id.
     zeroship_control::bootstrap_console::seed_plans(registry)
         .await

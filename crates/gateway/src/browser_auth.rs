@@ -1,4 +1,4 @@
-//! Browser-facing auth HTTP surface (auth-sdk Slice 1b-browser, spec §1.2).
+//! Browser-facing auth HTTP surface.
 //!
 //! Three same-origin gateway endpoints the `@zeroship/auth` SDK drives:
 //!
@@ -7,7 +7,7 @@
 //!   `/authorize` carrying the BROWSER-supplied PKCE `code_challenge`
 //!   (S256), `state`, `nonce`, requested `scope`, and an optional `prompt`
 //!   passthrough, with `redirect_uri = {scheme}://{host}/__zeroship/auth/popup-callback`
-//!   (a registered URI from 1d). The gateway holds NO PKCE verifier — the
+//!   (a registered per-app redirect URI). The gateway holds NO PKCE verifier — the
 //!   browser does (Supabase-style). 503 `client_not_provisioned` when the
 //!   route has no `oauth_client_id` yet.
 //!
@@ -21,12 +21,12 @@
 //!   with `targetOrigin = location.origin` (its OWN origin, never `'*'`); see
 //!   the dual-target block on [`popup_callback_html`]. A same-origin
 //!   `BroadcastChannel` + one-shot
-//!   `localStorage` relay cover the COOP-severed-opener case (§4.4). Strict
+//!   `localStorage` relay cover the COOP-severed-opener case. Strict
 //!   CSP (`default-src 'none'; script-src 'nonce-…'; frame-ancestors 'self'`),
 //!   `Referrer-Policy: no-referrer`, `COOP: same-origin`.
 //!
-//! - **`POST /__zeroship/auth/signout`** — FIXES the live "no handler" bug. Same-
-//!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zeroship_app_anchor`
+//! - **`POST /__zeroship/auth/signout`** — Enforces a same-origin guard
+//!   (X-ZS-Auth + exact Origin). Reads the `__Host-zeroship_app_anchor`
 //!   anchor cookie → loads the anchor → (a) sets the per-app family marker
 //!   via `revoke_family(client_id, pws_sub)`, (b) best-effort revokes the
 //!   server-held refresh family at the OP `/revoke`, (c) deletes the
@@ -45,7 +45,7 @@ use crate::auth_token::{
 use crate::oidc_rp::BrowserAuthorizeParams;
 use crate::{anchors, GateState};
 
-/// Strict CSP for the popup-callback page (spec §1.2). `default-src 'none'`
+/// Strict CSP for the popup-callback page. `default-src 'none'`
 /// blocks all loads; `script-src 'nonce-<random>'` permits ONLY the inline
 /// nonce-tagged relay script (a reflected/injected `<script>` is blocked
 /// even if a future edit reflected a query param); `frame-ancestors 'self'`
@@ -61,7 +61,7 @@ fn popup_csp(nonce: &str) -> String {
 #[allow(clippy::future_not_send)]
 pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResponse {
     // Resolve the app + per-app oauth_client_id. 503 client_not_provisioned
-    // when the route has no client yet (1d), matching /token's posture.
+    // when the route has no client yet.
     let route = match resolve_route(&req, &state) {
         Ok(r) => r,
         Err(resp) => return resp,

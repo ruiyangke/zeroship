@@ -24,7 +24,7 @@ pub enum StripeError {
     /// Callsite-level validation failure (bad shape, invalid amount, …).
     /// Maps to HTTP 400 — distinct from internal `Db` errors.
     Validation(String),
-    /// A non-2xx response from the Stripe REST API (billing PR6). `code` is the
+    /// A non-2xx response from the Stripe REST API. `code` is the
     /// machine-readable `error.code` from Stripe's JSON body when present.
     Api { status: u16, code: Option<String> },
 }
@@ -600,12 +600,11 @@ impl StripeStore {
     }
 
     // ------------------------------------------------------------------
-    // Creator billing identity — the Stream-1 platform Customer (cus_…).
+    // Creator billing identity — the platform Customer (cus_…).
     //
-    // Distinct from the Stream-2 Connect `acct_…` above: this is the
-    // PLATFORM-side Customer the infra-cost reconciler invoices. Keyed by
-    // creator_id (a user id), one row per creator, created lazily on first
-    // `billing/setup`. (billing PR6, changeset 0040.)
+    // Distinct from the Connect `acct_…` above: this is the PLATFORM-side
+    // Customer the infra-cost reconciler invoices. Keyed by creator_id (a user
+    // id), one row per creator, created lazily on first `billing/setup`.
     // ------------------------------------------------------------------
 
     /// The creator's platform Stripe Customer id (`cus_…`), or `None` if no ref
@@ -627,8 +626,8 @@ impl StripeStore {
 
     /// Reverse-resolve a creator from their platform Customer id
     /// (`cus_…`). Used by `invoice.payment_failed` ingest when the event
-    /// carries no `metadata.creator_id` but does carry the `customer` (PR6
-    /// Stream-1 infra invoices). Returns `None` if no creator owns that customer.
+    /// carries no `metadata.creator_id` but does carry the `customer`. Returns
+    /// `None` if no creator owns that customer.
     ///
     /// The caller has NO provider in hand — a provider customer id (`cus_…`) is
     /// globally unique, so the lookup is `WHERE external_id = $1`. The standalone

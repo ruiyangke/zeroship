@@ -1,8 +1,7 @@
-//! Shared, breaker-guarded outbound HTTP client for the gateway → OP
-//! path (auth-sdk §8.7, round-6 MAJOR #3).
+//! Shared, breaker-guarded outbound HTTP client for the gateway → OP path.
 //!
 //! Every gateway→OP call used to construct a fresh `cyper::Client::new()`
-//! with no bounded timeout and no shared failure state. A OP brownout
+//! with no bounded timeout and no shared failure state. An OP brownout
 //! could then exhaust the gateway's outbound connections — the mint path's
 //! exact risk (`/oauth2/token` slow or 5xx-ing while every request opens a
 //! new connection pool). This module fixes that with three pieces wired

@@ -216,7 +216,7 @@ impl Registry {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
 
-        // Server-side plan gate (PR4 / CT-A1): the plan must exist and be
+        // Server-side plan gate: the plan must exist and be
         // unarchived in the catalog. Checked inside the txn before the INSERT
         // so an invalid plan returns a clean InvalidInput AND never leaves a
         // half-written app/owner pair (the FK would also reject it, but this
@@ -456,7 +456,7 @@ impl Registry {
 
     /// Change the plan for an app.
     ///
-    /// Race-free in ONE statement (PR4 / CT-A1): the UPDATE only fires when the
+    /// Race-free in ONE statement: the UPDATE only fires when the
     /// target plan EXISTS and is NOT archived, guarded by an `EXISTS` subquery in
     /// the same statement. A separate validate-then-UPDATE had a TOCTOU window —
     /// a plan archived between the check and the UPDATE would still be assigned
@@ -513,7 +513,7 @@ impl Registry {
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
         // LEFT JOIN the plan catalog so each app's runtime limits come from its
-        // plan row (PR4 — no more hardcoded `runtime_limits_for_plan` table). A
+        // plan row rather than a hardcoded plan-name table. A
         // missing plan (NULL `runtime_limits_json`) falls back to the
         // conservative free-tier limits below, so the worker never receives
         // `(None, None, None)` for an unpriced app.
@@ -620,16 +620,16 @@ impl Registry {
     /// always defined (legacy fallback path was removed).
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;
-        // LEFT JOIN control.app_oauth_clients (§1.5): a provisioned app yields
+        // LEFT JOIN zeroship.app_oauth_clients: a provisioned app yields
         // Some(oauth_client_id)/Some(sector_identifier); an un-provisioned app
         // (no extension row) yields NULL ⇒ None. The join key is the app id.
-        // LEFT JOIN zeroship.app_spend_state (PR5): an app with a spend row
+        // LEFT JOIN zeroship.app_spend_state: an app with a spend row
         // carries its current `state` TEXT; an app without one yields NULL ⇒
         // default `SpendState::Allow` (the common, unrestricted case). The
-        // gateway gates dispatch on this pulled value (decision D1 — spend
-        // state is PULLed on the RouteEntry, not pushed).
+        // gateway gates dispatch on this pulled value: spend state is PULLed on
+        // the RouteEntry, not pushed.
         //
-        // LEFT JOIN zeroship.creator_billing_status (G2): payment/account state
+        // LEFT JOIN zeroship.creator_billing_status: payment/account state
         // is CREATOR-keyed (one row per creator), so we surface it per-app via
         // the app's `app_members(role='owner')` row — the same owner mapping the
         // billing reconciler uses (there is no apps.creator_id column). An app
@@ -638,8 +638,8 @@ impl Registry {
         // this pulled value as an OUTER AND with spend (Suspended → 402 before
         // spend is even consulted).
         //
-        // FAN-OUT SAFETY (critic #5): one owner per app by construction (0031),
-        // but a data-integrity fan-out of multiple `role='owner'` rows would make
+        // FAN-OUT SAFETY: normal app creation writes one owner, but the schema
+        // permits multiple `role='owner'` rows. Such a fan-out would make
         // a plain join non-deterministic — `map.insert(id, …)` is last-write-wins,
         // so `account_state` (and every other RouteEntry field) could flip
         // arbitrarily, even un-suspending a suspended creator. `acct` collapses the
@@ -700,16 +700,15 @@ impl Registry {
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                     manifest,
-                    // OAuth identity fields (§1.5), populated by the LEFT JOIN
-                    // on `control.app_oauth_clients` above. A provisioned app
-                    // (Slice 1d created its per-app client) yields
+                    // OAuth identity fields, populated by the LEFT JOIN on
+                    // `zeroship.app_oauth_clients` above. A provisioned app yields
                     // `Some(client_id)`/`Some(sector_identifier)`; an
                     // un-provisioned app has no extension row, so the join
                     // produces NULL ⇒ `None`. The gateway's
                     // `CompiledRoute`/browser-auth/Bearer arm consume these.
                     oauth_client_id: row.get("oauth_client_id"),
                     sector_identifier: row.get("sector_identifier"),
-                    // PR5: spend state from the LEFT-JOINed app_spend_state.
+                    // Spend state from the LEFT-JOINed app_spend_state.
                     // NULL (no spend row) ⇒ Allow; an unrecognised TEXT value
                     // fails closed to Block (defensive — should never happen,
                     // the engine only writes the four known states).
@@ -717,7 +716,7 @@ impl Registry {
                         .get::<_, Option<String>>("spend_state")
                         .as_deref()
                         .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
-                    // G2: creator account state from the LEFT-JOINed
+                    // Creator account state from the LEFT-JOINed
                     // creator_billing_status (via the owner membership). NULL
                     // (no status row) ⇒ Active; an unrecognised TEXT value fails
                     // closed to Suspended (defensive — the writer only ever
@@ -805,8 +804,8 @@ async fn load_frontable_suffix_catalog(conn: &Client) -> FrontableSuffixCatalog 
 /// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
 /// `runtime_limits_json` (the LEFT-JOINed column in [`Registry::get_versions`]).
 /// A NULL column (no plan row) or a parse failure falls back to the
-/// conservative free-tier limits — limits come from the catalog, not a
-/// hardcoded plan-name table (PR4 deleted `runtime_limits_for_plan`).
+/// conservative free-tier limits. Limits come from the catalog, not a
+/// hardcoded plan-name table.
 fn runtime_limits_from_catalog(
     json: Option<&serde_json::Value>,
     app_id: &Uuid,

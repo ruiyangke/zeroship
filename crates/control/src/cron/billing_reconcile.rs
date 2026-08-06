@@ -1,16 +1,16 @@
-//! Billing-reconcile cron (billing PR6, ISS-31, Stream-1).
+//! Billing-reconcile cron.
 //!
 //! At month close (UTC), for each creator with billing enabled: sum the
 //! creator's owned apps' usage aggregates for the CLOSED (previous) calendar
-//! month, price each app via the PR4 plan catalog into invoice-item lines, push
+//! month, price each app via the plan catalog into invoice-item lines, push
 //! those lines as Stripe **invoice items** on the creator's platform Customer
 //! (`cus_…`), then create + finalize the invoice. Infra-cost billing ONLY — no
-//! Connect, no `application_fee` (that is the separate Stream-2 epic).
+//! Connect, no `application_fee` (those belong to the separate app-payment flow).
 //!
-//! Creator→app resolution (decision D4 / H1): there is NO `apps.creator_id`
-//! column; ownership flows through `zeroship.app_members WHERE role='owner'`. We
+//! Creator→app resolution: there is NO `apps.creator_id` column; ownership
+//! flows through `zeroship.app_members WHERE role='owner'`. We
 //! group owned apps by `user_id` ⇒ that user_id is the `creator_id`. Apps with
-//! no owner row (e.g. the system console, 0036 `apps.system=true`) have no
+//! no owner row (e.g. the system console) have no
 //! billable creator and are SKIPPED.
 //!
 //! Idempotency — three airtight layers under at-least-once delivery (mapped onto
@@ -21,7 +21,7 @@
 //!      already billed this period ⇒ skip entirely (no pricing, no Stripe call).
 //!      A `status='draft'` row is a crash-window remnant we re-drive.
 //!   2. The `invoice_lines(invoice_id, app_id)` LEDGER is the DURABLE per-app
-//!      double-bill guard, written CLAIM-THEN-CALL (C1): the line (carrying the
+//!      double-bill guard, written CLAIM-THEN-CALL: the line (carrying the
 //!      frozen charge SNAPSHOT) is `INSERT`ed BEFORE `create_invoice_item`, and a
 //!      `billing_line_provider_refs(provider='stripe', ref_kind='invoice_item')`
 //!      row (a REAL composite FK → the line) is written AFTER. So the durable
@@ -34,7 +34,7 @@
 //!      item posts AT MOST ONCE even when Stripe's 24h Idempotency-Key window has
 //!      expired (a >24h re-drive). The line + ref + metadata lookup — not Stripe's
 //!      key — is what makes the no-double-bill guarantee hold.
-//!   3. The invoice is created (draft) and FINALIZED in distinct steps (C2): the
+//!   3. The invoice is created (draft) and FINALIZED in distinct steps: the
 //!      draft id is persisted to a `billing_provider_refs(ref_kind='draft_invoice')`
 //!      row the instant the draft exists, BEFORE finalize. A crash before finalize
 //!      re-drives by finalizing THAT draft (which carries the real items) rather
@@ -49,7 +49,7 @@
 //!
 //! Zero tokio: a `compio::time` interval; `compio-postgres`; `cyper` Stripe.
 //! Multi-instance safety: a `pg_try_advisory_lock` around the sweep (the same
-//! pattern PR5's `spend_reconcile` uses) so two control replicas don't
+//! pattern `spend_reconcile` uses) so two control replicas don't
 //! double-bill.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -350,12 +350,11 @@ pub fn period_settled(
 
 /// Deterministic Stripe `Idempotency-Key` for the per-SEGMENT invoice-ITEM create.
 /// Stable for a fixed `(creator, app, period, segment_no)` so a retry replays the
-/// same item. round 4, CRITICAL-1: the key includes `segment_no` — an app posts
-/// N+1 items in a period (one per plan segment), and a segment-blind key would
-/// dedup them to a SINGLE Stripe item (only segment 0 posts, the rest silently
-/// dropped — an under-bill). The N=0 degenerate path passes `segment_no = 0`, so
-/// its key is `billitem:{creator}:{app}:{period}:0` — a stable superset of the
-/// pre-PR-4 shape (the `:0` suffix is the only change).
+/// same item. The key includes `segment_no` because an app posts N+1 items in a
+/// period (one per plan segment), and a segment-blind key would deduplicate them
+/// to a SINGLE Stripe item (only segment 0 would post, silently under-billing).
+/// The N=0 degenerate path passes `segment_no = 0`, so its key is
+/// `billitem:{creator}:{app}:{period}:0`, with segment 0 encoded explicitly.
 #[must_use]
 pub fn invoice_item_idempotency_key(
     creator_id: &Uuid,
@@ -1561,12 +1560,12 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
         }
     };
 
-    // CRIT-1 (claim-then-call): the per-SEGMENT `invoice_lines` row is the DURABLE
-    // double-bill guard, and the DURABLE INTENT (the line + its frozen snapshot)
+    // The per-SEGMENT `invoice_lines` row is the DURABLE double-bill guard, and
+    // the DURABLE INTENT (the line + its frozen snapshot)
     // must PRECEDE the irreversible Stripe POST. Presence of a
-    // `billing_line_provider_refs` row (a real composite FK → the line) == old
-    // `stripe_item_id NOT NULL`. round 4, CRITICAL-1: post-`0051` the guards are
-    // keyed `(app_id, segment_no)` — keyed by `app_id` ALONE, N segments of an app
+    // `billing_line_provider_refs` row (a real composite FK → the line) marks
+    // the Stripe item as posted. The guards are keyed `(app_id, segment_no)`;
+    // keyed by `app_id` ALONE, N segments of an app
     // would collide to ONE Stripe item and only segment 0 would post (under-bill).
     let posted_rows = conn
         .query(
@@ -2194,8 +2193,8 @@ mod tests {
             invoice_item_idempotency_key(&creator, &app_a, p, 0),
             invoice_item_idempotency_key(&creator, &app_a, p + 1, 0),
         );
-        // round 4, CRITICAL-1: distinct per SEGMENT — else N segments collide to
-        // one Stripe item and only segment 0 posts (under-bill).
+        // Distinct per SEGMENT; otherwise N segments collide into one Stripe
+        // item and only segment 0 posts (under-bill).
         assert_ne!(
             invoice_item_idempotency_key(&creator, &app_a, p, 0),
             invoice_item_idempotency_key(&creator, &app_a, p, 1),
@@ -2380,7 +2379,7 @@ mod tests {
 
     // -- injected-StripeApi unit (no PG): prove the trait seam records the
     //    invoice-item lines + the deterministic keys a sweep would emit, using a
-    //    recording fake instead of the cyper client. (blueprint PR6 (d) unit.)
+    //    recording fake instead of the cyper client.
 
     use std::cell::RefCell;
 

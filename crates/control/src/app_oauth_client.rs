@@ -1,20 +1,20 @@
-//! Per-app brokered OAuth client lifecycle (auth-sdk Slice 1d, spec §1.1).
+//! Per-app brokered OAuth client lifecycle.
 //!
 //! Each hosted creator app gets its own stable `oac_<base62-app-id>` OAuth
 //! client. The platform OP treats these clients as gateway-brokered: app code
 //! and browsers never hold a client secret, while the gateway derives and
 //! presents the per-app broker secret from the shared platform broker master.
 //!
-//! Storage (spec §1.1 round-5): the client identity lives in the EXISTING
-//! `control.oauth_clients` (the `control.oauth_grants` FK target + the
+//! The client identity lives in the EXISTING
+//! `zeroship.oauth_clients` (the `zeroship.oauth_grants` FK target + the
 //! `skip_consent` flag the consent fast path reads), written exactly like
 //! `bootstrap_builder.rs::insert_oauth_client` does for the builder client.
-//! `control.app_oauth_clients` is a thin per-app extension carrying only the
+//! `zeroship.app_oauth_clients` is a thin per-app extension carrying only the
 //! `app_id ↔ client_id` link and the `sector_identifier` (apex origin) for
 //! pairwise/relay scoping. `ensure_app_client` writes BOTH rows in one
 //! transaction.
 //!
-//! redirect_uris (§1.1): `{scheme}://{host}/__zeroship/auth/popup-callback` AND
+//! Redirect URIs: `{scheme}://{host}/__zeroship/auth/popup-callback` AND
 //! `{scheme}://{host}/__zeroship/auth/callback` for every host the app serves (apex +
 //! custom domains). Reconciled idempotently from the native DB row — the desired
 //! set is computed on every change and a no-op deploy makes no DB change. The set
@@ -29,23 +29,23 @@
 //! wholesale — a race cannot drop, duplicate, or unboundedly grow URIs (the merge
 //! in [`ensure_app_client`] is set-union + dedup + cap). It is NOT a
 //! serialization guarantee: two writers with different host sets race to a
-//! last-writer-wins outcome. Once custom-domain attach lands (see "Scope"
-//! below), a concurrent apex-deploy + domain-attach with *stale* host snapshots
-//! would need a per-app advisory lock to avoid one clobbering the other's
-//! just-added host; until then every writer's input is apex-only so the union is
-//! convergent.
+//! last-writer-wins outcome. Once custom-domain attach lands (see "Current host
+//! coverage" below), a concurrent apex-deploy + domain-attach with *stale* host
+//! snapshots would need a per-app advisory lock to avoid one clobbering the
+//! other's just-added host; until then every writer's input is apex-only so the
+//! union is convergent.
 //!
-//! ## Scope (Slice 1d vs. Slice N)
+//! ## Current host coverage
 //!
-//! Slice 1d ships **apex-host-only** provisioning end-to-end: `create` and
-//! `deploy` both call [`ensure_app_client`] with a single apex host
+//! **Apex-host-only** provisioning is wired end-to-end: `create` and `deploy`
+//! both call [`ensure_app_client`] with a single apex host
 //! (`{name}.{app_base_domain}`). The multi-host surface —
 //! [`sync_app_redirect_uris`], [`MAX_HOSTS`], the >1-host branch of
-//! [`redirect_uris_for_hosts`], and the `≤102` cap — is **Slice-N-deferred**:
-//! there is no custom-domain attach handler in the codebase yet, so these are
-//! not yet wired to a production caller. They are kept (and unit-tested) because
-//! the custom-domain attach path (a future slice) will call
-//! [`sync_app_redirect_uris` ] / a multi-host [`ensure_app_client`] directly.
+//! [`redirect_uris_for_hosts`], and the `≤102` cap — is not yet wired to a
+//! production caller because there is no custom-domain attach handler in the
+//! codebase. These helpers are kept and unit-tested so a custom-domain attach
+//! path can call [`sync_app_redirect_uris`] or a multi-host
+//! [`ensure_app_client`] directly.
 //! To keep apex-only deploys from clobbering URIs a future attach path adds,
 //! [`ensure_app_client`] is **non-destructive**: it UNIONs the incoming
 //! (apex) URIs with any URIs already on the native client row rather than
@@ -61,21 +61,21 @@ use zeroship_core::typed_id::{app_oauth_client_id, APP_OAUTH_CLIENT_PREFIX};
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
 /// (popup-callback + callback) the redirect_uri array is bounded at
-/// `2 * (1 + 50) = 102` (apex host + up to 50 custom domains). Spec §1.1.
+/// `2 * (1 + 50) = 102` (apex host + up to 50 custom domains).
 pub const MAX_HOSTS: usize = 51;
 
 /// Hard upper bound on the redirect_uri array stored for a per-app
-/// client: 2 per host × [`MAX_HOSTS`]. Spec §1.1 ("≤102 redirect_uris").
+/// client: 2 per host × [`MAX_HOSTS`].
 pub const MAX_REDIRECT_URIS: usize = MAX_HOSTS * 2;
 
 /// Baseline scope allowlist for every per-app client. App-declared custom
-/// scopes are appended by Subsystem 3 (Slice 3); the baseline always includes
+/// scopes are appended to it; the baseline always includes
 /// `openid` + `offline_access` (refresh tokens) + `profile` + `email`.
 pub const BASE_SCOPE: &str = "openid offline_access profile email";
 
 /// The OAuth `client_id` prefix for per-app clients. Re-exported from
 /// `zeroship_core::typed_id` — the SINGLE source of truth shared with the auth
-/// consent classifier's decoder, so the two can never drift (spec §1.1 round-5).
+/// consent classifier's decoder, so the two can never drift.
 /// Distinct from the `app_` *entity* typed_id namespace on purpose: the OAuth
 /// `client_id` is a derived identifier, not a typed_id.
 pub const APP_CLIENT_PREFIX: &str = APP_OAUTH_CLIENT_PREFIX;
@@ -93,7 +93,7 @@ pub enum AppOauthClientError {
     /// No hosts at all — a per-app client must have at least one redirect host.
     NoHosts,
     /// A declared `auth.scopes` id is malformed or collides with the closed
-    /// platform-delegated vocabulary / a reserved identity scope (spec §5.1).
+    /// platform-delegated vocabulary / a reserved identity scope.
     InvalidScope { id: String, reason: String },
 }
 
@@ -210,10 +210,10 @@ pub fn validate_app_scopes(scopes: &[ScopeDef]) -> Result<()> {
     Ok(())
 }
 
-/// Build the per-app client `scope` allowlist string (spec §5.1):
+/// Build the per-app client `scope` allowlist string:
 /// `"openid offline_access profile email " + declared ids`, deduped and
 /// order-stable (baseline first, then declared ids in manifest order). This is
-/// the exact value written to the `control.oauth_clients.scopes` mirror.
+/// the exact value written to the `zeroship.oauth_clients.scopes` mirror.
 ///
 /// Caller MUST have run [`validate_app_scopes`] first — a declared id here can
 /// never duplicate a baseline scope (the validator rejects the reserved
@@ -351,13 +351,13 @@ fn generate_client_secret_hash() -> String {
 // ---------------------------------------------------------------------------
 
 /// Idempotently create-or-sync the per-app client and persist the
-/// `control.oauth_clients` row + `control.app_oauth_clients` extension row.
+/// `zeroship.oauth_clients` row + `zeroship.app_oauth_clients` extension row.
 ///
-/// Spec §1.1 lifecycle: called on app **create** AND on **deploy**. Slice 1d
-/// always passes the single apex host (`{name}.{app_base_domain}`); the
-/// multi-host / custom-domain reconciliation surface is Slice-N-deferred (see
-/// the module-level "Scope" doc and [`sync_app_redirect_uris`]). The DB rows
-/// are upserted so a re-run is a no-op.
+/// Called on app **create** AND on **deploy**. Those paths pass the single apex
+/// host (`{name}.{app_base_domain}`); the multi-host / custom-domain
+/// reconciliation surface is not yet wired (see the module-level "Current host
+/// coverage" doc and [`sync_app_redirect_uris`]). The DB rows are upserted so a
+/// re-run is a no-op.
 ///
 /// **Non-destructive on re-provision.** This is an additive, set-union path: the
 /// reconcile UNIONs the incoming (apex) URIs with whatever is already on the
@@ -370,25 +370,23 @@ fn generate_client_secret_hash() -> String {
 /// `hosts[0]` is treated as the apex host (sector + BCL + post-logout origin);
 /// all hosts contribute redirect_uris.
 ///
-/// **Declared scopes (Slice 3, spec §5.1 O8 mirror).** `declared_scopes` are
-/// the app's manifest `auth.scopes`. They are validated ([`validate_app_scopes`]
+/// **Declared scopes.** `declared_scopes` are the app's manifest `auth.scopes`.
+/// They are validated ([`validate_app_scopes`]
 /// — format + platform-vocab collision) BEFORE any DB write, then mirrored
-/// ATOMICALLY: `control.oauth_clients.scopes` is set to `"openid offline_access
-/// profile email " + declared ids`, and `control.app_scope_defs` is replaced
+/// ATOMICALLY: `zeroship.oauth_clients.scopes` is set to `"openid offline_access
+/// profile email " + declared ids`, and `zeroship.app_scope_defs` is replaced
 /// with the declared set — both in the same control-plane transaction as the
 /// client rows.
 /// Pass `&[]` for an app declaring no custom scopes (the baseline allowlist).
 ///
-/// **`first_party` / `skip_consent` (spec §5.2 + the first-party-console
-/// exception).** Every creator app passes `first_party = false` ⇒
-/// `skip_consent = false`: the consent prompt MUST fire (the single grant
-/// ledger depends on it). Spec §5.2's "per-app clients NEVER skip consent"
-/// targets THIRD-PARTY creator apps. The ONE deliberate, narrow exception is
-/// the platform's own **first-party console**, which passes
+/// **`first_party` / `skip_consent`.** Every creator app passes
+/// `first_party = false` ⇒ `skip_consent = false`: the consent prompt MUST fire
+/// (the single grant ledger depends on it). The ONE deliberate, narrow
+/// exception is the platform's own **first-party console**, which passes
 /// `first_party = true` ⇒ `skip_consent = true` (see
 /// [`crate::bootstrap_console`]) — a consent prompt for the platform's own
 /// surface is meaningless. This exception applies ONLY to the console, NEVER to
-/// creator apps. The flag is mirrored to `control.oauth_clients.skip_consent`
+/// creator apps. The flag is mirrored to `zeroship.oauth_clients.skip_consent`
 /// in the same transaction as the client rows.
 ///
 /// # Errors
@@ -495,10 +493,10 @@ pub async fn sync_app_redirect_uris(
     }
 }
 
-/// Upsert the `control.oauth_clients` identity row, the
-/// `control.app_oauth_clients` extension row, AND the `control.app_scope_defs`
-/// declared-scope registry — all in ONE transaction (spec §8.1 / §5.1 O8
-/// mirror). The `oauth_clients.scopes` mirror and the `app_scope_defs` rows are
+/// Upsert the `zeroship.oauth_clients` identity row, the
+/// `zeroship.app_oauth_clients` extension row, AND the `zeroship.app_scope_defs`
+/// declared-scope registry — all in ONE transaction. The
+/// `oauth_clients.scopes` mirror and the `app_scope_defs` rows are
 /// derived from the SAME validated `scope_allowlist` / `declared_scopes`, so
 /// the mirror and the registry can never disagree — which is what keeps the
 /// consent classifier sound.
@@ -533,9 +531,9 @@ async fn upsert_db_rows(
         .await
         .map_err(db_error)?;
 
-    // control.oauth_clients — the FK target + skip_consent reader.
+    // zeroship.oauth_clients — the FK target + skip_consent reader.
     // `skip_consent` is FALSE for every creator (per-app end-user) client
-    // (spec §5.2), TRUE only for the platform's own first-party console
+    // and TRUE only for the platform's own first-party console
     // (`first_party`). `scopes` mirrors the baseline + declared allowlist.
     tx.execute(
         "INSERT INTO zeroship.oauth_clients \
@@ -567,7 +565,7 @@ async fn upsert_db_rows(
     .await
     .map_err(db_error)?;
 
-    // control.app_oauth_clients — the per-app extension (app link + sector).
+    // zeroship.app_oauth_clients — the per-app extension (app link + sector).
     tx.execute(
         "INSERT INTO zeroship.app_oauth_clients \
             (app_id, client_id, sector_identifier) \
@@ -580,7 +578,7 @@ async fn upsert_db_rows(
     .await
     .map_err(db_error)?;
 
-    // control.app_scope_defs — REPLACE the declared-scope registry for this app
+    // zeroship.app_scope_defs — REPLACE the declared-scope registry for this app
     // wholesale (delete-then-insert): a deploy that drops a previously-declared
     // scope must remove its row, so the registry exactly tracks the current
     // manifest. Same transaction ⇒ atomic with the allowlist mirror above.
@@ -606,9 +604,9 @@ async fn upsert_db_rows(
     Ok(())
 }
 
-/// Refresh just the `control.oauth_clients.redirect_uris` mirror after a
-/// redirect sync (the single source of truth for redirect_uris is the
-/// `oauth_clients` row, spec §8.1).
+/// Refresh just the `zeroship.oauth_clients.redirect_uris` mirror after a
+/// redirect sync. The `oauth_clients` row is the single source of truth for
+/// redirect URIs.
 async fn update_redirect_uri_mirror(
     pg: &Client,
     client_id: &str,
@@ -818,13 +816,13 @@ mod tests {
         );
     }
 
-    // ── declared-scope validation (spec §5.1) ───────────────────────────────
+    // Declared-scope validation
 
     #[test]
     fn validate_rejects_platform_vocab_collision() {
         // billing:read is in the closed Scope::parse vocabulary — it MUST be
-        // rejected even though it is a well-formed verb:resource id (the
-        // round-1 hole this guard closes).
+        // rejected even though it is a well-formed verb:resource id; this guard
+        // closes that platform-vocabulary collision.
         let scopes = vec![ScopeDef {
             id: "billing:read".to_string(),
             label: "x".to_string(),

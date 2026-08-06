@@ -1,14 +1,13 @@
-//! Plan catalog — the operator-editable, server-side pricing catalog
-//! (billing PR4, closes CT-A1).
+//! Plan catalog — the operator-editable, server-side pricing catalog.
 //!
 //! Replaces the free-text, self-escalatable `plan_id`: every plan is a row in
 //! `zeroship.plans` keyed by a `pln_<base62>` typed id, and `apps.plan_id` is
-//! an FK into it (added by changeset 0038). An app can no longer pick an
+//! an FK into it. An app cannot pick an
 //! unpriced or oversized plan — the FK + the [`Registry`]'s existence check
 //! reject any id that is not a real, unarchived plan.
 //!
 //! The catalog is a GLOBAL operator config (not tenant-scoped) — `plans` has no
-//! RLS; control is `BYPASSRLS`. Under billing-v2 compute-unit pricing the price
+//! RLS; control is `BYPASSRLS`. Under compute-unit pricing the price
 //! model is SCALAR (`included_units` + a nullable per-plan FX) — read back into
 //! the pure [`crate::pricing::PlanPrice`]; only `runtime_limits_json` stays
 //! JSONB ([`AppRuntimeLimits`]).

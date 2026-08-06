@@ -1,15 +1,15 @@
-//! Regression tests for the billing-schema redesign (Phase B), changes 5/6/9:
+//! Regression tests for the current billing-schema invariants:
 //!
-//!   (5a) the invoice balance CHECK rejects a NON-atomic finalize — writing
-//!        `subtotal` then `total` in two statements is rejected, proving finalize
-//!        MUST be one UPDATE (the under-bill-window guard).
-//!   (5b) re-running `charge_cents` over a finalized line's frozen snapshot
-//!        reproduces `amount_cents` BIT-FOR-BIT (the reproducibility fix).
-//!   (6)  the Native `invoice` verb's `lookup_invoice_id` resolves the finalized
-//!        id via `invoices ⋈ billing_provider_refs` after the relocation.
-//!   (9)  the immutability triggers: a finalized invoice rejects any non-void
-//!        UPDATE; its lines reject UPDATE/DELETE; the only legal invoice
-//!        transition is finalized→void.
+//!   * The invoice balance CHECK rejects a NON-atomic finalize — writing `subtotal`
+//!     then `total` in two statements is rejected, proving finalize MUST be one
+//!     UPDATE (the under-bill-window guard).
+//!   * Re-running `charge_cents` over a finalized line's frozen snapshot reproduces
+//!     `amount_cents` BIT-FOR-BIT.
+//!   * The finalized Stripe invoice id resolves via
+//!     `invoices ⋈ billing_provider_refs`.
+//!   * The immutability triggers reject any non-void UPDATE of a finalized invoice
+//!     and reject mutations of its lines; the only legal invoice transition is
+//!     finalized→void.
 //!
 //! FAITHFUL by construction: every assertion runs against a live, migrated
 //! Postgres (the REAL `invoices`/`invoice_lines`/`billing_provider_refs` tables +
@@ -249,12 +249,11 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
 }
 
 // ---------------------------------------------------------------------------
-// (6) The Native `invoice` verb's id resolution after the relocation: the
-//     finalized provider id lives on `billing_provider_refs`, resolved via the
-//     `invoices ⋈ billing_provider_refs (finalized, provider='stripe',
-//     ref_kind='invoice')` join — NOT on a `billing_runs.stripe_invoice_id`
-//     column (which no longer exists). This is the exact query
-//     `native.rs::lookup_invoice_id` runs.
+// Finalized Stripe invoice id resolution: the provider id lives on
+// `billing_provider_refs` and is resolved through the finalized
+// `invoices ⋈ billing_provider_refs` row for `provider='stripe'` and
+// `ref_kind='invoice'`. `billing_reconcile::lookup_invoice_id_for_registry`
+// uses this same join.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
@@ -283,7 +282,7 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
         .await
         .expect("insert provider invoice ref");
 
-    // The exact resolution `lookup_invoice_id` performs.
+    // The exact resolution `lookup_invoice_id_for_registry` performs.
     let resolved: Option<String> = client
         .query(
             "SELECT r.external_id \

@@ -20,17 +20,17 @@ use crate::GateState;
 #[derive(Debug)]
 pub(crate) enum AuthOutcome {
     /// Policy is `Anon` (request passes without identity) OR the
-    /// policy required `User`/`Admin` and the session cookie validated.
-    /// `user_header` is `Some(...)` whenever a session was actually
+    /// policy required `User`/`Admin` and a user credential validated.
+    /// `user_header` is `Some(...)` whenever identity was actually
     /// resolved — even on `Anon` resources, so the worker can still
     /// see the authenticated user when present.
     Allowed { user_header: Option<String> },
-    /// Policy required `User`/`Admin` and no valid session was found.
+    /// Policy required `User`/`Admin` and no valid user credential was found.
     /// Caller decides between a 401 (API) and a 302 → op (HTML).
     Unauthenticated,
     /// A request resolved a real user (cookie / raw OP Bearer)
     /// but the route has no `sector_identifier` yet, so the gateway CANNOT
-    /// derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2). We FAIL
+    /// derive the per-app pairwise `pws_…`. We FAIL
     /// CLOSED — never project the global UUID into `ZeroShip-User.id` — and
     /// answer `503 client_not_provisioned`, the same retryable posture the
     /// browser-token path uses (`auth_token.rs`). The SDK keeps its
@@ -38,7 +38,7 @@ pub(crate) enum AuthOutcome {
     ClientNotProvisioned,
     /// The request authenticated successfully (any arm), but the matched
     /// route declares `required_scopes` the principal's granted `scopes`
-    /// do NOT cover (auth-sdk Slice 3c, §5.3 / RFC 6750 §3.1). Distinct
+    /// do NOT cover (RFC 6750 §3.1). Distinct
     /// from `Unauthenticated`: identity is fine, the *grant* is too
     /// narrow. The caller answers `403 scope_required` (JSON body) with a
     /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge and
@@ -139,26 +139,22 @@ async fn family_revocation_decision(
     }
 }
 
-/// Resolve the per-request auth gate. Returns `Allowed` when the
-/// resource policy is satisfied, `Unauthenticated` otherwise. The
-/// caller layers the HTML-vs-API response decision on top.
+/// Resolve the per-request auth gate and protected-route scope requirements.
+/// A raw OP Bearer token is evaluated before the signed session cookie; either
+/// credential can produce the HMAC-signed `ZeroShip-User` header forwarded to
+/// the worker. Recognized but invalid user-session Bearers may continue without
+/// identity on anonymous routes, while protected routes fail closed. Other
+/// Bearer schemes are rejected on every route.
 ///
-/// Flow:
-///   1. Look for `__Host-zeroship_app_session` cookie.
-///   2. If present + DB configured + validate succeeds → resolved
-///      user. Header is the HMAC-signed payload the worker expects.
-///   3. If `policy.auth == Anon` we return `Allowed` regardless of
-///      whether the cookie validated (anonymous resources don't
-///      require a session, but a present session still produces a
-///      `ZeroShip-User` so the worker sees the user when available).
-///   4. If `policy.auth == User|Admin` and no session resolved →
-///      `Unauthenticated`.
+/// Without a Bearer credential, the gateway verifies the signed session cookie
+/// locally and applies the same-origin anti-CSRF gate to state-changing requests.
+/// When a database is configured, the per-app family revocation marker is checked
+/// through the read-through cache. With no database, only that revocation check is
+/// skipped; signature, issuer, expiry, key id, and app binding are still verified.
 ///
-/// Dev / test fallthrough: when `state.db` is `None` the gateway has no
-/// way to validate sessions. `Anon` resources still pass; `User`/`Admin`
-/// resources are gated to `Unauthenticated`. (The legacy `auth_secret`
-/// empty-string fall-open is removed — Phase 3 made the gateway the
-/// authoritative auth checker.)
+/// Anonymous routes allow a request without resolved identity. `User` and `Admin`
+/// routes require one, and any declared `required_scopes` must be covered by the
+/// authenticated principal's scopes.
 pub(crate) async fn resolve_auth(
     req: &HttpRequest,
     state: &Arc<GateState>,
@@ -178,11 +174,11 @@ pub(crate) async fn resolve_auth(
     )
     .await;
 
-    // Route-level scope enforcement (auth-sdk Slice 3c, §5.3 / RFC 6750
-    // §3.1). The matched route's `required_scopes` (compiled from the
+    // Route-level scope enforcement follows RFC 6750 §3.1. The matched
+    // route's `required_scopes` (compiled from the
     // manifest, unioned along the inheritance chain) gate an AUTHENTICATED
     // principal ONLY: once an arm resolved a `ZeroShip-User` header, the
-    // principal's granted `scopes` (Slice 3a — encoded in that header) MUST
+    // principal's granted `scopes`, encoded in that header, MUST
     // be a superset, else `403 scope_required`. An UNAUTHENTICATED request
     // never reaches this gate — `Unauthenticated`/`ClientNotProvisioned`
     // pass through unchanged, gated by the Anon/User/Admin policy first
@@ -198,7 +194,7 @@ pub(crate) async fn resolve_auth(
     // browser whose session lacks a scope inherited from a broad `*`
     // parent would get 403 on public pages a logged-OUT user loads fine. That
     // is the "logged-in is worse than anonymous on public routes" footgun the
-    // round-3 Invalid-Bearer fix removed; scope gating must not re-introduce
+    // Invalid-Bearer fix removed; scope gating must not re-introduce
     // it. Scopes on `*` therefore constrain only the protected (`User`/`Admin`)
     // descendants, exactly like the auth level itself.
     if policy.required_scopes.is_empty()
@@ -235,8 +231,8 @@ fn scopes_satisfied(granted: &[String], required: &[String]) -> bool {
 }
 
 /// Recover the `scopes` vector from a freshly-built `ZeroShip-User`
-/// header (the scope source-of-truth set by whichever arm authenticated,
-/// Slice 3a). Verifies the MAC under the worker key and JSON-parses the
+/// header, the scope source of truth set by whichever arm authenticated.
+/// Verifies the MAC under the worker key and JSON-parses the
 /// `scopes` array — the same path the worker uses. A verify/parse failure
 /// yields `[]`, which fails the scope gate closed (a route demanding a
 /// scope rejects an unreadable principal rather than waving it through).
@@ -270,7 +266,7 @@ async fn resolve_auth_inner(
 ) -> AuthOutcome {
     use zeroship_bundle::AuthLevel;
 
-    // 1. Bearer arm (§1.3, slice 1c). Ordered BEFORE the cookie arm.
+    // 1. Bearer arm. Ordered BEFORE the cookie arm.
     //    Serves NON-BROWSER OAuth clients (CLI /
     //    server-to-server) presenting a raw OP access JWT; the SPA uses
     //    the signed session cookie, not Bearer. Discriminates the raw OP
@@ -298,7 +294,7 @@ async fn resolve_auth_inner(
         }
         BearerOutcome::ClientNotProvisioned => {
             // A valid raw OP Bearer user, but no sector_identifier yet ⇒
-            // cannot derive the per-app pws_. Fail closed (§6.2).
+            // cannot derive the per-app pws_. Fail closed.
             return AuthOutcome::ClientNotProvisioned;
         }
         BearerOutcome::NotUserSession => {
@@ -311,7 +307,7 @@ async fn resolve_auth_inner(
             AuthLevel::Anon => {
                 return AuthOutcome::Allowed { user_header: None };
             }
-            // INTENTIONAL (round-3 decision): on a `User`/`Admin` route an
+            // INTENTIONAL: on a `User`/`Admin` route an
             // Invalid Bearer 401s and
             // does NOT fall through to the cookie arm — even if the request
             // also carries a valid cookie session. A client that presented
@@ -440,14 +436,14 @@ fn cookie_csrf_rejected(req: &HttpRequest, insecure_dev: bool) -> bool {
     false
 }
 
-/// Outcome of projecting a global user id to its per-app pairwise `pws_…`
-/// (auth-sdk Slice 4, §6.2). Either the route is provisioned with a
+/// Outcome of projecting a global user id to its per-app pairwise `pws_…`.
+/// Either the route is provisioned with a
 /// `sector_identifier` (and we derived + persisted the `pws_`), or it is
 /// not — in which case the caller MUST fail closed (`503
 /// client_not_provisioned`) rather than ever leak the global UUID.
 enum PairwiseProjection {
     /// The derived per-app `pws_…` subject + the per-app relay alias (the
-    /// email-claim swap, §7). The global UUID never appears in `pws` (HMAC of
+    /// email-claim swap). The global UUID never appears in `pws` (HMAC of
     /// the UUID under the platform salt); `relay_email` is the app-facing
     /// `email` claim — `None` when no ACTIVE alias exists, in which case the
     /// caller FAILS CLOSED on the email (emits empty), NEVER the real address.
@@ -456,7 +452,7 @@ enum PairwiseProjection {
         /// The active relay alias for this `(app, user)`, or `None` when no
         /// alias is minted / it is revoked. The caller substitutes this for
         /// the real email and emits empty when it is `None` — the real email
-        /// must NEVER reach an app (§7).
+        /// must NEVER reach an app.
         relay_email: Option<String>,
     },
     /// No `sector_identifier` on the route yet ⇒ no `pws_` derivation
@@ -467,7 +463,7 @@ enum PairwiseProjection {
 /// Derive the per-app pairwise `pws_…` for `global_user_id` under the
 /// route's `sector_identifier`, and idempotently UPSERT the mapping into
 /// `zeroship.app_user_identities` so support tooling / the relay handler /
-/// revocation can reverse `pws_ → (app, global_user)` (§6.2/§6.3).
+/// revocation can reverse `pws_ → (app, global_user)`.
 ///
 /// Fail-closed contract: returns [`PairwiseProjection::Unprovisioned`]
 /// when the route has no `sector_identifier` (the caller answers `503`),
@@ -481,7 +477,7 @@ enum PairwiseProjection {
 /// two writes/reads and release it on drop — never held across an outbound
 /// HTTP call.
 ///
-/// ## Email-claim swap (§7)
+/// ## Email-claim swap
 ///
 /// In the SAME checkout that upserts the pairwise mapping, this reads the
 /// ACTIVE relay alias (`relay_email`, `revoked_at IS NULL`) for
@@ -502,10 +498,10 @@ async fn project_pairwise(
     let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
 
     // Persist the (app_client_id, global_user_id) → pws_ mapping AND read the
-    // active relay alias, both keyed on the per-app oac_ client_id (§6.2), in
+    // active relay alias, both keyed on the per-app oac_ client_id, in
     // ONE pooled checkout. The UPSERT is best-effort (log-and-continue: the
     // pws_ is already projected). The relay-alias read is the email-swap
-    // source (§7): a read failure leaves `relay_email = None`, so the caller
+    // source: a read failure leaves `relay_email = None`, so the caller
     // fails closed (empty email) — it NEVER falls back to the real address.
     let mut relay_email = None;
     if let (Some(app_client_id), Some(db_cfg)) = (app_client_id, state.db.as_ref()) {
@@ -523,7 +519,7 @@ async fn project_pairwise(
                             );
                         }
                         // Email-claim swap: read the active alias for this
-                        // (app, user). None ⇒ caller emits empty email (§7).
+                        // (app, user). None ⇒ caller emits empty email.
                         match crate::identities::lookup_relay_email(&mut conn, app_client_id, uuid).await
                         {
                             Ok(alias) => relay_email = alias,
@@ -570,7 +566,7 @@ enum BearerOutcome {
     NotUserSession,
     /// A valid raw OP Bearer user, but the route has no
     /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
-    /// Fail closed (`503`) rather than project the global UUID (§6.2).
+    /// Fail closed (`503`) rather than project the global UUID.
     ClientNotProvisioned,
     /// No `Authorization: Bearer` header. Fall through to the cookie arm.
     NotBearer,
@@ -599,7 +595,7 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 }
 
 /// Resolve the `ZeroShip-User` header from an `Authorization: Bearer`
-/// access token (§1.3, slice 1c). This serves **non-browser** OAuth clients
+/// access token. This serves **non-browser** OAuth clients
 /// (CLI / server-to-server) that present a RAW OP access JWT; the SPA
 /// uses the signed session cookie, not Bearer.
 ///
@@ -614,10 +610,10 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// **Per-app binding** is the critical safety property: a token minted
 /// for app A must be rejected at app B's host. `oauth_client_id` is the
 /// matched route's expected client. When it is `None` (the app is not
-/// yet provisioned — 1d fills it), a raw OP token cannot be bound to a
+/// yet provisioned), a raw OP token cannot be bound to a
 /// missing client and yields `Invalid`.
 ///
-/// **Revocation** is the spec §8.5 PER-APP family marker
+/// **Revocation** uses the per-app family marker
 /// (`zeroship.token_revocations`, keyed on `(client_id, sub)` with `sub` as
 /// TEXT). The arm rejects a token when a row exists for its
 /// `(client_id, pws_)` with `revoked_after > token.iat`; `sub` being TEXT
@@ -625,8 +621,8 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// subject denylist could not). Per-app scoping means a revocation on app A
 /// leaves the same user's tokens on app B valid.
 ///
-/// Pairwise projection (Slice 4, §6.2): the RAW-OP path's `sub` is the
-/// GLOBAL OP UUID, so it is projected to the per-app `pws_` via
+/// Pairwise projection: the RAW-OP path treats `sub` as the global OP UUID
+/// and projects it to the per-app `pws_` via
 /// [`project_pairwise`] before encoding the header (and the mapping row is
 /// upserted). The arm fails closed ([`BearerOutcome::ClientNotProvisioned`]
 /// → `503`) when the route has no `sector_identifier` yet, so the global
@@ -713,13 +709,12 @@ async fn resolve_bearer_user_header(
             tracing::warn!("raw OP Bearer token missing sub — rejecting");
             return BearerOutcome::Invalid;
         }
-        // Project the per-app pairwise `pws_` FIRST (§6.2), then key the
+        // Project the per-app pairwise `pws_` FIRST, then key the
         // revocation check on it — the marker WRITERS (/signout + control's
         // disconnect-app cascade) key `zeroship.token_revocations` on
-        // `(client_id, pws_)`, NOT the global OP UUID, so the reader MUST
-        // agree (Batch A fix 3). Pre-fix this arm keyed the lookup on the
-        // global `claims.sub` while the writer keyed on `pws_`, so a real
-        // revocation never matched a still-live raw OP token.
+        // `(client_id, pws_)`, NOT the global OP UUID. This branch therefore
+        // treats `claims.sub` as global and derives a `pws_` before lookup;
+        // querying the raw subject directly could never match those markers.
         //
         // The pairwise derivation needs the route's `sector_identifier`; with
         // no sector we cannot derive the `pws_` (and would never reach the
@@ -728,14 +723,11 @@ async fn resolve_bearer_user_header(
         let Some(sector) = sector_identifier else {
             return BearerOutcome::ClientNotProvisioned;
         };
-        // `derive_pairwise` canonicalizes a UUID `sub` to its hyphenated-
-        // lowercase form before hashing (Batch A M1), so the `pws_` this reader
-        // computes from the RAW OP `claims.sub` is byte-identical to the
-        // marker the canonical-form writers (`/signout`, control cascade) wrote
-        // — even if OP emitted a non-canonical sub spelling.
+        // This branch expects a UUID `sub`; `derive_pairwise` canonicalizes its
+        // spelling before hashing.
         let pws_sub =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &claims.sub, sector);
-        // Cross-node PER-APP family-marker revocation (spec §8.5). Keyed on
+        // Cross-node per-app family-marker revocation. Keyed on
         // `(expected_client_id, pws_sub)` — the SAME `(client_id, pws_)` shape
         // the writers use. Per-app: revoking this user on app A leaves their
         // raw OP access on app B valid (app B's `pws_` differs). We key on
@@ -743,8 +735,8 @@ async fn resolve_bearer_user_header(
         // above proved the token agrees and the marker is written against the
         // route's client.
         if let Some(db_cfg) = state.db.as_ref() {
-            // Routed through the short-TTL read-through `revocation_cache`
-            // (R1d) — same as the cookie arm. A fresh hit decides
+            // Routed through the short-TTL read-through `revocation_cache`,
+            // the same as the cookie arm. A fresh hit decides
             // locally with no DB round-trip; a miss loads + caches the marker.
             match family_revocation_decision(
                 state,
@@ -768,8 +760,8 @@ async fn resolve_bearer_user_header(
                 RevocationDecision::Unavailable => return BearerOutcome::Invalid,
             }
         }
-        // Slice 4 (§6.2): the raw OP `sub` is the GLOBAL OP UUID —
-        // project it to the per-app `pws_` (and upsert the mapping + read the
+        // This branch treats the raw OP `sub` as the global OP UUID and
+        // projects it to the per-app `pws_` (and upserts the mapping + reads the
         // live relay alias) before the header is built, so the worker never
         // sees the global id. `expected_client_id` is the route's bound oac_
         // client (the binding above proved the token agrees), so the mapping
@@ -787,7 +779,7 @@ async fn resolve_bearer_user_header(
         {
             PairwiseProjection::Projected { pws, relay_email } => {
                 owned.id = pws;
-                // Email-claim swap (§7): project the relay alias, never the
+                // Email-claim swap: project the relay alias, never the
                 // real email. No active alias ⇒ empty (fail closed).
                 owned.email = relay_email.unwrap_or_default();
             }
@@ -810,9 +802,9 @@ async fn resolve_bearer_user_header(
 
 /// Materialise a `WorkerUser` from a verified raw OP access JWT.
 ///
-/// `id` is the raw `sub` (the GLOBAL OP UUID) here; the caller
-/// ([`resolve_bearer_user_header`]) projects it to the per-app `pws_`
-/// via [`project_pairwise`] (Slice 4, §6.2) BEFORE the header is built,
+/// `id` is the raw `sub` here. [`resolve_bearer_user_header`] treats it as the
+/// global OP UUID and projects it to the per-app `pws_`
+/// via [`project_pairwise`] BEFORE the header is built,
 /// so the global UUID never reaches the worker. The profile fields come
 /// straight from the verified claims.
 fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -> OwnedWorkerUser {
@@ -836,7 +828,7 @@ struct OwnedWorkerUser {
     email: String,
     name: String,
     email_verified: bool,
-    /// Granted scopes (Slice 3, §1.4). Owned here so the borrowed
+    /// Granted scopes. Owned here so the borrowed
     /// `WorkerUser.scopes` can survive through `encode_user_header`.
     scopes: Vec<String>,
 }
@@ -1099,7 +1091,7 @@ mod tests {
     // degrade the worker's view of the authenticated user — covered here.
 
     /// The raw OP Bearer arm carries the app's granted scopes from the
-    /// access-token `scope` claim onto `WorkerUser.scopes` (Slice 3, §1.4), and
+    /// access-token `scope` claim onto `WorkerUser.scopes`, and
     /// they survive the encode → verify → JSON-parse round-trip the worker
     /// performs.
     #[test]
@@ -1296,7 +1288,7 @@ mod tests {
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024)
             .expect("disk cache");
 
-        // BFF R1b — the signed session-cookie issuer/verifier from the key.
+        // The signed session-cookie issuer/verifier comes from the configured key.
         let session_issuer =
             crate::session_token::Issuer::new(&signing, "https://api.zeroship.ai".into())
                 .expect("session issuer");
@@ -1346,7 +1338,7 @@ mod tests {
         })
     }
 
-    // ─── Bearer arm (slice 1c) ────────────────────────────────────────
+    // ─── Bearer arm ────────────────────────────────────────
     //
     // The Bearer arm sits before the cookie arm. It
     // recognizes a raw OP access JWT (`iss == oidc_rp.issuer`, verified
@@ -1507,8 +1499,8 @@ mod tests {
         policy_with_auth(zeroship_bundle::AuthLevel::User)
     }
 
-    /// A `User` policy that additionally demands `required` scopes
-    /// (auth-sdk Slice 3c, §5.3) — the route-level scope gate.
+    /// A `User` policy that additionally demands `required` scopes, exercising
+    /// the route-level scope gate.
     fn user_policy_requiring(
         required: &[&str],
     ) -> crate::compiled::EffectivePolicy {
@@ -1671,7 +1663,7 @@ mod tests {
         // A present-but-INVALID raw OP user-session Bearer on an `Anon`
         // route must NOT 401 — it falls through to anonymous (a client may
         // auto-attach a Bearer to every request; a stale/invalid one must not
-        // break public pages). round-3. The same invalid Bearer on a `User`
+        // break public pages). The same invalid Bearer on a `User`
         // route is Unauthenticated (401).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -1734,7 +1726,7 @@ mod tests {
         drop(srv);
     }
 
-    // ─── Route-level required-scope enforcement (auth-sdk Slice 3c, §5.3) ──
+    // ─── Route-level required-scope enforcement ──
     //
     // After a principal authenticates (here via a real signed session
     // cookie), the matched route's `required_scopes` gate the GRANT:
@@ -1917,7 +1909,7 @@ mod tests {
 
     #[ntex::test]
     async fn resolve_auth_underscoped_authenticated_on_anon_route_is_allowed() {
-        // REGRESSION (Slice 3c review finding 2): the scope gate must NOT fire
+        // Regression: the scope gate must NOT fire
         // on an `Anon` (public) route. A logged-in browser whose session lacks
         // a scope that a broad `*` parent put into `required_scopes` would
         // otherwise get 403 on the app's own HTML/JS/CSS while a logged-OUT
@@ -1998,7 +1990,7 @@ mod tests {
         // Happy path (raw OP): a real EdDSA-signed access JWT,
         // JWKS-verified against a live JWKS server, with a matching
         // client_id claim → Allowed + ZeroShip-User whose id is the per-app
-        // pairwise pws_ (Slice 4 §6.2 — the global UUID sub is projected,
+        // pairwise pws_; the global UUID sub is projected,
         // never emitted on the worker header).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // OP's key
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]); // gateway wrapper key
@@ -2038,7 +2030,7 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // Slice 4: the raw OP global UUID is projected to the per-app pws_.
+        // The raw OP global UUID is projected to the per-app pws_.
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         assert_eq!(user["id"], expected_pws);
@@ -2051,7 +2043,7 @@ mod tests {
             !json.contains(global_sub),
             "global UUID leaked into ZeroShip-User: {json}"
         );
-        // Slice 5c §7 — email-claim swap: the app NEVER sees the real email.
+        // Email-claim swap: the app NEVER sees the real email.
         // With no DB/alias source here (`build_state_for_op` db=None) the
         // swap fails closed → empty email. The real `user@example.com` (what
         // OP stamped) must be ABSENT from the projected header.
@@ -2435,7 +2427,7 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // Slice 4: the raw OP global UUID is projected to the per-app pws_
+        // The raw OP global UUID is projected to the per-app pws_
         // end-to-end through resolve_auth (the global UUID never reaches the
         // worker header).
         let expected_pws =
@@ -2446,11 +2438,11 @@ mod tests {
         drop(srv);
     }
 
-    // ─── Invalid-Bearer does NOT fall back to a valid cookie (minor) ──────
+    // ─── Invalid Bearer does NOT fall back to a valid cookie ──────
     //
-    // Documents the round-3 decision: on a User/Admin route an Invalid
+    // Documents the behavior: on a User/Admin route an Invalid
     // raw OP Bearer 401s and is NOT silently
-    // rescued by a valid cookie session. DB-free under R1b — the cookie is a
+    // rescued by a valid cookie session. The cookie path is DB-free: it uses a
     // SIGNED `zeroship-sess+jwt` verified locally, so the test mints a real signed
     // cookie (genuinely valid) and proves the Bearer still wins the 401.
     #[ntex::test]
@@ -2540,12 +2532,12 @@ mod tests {
         drop(srv);
     }
 
-    // ─── Cookie-arm required-scope enforcement (Slice 3c review finding 6) ──
+    // ─── Cookie-arm required-scope enforcement ──
     //
     // The single enforcement point in `resolve_auth` is arm-agnostic, but the
     // plain-Bearer scope tests above only verify ONE arm. This pair drives the
     // COOKIE arm — whose scopes now come from the SIGNED cookie's `scopes`
-    // claim (BFF R1b; no DB row) — through the REAL `resolve_auth`. A signed
+    // claim (no DB row) — through the REAL `resolve_auth`. A signed
     // cookie whose scopes cover the route's `required_scopes` is Allowed; one
     // that does not is InsufficientScope (403), proving the gate is not
     // Bearer-only. DB-free (the cookie arm is stateless).
@@ -2633,7 +2625,7 @@ mod tests {
         }
     }
 
-    // ─── Slice 4 — pairwise subject projection (§6.2) ─────────────────────
+    // ─── Pairwise subject projection ─────────────────────
     //
     // These cover the four properties of the consistent `pws_` projection:
     // (1) cross-app divergence (same user, two apps → different pws_);
@@ -2646,7 +2638,7 @@ mod tests {
 
     /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
     /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
-    /// correlation (G4). This is the cross-app divergence property at the
+    /// correlation. This is the cross-app divergence property at the
     /// gateway projection boundary, asserted against the raw OP arm's
     /// emitted header (the path that actually projects).
     #[ntex::test]

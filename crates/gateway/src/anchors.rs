@@ -1,9 +1,9 @@
 //! `zeroship.app_session_anchors` store + the SDK reload-recovery cookies.
 //!
 //! The anchor is the DEDICATED, durable reload-recovery credential for the
-//! `@zeroship/auth` browser SDK (Slice 1b-anchors, spec §8.1) — a SEPARATE
-//! store from the 12h/30-min interactive `zeroship.gateway_sessions`
-//! (`crate::sessions`). Anchor-specific lifetime semantics:
+//! `@zeroship/auth` browser SDK, separate from the short-lived signed session
+//! cookie. `zeroship.gateway_sessions` holds audit/revocation rows rather than
+//! the interactive cookie credential. Anchor-specific lifetime semantics:
 //!
 //!   - **No idle window.** A reload-recovery anchor exists precisely to
 //!     survive long idle gaps, so there is no `idle_expires_at`/slide.
@@ -26,7 +26,7 @@
 //! Every store fn takes a `&mut Client` (a `PooledClient` derefs mutably to
 //! it), so the caller checks a pooled connection out for exactly ONE operation
 //! and releases it on drop — NO connection is ever held across the outbound
-//! OP HTTP call (`crate::db`, the round-6 BLOCKER invariant).
+//! OP HTTP call.
 //!
 //! RLS (changeset 0025): `zeroship.app_session_anchors` is FORCE-RLS,
 //! tenant-isolated on `app_id` via the `zeroship.tenant_app` GUC. The gateway
@@ -51,7 +51,7 @@ use crate::error::{GatewayError, Result};
 use crate::rls;
 
 /// Anchor absolute lifetime in days. `abs_expires_at = created_at + 30d`,
-/// set once at create and NEVER slid (spec §8.1/§8.3 round-6). This is the
+/// set once at create and NEVER slid. This is the
 /// SDK reload-recovery anchor's OWN clock — independent of the 720h OP
 /// family ceiling, which the gateway learns about only via `invalid_grant`.
 pub const ANCHOR_ABS_DAYS: i64 = 30;
@@ -62,13 +62,12 @@ pub const ANCHOR_COOKIE_MAX_AGE_SECS: i64 = ANCHOR_ABS_DAYS * 24 * 3600;
 
 /// Production anchor cookie name (`__Host-` prefix → Secure required).
 ///
-/// DISTINCT from the interactive OIDC `__Host-zeroship_app_session`
-/// (`oidc_rp::APP_SESSION_COOKIE_PROD`). These are TWO different storage
-/// models on the same origin: the interactive flow's cookie is a
-/// `zeroship.gateway_sessions.id` (SameSite=Lax, 12h); the SDK reload-recovery
-/// anchor is a `zeroship.app_session_anchors.id` (SameSite=Strict, 30d). Sharing
-/// one name would let a request carrying one be validated against the WRONG
-/// table (MAJOR fix). One cookie name ⇒ exactly one table.
+/// DISTINCT from the interactive `__Host-zeroship_app_session` cookie
+/// (`oidc_rp::APP_SESSION_COOKIE_PROD`). The interactive credential is a
+/// locally verified `zeroship-sess+jwt` assertion (SameSite=Lax, about 15
+/// minutes); the reload-recovery credential identifies a
+/// `zeroship.app_session_anchors` row (SameSite=Strict, 30 days). Separate names
+/// keep the live-session assertion and recovery credential unambiguous.
 pub const ANCHOR_COOKIE_PROD: &str = "__Host-zeroship_app_anchor";
 /// Dev anchor cookie name (no `__Host-` prefix, no Secure).
 pub const ANCHOR_COOKIE_DEV: &str = "zeroship_app_anchor";
@@ -76,7 +75,7 @@ pub const ANCHOR_COOKIE_DEV: &str = "zeroship_app_anchor";
 /// Resolve the anchor cookie name for the current environment. The anchor has
 /// its OWN cookie name (`__Host-zeroship_app_anchor`), separate from the interactive
 /// `oidc_rp::app_session_cookie_name` (`__Host-zeroship_app_session`), and uses
-/// `SameSite=Strict` (vs the interactive cookie's `Lax`) per §8.3.
+/// `SameSite=Strict` (vs the interactive cookie's `Lax`).
 #[must_use]
 pub fn anchor_cookie_name(insecure_dev: bool) -> &'static str {
     if insecure_dev { ANCHOR_COOKIE_DEV } else { ANCHOR_COOKIE_PROD }
@@ -84,7 +83,7 @@ pub fn anchor_cookie_name(insecure_dev: bool) -> &'static str {
 
 /// Build the `Set-Cookie` value for the `__Host-zeroship_app_anchor` anchor.
 ///
-/// `SameSite=Strict` (§8.3 round-2): the anchor is never legitimately
+/// `SameSite=Strict`: the anchor is never legitimately
 /// needed on a cross-site request, so a top-level navigation cannot ride
 /// it. `HttpOnly` (XSS cannot read it). `insecure_dev` drops `Secure` AND
 /// the `__Host-` prefix together (RFC 6265bis §4.1.3.2 requires `Secure`
@@ -338,8 +337,8 @@ pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
 }
 
 /// Delete EVERY anchor row for an `(app_id, global_user_id)` pair and
-/// return the encrypted refresh families that were removed (auth-sdk Slice
-/// 1b-browser, `scope: 'global'` signout — "this app, every device", §1.2).
+/// return the encrypted refresh families that were removed. Used by
+/// `scope: 'global'` signout to cover this app on every device.
 ///
 /// Returns each row's `(refresh_token_enc, client_id)` so the caller can
 /// best-effort revoke each family at OP. The delete is the authoritative
@@ -401,7 +400,7 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Anchor {
     }
 }
 
-// ─── Per-node family-rotation single-flight (round-6 BLOCKER) ────────────
+// ─── Per-node family-rotation single-flight ────────────
 //
 // Concurrent `?mint=1` reloaders for the SAME anchor on ONE gateway worker
 // thread coalesce into ONE OP refresh (the "family rotation"). The compio
@@ -549,8 +548,8 @@ pub fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
 }
 
 /// RAII guard that removes an `anchor_id` from THIS worker thread's rotation
-/// single-flight map when dropped (round-6 BLOCKER invariant: "remove
-/// `single_flight.entry` once `fut` resolves").
+/// single-flight map when dropped, so the entry is removed when the shared
+/// future resolves or is dropped.
 ///
 /// The guard is owned by the SHARED rotation future's body, NOT by the leader
 /// request task. That distinction is the whole point: a `futures::Shared`
@@ -596,7 +595,7 @@ mod tests {
         assert!(c.contains(&id.to_string()));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
-        // The anchor is Strict (NOT Lax) — §8.3 round-2.
+        // The anchor is Strict (NOT Lax).
         assert!(c.contains("SameSite=Strict"), "{c}");
         assert!(!c.contains("SameSite=Lax"), "{c}");
         assert!(c.contains("Secure"));

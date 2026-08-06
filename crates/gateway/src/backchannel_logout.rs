@@ -17,8 +17,6 @@
 //!   short text body; op logs the body so it shows up in the auth
 //!   server's debug surface)
 //! - 5xx + `cache-control: no-store` on a retryable local processing failure
-//!
-//! Phase 7 U1.2.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -60,7 +58,7 @@ pub async fn handle(
     // `OidcRp::with_issuer` in tests).
     let issuer = state.oidc_rp.issuer.clone();
 
-    // Per-app BCL disambiguation (auth-sdk Slice 1d, spec §1.2). Each per-app
+    // Per-app BCL disambiguation: each per-app
     // OAuth client registers its own `backchannel_logout_uri` with its own
     // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
     // (routing only — the signature is still verified below) to learn which
@@ -72,10 +70,10 @@ pub async fn handle(
     // key).
     // `revoke_sector` carries that app's `sector_identifier` so the per-app
     // branch can derive the same `pws_…` the gateway projects, to write the
-    // PER-APP token-family marker (Batch A fix 4) — a per-app BCL must kill the
-    // user's live wrapper / raw-OP access token for THAT app, not just its
+    // PER-APP token-family marker — a per-app BCL must kill the
+    // user's live signed session / raw-OP access token for THAT app, not just its
     // gateway sessions. `None` sector ⇒ the marker write is skipped (no live
-    // wrapper to revoke without a sector).
+    // per-app subject to revoke without a sector).
     let aud_candidates =
         zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
     let Some((aud, app_id, revoke_sector)) = aud_candidates
@@ -326,15 +324,15 @@ pub async fn handle(
     }
     jti_claim.disarm();
 
-    // Release the pooled connection BEFORE the outbound OP revoke (the
-    // round-6 BLOCKER invariant: no DB conn is ever held across outbound HTTP).
+    // Release the pooled connection BEFORE the outbound OP revoke; no database
+    // connection is ever held across outbound HTTP.
     drop(conn);
     drop(pool);
 
-    // M1 fix (best-effort, defense-in-depth): revoke each anchor refresh family
+    // As a best-effort defense-in-depth measure, revoke each anchor refresh family
     // deleted above at OP so the rotating refresh grant is killed at the
     // source, not just locally. The anchor rows are already gone (the
-    // authoritative step); a OP hiccup here is logged, never surfaced.
+    // authoritative step); an OP hiccup here is logged, never surfaced.
     for (global_user_id, fam) in &anchor_families {
         let sub_str = global_user_id.to_string();
         let aad = anchor_aad(&fam.client_id, &sub_str);

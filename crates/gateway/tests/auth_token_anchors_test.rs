@@ -1,6 +1,7 @@
-//! Faithful integration tests for the auth-sdk Slice 1b-anchors
-//! browser-token CORE (`POST /__zeroship/auth/token`, `GET /__zeroship/auth/session`,
-//! the per-node mint single-flight, the `zeroship.app_session_anchors` store).
+//! Integration tests for the browser-session core
+//! (`POST /__zeroship/auth/session`, `GET /__zeroship/auth/session`, the
+//! per-node family-rotation single-flight, and the
+//! `zeroship.app_session_anchors` store).
 //!
 //! A loopback MOCK OP (in-process ntex test server) serves
 //! `/.well-known/jwks.json` and `/token` so the REAL code path runs
@@ -836,11 +837,10 @@ async fn session_post_fails_fast_without_signing_key() {
 }
 
 /// Build the SAME coalesced future `auth_token::rotate_family` builds for a
-/// leader: a OP refresh-grant wrapped in the REAL `anchors::EntryGuard` so
-/// the single-flight entry is removed when the future body is dropped — NOT
-/// when any one task survives. This is the exact round-6 BLOCKER mechanism.
-/// Post-BFF the rotation yields identity facts (a `RotationOk`), NOT a browser
-/// wrapper; the coalescing mechanism it exercises is unchanged.
+/// leader: an OP refresh-grant wrapped in the REAL `anchors::EntryGuard` so
+/// the single-flight entry is removed when the future body is dropped, rather
+/// than being tied to any one request task's lifetime. The rotation yields
+/// identity facts (a `RotationOk`); the coalescing mechanism is unchanged.
 fn leader_mint_future(
     oidc: Arc<OidcRp>,
     op: Arc<MockOP>,
@@ -895,8 +895,8 @@ async fn n_parallel_mints_cause_one_op_refresh() {
     // `/token` refresh against the loopback mock, and assert the mock
     // saw exactly ONE refresh for N concurrent minters.
     //
-    // The coalescing key + future-sharing + guard-based removal is the
-    // round-6 BLOCKER core; the anchor DB read/write around it is orthogonal
+    // The coalescing key + future-sharing + guard-based removal is the core;
+    // the anchor DB read/write around it is orthogonal
     // to coalescing (covered by the PG-gated full-handler test below).
     let op = Arc::new(MockOP::new(CLIENT_ID));
     // Hold each refresh open long enough that all N callers pile onto the
@@ -953,7 +953,7 @@ async fn n_parallel_mints_cause_one_op_refresh() {
 
 #[ntex::test]
 async fn cancelled_leader_does_not_leak_single_flight_entry() {
-    // REGRESSION for the round-6 BLOCKER (leader-only removal leak): if the
+    // Regression for the leader-only removal leak: if the
     // LEADER's request future is dropped mid-flight AFTER `insert` but before
     // it resolves, a surviving follower still drives the shared future to
     // completion, the `EntryGuard` fires on the future's drop, and the entry
@@ -1174,13 +1174,13 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
 }
 
 /// The real email the mock OP stamps into the id_token + access JWT (see
-/// `MockOP::id_token`/`access_token`). The email-claim swap (§7) must ensure
-/// THIS never reaches the browser wrapper or the user projection.
+/// `MockOP::id_token`/`access_token`). The email-claim swap must ensure THIS
+/// never reaches the browser response or the user projection.
 const REAL_EMAIL: &str = "user@example.com";
 
-/// Seed an active relay alias for `(CLIENT_ID, user_id)` — the row the gateway
-/// (Slice 4) + consent (5b) write. The email-claim swap (§7) reads THIS and
-/// projects it instead of the real email.
+/// Seed an active relay alias for `(CLIENT_ID, user_id)` in the row maintained
+/// by pairwise projection and populated with the alias at consent. The
+/// email-claim swap reads THIS and projects it instead of the real email.
 async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
     seed_relay_alias_for(dsn, CLIENT_ID, user_id, relay_email).await;
 }
