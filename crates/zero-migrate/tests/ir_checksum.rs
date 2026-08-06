@@ -712,3 +712,53 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
     let b = Checksum::of_ir(&CanonicalOpList(&v), &flags, owner, &[], &[], &[]);
     assert_eq!(a, b, "JCS encoding must be stable");
 }
+
+/// An `existenceGuard` change must move the IR checksum.
+///
+/// `Migration::existence_guard` is deliberately absent from `ChecksumInput`, on the
+/// stated grounds that the IR-path drift anchor is `Checksum::of_ir` over the
+/// op-list, which already folds the guard. That is the load-bearing half of the
+/// argument and nothing pinned it: every other checksum fixture leaves the field
+/// `None`. Without this, dropping the guard from the canonical op encoding would
+/// silently make a guarded and an unguarded migration interchangeable, and the guard
+/// decides whether an op runs, journals a satisfied no-op, or fails closed on drift.
+#[test]
+fn ir_checksum_covers_the_existence_guard() {
+    use zero_migrate::model::ir::ExistenceGuard;
+
+    let flags = MigrationFlags::default();
+    let owner = "app_alpha";
+    let unguarded = Op::DropTable {
+        table: "widgets".into(),
+        cascade: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let mut guarded = unguarded.clone();
+    if let Op::DropTable {
+        existence_guard, ..
+    } = &mut guarded
+    {
+        *existence_guard = Some(ExistenceGuard::IfExists);
+    }
+
+    let unguarded_ops = [unguarded];
+    let guarded_ops = [guarded];
+    assert_ne!(
+        CanonicalOpList(&unguarded_ops).canonical_bytes(),
+        CanonicalOpList(&guarded_ops).canonical_bytes(),
+        "the existence guard is part of the canonical IR encoding"
+    );
+    assert_ne!(
+        Checksum::of_ir(
+            &CanonicalOpList(&unguarded_ops),
+            &flags,
+            owner,
+            &[],
+            &[],
+            &[]
+        ),
+        Checksum::of_ir(&CanonicalOpList(&guarded_ops), &flags, owner, &[], &[], &[]),
+        "adding an existence guard must change the IR drift anchor"
+    );
+}
