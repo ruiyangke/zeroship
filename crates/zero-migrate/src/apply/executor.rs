@@ -1747,10 +1747,23 @@ fn check_squash_all_or_none(
 }
 
 // ===========================================================================
-// Rollback — apply `down` SQL in reverse to a target.
+// Rollback - apply `down` SQL in reverse to a target.
+//
+// NO ORCHESTRATOR SHIPS. These types describe the request and the refusals a
+// rollback driver would make, but nothing in this crate consumes a
+// `RollbackRequest`, and there is no `MigrationEngine::rollback`. The only
+// reachable rollback is the per-migration backend leaf
+// `MigrationBackend::rollback_one_transactional`, which appends the `rolled_back`
+// event for ONE migration and performs none of the selection-time gating named
+// below: it does not refuse an irreversible migration, does not classify a
+// non-transactional `down`, does not run the guard over the `down` SQL, and does
+// not enforce reverse-topological order.
+//
+// So a host driving that leaf per migration gets none of these checks. See the
+// operations docs, which state the roll-forward stance plainly.
 // ===========================================================================
 
-/// How far [`rollback`] should unwind the applied migrations.
+/// How far a rollback should unwind the applied migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackTarget {
     /// Roll back every net-applied migration whose version is **strictly after**
@@ -1768,7 +1781,7 @@ pub enum RollbackTarget {
 /// A complete rollback request.
 ///
 /// How far to unwind ([`RollbackTarget`]) plus the irreversible-handling
-/// [`RollbackOptions`]. Bundled so [`rollback`] and
+/// [`RollbackOptions`]. Bundled so `rollback` and
 /// [`MigrationEngine::rollback`](crate::engine::MigrationEngine::rollback) carry
 /// one parameter rather than two.
 #[derive(Debug, Clone)]
@@ -1797,7 +1810,7 @@ impl RollbackRequest {
     }
 }
 
-/// Options controlling [`rollback`] over irreversible (`down: None`) migrations.
+/// Options controlling `rollback` over irreversible (`down: None`) migrations.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RollbackOptions {
     /// Proceed across a migration with `down: None` (irreversible) by **skipping**
@@ -1814,7 +1827,7 @@ pub struct RollbackOptions {
     pub backup_acknowledged: bool,
 }
 
-/// What [`rollback`] did.
+/// What `rollback` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackOutcome {
     /// Versions whose `down` ran + were journaled `rolled_back`, in the order they
@@ -1837,7 +1850,7 @@ impl RollbackOutcome {
     }
 }
 
-/// Error from [`rollback`].
+/// Error from `rollback`.
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackError {
     /// A database/driver error outside a guarded/journaled step.
@@ -1860,7 +1873,7 @@ pub enum RollbackError {
     /// [`Approval::Approved`]. This is the executor's OWN defense-in-depth gate,
     /// independent of (and additional to) the engine's gate
     /// ([`crate::engine::MigrationEngine::rollback`]), so a caller driving
-    /// [`rollback`] directly cannot bypass approval. Nothing was rolled back.
+    /// `rollback` directly cannot bypass approval. Nothing was rolled back.
     #[error(
         "rollback requires Approval::Approved (every down is destructive) but it was not given"
     )]
