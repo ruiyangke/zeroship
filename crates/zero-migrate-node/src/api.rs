@@ -291,7 +291,7 @@ mod tests {
             "ops": [{
                 "op": "createTable",
                 "name": "widgets",
-                "columns": [{ "name": "label", "type": "string" }],
+                "columns": [{ "name": "label", "type": "text" }],
                 "primaryKey": null
             }]
         });
@@ -329,7 +329,7 @@ mod tests {
             "ops": [{
                 "op": "createTable",
                 "name": "widgets",
-                "columns": [{ "name": "label", "type": "string" }],
+                "columns": [{ "name": "label", "type": "text" }],
                 "primaryKey": null
             }]
         });
