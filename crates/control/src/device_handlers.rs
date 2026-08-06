@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroship_core::auth::extract_bearer;
-use zeroship_core::auth_provider::{ProviderAuthz, VerifyTokenError};
+use zeroship_core::auth_provider::{ProviderAuthz, VerifiedToken, VerifyTokenError};
 use zeroship_core::crypto;
 
 use crate::{identity_bridge, AppState};
@@ -56,8 +56,6 @@ pub struct DeviceAuthResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeviceApproveRequest {
     user_code: String,
-    #[serde(default)]
-    csrf: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,14 +163,12 @@ pub async fn device_approve(
     req: web::HttpRequest,
     body: Json<DeviceApproveRequest>,
 ) -> web::HttpResponse {
-    // The auth-service browser page owns CSRF/origin hardening. This endpoint
-    // still requires an authenticated upstream bearer before it can approve a
-    // device code or ask the OP to mint a platform token.
-    let verified = match verified_gotrue_bearer(&state, &req).await {
+    // Approval uses an explicit non-ambient bearer and does not depend on
+    // browser cookies.
+    let verified = match verified_device_approval_bearer(&state, &req).await {
         Ok(verified) => verified,
         Err(resp) => return resp,
     };
-    let _csrf = body.csrf.as_deref();
 
     let user_code = normalize_user_code(&body.user_code);
     if user_code.is_empty() {
@@ -204,49 +200,9 @@ pub async fn device_approve(
     let device_code_hash: String = row.get("device_code_hash");
     let requested_scope: Option<String> = row.get("scope");
 
-    let Some(supabase_url) = state.auth_provider.supabase_url() else {
-        return unsupported_provider();
-    };
-    let service_role_key = state.auth_provider.supabase_service_role_key().unwrap_or("");
-    let email_verified =
-        match identity_bridge::fetch_email_verified(
-            supabase_url,
-            service_role_key,
-            &verified.provider_subject,
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "control: GoTrue email verification lookup failed closed"
-                );
-                false
-            }
-        };
-
-    let mut conn = match state.registry.conn().await {
-        Ok(conn) => conn,
-        Err(err) => {
-            tracing::error!(error = %err, "control: device approve DB connect failed");
-            return internal_error();
-        }
-    };
-    let principal_id = match identity_bridge::provision_or_link(
-        &mut conn,
-        "supabase",
-        &verified.provider_subject,
-        verified.email.as_deref(),
-        email_verified,
-    )
-    .await
-    {
+    let principal_id = match device_approval_principal(&state, &verified).await {
         Ok(principal_id) => principal_id,
-        Err(err) => {
-            tracing::error!(error = %err, "control: device approve identity bridge failed");
-            return internal_error();
-        }
+        Err(resp) => return resp,
     };
 
     let scopes = match deploy_scopes_for_principal(&state, principal_id, requested_scope.as_deref())
@@ -698,10 +654,16 @@ fn platform_token_metadata(access_token: &str) -> Option<(u64, String)> {
     Some((exp.saturating_sub(now).max(0) as u64, scope))
 }
 
-async fn verified_gotrue_bearer(
+/// Verify the explicit bearer used for device approval.
+///
+/// A verified platform OAuth access token or a verified GoTrue access token
+/// with the `authenticated` role may identify the approving principal. The
+/// incoming OAuth scope is not an approval rule: the deploy token is restricted
+/// to the principal's stored grants later in this handler.
+async fn verified_device_approval_bearer(
     state: &AppState,
     req: &web::HttpRequest,
-) -> Result<zeroship_core::auth_provider::VerifiedToken, web::HttpResponse> {
+) -> Result<VerifiedToken, web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")
@@ -727,9 +689,69 @@ async fn verified_gotrue_bearer(
             }
         })?;
 
+    let accepted = match &verified.provider_authz {
+        ProviderAuthz::OAuthScope(_) => true,
+        ProviderAuthz::GoTrueRole(role) if role == "authenticated" => true,
+        ProviderAuthz::GoTrueRole(_) => false,
+    };
+    if accepted {
+        Ok(verified)
+    } else {
+        Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"})))
+    }
+}
+
+async fn device_approval_principal(
+    state: &AppState,
+    verified: &VerifiedToken,
+) -> Result<uuid::Uuid, web::HttpResponse> {
     match &verified.provider_authz {
-        ProviderAuthz::GoTrueRole(role) if role == "authenticated" => Ok(verified),
-        _ => Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))),
+        ProviderAuthz::OAuthScope(_) => uuid::Uuid::parse_str(&verified.provider_subject)
+            .map_err(|_| {
+                web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
+            }),
+        ProviderAuthz::GoTrueRole(_) => {
+            let Some(supabase_url) = state.auth_provider.supabase_url() else {
+                return Err(unsupported_provider());
+            };
+            let service_role_key = state
+                .auth_provider
+                .supabase_service_role_key()
+                .unwrap_or("");
+            let email_verified = match identity_bridge::fetch_email_verified(
+                supabase_url,
+                service_role_key,
+                &verified.provider_subject,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "control: GoTrue email verification lookup failed closed"
+                    );
+                    false
+                }
+            };
+
+            let mut conn = state.registry.conn().await.map_err(|err| {
+                tracing::error!(error = %err, "control: device approve DB connect failed");
+                internal_error()
+            })?;
+            identity_bridge::provision_or_link(
+                &mut conn,
+                "supabase",
+                &verified.provider_subject,
+                verified.email.as_deref(),
+                email_verified,
+            )
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: device approve identity bridge failed");
+                internal_error()
+            })
+        }
     }
 }
 

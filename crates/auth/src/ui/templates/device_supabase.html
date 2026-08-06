@@ -6,7 +6,6 @@
   <div class="error">{{ err }}</div>
 {% endif %}
 <form id="device-approve-form" method="POST" action="/device">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Device code
     <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>
   </label>
@@ -37,9 +36,8 @@
     const userCode = String(data.get("user_code") || "").trim();
     const email = String(data.get("email") || "").trim();
     const password = String(data.get("password") || "");
-    const csrf = String(data.get("csrf") || "");
 
-    if (!userCode || !email || !password || !csrf) {
+    if (!userCode || !email || !password) {
       setStatus("missing required fields", true);
       return;
     }
@@ -67,16 +65,11 @@
       setStatus("Approving device...", false);
       const approve = await fetch(controlApproveUrl, {
         method: "POST",
-        credentials: "include",
         headers: {
           "content-type": "application/json",
-          "authorization": `Bearer ${session.access_token}`,
-          "x-zeroship-csrf": csrf
+          "authorization": `Bearer ${session.access_token}`
         },
-        body: JSON.stringify({
-          user_code: userCode,
-          csrf
-        })
+        body: JSON.stringify({ user_code: userCode })
       });
       const approved = await approve.json().catch(() => ({}));
       if (!approve.ok) {

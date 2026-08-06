@@ -140,6 +140,7 @@ impl Drop for MockSupabase {
 
 struct MockPlatformAuth {
     base: String,
+    issuer: Arc<Issuer>,
     shutdown: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -174,6 +175,7 @@ impl MockPlatformAuth {
         });
         Self {
             base,
+            issuer,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         }
@@ -181,6 +183,19 @@ impl MockPlatformAuth {
 
     fn jwks_url(&self) -> String {
         format!("{}/.well-known/jwks.json", self.base)
+    }
+
+    fn issue_access_token(&self, principal_id: Uuid, scopes: &[String]) -> String {
+        let principal_id = principal_id.to_string();
+        self.issuer
+            .issue_principal_access_token(&PrincipalAccessTokenMint {
+                principal_id: &principal_id,
+                audience: "control.zeroship.ai",
+                client_id: "zeroship-console",
+                scopes,
+                ttl_secs: None,
+            })
+            .expect("platform approval token")
     }
 }
 
@@ -339,8 +354,18 @@ struct Fixture {
     device_hashes: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum FixtureProvider {
+    Platform,
+    DualIssuer,
+}
+
 impl Fixture {
     async fn new() -> Self {
+        Self::new_with_provider(FixtureProvider::DualIssuer).await
+    }
+
+    async fn new_with_provider(provider: FixtureProvider) -> Self {
         let db_url = db_url();
         let mock_supabase = MockSupabase::start();
         let mock_platform = MockPlatformAuth::start();
@@ -384,9 +409,12 @@ impl Fixture {
             PlatformConfig::new(mock_platform.base.clone(), Some(mock_platform.jwks_url()))
                 .expect("valid platform config"),
         );
-        let auth_provider = Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
-            platform, legacy,
-        )));
+        let auth_provider = Arc::new(match provider {
+            FixtureProvider::Platform => AuthProvider::Platform(platform),
+            FixtureProvider::DualIssuer => {
+                AuthProvider::DualIssuer(DualIssuerProvider::new(platform, legacy))
+            }
+        });
 
         let state = Arc::new(AppState {
             registry,
@@ -493,6 +521,56 @@ impl Fixture {
         app.id
     }
 
+    async fn create_platform_principal(&mut self) -> Uuid {
+        let principal_id = Uuid::new_v4();
+        let email = format!(
+            "platform-device-{}@zeroship.test",
+            Uuid::new_v4().simple()
+        );
+        self.state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
+                 VALUES ($1, $2::citext, NOW(), 'Platform Device User')",
+                &[&principal_id, &email],
+            )
+            .await
+            .expect("insert platform device user");
+        for grant in ["apps:deploy", "apps:read", "apps:write"] {
+            self.state
+                .control_pg
+                .execute(
+                    "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
+                     VALUES ($1, $2)",
+                    &[&principal_id, &grant],
+                )
+                .await
+                .expect("insert platform device grant");
+        }
+        self.users.push(principal_id);
+        principal_id
+    }
+
+    async fn assert_device_grant_pending(&self, device_code_hash: &str) {
+        let row = self
+            .state
+            .control_pg
+            .query_one(
+                "SELECT status, principal_id, platform_access_token_enc \
+                 FROM zeroship.device_grants \
+                 WHERE device_code_hash = $1",
+                &[&device_code_hash],
+            )
+            .await
+            .expect("pending device grant row");
+        assert_eq!(row.get::<_, String>("status"), "pending");
+        assert_eq!(row.get::<_, Option<Uuid>>("principal_id"), None);
+        assert_eq!(
+            row.get::<_, Option<Vec<u8>>>("platform_access_token_enc"),
+            None
+        );
+    }
+
     async fn cleanup(&self) {
         for hash in &self.device_hashes {
             let _ = self
@@ -581,7 +659,94 @@ async fn deploy_check(
 }
 
 #[compio::test]
-async fn platform_device_flow_enforces_hashing_auth_encryption_interval_expiry_and_one_time_use() {
+async fn platform_token_approves_device_grant_under_platform_provider() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+    let device_code = format!("platform-device-{}", Uuid::new_v4().simple());
+    let device_code_hash = fx.track_hash(&device_code);
+    let user_code_suffix = Uuid::new_v4().simple().to_string();
+    let user_code = format!("PLAT-{}", &user_code_suffix[..4]).to_ascii_uppercase();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.device_grants \
+                (device_code_hash, user_code, provider, scope, expires_at) \
+             VALUES ($1, $2, 'platform', 'apps:deploy apps:read apps:write', \
+                     NOW() + INTERVAL '10 minutes')",
+            &[&device_code_hash, &user_code],
+        )
+        .await
+        .expect("insert pending platform device grant");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let absent_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let absent_resp = test::call_service(&app, absent_req).await;
+    assert_eq!(absent_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    let invalid_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", "Bearer not-a-jwt")
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let invalid_resp = test::call_service(&app, invalid_req).await;
+    assert_eq!(invalid_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    let wrong_provider_token = gotrue_token(
+        &fx._mock_supabase.issuer(),
+        &Uuid::new_v4().to_string(),
+        "wrong-provider@zeroship.test",
+        "authenticated",
+    );
+    let wrong_provider_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&wrong_provider_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let wrong_provider_resp = test::call_service(&app, wrong_provider_req).await;
+    assert_eq!(wrong_provider_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    let approval_token = fx
+        ._mock_platform
+        .issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let approve_resp = test::call_service(&app, approve_req).await;
+
+    assert_eq!(approve_resp.status(), StatusCode::NO_CONTENT);
+    let approved = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT status, principal_id \
+             FROM zeroship.device_grants \
+             WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await
+        .expect("approved platform device grant");
+    assert_eq!(approved.get::<_, String>("status"), "approved");
+    assert_eq!(approved.get::<_, Uuid>("principal_id"), principal_id);
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one_time_use() {
     let mut fx = Fixture::new().await;
     let app = test::init_service(
         web::App::new()
@@ -677,6 +842,7 @@ async fn platform_device_flow_enforces_hashing_auth_encryption_interval_expiry_a
         .to_request();
     let no_bearer_resp = test::call_service(&app, no_bearer_req).await;
     assert_eq!(no_bearer_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
 
     let invalid_bearer_req = test::TestRequest::post()
         .uri("/api/device/approve")
@@ -687,9 +853,22 @@ async fn platform_device_flow_enforces_hashing_auth_encryption_interval_expiry_a
         .to_request();
     let invalid_bearer_resp = test::call_service(&app, invalid_bearer_req).await;
     assert_eq!(invalid_bearer_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
 
     let subject = Uuid::new_v4().to_string();
     let email = format!("device-flow-{}@zeroship.test", Uuid::new_v4().simple());
+    let wrong_role_token = gotrue_token(fx.issuer(), &subject, &email, "anon");
+    let wrong_role_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&wrong_role_token))
+        .set_json(&json!({
+            "user_code": user_code
+        }))
+        .to_request();
+    let wrong_role_resp = test::call_service(&app, wrong_role_req).await;
+    assert_eq!(wrong_role_resp.status(), StatusCode::UNAUTHORIZED);
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
     let bearer_token = gotrue_token(fx.issuer(), &subject, &email, "authenticated");
 
     let unknown_approve_req = test::TestRequest::post()
