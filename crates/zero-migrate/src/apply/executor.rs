@@ -1134,9 +1134,19 @@ async fn apply_repeatables<B: MigrationBackend>(
     // pending because an `OnUnmet::Skip` precondition did not pass. Only durable
     // journal completion or a durable supersession edge satisfies an external
     // repeatable dependency.
-    let mut satisfied = backend
-        .applied(cfg)
-        .await?
+    let entries = backend.applied(cfg).await?;
+    // Inflight markers left by an interrupted apply. A repeatable rides the same
+    // two-phase path as a versioned migration on MySQL, where DDL auto-commits, and
+    // the refusal that keeps the engine from replaying possibly-applied CREATE/ALTER
+    // statements is driven entirely by this flag. Passing a hardcoded `false` here
+    // meant a repeatable interrupted mid-DDL silently replayed its `up` on the next
+    // deploy instead of reaching the marker-identity recovery flow.
+    let started = entries
+        .iter()
+        .filter(|entry| matches!(entry.phase, Phase::Started))
+        .map(|entry| entry.version.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut satisfied = entries
         .into_iter()
         .filter(|entry| matches!(entry.phase, Phase::Completed))
         .map(|entry| entry.version)
@@ -1183,7 +1193,14 @@ async fn apply_repeatables<B: MigrationBackend>(
         // re-run from a flipped once-only, and `latest_completed_checksums` reads only
         // `kind='repeatable'` rows for the re-run oracle.
         backend
-            .apply_one(cfg, m, applied_by, false, &[], "repeatable")
+            .apply_one(
+                cfg,
+                m,
+                applied_by,
+                started.contains(version),
+                &[],
+                "repeatable",
+            )
             .await?;
         outcome.applied.push(version.to_string());
     }
