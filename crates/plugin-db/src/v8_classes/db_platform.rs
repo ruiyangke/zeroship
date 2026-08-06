@@ -4,8 +4,8 @@
 //! ## Why this class exists
 //!
 //! Before P9 PR 4 the platform-internal entry points — `registerModel`,
-//! `setMaskPolicy`, `startReplicationConsumer`, and the `migrations` /
-//! `replication` sub-namespaces — lived directly on the `Db` v8_class
+//! `setMaskPolicy`, `startReplicationConsumer`, and the `replication`
+//! sub-namespace — lived directly on the `Db` v8_class
 //! (`env.db`). They were therefore directly reachable from creator JS
 //! (`env.db.registerModel(...)`) and showed up in IDE hover on the
 //! published `@zeroship/types` surface.
@@ -27,8 +27,8 @@
 //! Every method delegates to the SAME dispatch helper the `Db` method
 //! used to call — only the JS carrier moved. The `register_model` /
 //! `set_mask_policy` / `start_replication_consumer` pipelines and the
-//! `Migrations` / `Replication` v8_classes are unchanged; this wrapper
-//! is a thin, app-scoped re-home of the five entry points.
+//! `Replication` v8_class are unchanged; this wrapper is a thin,
+//! app-scoped re-home of the platform entry points.
 //!
 //! ## App scoping
 //!
@@ -61,8 +61,8 @@ use crate::v8_bridge::read_json_arg;
 /// Field 0 of the wrapper holds a `Box<DbPlatform>`. The Weak finalizer
 /// registered by [`mint_db_platform`] drops the Box on GC. There are no
 /// native resources to release — `app_id` is a `String` and the cached
-/// `migrations_obj` / `replication_obj` hold `v8::Global<v8::Object>`
-/// handles whose own Weak counterparts reclaim the wrapped state.
+/// `replication_obj` holds a `v8::Global<v8::Object>` handle whose own
+/// Weak counterpart reclaims the wrapped state.
 pub struct DbPlatform {
     /// The app_id this handle is scoped to. Stamped at mint time from
     /// the live `Db`'s `app_id`; never mutated. Security-critical — the
@@ -70,10 +70,6 @@ pub struct DbPlatform {
     /// caller-supplied override is never honoured (see
     /// `start_replication_consumer`).
     pub(crate) app_id: String,
-    /// Cache of the `Migrations` namespace wrapper minted on first
-    /// access of `__platform.migrations`. Stable identity so
-    /// `__platform.migrations === __platform.migrations` holds.
-    pub(crate) migrations_obj: RefCell<Option<v8::Global<v8::Object>>>,
     /// Cache of the `Replication` namespace wrapper minted on first
     /// access of `__platform.replication`. Stable identity.
     pub(crate) replication_obj: RefCell<Option<v8::Global<v8::Object>>>,
@@ -214,22 +210,6 @@ impl DbPlatform {
         Ok(obj)
     }
 
-    /// `__platform.migrations` — the [`super::migrations::Migrations`]
-    /// namespace (`start` / `status` / `cancel` / `reset`). Cached on
-    /// first access. Moved off `Db` in P9 PR 4.
-    #[v8_getter]
-    fn migrations<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if let Some(existing) = self.migrations_obj.borrow().as_ref() {
-            return Ok(v8::Local::new(scope, existing));
-        }
-        let obj = super::migrations::mint_migrations(scope, &self.app_id)?;
-        let global = v8::Global::new(scope, obj);
-        *self.migrations_obj.borrow_mut() = Some(global);
-        Ok(obj)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +237,6 @@ pub(crate) fn mint_db_platform<'s>(
 
     let state = DbPlatform {
         app_id: app_id.to_string(),
-        migrations_obj: RefCell::new(None),
         replication_obj: RefCell::new(None),
     };
     let boxed: Box<DbPlatform> = Box::new(state);
@@ -270,8 +249,8 @@ pub(crate) fn mint_db_platform<'s>(
     // finalizer casts back to the same type and drops the Box exactly
     // once when V8 reclaims the wrapper. There are no native resources
     // to release in Drop — `app_id` is an owned String and the cached
-    // Globals are dropped with the Box (their own Weak finalizers
-    // reclaim the wrapped Migrations / Replication state).
+    // Global is dropped with the Box (its own Weak finalizer
+    // reclaims the wrapped Replication state).
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,

@@ -22,8 +22,7 @@
 //! - test-coverage r12 NEW-R12-1 — the F1 warn half (`5d9acab8` /
 //!   `fcf7ce3c` / `7c6bd2ec` / `18aee490`) needs the harness.
 //! - test-coverage r13 NEW-R13-* — extend to the [I6]
-//!   `release_advisory_lock` typed-error caller paths and the [I23]
-//!   `mig_lock` state-machine drift logs.
+//!   `release_advisory_lock` typed-error caller paths.
 //!
 //! # Scope
 //!

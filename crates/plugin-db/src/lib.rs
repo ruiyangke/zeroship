@@ -155,20 +155,6 @@ pub(crate) mod exec;
 pub mod exec;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod migrations;
-#[cfg(feature = "test-helpers")]
-pub mod migrations;
-
-// F1 sweeper-half (P6a-1) — orphan `Running`-row reaper. Exposed to
-// downstream test crates under `test-helpers` like the other
-// orchestration modules; the in-crate unit tests reach it via
-// `#[cfg(test)]`.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod migration_sweeper;
-#[cfg(feature = "test-helpers")]
-pub mod migration_sweeper;
-
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod drop_namespace;
 #[cfg(feature = "test-helpers")]
 pub mod drop_namespace;
@@ -409,7 +395,7 @@ pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
 
 /// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
 /// usual `DbPlugin::register()` path. Used by integration tests that
-/// drive `migrations::exec_*` without spinning up a full runtime.
+/// drive DB ops directly without spinning up a full runtime.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_db_url_for_tests(url: &str) {
@@ -492,44 +478,6 @@ pub fn simulate_fresh_isolate_for_tests(app_id: &str, collections: &[&str]) {
 #[doc(hidden)]
 pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
     ctx_mut(|c| c.set_mask_policy_for_app(app_id, None));
-}
-
-/// **Test-only**: clear [`crate::context::IsolateDbContext::mig_lock`]
-/// for the current thread. Safe across test boundaries when an earlier
-/// test left the lock held.
-///
-/// Async + best-effort `ROLLBACK; SELECT pg_advisory_unlock_all();` on
-/// the lock client BEFORE dropping it. We can't rely on Client::drop
-/// alone to clean up the server-side state — dropping the Client just
-/// closes the channel to the per-connection task. That task is on the
-/// same compio runtime as the test; when the test fn returns, the
-/// runtime drops, and the task is dropped *before* it gets to send
-/// Terminate / shutdown the socket. With io_uring the fd is still
-/// closed (so the server eventually notices EOF), but in the meantime
-/// the backend is "idle in transaction" / holding session-scoped
-/// advisory locks, which blocks `pg_create_logical_replication_slot()`
-/// in a later p8a2 test (logical-slot creation must drain the proc
-/// array of in-flight xacts before it can take its snapshot).
-///
-/// Sending an explicit ROLLBACK + advisory_unlock_all over the wire
-/// from within the test makes the server-side cleanup synchronous from
-/// PG's perspective — the next test's slot creation never observes
-/// our backend as in-transaction.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub async fn clear_migration_lock_for_tests() {
-    // Take the client out (if any) so we can send cleanup SQL on it
-    // before drop. Best-effort: a connection that's already dead is
-    // expected during the panic-recovery path and not worth treating
-    // as an error.
-    // Forced teardown: drain whatever lock client is parked regardless
-    // of owner (production code uses the owner-scoped accessor).
-    if let Some(client) = ctx_mut(|c| c.take_mig_client_any_for_tests()) {
-        let _ = client.batch_execute("ROLLBACK; SELECT pg_advisory_unlock_all();").await;
-        drop(client);
-    }
-    ctx_mut(|c| c.clear_mig_lock());
-    migrations::release_active_lock();
 }
 
 /// **Test-only**: install a real Postgres client into the active

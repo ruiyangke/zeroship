@@ -474,15 +474,6 @@ pub struct BackfillLookup {
     pub is_done: bool,
 }
 
-/// Snapshot returned by [`lock_audit_row_for_update`] — the columns the
-/// commit-batch path needs to validate generation + cancellation before
-/// applying row updates.
-#[derive(Debug)]
-pub struct LockedAuditRow {
-    pub status: String,
-    pub audit_generation: i64,
-}
-
 /// Compatibility shim — the legacy `Pool` and `Client` types both expose
 /// `query_text_params(sql, &[&str])`, so the helpers below accept either
 /// via this trait. Keeps the audit-table SQL in one file without forcing
@@ -599,279 +590,6 @@ pub(crate) async fn find_latest_backfill_row<E: AuditExecutor>(
     }))
 }
 
-/// `UPDATE … SET status='running'` — used at `migration.start(...)` time
-/// when an existing backfill row is being resumed by this worker.
-/// Refreshes `owner_session_id`/`last_heartbeat_at` to the current
-/// backend so operators can see who's running.
-pub async fn set_backfill_running(
-    client: &Client,
-    app_id: &str,
-    id: i64,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = 'running',
-                owner_session_id = pg_backend_pid()::text,
-                last_heartbeat_at = NOW(),
-                updated_at = NOW(),
-                error = NULL
-            WHERE id = $1::bigint"#
-    );
-    let id_s = id.to_string();
-    client
-        .query_text_params(&sql, &[id_s.as_str()])
-        .await
-        .map_err(|e| coded_sql("set_backfill_running", e))?;
-    Ok(())
-}
-
-/// `INSERT … status='running'` — first-time insert at
-/// `migration.start(...)`. Stamps `owner_session_id` to the connection's
-/// `pg_backend_pid()` and seeds `details.processed = 0`. Audit
-/// generation defaults to 0 from the column DEFAULT.
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_backfill_running(
-    client: &Client,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-    dry_run: bool,
-    deploy_id: &str,
-    schema_version: i32,
-) -> Result<i64, DbError> {
-    let sql = format!(
-        r#"INSERT INTO "{app_id}"."__zeroship_migrations"
-            (collection, phase, change_class, change_kind, details,
-             ddl_sql, status, deploy_id, applied_by_kind, schema_version,
-             owner_session_id, last_heartbeat_at, validate_cursor)
-            VALUES ($1, 'backfill', $2, $3, $4::jsonb,
-                    NULL, 'running', $5, $6, $7::integer,
-                    pg_backend_pid()::text, NOW(), 0)
-            RETURNING id"#
-    );
-    let details = serde_json::json!({
-        "processed": 0,
-        "dryRun": dry_run,
-    });
-    let details_s = details.to_string();
-    let sv_s = schema_version.to_string();
-    let rows = client
-        .query_text_params(
-            &sql,
-            &[
-                collection,
-                ChangeClass::Additive.as_sql(),
-                name,
-                details_s.as_str(),
-                deploy_id,
-                ActorKind::Auto.as_sql(),
-                sv_s.as_str(),
-            ],
-        )
-        .await
-        .map_err(|e| coded_sql("insert_backfill_running", e))?;
-    // Defensive: an empty RETURNING set used to silently produce `id =
-    // 0` (via `.unwrap_or_default()`), which then aliased every
-    // downstream `WHERE id = $1::bigint` write to a no-op. The
-    // regression test in this module locks in the `DbError::Internal`
-    // path so RLS bypass / trigger interception surfaces loudly. The
-    // predicate now lives in `crate::error::first_row_or_internal` so
-    // every empty-RETURNING site emits the same message shape.
-    let id: i64 =
-        first_row_or_internal(&rows, "audit: insert_backfill_running")?.get::<_, i64>("id");
-    Ok(id)
-}
-
-/// `UPDATE … audit_generation = audit_generation + 1` — bumps the
-/// generation counter so any in-flight worker holding a stale snapshot
-/// will detect the reset on its next commit. Also zeroes the cursor,
-/// dead-letter PKs, and processed counter so a fresh run starts from
-/// the top.
-pub(crate) async fn reset_backfill_row<E: AuditExecutor>(
-    exec: &E,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = 'pending',
-                validate_cursor = NULL,
-                dead_letter_pks = NULL,
-                error = NULL,
-                applied_at = NULL,
-                updated_at = NOW(),
-                audit_generation = audit_generation + 1,
-                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
-    );
-    exec.query_text(&sql, &[collection, name])
-        .await
-        .map_err(|e| coded_sql("reset_backfill_row", e))?;
-    Ok(())
-}
-
-/// `SELECT status FROM … ORDER BY id DESC LIMIT 1` — fast-path peek
-/// used by `migration.fetchBatch(...)` to short-circuit if the operator
-/// cancelled between batches.
-pub(crate) async fn peek_latest_backfill_status<E: AuditExecutor>(
-    exec: &E,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-) -> Result<Option<String>, DbError> {
-    let sql = format!(
-        r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let rows = exec
-        .query_text(&sql, &[collection, name])
-        .await
-        .map_err(|e| coded_sql("peek_latest_backfill_status", e))?;
-    Ok(rows.first().map(|r| r.get::<_, String>("status")))
-}
-
-/// `UPDATE … SET last_heartbeat_at = NOW()` — best-effort write the
-/// fetch-batch path issues so operators can see the worker is alive.
-pub(crate) async fn heartbeat_backfill<E: AuditExecutor>(
-    exec: &E,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET last_heartbeat_at = NOW()
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2 AND status = 'running'"#
-    );
-    exec.query_text(&sql, &[collection, name])
-        .await
-        .map_err(|e| coded_sql("heartbeat_backfill", e))?;
-    Ok(())
-}
-
-/// `SELECT status, audit_generation … FOR UPDATE` — acquires the row
-/// lock inside the current transaction so a concurrent
-/// `migrations.cancel(...)` on another connection serialises against
-/// the commit. Caller must already be inside a `BEGIN`.
-///
-/// Returns `Ok(None)` if the row was missing (shouldn't happen after
-/// a successful `exec_begin`, but kept honest).
-pub async fn lock_audit_row_for_update(
-    client: &Client,
-    app_id: &str,
-    id: i64,
-) -> Result<Option<LockedAuditRow>, DbError> {
-    let sql = format!(
-        r#"SELECT status, audit_generation FROM "{app_id}"."__zeroship_migrations"
-            WHERE id = $1::bigint FOR UPDATE"#
-    );
-    let id_s = id.to_string();
-    let rows = client
-        .query_text_params(&sql, &[id_s.as_str()])
-        .await
-        .map_err(|e| coded_sql("lock_audit_row_for_update", e))?;
-    let Some(row) = rows.first() else { return Ok(None) };
-    let status: String = row.get("status");
-    let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
-    Ok(Some(LockedAuditRow {
-        status,
-        audit_generation,
-    }))
-}
-
-/// `UPDATE … validate_cursor / dead_letter_pks / processed` — advances
-/// the row's progress columns after a successful batch. Must run on the
-/// same connection that holds the row lock from
-/// [`lock_audit_row_for_update`].
-pub async fn update_backfill_progress(
-    client: &Client,
-    app_id: &str,
-    id: i64,
-    next_cursor: i64,
-    dead_letter_pks: &Value,
-    processed_total: i64,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET validate_cursor = $2::bigint,
-                dead_letter_pks = $3::jsonb,
-                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', to_jsonb($4::bigint)),
-                last_heartbeat_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $1::bigint"#
-    );
-    let dlp_s = dead_letter_pks.to_string();
-    let id_s = id.to_string();
-    let nc_s = next_cursor.to_string();
-    let pt_s = processed_total.to_string();
-    client
-        .query_text_params(
-            &sql,
-            &[id_s.as_str(), nc_s.as_str(), dlp_s.as_str(), pt_s.as_str()],
-        )
-        .await
-        .map_err(|e| coded_sql("update_backfill_progress", e))?;
-    Ok(())
-}
-
-/// `UPDATE … status=$terminal, owner_session_id = NULL` — terminal
-/// transition for a backfill row. Idempotent: only flips rows still in
-/// `running` / `pending`, so a doubled call is harmless. Used by
-/// `exec_commit_batch` when `isDone=true`.
-pub async fn finalise_backfill(
-    client: &Client,
-    app_id: &str,
-    id: i64,
-    terminal: TerminalStatus,
-    error_message: Option<&str>,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = $2,
-                error = COALESCE($3, error),
-                updated_at = NOW(),
-                applied_at = CASE
-                    WHEN $2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL THEN NOW()
-                    ELSE applied_at
-                END,
-                owner_session_id = NULL
-            WHERE id = $1::bigint AND status IN ('running','pending')"#
-    );
-    let id_s = id.to_string();
-    let err_s = error_message.unwrap_or("").to_string();
-    client
-        .query_text_params(&sql, &[id_s.as_str(), terminal.as_sql(), err_s.as_str()])
-        .await
-        .map_err(|e| coded_sql("finalise_backfill", e))?;
-    Ok(())
-}
-
-/// `UPDATE … status='cancelled'` — operator-driven cancel via
-/// `migrations.cancel(...)`. Runs on a pool client (no lock) — the
-/// row's FOR UPDATE in any concurrent `exec_commit_batch` serialises
-/// against this update.
-pub(crate) async fn cancel_backfill_row<E: AuditExecutor>(
-    exec: &E,
-    app_id: &str,
-    id: i64,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = 'cancelled',
-                updated_at = NOW(),
-                owner_session_id = NULL,
-                error = COALESCE(error, 'cancelled by operator')
-            WHERE id = $1::bigint AND status IN ('pending','running')"#
-    );
-    let id_s = id.to_string();
-    exec.query_text(&sql, &[id_s.as_str()])
-        .await
-        .map_err(|e| coded_sql("cancel_backfill_row", e))?;
-    Ok(())
-}
-
 /// Validate an app_id used as a schema name — same rules as the query
 /// builder's `validate_schema`. Local copy avoids exporting a private
 /// function out of `query.rs`.
@@ -937,25 +655,25 @@ mod tests {
         }
     }
 
-    /// Regression: before the fix, `insert_backfill_running` called
+    /// Regression: the audit INSERT path used to call
     /// `.unwrap_or_default()` on the RETURNING rows, silently returning
     /// `id = 0` when the INSERT returned no row (RLS bypass, trigger
     /// interception, or a missing RETURNING clause). A `0` id then
     /// propagated into `WHERE id = 0` queries, silently no-oping every
-    /// downstream progress write.  The fix mirrors `write_audit_row`
-    /// and returns `DbError::Internal` instead.
+    /// downstream write. The fix in `write_audit_row` returns
+    /// `DbError::Internal` instead.
     ///
     /// This test cannot drive a real Client, but it directly exercises
     /// the `first_row_or_internal` helper on an empty slice to lock in
     /// the intended behaviour — the same predicate the production
     /// site now calls.
     #[test]
-    fn insert_backfill_running_empty_returning_is_internal_error() {
+    fn write_audit_row_empty_returning_is_internal_error() {
         let rows: Vec<()> = vec![];
-        let result = first_row_or_internal(&rows, "audit: insert_backfill_running");
+        let result = first_row_or_internal(&rows, "audit: INSERT");
         match result {
             Err(DbError::Internal { message }) => {
-                assert_eq!(message, "audit: insert_backfill_running: returned no row");
+                assert_eq!(message, "audit: INSERT: returned no row");
             }
             other => panic!("expected Internal error, got {other:?}"),
         }

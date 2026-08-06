@@ -78,7 +78,6 @@ registration, `db.live` snapshot delivery, and the generated RPC path.
 
 - Multi-step business transactions. Use `db.transaction()` when multiple DB
   operations must commit or roll back together.
-- Durable data migrations. See `examples/db-migrations-playground/`.
 - Authenticated per-user data. This demo uses a shared public ledger user so
   every browser window sees the same live list.
 - Raw file or binary RPC responses. Use stream procedures or normal fetch

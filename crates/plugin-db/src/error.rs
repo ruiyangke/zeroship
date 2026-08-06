@@ -508,8 +508,7 @@ impl DbError {
 ///
 /// This is the shared primitive every per-module `coded_sql`-style
 /// helper routes through: `audit`, `auth::bootstrap`, `auth::keys`,
-/// `auth::session`, `diff`, `replication`, and `migrations::coded_db`
-/// (deeefe18 — last inline copy collapsed). Operators see "what we
+/// `auth::session`, `diff`, and `replication`. Operators see "what we
 /// were doing when the SQL failed" without losing the SQLSTATE-driven
 /// classification at the V8 boundary.
 ///

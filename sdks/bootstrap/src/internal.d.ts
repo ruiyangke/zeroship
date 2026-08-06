@@ -21,87 +21,6 @@
 // types from `@zeroship/types` without re-importing them.
 
 /**
- * Status snapshot returned by `ZeroshipMigration.status()` and
- * `ZeroshipMigrations.status(spec)`. Mirrors the audit-row shape; the
- * `@zeroship/migrations` SDK maps it to its public
- * `MigrationStatusSnapshot` type.
- */
-interface ZeroshipMigrationStatus {
-  exists: boolean;
-  status: string | null;
-  cursor: number;
-  processed: number;
-  deadLetterPks: number[];
-  isDone: boolean;
-  error: string | null;
-}
-
-/**
- * A live migration-run wrapper minted by
- * `__platform.migrations.start(spec)`. Holds the (app_id, name,
- * collection) triple plus the session-scoped Postgres advisory lock
- * that fences concurrent runs. The wrapper's Weak finalizer
- * auto-cancels if the wrapper is GC'd without an explicit terminal
- * `commitBatch(isDone=true, ...)`.
- *
- * Lifecycle: `start(spec)` mints the wrapper in the `active` state.
- * `commitBatch(isDone=true, ...)` / `cancel()` / `reset()` all drive it
- * to the `settled` state — subsequent `commitBatch` / `cancel` /
- * `reset` calls reject because the wrapper no longer holds the advisory
- * lock; `status()` continues to work (the audit row is still observable
- * by `(name, collection)` coordinates).
- */
-interface ZeroshipMigration {
-  status(): Promise<ZeroshipMigrationStatus>;
-  cancel(): Promise<void>;
-  reset(): Promise<void>;
-
-  /**
-   * Fetch the next batch of rows after `cursor`. Resolves with the row
-   * array; each row is a plain object keyed by column name. `cursor` /
-   * `batchSize` must be finite, integer-valued numbers in the `i64`
-   * range; out-of-range values reject with a `RangeError`.
-   */
-  fetchBatch(cursor: number, batchSize: number): Promise<Record<string, unknown>[]>;
-
-  /**
-   * Commit one batch of per-row updates. The spec is walked from V8
-   * directly — no `JSON.stringify` on the SDK side. If `isDone=true`,
-   * drives the audit row to `terminalStatus` and releases the advisory
-   * lock. Resolves void; rejects with the underlying Postgres error on
-   * failure.
-   */
-  commitBatch(spec: {
-    updates: { id: number; set: Record<string, unknown> }[];
-    deadLetterPks: number[];
-    nextCursor: number;
-    processedTotal: number;
-    isDone: boolean;
-    terminalStatus?: string;
-    errorMessage?: string;
-  }): Promise<void>;
-}
-
-/**
- * The `Migrations` namespace surfaced as `__platform.migrations`. Two
- * concerns:
- * - **Running** a migration: `start(spec)` mints a Migration wrapper.
- * - **Observing / controlling** an already-persisted migration row by
- *   coordinates: `status(spec)` / `cancel(spec)` / `reset(spec)`.
- */
-interface ZeroshipMigrations {
-  start(spec: {
-    name: string;
-    collection: string;
-    dryRun?: boolean;
-    reset?: boolean;
-  }): Promise<ZeroshipMigration>;
-  status(spec: { name: string; collection: string }): Promise<ZeroshipMigrationStatus>;
-  cancel(spec: { name: string; collection: string }): Promise<void>;
-  reset(spec: { name: string; collection: string }): Promise<void>;
-}
-
-/**
  * Operator-facing replication namespace, surfaced as
  * `__platform.replication`. Apps don't call these — the deploy
  * orchestrator / control plane does (via this package's runtime-entry).
@@ -169,9 +88,6 @@ interface ZeroshipDbPlatform {
    * `opts` is ignored (the handle is bound to its own app at mint).
    */
   startReplicationConsumer(opts?: string): Promise<string>;
-
-  /** Mint (or return the cached) Migrations namespace wrapper. */
-  migrations: ZeroshipMigrations;
 
   /** Mint (or return the cached) Replication namespace wrapper. */
   replication: ZeroshipReplication;

@@ -1873,9 +1873,8 @@ fn schema_pending_decoder_drops_then_resyncs() {
 // guard via `SqliteBackend::pause_broker_for_tests` — the test-helper
 // `pub(crate)` shortcut. This second fence exercises the SAME guard
 // behaviour but through `BackendHandle::as_change_stream_sqlite()
-// .pause_broker(app_id)` — the API the migration orchestrator
-// (`crate::migrations::exec_begin` / `exec_commit_batch`, P2 tail
-// wire-up) calls into. A regression that detaches the orchestrator-side
+// .pause_broker(app_id)` — the general broker-pause-window API a
+// DDL/bulk-write caller drives. A regression that detaches the
 // `ChangeStream::pause_broker` trait method from the underlying
 // `BrokerPauseGuard` construction (e.g. someone "optimises" the trait
 // to return a no-op guard while leaving the test helper intact) would
@@ -1894,8 +1893,8 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
     //    subscription on guard drop.
     // 3. Acquire `BrokerPauseGuard` via
     //    `BackendHandle::as_change_stream_sqlite()
-    //    .pause_broker(app_id)` — the canonical path
-    //    `migrations::exec_begin` reaches the guard through (P2 tail).
+    //    .pause_broker(app_id)` — the canonical path a DDL/bulk-write
+    //    caller reaches the guard through.
     // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
     //    the commit_hook ships packets, BUT the publisher's per-event
     //    `is_app_suppressed` check drops each one.
@@ -1904,14 +1903,10 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
     //    subscription.
     // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`.
     //
-    // The orchestrator wire-up (`migrations::exec_begin`) is PG-only
-    // because `exec_begin` takes a `compio_postgres::Client` directly;
-    // we cannot drive the full migration loop against SQLite without
-    // re-platforming the orchestrator. What we CAN — and must — pin
-    // here is that the same `ChangeStream::pause_broker` API the
-    // orchestrator depends on still routes through the
-    // `wal_consumer::suppress_app` + `broker::resume_app_with_resync`
-    // primitives this rail's contract is built on.
+    // What we pin here is that the `ChangeStream::pause_broker` API
+    // still routes through the `wal_consumer::suppress_app` +
+    // `broker::resume_app_with_resync` primitives this rail's contract
+    // is built on.
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -1933,8 +1928,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         // shape the per-isolate context's `ctx.backend()` accessor
         // returns. `as_change_stream_sqlite()` then yields the
         // `SqliteChangeStream` adapter whose `pause_broker(app_id)`
-        // mints the same `BrokerPauseGuard` `exec_begin` will mint at
-        // PG-side once the SQLite-flavoured orchestrator lands.
+        // mints the `BrokerPauseGuard`.
         let handle = BackendHandle::Sqlite(Rc::new(backend));
 
         let sub = subscribe_local("app_orch", "items");
@@ -1978,9 +1972,8 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 
         // Drop the guard — calls `unsuppress_app` + emits one Resync
         // onto every active subscription on `app_orch`. This is the
-        // orchestrator-shaped lifecycle: `exec_commit_batch{is_done=true}`
-        // → `clear_mig_lock()` → `MigrationLock::drop` → `broker_pause`
-        // field drops → `BrokerPauseGuard::drop`.
+        // broker-pause-window lifecycle: the guard binding drops at the
+        // end of the DDL/bulk-write window → `BrokerPauseGuard::drop`.
         drop(guard);
 
         let msgs = drain(&sub);

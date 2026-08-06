@@ -60,8 +60,8 @@
 //! the control plane wires the call (cross-worker fan-out + lock), the
 //! orchestrator surface is unused in a default build; it is fully
 //! exercised by the `tests/integration.rs` PG suite (reachable via
-//! `test-helpers`). Same posture as the `migration_sweeper` (P6a-1) and
-//! `auth/*` — built + tested, zero production callers until the wire-up.
+//! `test-helpers`). Same posture as `auth/*` — built + tested, zero
+//! production callers until the wire-up.
 //! Remove the allow in the PR that wires the control-plane call.
 #![allow(dead_code)]
 

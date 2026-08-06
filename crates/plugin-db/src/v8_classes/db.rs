@@ -205,11 +205,11 @@ impl Db {
     }
 
     // **P9 PR 4** — `db.startReplicationConsumer`, `db.setMaskPolicy`,
-    // and the `db.migrations` / `db.replication` getters moved to
-    // `DbPlatform` (reached via the `__platform` capability handle, not
-    // `env.db`). Their dispatch pipelines (`start_replication_consumer_
-    // dispatch`, `dispatch_set_mask_policy_field`, `mint_migrations`,
-    // `mint_replication`) are unchanged — only the JS carrier relocated.
+    // and the `db.replication` getter moved to `DbPlatform` (reached
+    // via the `__platform` capability handle, not `env.db`). Their
+    // dispatch pipelines (`start_replication_consumer_dispatch`,
+    // `dispatch_set_mask_policy_field`, `mint_replication`) are
+    // unchanged — only the JS carrier relocated.
     //
     // **P9 PR 2** — `db.unmaskField` / `db.bulkUnmaskFields` had already
     // moved to `Collection.unmaskField` / `.bulkUnmask` +

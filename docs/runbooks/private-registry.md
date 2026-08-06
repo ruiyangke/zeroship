@@ -70,7 +70,6 @@ Published packages:
 - `@zeroship/auth`
 - `@zeroship/kv`
 - `@zeroship/storage`
-- `@zeroship/migrations`
 - `@zeroship/rpc`
 - `@zeroship/server`
 - `@zeroship/react`
