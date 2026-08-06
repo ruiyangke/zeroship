@@ -213,3 +213,32 @@ fn a_scope_owning_no_schema_permits_no_schema() {
     )
     .expect("an explicit Unconfined posture still admits any schema");
 }
+
+#[test]
+fn an_anonymous_block_in_an_untrusted_language_is_denied() {
+    // `DO [LANGUAGE lang] $$..$$` executes an anonymous block in an arbitrary
+    // procedural language, so it carries the same RCE reach as `CREATE FUNCTION`.
+    // `DO` sat in the unconditionally-safe statement list and never had its language
+    // read, so the block spelling was admitted while the function spelling of the
+    // same body was denied.
+    let g = confined();
+    for sql in [
+        "DO LANGUAGE plpythonu $$ import os $$",
+        "DO LANGUAGE plperlu $$ system(\"id\"); $$",
+        // Quoting the language name must not evade the check.
+        "DO LANGUAGE \"plpythonu\" $$ import os $$",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("untrusted language must be denied: {sql}"));
+        assert!(
+            matches!(err, GuardError::Denied { .. }),
+            "expected a hard Denied for `{sql}`, got {err:?}"
+        );
+    }
+
+    // An absent LANGUAGE is plpgsql, which is trusted and stays allowed.
+    g.check("DO $$ BEGIN NULL; END $$")
+        .expect("a plain plpgsql block stays allowed");
+}
+

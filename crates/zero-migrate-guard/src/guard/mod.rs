@@ -1746,8 +1746,21 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             | NodeEnum::TruncateStmt(_)
             | NodeEnum::VacuumStmt(_)
             | NodeEnum::ClusterStmt(_)
-            | NodeEnum::ReindexStmt(_)
-            | NodeEnum::DoStmt(_) => {}
+            | NodeEnum::ReindexStmt(_) => {}
+
+            // `DO [LANGUAGE lang] $$…$$` runs an anonymous block in an arbitrary
+            // procedural language, so it needs the same language check as
+            // `CREATE FUNCTION`: the language is a `DefElem` in exactly the same
+            // shape. Without it, `DO LANGUAGE plpythonu $$ import os $$` was admitted
+            // while the function spelling of the same body was denied as RCE. An
+            // absent `LANGUAGE` is plpgsql, which is trusted.
+            NodeEnum::DoStmt(d) => {
+                if let Some(lang) = function_language(&d.args) {
+                    if !denylist::is_trusted_language(&lang) {
+                        return Err(denied(rule::UNTRUSTED_LANGUAGE, raw));
+                    }
+                }
+            }
 
             // ---- DENY-BY-DEFAULT: every unenumerated statement kind ----
             _ => return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw)),
