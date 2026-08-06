@@ -35,7 +35,6 @@ compio = { workspace = true }
 http = { workspace = true }
 lru = { workspace = true }
 url = { workspace = true }
-compio-postgres = { workspace = true }
 # Observability — tracing subscriber init shared across all binaries.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

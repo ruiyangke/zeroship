@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::oidc::claims::{scope_gated_identity_claims, ScopeGatedIdentityClaims};
 use crate::oidc::Issuer;
 use crate::store::users;
-use zeroship_core::wrapper_revocation;
+use zeroship_authz::wrapper_revocation;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(

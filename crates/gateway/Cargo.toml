@@ -19,6 +19,10 @@ harness = false
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
+# Wrapper-token family revocation (`wrapper_revocation`) lives in zeroship-authz
+# (moved out of zeroship-core so core links no DB driver). The gate's OIDC-RP
+# JWT path checks revocation on every request.
+zeroship-authz = { workspace = true }
 # Metering coverage (#27): the gateway is a SECOND metering producer. It
 # builds its own process-wide `Arc<Meter>` + `spawn_flush_task` (same wire
 # type, same `/internal/usage` ingest as the worker) and emits

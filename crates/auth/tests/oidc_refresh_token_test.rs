@@ -19,7 +19,7 @@ use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_api_key;
-use zeroship_core::wrapper_revocation;
+use zeroship_authz::wrapper_revocation;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 

@@ -190,7 +190,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         oidc_rp: Arc::new(oidc_rp),
         db: opts.db,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
+        revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
         signing_key: Some(Arc::new(signing_key)),
         prev_signing_key: opts.prev_signing.map(Arc::new),
         session_issuer: Some(Arc::new(session_issuer)),
@@ -626,7 +626,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let revoked = zeroship_core::wrapper_revocation::is_family_revoked_since(
+        let revoked = zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &conn,
             CLIENT_ID,
             &pws_sub,

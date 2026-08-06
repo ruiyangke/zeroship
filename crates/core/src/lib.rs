@@ -12,7 +12,6 @@ pub mod config;
 pub mod dispatch_frame;
 pub mod observability;
 pub mod logout_token;
-pub mod wrapper_revocation;
 pub mod oidc_verify;
 pub mod pkce;
 pub mod preview_ports;

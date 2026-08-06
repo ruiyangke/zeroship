@@ -12,6 +12,7 @@ pub mod policy;
 pub mod resource;
 pub mod scope;
 pub mod statement;
+pub mod wrapper_revocation;
 
 pub use action::Action;
 pub use cedar_policy::PolicySet;

@@ -14,7 +14,7 @@ use crate::oidc::refresh::{
     introspect_refresh_token, ClientAuthMethod, RefreshTokenKeys,
 };
 use crate::oidc::{AccessTokenClaims, Issuer};
-use zeroship_core::wrapper_revocation;
+use zeroship_authz::wrapper_revocation;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/introspect").route(web::post().to(introspect_post)));
