@@ -1031,7 +1031,31 @@ async fn execute_pending<B: MigrationBackend>(
 
     for &m in pending {
         let version = m.version.as_str();
-        let had_inflight = started.contains_key(version);
+        // An inflight marker is the crash-recovery key for a half-run migration, and
+        // it records the checksum of the body that half-ran. The tamper gate cannot
+        // vet it: `compare_applied_to_set` deliberately skips every non-completed
+        // entry, because a lone marker is not a settled state. So this is the only
+        // place the marker's identity can be checked before its migration is
+        // re-executed, and reducing the entry to a bool skipped that check entirely.
+        //
+        // Editing a `transaction:false` migration in place after it half-applied
+        // would otherwise replay a DIFFERENT body than the one that ran, and then
+        // overwrite the marker, destroying the evidence. MySQL already refuses this
+        // (`MysqlInflightRecoveryError::MarkerMismatch`); the generic path did not.
+        //
+        // An empty recorded checksum is a marker predating the field, not a
+        // mismatch.
+        let inflight = started.get(version).copied();
+        if let Some(entry) = inflight {
+            if !entry.checksum.is_empty() && entry.checksum != m.checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: version.to_string(),
+                    recorded: entry.checksum.clone(),
+                    expected: m.checksum.as_str().to_string(),
+                });
+            }
+        }
+        let had_inflight = inflight.is_some();
 
         // A dependent of a Skip'd (still-pending) migration cannot run
         // this batch — the object its `up` needs was never created. Transitively
