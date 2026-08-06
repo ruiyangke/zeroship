@@ -6,7 +6,7 @@
 //! the IR envelope as data. **It is NEVER parsed from text** — there is no lexer,
 //! no Pratt parser, no `libpg_query`, and therefore no Rust-vs-JS parser drift
 //! and no differential fuzzer. Validation is a
-//! purely STRUCTURAL allow-list check over this enum ([`crate::model::validate`]).
+//! purely STRUCTURAL allow-list check over this enum ([`crate::validate`]).
 //!
 //! The variants are exactly:
 //!
@@ -27,7 +27,7 @@
 //!   is rejected at DESERIALIZE before any checksum runs.
 //!
 //! NB: the per-dialect *rendering* of an `Expr` is the engine's job — this module
-//! is the data + (with [`crate::model::validate`]) the structural
+//! is the data + (with [`crate::validate`]) the structural
 //! gate. Nothing here renders SQL.
 
 use schemars::JsonSchema;
@@ -497,7 +497,7 @@ pub enum Expr {
     /// canonical leg order the checksum folds. A leg that is `None` is skipped on
     /// the wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.
     ///
-    /// **Scope math (validate, [`crate::model::validate`]).** The covered dialect
+    /// **Scope math (validate, [`crate::validate`]).** The covered dialect
     /// set is `{legs present} ∪ {all dialects if default present}`; a target with
     /// NEITHER its own leg NOR a `default` is REFUSED fail-closed
     /// (`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing

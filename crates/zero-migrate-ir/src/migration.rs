@@ -411,7 +411,7 @@ impl Checksum {
     /// canonical op-list region in PLACE OF the `up`/`down`
     /// region, then the SAME [`fold_common`] tail as [`Checksum::of`].
     ///
-    /// The op-list region is [`crate::model::ir::CanonicalOpList::canonical_bytes`]: an op count,
+    /// The op-list region is [`crate::ir::CanonicalOpList::canonical_bytes`]: an op count,
     /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a
     /// reorder/insert, an `Insert` row scalar change, or a change to an embedded
     /// expression-AST `Literal` (all fold, since they live inside the op value)
@@ -670,8 +670,8 @@ pub struct Migration {
     /// Optional **preconditions**: assertions evaluated against the
     /// live DB BEFORE this migration's `up` runs, gating whether it applies.
     /// Empty (the default) = unconditional apply. Each [`PreconditionCheck`]
-    /// carries an assertion ([`Precondition`](crate::model::precondition::Precondition))
-    /// and an unmet policy ([`OnUnmet`](crate::model::precondition::OnUnmet)): `Halt`
+    /// carries an assertion ([`Precondition`](crate::precondition::Precondition))
+    /// and an unmet policy ([`OnUnmet`](crate::precondition::OnUnmet)): `Halt`
     /// (fail-closed — abort the apply, nothing applied) or `Skip` (leave this
     /// migration pending, re-evaluate next deploy). Folded into [`checksum`] so a
     /// precondition change is drift, exactly like an SQL change.

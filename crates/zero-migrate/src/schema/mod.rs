@@ -26,8 +26,8 @@
 //! - [`descriptors`] — the schema-shape **enums** ([`descriptors::VectorMetric`],
 //!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
 //! - [`fts_sqlite`] — the SQLite full-text-search vtable helpers.
-//! - [`error`] — leaf error types ([`error::SchemaError`],
-//!   [`error::MaskSentinelError`]).
+//! - [`error`] - leaf error types (`SchemaError` under the `introspect` feature
+//!   and [`error::MaskSentinelError`]).
 
 // **Inherited lint posture.** `query.rs` and `diff.rs` were relocated verbatim
 // out of the original data-plane crate; the moved code trips a handful of style

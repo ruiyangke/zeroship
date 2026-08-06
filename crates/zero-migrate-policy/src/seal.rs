@@ -22,7 +22,7 @@
 //!   1-byte tag per field, integers big-endian fixed-width, strings/sets
 //!   length-prefixed. No two distinct rule sets can collide and no boundary is
 //!   ambiguous.
-//! - **The registry digest** is [`PolicyRegistry::digest`] (II.2.1) — the full
+//! - **The registry digest** is [`crate::PolicyRegistry::digest`] (II.2.1) - the full
 //!   canonical `KnobDef` encoding of every knob, including `requires_db_privilege`.
 //! - **`(dialect, matcher_version)`** is the scope-matcher-semantics pair (II.2.7):
 //!   `dialect` selects the identifier fold, `matcher_version` the glob-lattice +

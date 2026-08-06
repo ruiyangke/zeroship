@@ -48,7 +48,8 @@
 //!   distinct across the update.
 //! - **E3 backfills on the table's PRIMARY KEY**, never on `<to>` (the column
 //!   being populated): the backfill engine requires a UNIQUE/NOT-NULL cursor and
-//!   forbids paging on the column it mutates (see [`crate::apply::backend::postgres::backfill`]). E3
+//!   forbids paging on the column it mutates (see
+//!   [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)). E3
 //!   depends on E2 so the trigger is live before the backfill runs — otherwise a
 //!   concurrent write between backfill batches could land in `<from>` only and
 //!   be lost.
@@ -112,7 +113,8 @@ pub struct ExpandContractPlan {
     /// C1, C2 in order (drop trigger/function, drop old column).
     pub contract: Vec<Migration>,
     /// The structured backfill spec for E3, to be driven by
-    /// [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) during orchestration.
+    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
+    /// during orchestration.
     pub backfill: BackfillSpec,
     /// The version of the E2 trigger migration — the dependency every contract
     /// step and the gate keys on as "the expand". Carried out so the

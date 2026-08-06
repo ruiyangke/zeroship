@@ -27,7 +27,7 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`crate::apply::drift::check_checksum_drift`]).
 //!
-//! [`PostgresBackend`], [`SqliteBackend`], and [`MysqlBackend`] are the live
+//! [`PostgresBackend`], [`sqlite::SqliteBackend`], and [`MysqlBackend`] are the live
 //! implementations. Postgres remains the richest regression bar; SQLite and MySQL
 //! provide dialect-specific session, journal, drift, and DML behavior behind the
 //! same orchestration trait, without forking the generic executor.

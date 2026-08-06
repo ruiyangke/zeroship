@@ -98,7 +98,7 @@ pub enum BackfillError {
         /// The cursor component the transform illegally assigns.
         cursor_component: String,
     },
-    /// SQLite analog of [`BackfillError::BatchFailed`].
+    /// A SQLite backfill batch failure after the last committed cursor.
     #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
     SqliteBatchFailed {
         /// The last committed cursor when the failing batch started.

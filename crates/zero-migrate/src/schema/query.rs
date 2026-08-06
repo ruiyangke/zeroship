@@ -31,7 +31,7 @@ pub enum QueryError {
     InvalidIdent(String),
     /// Creator declared a field whose name collides with a column injected by
     /// the active effective policy.
-    /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
+    /// Distinct from [`Self::InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
     /// generic `invalid_identifier` thrown by the `_*` / `__zero_migrate_*` prefix
     /// reservations. Filter-time use of these names is unrestricted
@@ -978,8 +978,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 /// mask/encryption sentinels) instead of the `;\n`-joined string.
 ///
 /// `join(";\n")` over the returned vector is byte-identical to the joined form, so
-/// the two entry points never diverge. The migrate engine's guard-per-statement
-/// lower ([`zero_migrate`]) consumes this list so a string-literal column
+/// the two entry points never diverge. The `zero_migrate` engine's
+/// guard-per-statement lowering consumes this list so a string-literal column
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
 /// split mid-statement — the split is structural, not a textual `;\n` heuristic.
 pub fn build_create_table_with_fks_for_dialect_scoped_statements(

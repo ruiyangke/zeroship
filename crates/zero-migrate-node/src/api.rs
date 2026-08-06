@@ -12,6 +12,8 @@
 //! authoritative structural + schema-confinement validation, enforces ownership
 //! against the project registry, and compares the advisory checksum hint.
 //! It is the single DB-free gate an authoring host runs before deploy.
+//!
+//! [`LoadVerifyReply`]: crate::wire::LoadVerifyReply
 
 use std::collections::HashMap;
 

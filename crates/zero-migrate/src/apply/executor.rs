@@ -106,10 +106,9 @@ impl ApplyOutcome {
 
 /// Opaque driver/transport error carried by the dialect-neutral executor.
 ///
-/// Postgres stores the original [`compio_postgres::Error`] inside this wrapper,
-/// so callers that need PG-specific details can downcast. Non-PG backends can
-/// carry their own structured error type without forcing `ApplyError` /
-/// `RollbackError` to name a Postgres driver in their public shape.
+/// Backends store their original driver or transport error inside this wrapper,
+/// so callers that need backend-specific details can downcast without forcing
+/// `ApplyError` or `RollbackError` to name a concrete driver in their public shape.
 #[derive(Debug)]
 pub struct BackendError(Box<dyn Error + Send + Sync + 'static>);
 
@@ -1781,9 +1780,8 @@ pub enum RollbackTarget {
 /// A complete rollback request.
 ///
 /// How far to unwind ([`RollbackTarget`]) plus the irreversible-handling
-/// [`RollbackOptions`]. Bundled so `rollback` and
-/// [`MigrationEngine::rollback`](crate::engine::MigrationEngine::rollback) carry
-/// one parameter rather than two.
+/// [`RollbackOptions`], bundled so a rollback driver can carry one parameter
+/// rather than two.
 #[derive(Debug, Clone)]
 pub struct RollbackRequest {
     /// How far to unwind.
@@ -1868,12 +1866,11 @@ pub enum RollbackError {
     /// operator-facing text. See [`ApplyError::Backend`].
     #[error("backend error: {0}")]
     Backend(String),
-    /// Rollback was requested with [`Approval::None`]. A `down` is inherently
-    /// destructive (it tears structure down), so rollback ALWAYS requires
-    /// [`Approval::Approved`]. This is the executor's OWN defense-in-depth gate,
-    /// independent of (and additional to) the engine's gate
-    /// ([`crate::engine::MigrationEngine::rollback`]), so a caller driving
-    /// `rollback` directly cannot bypass approval. Nothing was rolled back.
+    /// Reserved for a future rollback orchestrator that would reject
+    /// [`Approval::None`] and require [`Approval::Approved`] before any `down`.
+    ///
+    /// Current per-migration backend rollback leaves do not accept approval and
+    /// never construct this variant.
     #[error(
         "rollback requires Approval::Approved (every down is destructive) but it was not given"
     )]

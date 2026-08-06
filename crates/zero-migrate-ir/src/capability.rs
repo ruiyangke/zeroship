@@ -4,7 +4,8 @@
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
 //! capability flags** + a schema allowlist. A vendor op declares the closed set of
-//! [`VendorCapability`] values it needs ([`crate::ir::Op::vendor_capabilities`]); the active
+//! [`VendorCapability`] values it needs (computed by
+//! `zero_migrate::model::op_support::vendor_capabilities`); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
 //! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
 //! SQL hits the Confined deny-list at the second gate).
@@ -30,8 +31,8 @@ use crate::policy::{SchemaScope, TrustProfile};
 /// so operator-side engine seams can name it without depending on the runner. The
 /// token has a PRIVATE `()` field, so an external crate can name the type but cannot
 /// construct one. Production code mints it through the named engine runner seam
-/// ([`OperatorCapability::new`]); engine tests mint it via the `test-support`-gated
-/// [`OperatorCapability::for_test`]. Guard policies are always supplied explicitly
+/// ([`OperatorCapability::new`]); engine tests mint it through the `for_test` method,
+/// gated by the `test-support` feature. Guard policies are always supplied explicitly
 /// as composed `EffectivePolicy` values and do not use this token to select a preset.
 #[derive(Debug, Clone)]
 pub struct OperatorCapability(());
@@ -68,8 +69,8 @@ impl Default for OperatorCapability {
 }
 
 /// The CLOSED set of vendor capabilities a privileged op can require.
-/// Each [`crate::ir::Op`] vendor variant maps to one or more of these via
-/// [`crate::ir::Op::vendor_capabilities`].
+/// Each [`crate::ir::Op`] vendor variant maps to one or more of these through
+/// `zero_migrate::model::op_support::vendor_capabilities`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
     /// `CREATE/DROP EXTENSION` ([`VendorCapabilities::allow_extension`]).

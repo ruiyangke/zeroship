@@ -26,7 +26,8 @@
 //!    reads this.
 //!
 //! This is the FIRST external consumer of the seam beyond the engine itself: a
-//! driver author (or the `PgDevSession` test harness) runs [`run`] against a live,
+//! driver author (or the `PgDevSession` test harness) runs
+//! [`crate::driver::conformance::run`] against a live,
 //! empty session and gets a single pass/fail verdict with a precise reason. It is
 //! deliberately **schema-agnostic** — it creates and drops its own scratch objects
 //! in a caller-provided scratch schema, touching nothing the engine journals.

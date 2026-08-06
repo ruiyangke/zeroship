@@ -2,7 +2,8 @@
 //! map (Phase 2 Step 2a).
 //!
 //! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
-//! the composition algebra, the unforgeable [`EffectivePolicy`]). It is content-free
+//! the composition algebra, the unforgeable
+//! [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy)). It is content-free
 //! by design. THIS module is the engine's *content*: it declares zero-migrate's
 //! knobs — the vendor capabilities as grant keys, the op-timeout upper bounds, the
 //! index/table-rewrite postures, and the data-security obligations — as a builtin
@@ -28,7 +29,8 @@
 //! off the posture, not an operator-authorable knob. Both moved to the guard crate.
 //!
 //! This is the Step-0 prep for moving the guard's capability gate onto the PDP: the
-//! guard, given an [`EffectivePolicy`] composed over [`builtin_registry`], queries
+//! guard, given an [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) composed
+//! over [`builtin_registry`], queries
 //! `grants(key, object)` for the statement's capability key instead of reading a
 //! `VendorCapabilities` bit. The registry here is what makes those queries meaningful
 //! (a key with no def would fail closed).
@@ -308,7 +310,8 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
 }
 
 /// The engine's BUILTIN [`PolicyRegistry`]: every zero-migrate knob the guard and
-/// validator gate on, as PDP knob defs. An [`EffectivePolicy`] the guard queries is
+/// validator gate on, as PDP knob defs. An
+/// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) the guard queries is
 /// composed over exactly this registry, so `grants(key, object)` resolves to the
 /// knob's default (deny) when no covering grant rule raises it.
 ///

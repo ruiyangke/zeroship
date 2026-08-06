@@ -13,7 +13,7 @@
 //! exclude-covers-include scope to `Nothing`. A disjoint meet therefore produces
 //! `Nothing`, never the universe.
 //!
-//! Correctness is proven by the brute-force oracle in [`oracle`]: over a bounded
+//! Correctness is proven by the brute-force oracle in `oracle`: over a bounded
 //! universe of names and globs it asserts every lattice op against a direct
 //! ground-truth matcher — `⊓` EXACT, `⊑ ⟺ ⊆`, `⊔ ⊇ ∪`, and `∖ ⊇ ∖`-or-reject
 //! (never a strict subset — the escalation direction is provably impossible).

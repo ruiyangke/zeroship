@@ -30,6 +30,23 @@
 //! - The journal's monotonic `event_seq` is an [`i64`] read from an `int8` column; it
 //!   crosses to JS as a `bigint` ([`BigInt`]) in [`HistoryEventDto`] so a large
 //!   sequence never rounds.
+//!
+//! [`JsCell`]: crate::wire::JsCell
+//! [`JsRow`]: crate::wire::JsRow
+//! [`JsReply`]: crate::wire::JsReply
+//! [`JsError`]: crate::wire::JsError
+//! [`JsRequest`]: crate::wire::JsRequest
+//! [`ApplyRequest`]: crate::wire::ApplyRequest
+//! [`StatusRequest`]: crate::wire::StatusRequest
+//! [`StatusIrRequest`]: crate::wire::StatusIrRequest
+//! [`HistoryRequest`]: crate::wire::HistoryRequest
+//! [`ApplyReply`]: crate::wire::ApplyReply
+//! [`StatusReply`]: crate::wire::StatusReply
+//! [`HistoryReply`]: crate::wire::HistoryReply
+//! [`LoadVerifyReply`]: crate::wire::LoadVerifyReply
+//! [`JsonValue`]: crate::wire::JsonValue
+//! [`BigInt`]: napi::bindgen_prelude::BigInt
+//! [`HistoryEventDto`]: crate::wire::HistoryEventDto
 
 #[cfg(feature = "napi")]
 use napi::bindgen_prelude::BigInt;

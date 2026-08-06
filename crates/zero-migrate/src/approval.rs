@@ -3,9 +3,9 @@
 //!
 //! [`Approval`] lived in [`crate::engine`] originally, where it gated only the
 //! public [`MigrationEngine`](crate::engine::MigrationEngine) surface. But the
-//! executor ([`crate::apply::executor::apply`] / [`crate::apply::executor::rollback`]) is itself
-//! a public entry point a caller (or a rollback→reapply retry loop) can drive
-//! directly, bypassing the engine gate. The executor already re-runs the guard +
+//! executor's [`crate::apply::executor::apply`] is itself a public entry point a
+//! caller can drive directly, bypassing the engine gate. The executor already
+//! re-runs the guard +
 //! the least-privilege role rather than trusting the engine; the approval gate is
 //! the same pattern, so it must live at the executor layer too. Hoisting
 //! [`Approval`] into its own module lets both layers share the one type without an

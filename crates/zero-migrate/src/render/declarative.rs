@@ -4608,8 +4608,8 @@ pub enum DeclarativeError {
 /// statement. Its [`ExpandContractPlan`] is more than a list of `Migration`s: it
 /// also carries the [`BackfillSpec`](crate::model::backfill::BackfillSpec) that mirrors
 /// **pre-existing** rows from `<from>` into `<to>`. E3's `up` is only a `SELECT 1`
-/// marker — the actual data copy is [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill),
-/// driven exclusively by [`run_expand`](crate::engine::MigrationEngine::run_expand).
+/// marker - the actual data copy is driven through
+/// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online).
 ///
 /// If the rename were flattened into the plain migration set (`out.extend(plan.all())`)
 /// and pushed through `plan` → `executor::apply`, the backfill would NEVER run:

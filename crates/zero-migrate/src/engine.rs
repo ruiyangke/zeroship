@@ -243,7 +243,7 @@ pub enum EngineError {
     },
 }
 
-/// A failure from [`MigrationEngine::rollback`].
+/// A rollback error shape retained for a future engine-level orchestrator.
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackEngineError {
     /// Rollback is destructive (a `down` typically drops/reverses schema) and
@@ -698,8 +698,9 @@ impl MigrationEngine {
     /// A hinted rename is NOT folded into the linted plain plan: a rename's
     /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan) carries a
     /// [`BackfillSpec`](crate::model::backfill::BackfillSpec) that must run the REAL
-    /// pre-existing-row mirror (see [`run_expand`](Self::run_expand)). Flattening
-    /// it through the plain `plan` → `apply` path would discard the backfill and
+    /// pre-existing-row mirror (see
+    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)).
+    /// Flattening it through the plain `plan` -> `apply` path would discard the backfill and
     /// the contract `DROP COLUMN <from>` would then destroy un-mirrored rows. So
     /// the result keeps the plain migrations and the renames SEPARATE; drive the
     /// whole thing through [`apply_declarative`](Self::apply_declarative).
@@ -761,8 +762,9 @@ impl MigrationEngine {
     ///    [`apply`](Self::apply) (denial / approval gate + the executor's own
     ///    guard + least-privilege role); then
     /// 2. for each rename, drives the **expand** through
-    ///    [`run_expand`](Self::run_expand) — which applies E1 (ADD COLUMN) + E2
-    ///    (dual-write trigger), runs the REAL [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) mirroring every
+    ///    [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online),
+    ///    which applies E1 (ADD COLUMN) + E2 (dual-write trigger), then runs the
+    ///    real Postgres backfill to mirror every
     ///    pre-existing `<from>` value into `<to>`, and journals E3 **only after**
     ///    the backfill succeeds (data-integrity ordering); and
     /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
@@ -3364,12 +3366,13 @@ pub struct DeclarativeDeployPlan {
     /// The online renames, each a full
     /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan)
     /// (expand migs + `BackfillSpec` + contract migs). Driven through
-    /// [`run_expand`](MigrationEngine::run_expand), NOT the plain `apply`.
+    /// [`MigrationEngine::apply_declarative`], not the plain [`MigrationEngine::apply`].
     ///
     /// ALWAYS empty on the SQLite dialect: a SQLite declarative rename is routed to a
-    /// [`rebuilds`](Self::rebuilds) entry (an offline rebuild copying `to ← from`),
-    /// never expand-contract — so [`run_expand`](MigrationEngine::run_expand) is never
-    /// reached on a SQLite backend.
+    /// [`rebuilds`](Self::rebuilds) entry (an offline rebuild copying `to <- from`),
+    /// never expand-contract, so
+    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
+    /// is never reached on a SQLite backend.
     pub renames: Vec<crate::render::expand_contract::ExpandContractPlan>,
     /// **SQLite only** — the existing-table changes SQLite has no native
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
@@ -3520,7 +3523,8 @@ pub enum DeclarativeApplyError {
     Expand(#[from] OnlineError),
 }
 
-/// A failure from [`MigrationEngine::run_expand`].
+/// A failure from
+/// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online).
 #[derive(Debug, thiserror::Error)]
 pub enum OnlineError {
     /// The online expand needs explicit [`Approval::Approved`] (its backfill

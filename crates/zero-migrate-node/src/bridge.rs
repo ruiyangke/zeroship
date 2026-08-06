@@ -6,7 +6,8 @@
 //!
 //! ## Async, host-driven entrypoints (fire-and-resolve)
 //! `applyIr`, `apply`, `status`, `history` — each goes through the ONE generic
-//! [`run_verb`]: it builds a [`TsfnDispatch`] from the JS host-driver callback, opens
+//! private `run_verb` helper: it builds a [`TsfnDispatch`] from the JS host-driver
+//! callback, opens
 //! a `create_deferred` promise, spawns the engine on its OWN std::thread
 //! ([`crate::runtime::run_engine_blocking`]) running a reactor-less
 //! `futures::executor::block_on`, and resolves/rejects the promise cross-thread with
@@ -29,6 +30,10 @@
 //! its real async DB work and calls `done(err, reply)`; `done`'s Rust body fires the
 //! `Sender`, waking the parked `block_on`. NO `#[napi] async fn`, NO `Promise::await`,
 //! NO `tokio_rt`.
+//!
+//! [`LoadVerifyReply`]: crate::wire::LoadVerifyReply
+//! [`TsfnDispatch`]: crate::bridge::TsfnDispatch
+//! [`TsfnDispatch::dispatch`]: crate::session::VerbDispatch::dispatch
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

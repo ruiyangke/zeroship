@@ -27,7 +27,7 @@
 //!    and a mismatch is a hard error (genuine drift / tamper). The engine is
 //!    authoritative; the hint is advisory and need not be present.
 //!
-//! Lowering the validated IR to an executable [`AppliedPlan`](crate::render::plan::AppliedPlan)
+//! Lowering the validated IR to an executable `zero_migrate::render::plan::AppliedPlan`
 //! (`IrAuthor::lower`, the snapshot-builder + per-dialect DDL render) is the
 //! next wave; this module is the load + gate that MUST run first.
 
@@ -367,7 +367,8 @@ pub fn enforce_ir_ownership(
 /// defaults — the caller MUST gate on that ([`hint_domain_uncomputable_field`])
 /// and refuse a hint over a wider domain rather than compare a partial one (a
 /// partial compare both false-rejects a spec-correct hint and false-accepts
-/// tampering of the un-folded fields). The result is what [`load_ir_document`]
+/// tampering of the un-folded fields). The result is what
+/// `zero_migrate::model::load::load_ir_document`
 /// compares to a present `checksum` hint, only after the gate passes.
 #[must_use]
 pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
@@ -403,7 +404,8 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
 /// changes this checksum ⇒ the executor's net-applied drift gate aborts
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
-/// which the IR Lower stamps with THIS value — see [`crate::render::lower::IrAuthor::lower_plan`]).
+/// which the IR Lower stamps with THIS value - see
+/// `zero_migrate::render::lower::IrAuthor::lower_plan`).
 ///
 /// `name` remains part of the stable plan identity rather than its content, and
 /// `ir_version` only selects the already-validated wire interpretation. The

@@ -121,8 +121,7 @@ pub enum ChangeKind {
     /// `.mask({...})` declaration. The accompanying
     /// `ALTER TABLE … ADD COLUMN <col>_masked TEXT NULL` op is emitted
     /// as a separate `AddColumn` immediately before this one; the
-    /// backfill itself is driven by
-    /// [`crate::crud::mask_backfill::run_mask_backfill`]. After the
+    /// backfill itself is driven by the data plane's `run_mask_backfill`. After the
     /// backfill is fully drained (two consecutive clean polls), the
     /// final step is `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT
     /// NULL`. Carries the kind + classification so the audit row
@@ -137,8 +136,7 @@ pub enum ChangeKind {
     /// an existing masked column's `.mask({...})` kind or classification
     /// changes. Touches every row (no IS NULL filter); the sibling
     /// column already exists + is NOT NULL so no schema mutation is
-    /// needed. Driven by
-    /// [`crate::crud::mask_backfill::run_mask_rewrite`].
+    /// needed. Driven by the data plane's `run_mask_rewrite`.
     MaskRewrite {
         collection: String,
         column: String,

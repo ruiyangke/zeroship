@@ -6,7 +6,7 @@
 //! monolithic `PolicyProfile.system_shape`. They are driven by the composed,
 //! unforgeable [`EffectivePolicy`]: for each `createTable` op we build the
 //! [`ObjectName`] the op names and ask `effective.injects_for(&object)` for the
-//! covering [`InjectSpec`]s (in the sealed cross-layer inject total order). Each
+//! covering [`zero_migrate_policy::InjectSpec`]s (in the sealed cross-layer inject total order). Each
 //! spec contributes its columns (prepended, in order), indexes (appended), and — if
 //! it pins one — the table's primary key. The policy CONTENT (which columns, which
 //! type token) lives in the policy crate; this module only MAPS the opaque type
@@ -93,7 +93,7 @@ pub enum TableShapeError {
 }
 
 /// The resolved injection shape covering ONE object: the union of every covering
-/// [`InjectSpec`]'s columns/indexes plus the first pinned primary key. This is the
+/// [`zero_migrate_policy::InjectSpec`]'s columns/indexes plus the first pinned primary key. This is the
 /// per-object content the resolver lays into the IR — the flattening of
 /// `injects_for(object)` into a single ordered shape.
 ///
@@ -561,7 +561,7 @@ fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), Tab
 ///
 /// The old `resolved_create_table_matches_profile` re-derived the expected columns
 /// from the profile; this peer re-derives them from the covering
-/// [`InjectSpec`]s (`inject`). Beyond the leading-prefix name/shape match it adds
+/// [`zero_migrate_policy::InjectSpec`]s (`inject`). Beyond the leading-prefix name/shape match it adds
 /// the II.2.6b conformance check: a resolved column occupying an injected slot must
 /// match the [`InjectColumn`]'s type + nullability + default (a rename-into or a
 /// hand-forged column that merely borrows an injected NAME but diverges in shape is

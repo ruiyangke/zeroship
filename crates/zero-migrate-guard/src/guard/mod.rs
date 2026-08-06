@@ -744,7 +744,7 @@ impl SqlGuard {
     /// - [`GuardError::CrossSchema`] — a reference outside the project schema.
     /// - [`GuardError::Parse`] — unparseable SQL (deny-by-default).
     ///
-    /// Under [`TrustProfile::Trusted`] the deny-list / cross-schema / body walks
+    /// Under [`zero_migrate_ir::policy::TrustProfile::Trusted`] the deny-list / cross-schema / body walks
     /// are SKIPPED entirely (the operator owns the DB; arbitrary SQL applies) —
     /// only `classify` + `analyze` run so the destructive/transactional/approval
     /// flags are still derived. A [`GuardError::Parse`] can still surface
@@ -2337,7 +2337,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 /// This is the line-1 output the core engine actually consumes: the engine's
 /// `plan()`/`apply` only read `destructive` (to drive the destructive/approval
 /// gate) and `advisories` (to surface operational footguns) — see
-/// [`crate::engine::MigrationEngine::plan`]. Deliberately **does not** carry the
+/// `MigrationEngine::plan`. Deliberately **does not** carry the
 /// PG-specific `classes: Vec<StatementClass>` (the `libpg_query` `DdlKind`
 /// vocabulary): that stays *inside* the PG guard ([`SqlGuard`]/[`GuardReport`]),
 /// because a non-PG engine (`SQLite` descriptor diff, a future non-PG parser) has no
@@ -2425,7 +2425,7 @@ impl MigrationGuard for PgGuard {
 /// The `SQLite` line-1: the descriptor-diff path is **trusted by construction**.
 ///
 /// `SQLite` migrations are produced ONLY by the declarative differ
-/// ([`crate::render::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL `SQLite`
+/// (`DeclarativeAuthor::diff`) - there is no raw-SQL `SQLite`
 /// author. `libpg_query` cannot parse `SQLite`, so there is no string deny-list to
 /// run; the line-1 vet is the descriptor emitter at the author boundary and the
 /// line-2 defense is the `SqliteBackend`'s runtime authorizer applied per

@@ -14,7 +14,7 @@
 //!   emits directly. See `docs/decisions/2026-06-23-op-ir-serde-repr.md`.
 //! - **All identifier fields are plain `String`**: the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
-//!   the apply/render-time structural validator ([`crate::model::validate`]), not here.
+//!   the apply/render-time structural validator ([`crate::validate`]), not here.
 //! - **Raw SQL is admitted only in the three operator-gated islands**:
 //!   [`Op::CreateFunction`] carries a PL/pgSQL/SQL `body`, [`Op::PgRaw`] carries a
 //!   last-resort raw statement, and [`ViewQuery::Raw`] carries a read-only raw view
@@ -1095,7 +1095,7 @@ impl IrClassification {
 /// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
 /// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold
-/// ([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no
+/// (`zero_migrate::fold_to_field_defs`) and `gen-types` have NO live DB - there is no
 /// sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
 /// on the IR or it is DROPPED through author→generate→fold (the creator's
 /// `MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the
@@ -1290,7 +1290,11 @@ pub struct IrColumn {
     /// the runtime, once it deletes the declared-schema cache — keep that legacy
     /// internal brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
-    /// BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image. Bounded
+    /// BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.
+    ///
+    /// [`crate::model::validate`]: crate::validate
+    ///
+    /// Validation is bounded
     #[cfg_attr(
         doc,
         doc = "at validate-time ([`crate::model::validate`]) to the legacy internal prefix charset/length + the"

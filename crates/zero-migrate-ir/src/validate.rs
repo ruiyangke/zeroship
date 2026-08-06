@@ -1,6 +1,6 @@
 //! The STRUCTURAL expression-AST validator + the structured-error envelope.
 //!
-//! The closed expression AST ([`crate::model::expr::Expr`]) is **constructed in JS and
+//! The closed expression AST ([`crate::expr::Expr`]) is **constructed in JS and
 //! serialized to IR — never parsed from text**. So validation is a
 //! purely STRUCTURAL allow-list walk over the deserialized tree:
 //!
@@ -20,7 +20,7 @@
 //!   column not on the target table is a hard error (injection defense + the
 //!   capability boundary).
 //! - **(d)** a `Cast` target is a portable type — guaranteed by the closed
-//!   [`crate::model::expr::CastTarget`] enum, so this is structurally total.
+//!   [`crate::expr::CastTarget`] enum, so this is structurally total.
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
 //! differential fuzzer** — the parser-drift risk is dissolved, not mitigated. The
@@ -61,7 +61,7 @@ pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
 /// An op is structurally valid JSON but carries an internally inconsistent shape.
 pub const CODE_OP_INVALID: &str = "OP_INVALID";
-/// An op naming a `schema` the active [`SchemaScope`](crate::model::policy::SchemaScope)
+/// An op naming a `schema` the active [`SchemaScope`](crate::policy::SchemaScope)
 /// does not permit. The Confined creator profile pins the project schema:
 /// an explicit `schema != project_schema` is REFUSED at validate-time, fail-closed,
 /// BEFORE lower — additional and EARLIER than the migrator-role 42501 + the
@@ -90,7 +90,7 @@ pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
 pub const CODE_INVALID_TYPE_ID_PREFIX: &str = "INVALID_TYPE_ID_PREFIX";
 /// A `vector_metric` carried on a column that is
 /// NOT a `ColType::Vector`. The metric is structurally bounded by the closed
-/// [`crate::model::ir::VectorMetric`] enum at deserialize; this is the co-occurrence
+/// [`crate::ir::VectorMetric`] enum at deserialize; this is the co-occurrence
 /// rule (the metric is meaningless without a vector type, and would otherwise be
 /// a silent dead field a hand-crafted artifact could ride in on).
 pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
@@ -111,7 +111,7 @@ pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT"
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// **VENDOR (`zero-migrate`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pgRaw`) whose required
-/// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
+/// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
 /// active capability set. The Confined creator/AI posture
 /// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
 /// validate, BEFORE lower — the first gate. The redundant lower gate
