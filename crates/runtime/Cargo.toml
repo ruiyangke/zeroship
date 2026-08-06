@@ -89,12 +89,17 @@ uuid = { workspace = true }
 [[bin]]
 name = "zeroship-bench-server"
 path = "src/core/server.rs"
+required-features = ["bench-bins"]
 
 [[bin]]
 name = "echo-server"
 path = "src/core/echo_server.rs"
+required-features = ["bench-bins"]
 
 [features]
+# Opt-in bench/echo binaries — kept out of the default library build so a
+# plain `cargo build -p zeroship-runtime` doesn't compile them.
+bench-bins = []
 # Cutover landing 2: the native WebSocket impl is on by default.
 # The polyfill's `WebSocket` and `WebSocketPair` JS classes still install
 # but only wire to the native plumbing via `__nativeWebSocket` detection

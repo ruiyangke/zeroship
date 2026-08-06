@@ -1196,7 +1196,7 @@ async fn do_refresh(
         //       `update_rotated_family`'s rows-affected (below): 0 rows ⇒ the
         //       anchor was revoked mid-rotation ⇒ fail closed.
         if let Some(pws) = pws_sub {
-            match zeroship_core::wrapper_revocation::revoked_after_for(&conn, client_id, pws).await {
+            match zeroship_authz::wrapper_revocation::revoked_after_for(&conn, client_id, pws).await {
                 Ok(Some(revoked_after)) if revoked_after >= rotation_started_at => {
                     // A family marker landed during the rotation — fail closed
                     // (the handler deletes the anchor + clears the breadcrumb).
@@ -1283,7 +1283,7 @@ async fn session_cookie_family_revoked(
             return true;
         }
     };
-    match zeroship_core::wrapper_revocation::is_family_revoked_since(
+    match zeroship_authz::wrapper_revocation::is_family_revoked_since(
         &conn,
         &claims.app,
         &claims.sub,

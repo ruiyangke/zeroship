@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "libs/*"]
 resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
@@ -197,9 +197,9 @@ tempfile = "3"
 # Internal crates
 zeroship-core = { path = "crates/core" }
 zeroship-bundle = { path = "crates/bundle" }
-compio-postgres = { path = "crates/compio-postgres" }
-compio-redis = { path = "crates/compio-redis" }
-compio-s3 = { path = "crates/compio-s3" }
+compio-postgres = { path = "libs/compio-postgres" }
+compio-redis = { path = "libs/compio-redis" }
+compio-s3 = { path = "libs/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
 # Phase F: the monorepo's native-PG producer (`CompioPgSession`) for the published
 # `zero-migrate` engine's driver-neutral `SqlSession` seam. This adapter — together

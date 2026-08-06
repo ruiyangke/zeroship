@@ -19,7 +19,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz as authz;
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
-use zeroship_core::wrapper_revocation::{
+use zeroship_authz::wrapper_revocation::{
     family_revoked_at, revoked_after_for, RevocationCache, REVOCATION_CACHE_MAX_ENTRIES,
 };
 

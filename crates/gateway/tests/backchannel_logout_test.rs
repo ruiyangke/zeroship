@@ -477,7 +477,7 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         )),
         db: Some(db),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
+        revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
         signing_key: None,
         prev_signing_key: None,
         session_issuer: None::<Arc<zeroship_gateway::session_token::Issuer>>,
@@ -1262,7 +1262,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
         "sid-miss fallback must remain scoped to the logout_token aud app"
     );
     assert!(
-        zeroship_core::wrapper_revocation::is_family_revoked_since(
+        zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws,
@@ -1771,7 +1771,7 @@ async fn per_app_bcl_writes_token_family_marker() {
 
     // Pre: no marker ⇒ the live token is NOT family-revoked.
     assert!(
-        !zeroship_core::wrapper_revocation::is_family_revoked_since(
+        !zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws,
@@ -1810,7 +1810,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     // The per-app branch wrote the family marker → the live token is rejected
     // by the EXACT reader the auth arms run.
     assert!(
-        zeroship_core::wrapper_revocation::is_family_revoked_since(
+        zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws,
@@ -1928,7 +1928,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         - 60;
 
     assert!(
-        !zeroship_core::wrapper_revocation::is_family_revoked_since(
+        !zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws_canonical,
@@ -1967,7 +1967,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     // CANONICAL `pws_`. With M1 canonicalization the two are byte-identical, so
     // the live token is rejected. Pre-fix this assertion would FAIL.
     assert!(
-        zeroship_core::wrapper_revocation::is_family_revoked_since(
+        zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws_canonical,

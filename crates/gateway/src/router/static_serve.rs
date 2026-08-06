@@ -1031,7 +1031,7 @@ mod tests {
             )),
             db: None,
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
+            revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
             signing_key: None,
             prev_signing_key: None,
             session_issuer: None,

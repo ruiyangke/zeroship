@@ -494,7 +494,7 @@ async fn teardown_per_app_user(
     let global_sub = global_user_id.to_string();
     if let Some(sector) = sector {
         let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
-        if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(conn, client_id, &pws).await
+        if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(conn, client_id, &pws).await
         {
             tracing::error!(
                 error = %e,

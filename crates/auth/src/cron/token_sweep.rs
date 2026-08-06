@@ -123,7 +123,7 @@ pub async fn tick(
     )
     .await?;
     let token_revocations_deleted =
-        zeroship_core::wrapper_revocation::sweep_expired_families(db)
+        zeroship_authz::wrapper_revocation::sweep_expired_families(db)
             .await
             .map_err(|e| AuthError::Db(format!("token_sweep zeroship.token_revocations: {e}")))?;
     let (refresh_tokens_deleted, refresh_idem_reaped) = refresh::sweep_refresh_tokens(refresh_pool)

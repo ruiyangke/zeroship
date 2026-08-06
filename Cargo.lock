@@ -6789,7 +6789,6 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "uuid",
- "zeroship-auth",
 ]
 
 [[package]]
@@ -6865,7 +6864,6 @@ dependencies = [
  "base64",
  "clap",
  "compio",
- "compio-postgres",
  "cyper",
  "ed25519-dalek",
  "hex",
@@ -6929,6 +6927,7 @@ dependencies = [
  "uuid",
  "xxhash-rust",
  "zeroship-auth",
+ "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-mailer",

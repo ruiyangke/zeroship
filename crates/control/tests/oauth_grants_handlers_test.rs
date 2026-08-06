@@ -723,7 +723,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
 
     // Pre-condition: no marker yet ⇒ the live token is NOT revoked.
     assert!(
-        !zeroship_core::wrapper_revocation::is_family_revoked_since(
+        !zeroship_authz::wrapper_revocation::is_family_revoked_since(
             fx.state.control_pg.as_ref(),
             &client_id,
             &pws,
@@ -762,7 +762,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // still-live token as revoked. A regression that dropped this write (or
     // keyed it on the global UUID) would leave the live token accepted here.
     assert!(
-        zeroship_core::wrapper_revocation::is_family_revoked_since(
+        zeroship_authz::wrapper_revocation::is_family_revoked_since(
             fx.state.control_pg.as_ref(),
             &client_id,
             &pws,

@@ -50,7 +50,7 @@ pub(crate) enum AuthOutcome {
 }
 
 /// The per-request family-marker revocation decision, routed through the
-/// short-TTL [`RevocationCache`](zeroship_core::wrapper_revocation::RevocationCache)
+/// short-TTL [`RevocationCache`](zeroship_authz::wrapper_revocation::RevocationCache)
 /// (BFF reshape R1d).
 ///
 /// `NotRevoked` / `Revoked` are the two clean answers; `Unavailable` means a
@@ -72,7 +72,7 @@ enum RevocationDecision {
 /// iat`) with NO DB round-trip — this is the steady-state win that removes the
 /// last per-request DB read from the cookie hot path. On a MISS we check out a
 /// pooled connection, load the family's latest `revoked_after` via
-/// [`revoked_after_for`](zeroship_core::wrapper_revocation::revoked_after_for),
+/// [`revoked_after_for`](zeroship_authz::wrapper_revocation::revoked_after_for),
 /// cache it (negative results included — that is the whole point), and decide
 /// locally.
 ///
@@ -97,7 +97,7 @@ async fn family_revocation_decision(
 
     // 1. Fast path: a fresh cache entry answers locally, no DB.
     if let Some(revoked_after) = state.revocation_cache.get(client_id, sub, now) {
-        return if zeroship_core::wrapper_revocation::family_revoked_at(revoked_after, iat) {
+        return if zeroship_authz::wrapper_revocation::family_revoked_at(revoked_after, iat) {
             RevocationDecision::Revoked
         } else {
             RevocationDecision::NotRevoked
@@ -120,13 +120,13 @@ async fn family_revocation_decision(
             return RevocationDecision::Unavailable;
         }
     };
-    match zeroship_core::wrapper_revocation::revoked_after_for(&conn, client_id, sub).await {
+    match zeroship_authz::wrapper_revocation::revoked_after_for(&conn, client_id, sub).await {
         Ok(revoked_after) => {
             // Cache the loaded marker (negative caching included) keyed on
             // `now`; re-read `Instant::now()` is unnecessary — the lookup is
             // fast and `now` is a tight upper bound on freshness.
             state.revocation_cache.store(client_id, sub, revoked_after, now);
-            if zeroship_core::wrapper_revocation::family_revoked_at(revoked_after, iat) {
+            if zeroship_authz::wrapper_revocation::family_revoked_at(revoked_after, iat) {
                 RevocationDecision::Revoked
             } else {
                 RevocationDecision::NotRevoked
@@ -1327,7 +1327,7 @@ mod tests {
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),
             revocation_cache: StdArc::new(
-                zeroship_core::wrapper_revocation::RevocationCache::new(),
+                zeroship_authz::wrapper_revocation::RevocationCache::new(),
             ),
             signing_key: Some(StdArc::new(signing)),
             prev_signing_key: None,
@@ -2324,7 +2324,7 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, "oac_app_a", &pws_a)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, "oac_app_a", &pws_a)
                 .await
                 .expect("revoke_family app A");
         }
@@ -3232,7 +3232,7 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
         }
@@ -3276,7 +3276,7 @@ mod tests {
     fn set_revocation_cache_ttl(state: &mut std::sync::Arc<crate::GateState>, ttl_secs: u64) {
         let s = std::sync::Arc::get_mut(state).expect("state Arc must be unique");
         s.revocation_cache = std::sync::Arc::new(
-            zeroship_core::wrapper_revocation::RevocationCache::with_ttl_and_capacity(
+            zeroship_authz::wrapper_revocation::RevocationCache::with_ttl_and_capacity(
                 ttl_secs, 1024,
             ),
         );
@@ -3343,7 +3343,7 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
         }
@@ -3525,7 +3525,7 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
         }
@@ -3730,7 +3730,7 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool get");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
                 .await
                 .expect("signout-style revoke_family on (client_id, pws_)");
         }

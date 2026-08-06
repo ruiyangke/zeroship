@@ -33,7 +33,7 @@
 //! + `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
 //! SAME per-app family-marker check the Bearer arm uses —
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
-//! ([`zeroship_core::wrapper_revocation`]) — and that is a direct
+//! ([`zeroship_authz::wrapper_revocation`]) — and that is a direct
 //! `SELECT EXISTS` against a pooled connection, with NO in-memory TTL cache in
 //! front of it. `iat` is the binding instant, so a revoked `(client_id, pws_)`
 //! family rejects a still-valid signed cookie WITHOUT re-reading any session

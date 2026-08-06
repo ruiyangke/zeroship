@@ -17,7 +17,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
-zeroship-auth = { workspace = true }
 
 [build-dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }

@@ -418,7 +418,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         //     anchor delete below, so the two `&conn`/`&mut conn` borrows never
         //     overlap.
         if let Some(pws_sub) = pws_sub.as_deref() {
-            if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
+            if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(
                 &conn,
                 &anchor.client_id,
                 pws_sub,

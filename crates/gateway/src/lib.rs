@@ -144,7 +144,7 @@ pub struct GateState {
     /// SAME-NODE writer (`/signout`, back-channel logout) busts the entry
     /// immediately via `invalidate`. Fail-closed is preserved: a cache MISS
     /// followed by a DB error rejects, exactly as the un-cached read did.
-    pub revocation_cache: Arc<zeroship_core::wrapper_revocation::RevocationCache>,
+    pub revocation_cache: Arc<zeroship_authz::wrapper_revocation::RevocationCache>,
     /// Gateway session-cookie signing key. Loaded from a PKCS#8 PEM/DER file
     /// at boot via `--signing-key-file`. `None` when the operator runs without
     /// the flag — the signed session cookie cannot be issued/verified, so the

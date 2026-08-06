@@ -515,7 +515,7 @@ fn build_state_with_route(
         oidc_rp: Arc::new(oidc_rp),
         db,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
+        revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
         signing_key: Some(Arc::new(signing_key)),
         prev_signing_key: None,
         session_issuer: Some(Arc::new(session_issuer)),
@@ -2569,7 +2569,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     //    it MUST be true — the interactive cookie minted at `cookie_iat` is now
     //    evicted. Pre-fix: no identity row → no marker → false → cookie SURVIVES.
     let gate_client = connect_pg(&dsn).await;
-    let revoked = zeroship_core::wrapper_revocation::is_family_revoked_since(
+    let revoked = zeroship_authz::wrapper_revocation::is_family_revoked_since(
         &gate_client,
         CLIENT_ID,
         &expected_pws,

@@ -705,7 +705,7 @@ fn main() -> std::io::Result<()> {
         oidc_rp,
         db,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
+        revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
         signing_key,
         prev_signing_key,
         session_issuer,
