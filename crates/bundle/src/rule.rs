@@ -20,12 +20,13 @@ pub struct Rule {
 /// per-action) so apps can opt in selectively.
 ///
 /// v1 simplifications: origins are exact strings; the literal `"*"`
-/// matches any origin (subject to credentials rules); no glob, no
-/// automatic header reflection.
+/// matches any origin, but manifest validation rejects it when
+/// `allow_credentials` is set; no glob, no automatic header reflection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Cors {
     /// Origins to allow. Each entry is an exact string match. The
-    /// literal "*" matches any origin (subject to credentials rules).
+    /// literal `"*"` matches any origin, but manifest validation rejects
+    /// it when `allow_credentials` is set.
     pub allow_origins: Vec<String>,
     /// HTTP methods to allow on cross-origin requests.
     #[serde(default)]

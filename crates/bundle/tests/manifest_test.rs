@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use zeroship_bundle::{
-    AuthConfig, AuthLevel, HandlerEntry, Manifest, ManifestExports, ResourceEntry, ScopeDef,
+    AuthConfig, AuthLevel, Cors, HandlerEntry, Manifest, ManifestExports, ResourceEntry, ScopeDef,
 };
 
 /// An old manifest produced before `exports` existed must deserialize
@@ -286,4 +286,56 @@ fn validate_accepts_reserved_identity_required_scope() {
     );
     m.validate()
         .expect("reserved identity scopes accepted without declaration");
+}
+
+fn manifest_with_cors(allow_origins: &[&str], allow_credentials: bool) -> Manifest {
+    let mut m = Manifest::default();
+    m.resources.insert(
+        "/api/*".to_string(),
+        ResourceEntry {
+            cors: Some(Cors {
+                allow_origins: allow_origins
+                    .iter()
+                    .map(|origin| origin.to_string())
+                    .collect(),
+                allow_methods: Vec::new(),
+                allow_headers: Vec::new(),
+                expose_headers: Vec::new(),
+                allow_credentials,
+                max_age_seconds: None,
+            }),
+            ..Default::default()
+        },
+    );
+    m
+}
+
+#[test]
+fn validate_rejects_wildcard_cors_origin_with_credentials() {
+    let m = manifest_with_cors(&["*"], true);
+    let err = m
+        .validate()
+        .expect_err("wildcard CORS origin with credentials must be rejected");
+    assert!(
+        err.contains(r#"resource "/api/*""#),
+        "error must name the resource key: {err}"
+    );
+    assert!(
+        err.contains("list the exact origins instead"),
+        "error must explain how to fix the CORS policy: {err}"
+    );
+}
+
+#[test]
+fn validate_accepts_wildcard_cors_origin_without_credentials() {
+    manifest_with_cors(&["*"], false)
+        .validate()
+        .expect("wildcard CORS origin without credentials must be accepted");
+}
+
+#[test]
+fn validate_accepts_exact_cors_origin_with_credentials() {
+    manifest_with_cors(&["https://app.example.com"], true)
+        .validate()
+        .expect("exact CORS origin with credentials must be accepted");
 }
