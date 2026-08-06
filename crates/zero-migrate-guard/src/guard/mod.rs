@@ -1677,6 +1677,34 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 if !drop_allowed {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
+                // DROP SCHEMA additionally has to be CONFINED, not merely granted.
+                //
+                // `grants_drop_object` answers `ObjectSchema` with a GLOBAL
+                // `schema.create_schema` query that never looks at which schema is
+                // being dropped, while `CreateSchemaStmt` below checks the name at
+                // its target. So a charter granting `create_schema` over `all` with
+                // `cross_schema` scoped to the owned set - the shape this engine's own
+                // operator fixture builds - could DROP a schema it could not CREATE:
+                //
+                //     CREATE SCHEMA control        -> CrossSchema
+                //     DROP SCHEMA control CASCADE  -> admitted
+                //
+                // The name is a bare single-part String in `objects`, and
+                // `qualified_list_schema` needs 2+ parts, so the cross-schema walk
+                // that catches every other spelling never sees it.
+                if d.remove_type == ObjectType::ObjectSchema as i32 {
+                    for item in &d.objects {
+                        if let Some(NodeEnum::String(s)) = item.node.as_ref() {
+                            let schema = s.sval.trim();
+                            if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                                return Err(GuardError::CrossSchema {
+                                    schema: schema.to_string(),
+                                    statement: raw.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
             // CREATE SCHEMA — deny-by-default for Confined; ALLOW iff Platform
             // (platform migrations create platform schemas). When

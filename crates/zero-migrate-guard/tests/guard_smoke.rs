@@ -303,3 +303,63 @@ fn a_body_hiding_a_privilege_verb_is_denied() {
     g.check("CREATE TABLE app1.t (grant_total int, revoked_at timestamptz)")
         .expect("a column named grant_total is not a GRANT");
 }
+
+/// A schema you cannot CREATE, you also cannot DROP.
+///
+/// `grants_drop_object` answered `OBJECT_SCHEMA` with a GLOBAL `schema.create_schema`
+/// query that never looked at which schema was being dropped, while `CreateSchemaStmt`
+/// checks the name at its target. Under a charter granting `create_schema` over `all`
+/// with `cross_schema` scoped - the shape this engine's own operator fixture builds -
+/// that let a migration drop a schema it was refused permission to create.
+///
+/// The name is a bare single-part String in `DropStmt.objects`, and the cross-schema
+/// walk needs 2+ parts, so nothing downstream caught it either.
+#[test]
+fn a_foreign_schema_cannot_be_dropped_even_when_create_schema_is_global() {
+    // The shape this repo's own operator fixture builds: create_schema granted
+    // globally, cross_schema scoped to the owned set.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app1"] }
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#;
+    let g = SqlGuard::new(GuardConfig::from_policy(
+        support::effective_policy_from_charter_toml(charter),
+        SqlDialect::Postgres,
+    ));
+    for sql in [
+        "DROP SCHEMA control CASCADE",
+        // One owned name in the list does not launder the foreign one.
+        "DROP SCHEMA control, app1 CASCADE",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a foreign schema must not be droppable: {sql}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // The asymmetry that made this a bug rather than a posture: create was already
+    // confined at its target.
+    let err = g
+        .check("CREATE SCHEMA control")
+        .expect_err("creating a foreign schema was already refused");
+    assert!(matches!(err, GuardError::CrossSchema { .. }), "got {err:?}");
+
+    // Dropping the owned schema stays allowed, and stays flagged destructive.
+    let report = g
+        .check("DROP SCHEMA app1 CASCADE")
+        .expect("dropping the owned schema stays allowed");
+    assert!(report.destructive, "DROP SCHEMA must remain destructive");
+}
