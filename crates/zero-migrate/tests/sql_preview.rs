@@ -659,7 +659,8 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     let sqlite = render_ir_envelope_sql(&resolved, SqlDialect::Sqlite, &opts())
         .expect("bounded string renders on SQLite");
     assert!(
-        sqlite.to_uppercase().contains("\"CODE\" TEXT") || sqlite.contains("code") && sqlite.contains("TEXT"),
+        sqlite.to_uppercase().contains("\"CODE\" TEXT")
+            || sqlite.contains("code") && sqlite.contains("TEXT"),
         "SQLite stores the bounded string as TEXT:\n{sqlite}"
     );
 }

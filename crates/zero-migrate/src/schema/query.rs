@@ -4838,7 +4838,10 @@ columns = [
     fn create_table_emits_id_bounded_string_primary_key() {
         let schema = serde_json::json!({});
         for (dialect, expected_id) in [
-            (SqlDialect::Postgres, "id character varying(255) PRIMARY KEY"),
+            (
+                SqlDialect::Postgres,
+                "id character varying(255) PRIMARY KEY",
+            ),
             (SqlDialect::Sqlite, "id TEXT PRIMARY KEY"),
         ] {
             let sql = build_create_table_with_fks_for_dialect(
@@ -5091,7 +5094,10 @@ columns = [
             "FK target must still reference id: {sql}"
         );
         // FK target IS the new TEXT id; the FK clause itself unchanged.
-        assert!(sql.contains("id character varying(255) PRIMARY KEY"), "{sql}");
+        assert!(
+            sql.contains("id character varying(255) PRIMARY KEY"),
+            "{sql}"
+        );
     }
 
     /// SQLite places the schema name on the INDEX, not the TABLE:

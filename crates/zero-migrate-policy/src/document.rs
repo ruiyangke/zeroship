@@ -12,12 +12,12 @@ use serde::Deserialize;
 
 use crate::knob::{KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity};
 use crate::registry::PolicyRegistry;
-use crate::value_order::leq_value;
 use crate::rule::{
     AuthorPkPolicy, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule, RuleKind,
     ValidatePredicate,
 };
 use crate::scope::normalize_pg_identifier;
+use crate::value_order::leq_value;
 use crate::{Pattern, Scope, ScopeError};
 
 /// The highest `policy_version` MAJOR this loader understands. An unknown major is

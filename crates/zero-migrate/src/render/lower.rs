@@ -10934,7 +10934,9 @@ mod tests {
             .find(|m| m.up.contains("CREATE TABLE"))
             .expect("create");
         assert!(
-            create.up.contains("\"id\" character varying(255) PRIMARY KEY NOT NULL"),
+            create
+                .up
+                .contains("\"id\" character varying(255) PRIMARY KEY NOT NULL"),
             "confined resolved CreateTable must still render the inline id PK byte-shape:\n{}",
             create.up
         );
