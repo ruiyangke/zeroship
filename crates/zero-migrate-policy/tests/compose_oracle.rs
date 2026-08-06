@@ -225,6 +225,7 @@ enum Pat {
     AppStar,      // include = ["app_*"]
     AppStarNoTmp, // include = ["app_*"], exclude = ["app_tmp_*"]
     Staging,      // include = ["staging"]
+    All,          // scope = "all" - the whole universe
 }
 
 impl Pat {
@@ -233,10 +234,14 @@ impl Pat {
             Pat::AppStar => r#"scope = { include = ["app_*"] }"#,
             Pat::AppStarNoTmp => r#"scope = { include = ["app_*"], exclude = ["app_tmp_*"] }"#,
             Pat::Staging => r#"scope = { include = ["staging"] }"#,
+            // A universal scope is what makes a masked hole reachable: its witness
+            // is outside any specific mask, so a partition that skips masking rules
+            // samples a point where the charter still grants.
+            Pat::All => r#"scope = "all""#,
         }
     }
     fn all() -> Vec<Pat> {
-        vec![Pat::AppStar, Pat::AppStarNoTmp, Pat::Staging]
+        vec![Pat::AppStar, Pat::AppStarNoTmp, Pat::Staging, Pat::All]
     }
 }
 
@@ -1474,6 +1479,7 @@ impl std::fmt::Debug for Pat {
             Pat::AppStar => "app_*",
             Pat::AppStarNoTmp => "app_*\\app_tmp_*",
             Pat::Staging => "staging",
+            Pat::All => "all",
         })
     }
 }
@@ -1632,5 +1638,101 @@ fn a_draft_cannot_regrant_over_a_masked_hole() {
         ep.grants(&key, &secret_t),
         Some(KnobValue::Bool(false)),
         "the mask survives an admitted draft"
+    );
+}
+
+/// The admit oracle over a LAYERED charter, so a masked hole is in the universe.
+///
+/// The main sweep builds its charter from a single root document, so no charter it
+/// generates can have a hole: one rule per key means the charter's value is constant
+/// over each rule's scope. That is exactly the shape `admit` got wrong - a root
+/// granting broadly with a later layer pulling back on a sub-scope, where the covered
+/// region arm sampled one witness and could miss the pull-back.
+///
+/// This sweep composes `overlay(base, over)` for every pattern/value pair and admits
+/// every draft against it. The ground truth is presence-based last-wins, the same
+/// rule `oracle_overlay_is_presence_last_wins` pins, fed into the same
+/// `gt_admissible` predicate the main sweep uses.
+#[test]
+fn oracle_admit_over_a_layered_charter_with_masked_holes() {
+    let univ = universe();
+    let reg = registry();
+    let pats = Pat::all();
+    let bool_vals = ["true", "false"];
+
+    let mut total = 0usize;
+    let mut accepted = 0usize;
+    let mut rejected = 0usize;
+
+    for &bp in &pats {
+        for bv in bool_vals {
+            for &op in &pats {
+                for ov in bool_vals {
+                    let base_gens = vec![Gen {
+                        key: BOOL_KEY,
+                        pat: bp,
+                        value: bv,
+                    }];
+                    let over_gens = vec![Gen {
+                        key: BOOL_KEY,
+                        pat: op,
+                        value: ov,
+                    }];
+                    let charter = finalize_charter(
+                        overlay(&parse_trusted(&base_gens), &parse_trusted(&over_gens), &reg)
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                    // The charter's effective value: presence-based last-wins, over
+                    // the base. Computed from the rule lists, never from the composer.
+                    let base_doc = parse_draft(&base_gens);
+                    let over_doc = parse_draft(&over_gens);
+                    let cval = |key: &str, kind: &KnobKind, default: &KnobValue, o: &ObjectName| {
+                        if covers_gt(&over_doc, key, o) {
+                            value_gt(&over_doc, kind, default, key, o)
+                        } else {
+                            value_gt(&base_doc, kind, default, key, o)
+                        }
+                    };
+
+                    for &dpat in &pats {
+                        for dv in bool_vals {
+                            let draft_gens = vec![Gen {
+                                key: BOOL_KEY,
+                                pat: dpat,
+                                value: dv,
+                            }];
+                            let draft = parse_draft(&draft_gens);
+
+                            let gt = gt_admissible(&cval, &draft, &univ);
+                            let got = admit(&charter, &draft, &reg);
+
+                            total += 1;
+                            match (&got, gt) {
+                                (Ok(_), true) => accepted += 1,
+                                (Err(_), false) => rejected += 1,
+                                (Ok(ep), false) => panic!(
+                                    "FALSE ACCEPT over a layered charter (escalation \
+                                     slipped through)!\n base={base_gens:?}\n \
+                                     over={over_gens:?}\n draft={draft_gens:?}\n{ep:?}"
+                                ),
+                                (Err(e), true) => panic!(
+                                    "FALSE REJECT over a layered charter (should have \
+                                     composed)!\n base={base_gens:?}\n over={over_gens:?}\n \
+                                     draft={draft_gens:?}\n err={e:?}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(total >= 200, "layered admit sweep too small: {total}");
+    assert!(
+        accepted > 0 && rejected > 0,
+        "sweep must exercise both arms"
     );
 }

@@ -142,16 +142,36 @@ fn check_grant_key(
     //     `⊔` never materializes the charter side (C-1). Excludes on each charter rule
     //     survive (the ∖ construction keeps a subtrahend's holes). A non-representable
     //     ∖ at any step ⇒ reject (fail-closed).
+    //
+    //     Subtraction order matters, so a step that cannot be represented is DEFERRED
+    //     rather than fatal. `All ∖ app_*` has no glob form, but if a later rule is
+    //     itself `All` the region empties anyway - aborting on the first
+    //     unrepresentable step made admission depend on the order rules happen to sit
+    //     in the layer stack, and refused charters that are plainly admissible (a root
+    //     granting `all` and a layer re-granting a sub-scope at the same value). Retry
+    //     the deferred rules until a pass makes no progress; only then fail closed,
+    //     and only if the region is still non-empty.
     let uncovered_rules = layered_nondefault_grant_rules(charter_layers, key)?;
     let charter_rules = layered_grant_rule_scopes(charter_layers, key);
     let mut r = draft_granted.clone();
-    for c_scope in &uncovered_rules {
-        match r.difference(c_scope) {
-            Difference::Scope(s) => r = s,
-            Difference::NotRepresentable => {
-                return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
+    let mut deferred: Vec<&Scope> = uncovered_rules.clone();
+    while !deferred.is_empty() && !matches!(r, Scope::Nothing) {
+        let before = deferred.len();
+        let mut still_deferred = Vec::with_capacity(before);
+        for c_scope in deferred {
+            match r.difference(c_scope) {
+                Difference::Scope(s) => r = s,
+                Difference::NotRepresentable => still_deferred.push(c_scope),
             }
         }
+        deferred = still_deferred;
+        if deferred.len() == before {
+            // No rule in that pass could be subtracted; another pass cannot help.
+            break;
+        }
+    }
+    if !deferred.is_empty() && !matches!(r, Scope::Nothing) {
+        return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
     }
     if !matches!(r, Scope::Nothing) {
         // The charter value on the uncovered region is `default` (tightest); the
