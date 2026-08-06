@@ -33,11 +33,10 @@ transform the closed surface cannot express is a hard, structured error, not a
 back door to hand-written SQL.
 
 The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
-`@zeroship/migrate` package). Its engine-side twin — the recorder the Rust
-runtime evaluates in V8 to turn a migration into the frozen IR wire shape —
-lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit the
-identical dialect-neutral op objects; the canonical IR shape is the frozen
-contract.
+`@zeroship/migrate` package). The current app build records it in-process through
+`sdks/vite-plugin/src/gen-types/recorder.ts`, backed by the standalone
+`zero-migrate` package. Both emit the identical dialect-neutral op objects; the
+canonical IR shape is the frozen contract.
 
 ```ts
 // migrations/0007_split_name.ts
@@ -1115,12 +1114,12 @@ apply-relevant change.
 
 ## Generating types from the migration set (`gen-types`)
 
-Migration-first: the op.* migration set is the source of truth for the schema, and
-the typed `env.db` surface is **generated from it** rather than from a separate
-declared schema object on the app entry. The `zeroship-migrate-js gen-types`
-subcommand records each `migrations/*.ts` source file through the sandboxed
-recorder in version order, folds the transient IR into a per-collection field map
-(the same fold the engine uses internally), and emits two artifacts:
+Migration-first: the op.* migration set is the source of truth for the schema,
+and the typed `env.db` surface is **generated from it** rather than from a
+separate declared schema object on the app entry. The in-process gen-types path
+in `@zeroship/vite-plugin` records each `migrations/*.ts` source through its
+pure-JS recorder in version order, passes the resulting IR envelopes to
+`zero-migrate-node`'s `genArtifacts` renderer, and emits two artifacts:
 
 - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
@@ -1134,15 +1133,10 @@ recorder in version order, folds the transient IR into a per-collection field ma
   `schema(...)` when folded options/indexes exist, and declares the single
   `Env.db` augmentation for the app.
 
-```bash
-# emit (writes both artifacts into the output dir)
-zeroship-migrate-js gen-types --dir migrations --out generated/zeroship
-
-# CI generated-artifact check (no DB, no write): regenerate in memory and diff
-# against the committed generated artifacts — fails non-zero if they no longer
-# track the migrations
-zeroship-migrate-js gen-types --dir migrations --out generated/zeroship --check
-```
+Development regenerates the artifacts on server boot and migration changes. A
+production build regenerates them in memory and fails if the committed files
+have drifted. Generation is in-process; there is no standalone `gen-types`
+executable or subprocess.
 
 The declared-only facets ([Sensitive-data facets](#sensitive-data-facets)) survive
 the fold: the typed-id `prefix`, the vector `metric`, and the `mask` brand all flow
@@ -1160,9 +1154,9 @@ retired `@zeroship/db/env` declared-schema alias:
 }
 ```
 
-The `@zeroship/vite-plugin` is a thin client of this same CLI: it regenerates the
-artifacts on dev-server boot and on any change under the migrations dir, and runs
-the `--check` generated-artifact gate on a production build. See
+The `@zeroship/vite-plugin` owns this in-process library path: it regenerates the
+artifacts on dev-server boot and on any change under the migrations dir, and
+performs the generated-artifact drift check on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
@@ -1181,17 +1175,15 @@ for the build/watch wiring.
 
 ## Offline SQL preview (`plan`)
 
-`zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
-per-dialect SQL the pending migration set WOULD execute** — without a database and
-without applying anything. This is the canonical Alembic `--sql` / Atlas / Flyway /
-dbmate feature, here for **go-live review**. Before approving an
-`approved_versions` go-live you can read the precise SQL the deploy will run,
-instead of approving blind.
+The former in-workspace operator CLI exposed an offline `plan` verb that rendered
+the exact per-dialect SQL a pending migration set would execute. That binary was
+removed when the engine moved to `third_party/zero-migrate`; the appbase Cargo
+workspace currently exposes no replacement preview command.
 
-It is **distinct from `validate`** (the shadow dry-run): `validate` needs a real DB
-and *applies* the migration on a throwaway shadow to prove it runs; `plan`
-opens **no connection** and renders the SQL statically. Use `validate` to prove it
-*works*; use `plan` to review *what it does*.
+`zeroship-platform-migrate` is deliberately apply-only and must not be used as a
+substitute for preview or validation. Engine-level preview remains a surfacing
+layer over the same lowerer, but its host now belongs to the standalone engine
+project.
 
 The preview is a **surfacing layer**, not a second renderer: it prints back the SQL
 the engine already lowers (the `Migration.up` / DML `template`). It never

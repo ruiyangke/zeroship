@@ -1,11 +1,12 @@
 # @zeroship/db — Database SDK
 
 `@zeroship/db` is the database SDK for zeroship apps. The schema source of
-truth is the committed op.* migration set. `zeroship-migrate-js gen-types`
-records `migrations/*.ts` through the sandboxed recorder, folds the transient IR
-in memory, and emits `generated/zeroship/env.db.ts`, which installs the
-TypeScript `Env.db` augmentation, plus `schema.runtime.json`, which the runtime
-consumes at boot. Handlers call CRUD methods on `env.db.<name>` directly.
+truth is the committed op.* migration set. `@zeroship/vite-plugin` records
+`migrations/*.ts` in-process through its pure-JS recorder, folds the resulting
+IR envelopes through `zero-migrate-node`, and emits
+`generated/zeroship/env.db.ts`, which installs the TypeScript `Env.db`
+augmentation, plus `schema.runtime.json`, which the runtime consumes at boot.
+Handlers call CRUD methods on `env.db.<name>` directly.
 Behind the scenes the SDK calls into the native `env.db` v8_class surface
 (registered by the Rust runtime); no raw SQL is exposed to user code.
 

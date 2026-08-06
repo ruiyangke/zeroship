@@ -138,14 +138,10 @@ if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   run_psql -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE);" \
     -c "CREATE DATABASE ${TEST_DB};"
-  echo "==> Migrating ${TEST_DB} (zeroship-migrate)"
-  # The platform set legitimately contains destructive expand-contract steps
-  # (DROP CONSTRAINT / DROP TABLE / NOT-NULL ADD COLUMN). The engine refuses a
-  # destructive plan without --yes; the compose `migrate` service passes --yes
-  # for exactly this reason (deploy/compose/docker-compose.yml). The test bootstrap is a clean
-  # build from empty, so applying the full history with --yes is correct + safe.
+  echo "==> Migrating ${TEST_DB} (zeroship-platform-migrate)"
+  # Apply the full committed platform history to the newly created database.
   ZEROSHIP_MIGRATE_DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}" \
-    deploy/ops/db-migrate.sh migrate --yes >/dev/null
+    deploy/ops/db-migrate.sh >/dev/null
   echo "==> Migration complete"
 else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"

@@ -7,7 +7,7 @@
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
 #   1. Stand up a fresh ephemeral Postgres + deploy/ops/postgres-init.sql + the FULL
-#      zeroship-migrate platform set. (Control still needs a DB for app CRUD + deploy.)
+#      platform migration set. (Control still needs a DB for app CRUD + deploy.)
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with `--dev-insecure`. The worker gets
@@ -97,8 +97,8 @@ echo "  zeroship E2E — env.kv + env.storage over the edge (G2/G4)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 KV_ZSHIP="$ROOT/examples/kv-dashboard/dist/app.zship"
 ST_ZSHIP="$ROOT/examples/storage-gallery/dist/app.zship"
@@ -131,21 +131,20 @@ if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
     && pass "applied deploy/ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-    "$BIN/zeroship-migrate" migrate \
-    --dir "$ROOT/db/migrations-ts" \
-    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-    --profile platform --yes > "$MIG_LOG" 2>&1; then
-  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
+if "$BIN/zeroship-platform-migrate" \
+    --database-url "$DBURL" \
+    --migrations-dir "$ROOT/db/migrations-ts" \
+    --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-platform-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 2: boot stack (--dev-insecure, worker with --kv-url + --storage-url) ==="
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null

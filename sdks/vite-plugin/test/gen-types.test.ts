@@ -3,7 +3,7 @@
  *
  * The plugin records `.ts` migrations and folds them into the typed `env.db`
  * surface (`env.db.ts` + `schema.runtime.json`) via the in-process `gen-types`
- * library (`genTypesFromMigrations` — no CLI subprocess, no `zeroship-migrate-js`
+ * library (`genTypesFromMigrations` — no CLI subprocess or migration-toolchain
  * binary). These tests cover the dev-server integration:
  *
  *  (a) a change under the migrations dir regenerates the artifacts;

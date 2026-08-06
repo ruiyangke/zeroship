@@ -42,14 +42,16 @@ and the charge path runs.
 - Postgres on `localhost:5440` (user `postgres`, pw `zeroship`). The harness
   creates a **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor a concurrent `zeroship_billing_test` DB.
-- `docker`, the `zeroship-migrate` bin (migrate via `ops/db-migrate.sh`), `node`, `openssl`, `curl`,
-  `psql` (default Nix store path; override with `ZEROSHIP_PSQL`).
+- `docker`, the `zeroship-platform-migrate` binary (invoked through
+  `deploy/ops/db-migrate.sh`), `node`, `openssl`, `curl`, and `psql` (default
+  Nix store path; override with `ZEROSHIP_PSQL`).
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
 ## Run
 
 ```bash
 cargo build --release -p zeroship-control
+cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
 source /home/ruiyang/.config/zeroship-stripe-test.env   # REQUIRED — skips cleanly if unset
 ./tests/e2e_stripe_connect_live.sh
 STRICT=1 ./tests/e2e_stripe_connect_live.sh             # documented divergences = hard fail
@@ -72,8 +74,9 @@ down control and deletes the test-mode connected accounts it minted on exit.
 ## What each stage proves (when Connect is enabled)
 
 1. **DB + control** — dedicated `zeroship_stripe_e2e` migrated with the full
-   zeroship-migrate platform set (incl. `V0044` `creator_fee_policy` + the
-   `creator_accounts` Connect flags); control at `https://api.stripe.com`.
+   platform corpus by `zeroship-platform-migrate` (incl. `V0044`
+   `creator_fee_policy` + the `creator_accounts` Connect flags); control at
+   `https://api.stripe.com`.
 2. **Express account + onboarding link** — `onboard` mints a real `acct_…`
    (`type=express`, `metadata[creator_id]` ownership signal) and returns a real
    `account_links` onboarding URL; `callback` verifies ownership + persists

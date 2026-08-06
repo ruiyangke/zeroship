@@ -123,7 +123,7 @@ lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB ($DB) + full zeroship-migrate platform set + control at REAL Stripe ==="
+echo "=== Stage 1: dedicated DB ($DB) + full platform migration set + control at REAL Stripe ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -134,10 +134,10 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + the other demo DBs untouched)"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
-  pass "zeroship-migrate platform set applied to $DB (plans, metric_weights, pricing_config, invoicing, proration)"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then
+  pass "platform migration set applied to $DB (plans, metric_weights, pricing_config, invoicing, proration)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "platform migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"

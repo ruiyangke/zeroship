@@ -310,20 +310,29 @@ divergences from the mock") for what this e2e catches that the in-test mock cann
 
 ## Database migrations
 
-The shared Postgres `zeroship` schema is owned by `zeroship-migrate` (the
-platform's own migration engine, run under its Platform trust profile).
-The one-shot `migrate` service runs `zeroship-migrate migrate --dir
-/db/migrations-ts --profile platform` after Postgres is healthy and before
-control/auth start. The source of truth is the committed JS DSL corpus in
-`db/migrations-ts/`; the runner records each `.ts` file to transient IR and
-applies that plan. control/auth `depends_on` it with
+The shared Postgres `zeroship` schema is managed by the platform migration
+runner, built from `zeroship-migrate-adapter` with its `platform-cli` feature.
+After Postgres is healthy and before control/auth start, the one-shot `migrate`
+service runs:
+
+```bash
+zeroship-platform-migrate \
+  --database-url postgres://postgres:zeroship@postgres:5432/zeroship \
+  --migrations-dir /db/migrations-ts \
+  --project-schema zeroship \
+  --project-id zeroship
+```
+
+The source of truth is the committed JS DSL corpus in `db/migrations-ts/`; the
+runner records each `.ts` file to transient IR and applies that plan.
+control/auth `depends_on` it with
 `service_completed_successfully`, so they only ever boot against a fully-migrated
 schema. See [Database migrations](db-migrations.md) for the layout,
 `deploy/ops/db-migrate.sh`, and how to add a migration.
 
 ## Related docs
 
-- [Database migrations](db-migrations.md) — zeroship-migrate JS DSL migrations, the `migrate` service, `ops/db-migrate.sh`.
+- [Database migrations](db-migrations.md) — platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
 - [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
 - [Nomad + Cloud Hypervisor sandbox](../runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
 - [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.

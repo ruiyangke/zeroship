@@ -19,11 +19,9 @@ PUBLISH_PASSWORD="${ZEROSHIP_NPM_PUBLISH_PASSWORD:-zeroship-publisher}"
 EXT_ROOT="${ZEROSHIP_EXTERNAL_CHAIN_TMP:-/tmp/zs-ext}"
 APP_NAME="${ZEROSHIP_EXTERNAL_CHAIN_APP:-ext-app}"
 TMP_NPMRC=""
-TOOLCHAIN_BIN_DIR=""
 
 cleanup() {
   [ -n "$TMP_NPMRC" ] && rm -f "$TMP_NPMRC"
-  [ -n "$TOOLCHAIN_BIN_DIR" ] && rm -rf "$TOOLCHAIN_BIN_DIR"
 }
 trap cleanup EXIT
 
@@ -110,27 +108,6 @@ write_publish_npmrc() {
     printf '%s:always-auth=true\n' "$auth_prefix"
     printf 'email=%s@example.invalid\n' "$PUBLISH_USER"
   } >"$TMP_NPMRC"
-}
-
-resolve_migrate_js_bin() {
-  if [ -n "${ZEROSHIP_MIGRATE_JS_BIN:-}" ] && [ -x "$ZEROSHIP_MIGRATE_JS_BIN" ]; then
-    printf '%s' "$ZEROSHIP_MIGRATE_JS_BIN"
-    return 0
-  fi
-  if command -v zeroship-migrate-js >/dev/null 2>&1; then
-    command -v zeroship-migrate-js
-    return 0
-  fi
-  for candidate in \
-    "$ROOT/target/release/zeroship-migrate-js" \
-    "$ROOT/target/debug/zeroship-migrate-js"
-  do
-    if [ -x "$candidate" ]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
-  return 1
 }
 
 assert_external_resolutions() {
@@ -220,20 +197,7 @@ npm ls @zeroship/db @zeroship/kv @zeroship/migrate @zeroship/rpc @zeroship/serve
 assert_external_resolutions
 
 log "5. Build external app"
-MIGRATE_JS_BIN="$(resolve_migrate_js_bin || true)"
-if [ -z "$MIGRATE_JS_BIN" ]; then
-  cat >&2 <<EOF
-missing zeroship-migrate-js; DB-backed scaffold builds need the migration
-toolchain binary on PATH or ZEROSHIP_MIGRATE_JS_BIN.
-
-Build it locally with:
-  cargo build -p zeroship-migrate --bin zeroship-migrate-js
-EOF
-  exit 2
-fi
-TOOLCHAIN_BIN_DIR="$(mktemp -d)"
-ln -sf "$MIGRATE_JS_BIN" "$TOOLCHAIN_BIN_DIR/zeroship-migrate-js"
-PATH="$TOOLCHAIN_BIN_DIR:$PATH" npm run build
+npm run build
 test -f dist/app.zship
 ls -lh dist/app.zship
 

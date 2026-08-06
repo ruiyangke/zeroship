@@ -16,7 +16,7 @@ The **default build (`default = ["js-cli"]`) is byte-for-byte behaviorally uncha
 
 ## 1. Objective + non-goals
 
-**Objective.** Make the in-Rust V8 host an *optional* subsystem of `zeroship-migrate`, gated behind a single feature. V8 (`zeroship-runtime` + `v8`) is coupled in exactly two **library** subsystems — the JS/TS schema-authoring front-end (`src/frontend/`) and the live-MySQL backend (`src/apply/backend/mysql/`, which drives `mysql2` in a V8 isolate over `node:net`) — plus **three V8-touching bins**: `zeroship-migrate-js`, `zeroship-migrate` (standalone, whose runner can reach MySQL), and `zeroship-migrate-recorder-child` (`src/bin/recorder-child.rs`, itself 12 `v8::`/`zeroship_runtime` hits + 41 `libc::` hits, grep-verified). Everything else is already V8-free. This milestone converts that latent separation into a compiled one.
+**Objective.** Make the in-Rust V8 host an *optional* subsystem of `zeroship-migrate`, gated behind a single feature. V8 (`zeroship-runtime` + `v8`) is coupled in exactly two **library** subsystems — the JS/TS schema-authoring front-end (`src/frontend/`) and the live-MySQL backend (`src/apply/backend/mysql/`, which drives `mysql2` in a V8 isolate over `node:net`) — plus **three V8-touching bins**: the JS authoring CLI, `zeroship-migrate` (standalone, whose runner can reach MySQL), and the recorder-child executable (`src/bin/recorder-child.rs`, itself 12 `v8::`/`zeroship_runtime` hits + 41 `libc::` hits, grep-verified). Everything else is already V8-free. This milestone converts that latent separation into a compiled one.
 
 **Non-goals (explicitly out of scope for this milestone):**
 - **No engine-logic changes.** Guard (`pg_query` deny-list), model/IR, render (SQL gen), analysis, journal, executor, PG apply, SQLite apply — untouched. Zero behavior delta.
@@ -72,7 +72,7 @@ Every one of those sites is already `zsv8`-gated: the `frontend/` files transiti
 **`libc` is made optional and folded into `zsv8`**, not left unconditional. Its only users are the V8-gated sandbox / recorder-child paths above, so leaving it unconditional would ship a leaf dependency with **zero in-core consumers** — inconsistent with this design's own lean-tree principle (the same principle that motivates relocating `js_driver_module_graph` in §4). Making it optional keeps the V8-free tree free of dead deps and makes the `cargo tree` absence assertion (§10) complete.
 
 **Consequences of the model:**
-- `default = ["js-cli"]` ⇒ `zsv8` on ⇒ **today's full behavior preserved exactly**. The platform's `zeroship-migrate-js` binary still builds.
+- `default = ["js-cli"]` ⇒ `zsv8` on ⇒ **today's full behavior preserved exactly**. The platform's JS authoring binary still builds.
 - `--no-default-features` ⇒ `zsv8` off ⇒ **V8-free core**: no `v8`, no `zeroship-runtime`, no `seccompiler`, no `landlock` in the tree; no `frontend/`, no MySQL backend, no recorder-child bin.
 - <!-- Added in round 2: addressing BLOCKER #1 --> The two real library dependents (`plugin-db`, `migrated`) consume only the V8-free surface (§7). **This milestone flips both to `default-features = false`** (§7.1) — that is the step that actually removes V8 from the platform build graph; leaving them on default features would keep `zsv8` unified on for the whole workspace and remove nothing. The dev-dep-only `schema-authority-e2e` keeps default features on because it genuinely imports `frontend::*`.
 
@@ -185,8 +185,8 @@ So the fallback is **honest, not new behavior**:
 | Bin (Cargo.toml) | Change |
 |---|---|
 | `zeroship-migrate` (`required-features = ["standalone-cli"]`) | unchanged; `standalone-cli ⊇ zsv8` (§2). The bin body is V8-free but its runner can reach MySQL, so riding `zsv8` is correct. |
-| `zeroship-migrate-js` (`required-features = ["js-cli"]`) | unchanged; `js-cli ⊇ zsv8`. |
-| `zeroship-migrate-recorder-child` (path `src/bin/recorder-child.rs`, **currently no `required-features`**) | **add `required-features = ["zsv8"]`** — otherwise it fails to compile under `--no-default-features`. This is the single most likely default-build breaker if missed. |
+| JS authoring CLI (`required-features = ["js-cli"]`) | unchanged; `js-cli ⊇ zsv8`. |
+| Recorder-child executable (path `src/bin/recorder-child.rs`, **currently no `required-features`**) | **add `required-features = ["zsv8"]`** — otherwise it fails to compile under `--no-default-features`. This is the single most likely default-build breaker if missed. |
 
 ### F. Tests / dev-deps
 
@@ -339,7 +339,7 @@ Steps 1–5 keep the **default build green**; the V8-free build turns on at step
 - <!-- Added in round 2: addressing BLOCKER #1 + MINOR #9 (workspace-level outcome never asserted) --> **The real removal, at the workspace level.** After the §7.1 flip, assert V8 is gone from the dependents' *resolved* trees:
   - `cargo tree -p zeroship-plugin-db | grep -c -E 'v8|zeroship-runtime'` **== 0**
   - `cargo tree -p zeroship-migrated  | grep -c -E 'v8|zeroship-runtime'` **== 0**
-  - A whole-workspace `cargo build` still succeeds (the platform binaries link the V8-free `plugin-db`/`migrated` while `zeroship-migrate-js` / the standalone bin still get `zsv8` via their own edges). Without these two assertions the isolated `-p ... --no-default-features` check can be green while the platform still links V8 everywhere it matters — a checklist that proves nothing about the goal.
+  - A whole-workspace `cargo build` still succeeds (the platform binaries link the V8-free `plugin-db`/`migrated` while the JS authoring CLI / the standalone bin still get `zsv8` via their own edges). Without these two assertions the isolated `-p ... --no-default-features` check can be green while the platform still links V8 everywhere it matters — a checklist that proves nothing about the goal.
 - **Dependents build:** `cargo build -p zeroship-plugin-db` and `cargo build -p zeroship-migrated` (now `default-features = false` on the migrate edge, both must stay green); `cargo build -p schema-authority-e2e --tests` (dev-dep, keeps default features — needs `zsv8`).
 - **No wire/IR drift:** no `CURRENT_IR_VERSION` change; serde byte-parity of existing `.ir.json` fixtures.
 

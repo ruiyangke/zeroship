@@ -31,7 +31,7 @@
 #   * Real zeroship-control binary, pointed at REAL https://api.stripe.com with
 #     the operator's Stripe TEST secret key.
 #   * Real ephemeral-but-dedicated zeroship Postgres DB `zeroship_stripe_e2e` on
-#     the :5440 server + the full zeroship-migrate platform set.
+#     the :5440 server + the full platform migration set.
 #   * Real Stripe objects (cus_/in_/ii_/pi_/ch_/re_/du_), created over the wire.
 #   * The REAL webhook signature path: events are constructed from the REAL
 #     fetched Stripe objects and HMAC-SHA256-signed with the secret the control
@@ -98,6 +98,7 @@ command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
 [ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
+[ -x "$BIN/zeroship-platform-migrate" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-platform-migrate — run: cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 0; }
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
@@ -140,7 +141,7 @@ lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB ($DB) + zeroship-migrate + control booted at REAL Stripe ==="
+echo "=== Stage 1: dedicated DB ($DB) + zeroship-platform-migrate + control booted at REAL Stripe ==="
 # ===========================================================================
 # (Re)create the dedicated DB clean so the run is deterministic.
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
@@ -151,17 +152,18 @@ ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
+DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 MIG_LOG="$WORK/migrate.log"
-# Use the PREBUILT release binary (like the other billing e2es) so we never
-# rebuild zeroship-migrate from source — the libpg_query C build needs the nix
-# dev shell's headers, which a plain shell lacks (`sys/types.h' not found`).
-if ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-migrate" ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
-  pass "zeroship-migrate platform set applied to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
+# Use the prebuilt release platform migration binary, matching the other billing e2es.
+if "$BIN/zeroship-platform-migrate" \
+    --database-url "$DBURL" \
+    --migrations-dir "$ROOT/db/migrations-ts" \
+    --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
+  pass "zeroship-platform-migrate applied the platform set to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-platform-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
-DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 

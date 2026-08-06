@@ -63,7 +63,7 @@ _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{t
 stack_preflight() {
   local b
   for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
-    [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b — run: cargo build --release"; return 2; }
+    [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; return 2; }
   done
   [ -f "$E2E_JOSE_JS" ] || { _stk_bad "missing jose at $E2E_JOSE_JS"; return 2; }
   command -v docker  >/dev/null || { _stk_bad "docker required"; return 2; }

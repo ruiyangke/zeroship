@@ -26,7 +26,7 @@
 # FAITHFUL by construction — NO stubbing of the components under test:
 #   * Real zeroship-control / zeroship-worker / zeroship-gate binaries.
 #   * Real ephemeral Postgres + a real Redpanda broker (docker) + the full
-#     zeroship-migrate platform set.
+#     platform migration set.
 #   * A real deployed app (examples/metering-probe .zship) hit through the
 #     gateway with real HTTP traffic; usage flows worker ─► redpanda ─►
 #     control recompute (NOT a POST — the old /internal/usage path is gone).
@@ -74,8 +74,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + tooling + built example -------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-migrate; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-platform-migrate; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 command -v node    >/dev/null 2>&1 || { echo "node required"; exit 2; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl required"; exit 2; }
@@ -142,7 +142,7 @@ done
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: ephemeral Postgres + zeroship-migrate + plan seed + mock-Stripe + stack ==="
+echo "=== Stage 1: ephemeral Postgres + platform migrations + plan seed + mock-Stripe + stack ==="
 # ===========================================================================
 
 docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -175,14 +175,13 @@ else
 fi
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-    "$BIN/zeroship-migrate" migrate \
-    --dir "$ROOT/db/migrations-ts" \
-    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-    --profile platform --yes > "$MIG_LOG" 2>&1; then
-  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
+if "$BIN/zeroship-platform-migrate" \
+    --database-url "$DBURL" \
+    --migrations-dir "$ROOT/db/migrations-ts" \
+    --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
 else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-platform-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # Seed the metering-test plan (compute-unit pricing, Refactor B scalar schema).

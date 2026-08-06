@@ -23,9 +23,9 @@ verification** are real.
   same dev server the cargo integration tests use. The harness creates a
   **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor the concurrent `zeroship_billing_test` DB.
-- `docker`, the `zeroship-migrate` bin (built; the migrate step via `ops/db-migrate.sh`), `node`,
-  `openssl`, `curl`, and `psql` (default path is the Nix store path; override
-  with `ZEROSHIP_PSQL`).
+- `docker`, the `zeroship-platform-migrate` binary (invoked through
+  `deploy/ops/db-migrate.sh`), `node`, `openssl`, `curl`, and `psql` (default
+  path is the Nix store path; override with `ZEROSHIP_PSQL`).
 - The operator's Stripe **TEST** keys, sourced from the env file (see Secrets).
 
 ## Run
@@ -33,6 +33,7 @@ verification** are real.
 ```bash
 # 1. Build control if needed
 cargo build --release -p zeroship-control
+cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
 
 # 2. Source the Stripe TEST keys (REQUIRED — the harness skips cleanly if unset)
 source /home/ruiyang/.config/zeroship-stripe-test.env
@@ -62,7 +63,8 @@ sourced, no PG :5440, no docker, missing tools) so it is CI-safe. It
 ## What each stage proves (with real object ids in the output)
 
 1. **DB + control** — dedicated `zeroship_stripe_e2e` migrated with the full
-   zeroship-migrate platform set; control booted at `https://api.stripe.com`.
+   platform corpus by `zeroship-platform-migrate`; control booted at
+   `https://api.stripe.com`.
 2. **Customer + PM** — real `cus_…` + a saved test PaymentMethod (`pm_card_visa`).
 3. **Reconcile** — `POST /internal/billing/reconcile` drives the real
    `bill_creator`: real invoice item + invoice + finalize on Stripe; the

@@ -157,7 +157,7 @@ the internal representation. Two front-ends:
 - **SQL migration files** (Flyway/dbmate) — the **lean core**. Pure Rust, no V8.
   This is the public dbmate-like CLI + the apply/rollback/status path.
 - **JS/TS `schema.ts`** — a **first-class, but optional, front-end** in a separate
-  crate **`zeroship-migrate-js`** that embeds a JS engine to evaluate the `t.*`
+  **JS authoring adapter crate** that embeds a JS engine to evaluate the `t.*`
   DSL → descriptor IR → the core engine's diff/generate. This is the zeroship
   creator superpower (the tool natively *speaks* the app's schema, the way Atlas
   speaks HCL), the analog of Atlas's ORM/HCL providers.
@@ -167,7 +167,7 @@ engine, which is heavy. It must NOT be welded into the base tool, or the public
 CLI loses its clean-standalone-binary property. So:
 
 - `zeroship-migrate` (core) — SQL front-end + descriptor-IR diff/migrate. **No V8.**
-- `zeroship-migrate-js` (front-end crate / cargo feature) — **reuses
+- JS authoring front end (crate / cargo feature) — **reuses
   `zeroship-runtime`'s existing V8 + TS toolchain** (no second JS engine), evals
   `schema.ts` **in the existing V8 sandbox** (untrusted creator schema runs under
   the same security model as app code), emits the descriptor IR. Only the
@@ -282,7 +282,7 @@ No more auto-migrate-on-boot. Dev parity:
   `zeroship-schema`; its v1 SUBSET `declarative.rs` is REPLACED by the shared full
   differ → the engine reaches full capability (vector/encrypted/mask/geo/FK/FTS).
   `generate` (descriptor IR diff → versioned migration) over the SQL front-end.
-- **P3 — `zeroship-migrate-js` front-end crate.** V8-backed (reuse
+- **P3 — JS authoring front-end crate.** V8-backed (reuse
   `zeroship-runtime`) eval of `schema.ts` → descriptor IR; `zeroship-migrate
   generate --schema schema.ts`. `@zeroship/db` infers types from `schema.ts`
   (Drizzle-style). Core stays V8-free; JS front-end is opt-in.

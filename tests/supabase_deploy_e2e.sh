@@ -278,7 +278,7 @@ ensure_release_bins() {
   local stale=0
   local build_stamp="$BIN/.supabase-e2e-build-stamp"
   local bin
-  for bin in zeroship zeroship-auth zeroship-control zeroship-worker zeroship-gate; do
+  for bin in zeroship zeroship-auth zeroship-control zeroship-worker zeroship-gate zeroship-platform-migrate; do
     [ -x "$BIN/$bin" ] || missing=1
   done
   if [ "$missing" -eq 0 ]; then
@@ -289,6 +289,7 @@ ensure_release_bins() {
       "$ROOT/crates/gateway/Cargo.toml" "$ROOT/crates/gateway/src"
       "$ROOT/crates/cli/Cargo.toml" "$ROOT/crates/cli/src"
       "$ROOT/crates/auth/Cargo.toml" "$ROOT/crates/auth/src"
+      "$ROOT/crates/zeroship-migrate-adapter/Cargo.toml" "$ROOT/crates/zeroship-migrate-adapter/src"
       "$ROOT/crates/mailer/Cargo.toml" "$ROOT/crates/mailer/src"
       "$ROOT/crates/core/Cargo.toml" "$ROOT/crates/core/src"
       "$ROOT/crates/bundle/Cargo.toml" "$ROOT/crates/bundle/src"
@@ -311,6 +312,12 @@ ensure_release_bins() {
     >"$WORK/cargo-build.log" 2>&1 || {
       tail -80 "$WORK/cargo-build.log" || true
       fail "release binary build failed"
+    }
+  nix develop --command cargo build --release \
+    -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate \
+    >>"$WORK/cargo-build.log" 2>&1 || {
+      tail -80 "$WORK/cargo-build.log" || true
+      fail "platform migration binary build failed"
     }
   touch "$build_stamp"
   pass "release binaries built"
@@ -455,13 +462,11 @@ start_postgres() {
 }
 
 apply_control_migrations() {
-  ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-    "$BIN/zeroship-migrate" migrate \
-      --dir "$ROOT/db/migrations-ts" \
+  "$BIN/zeroship-platform-migrate" \
       --database-url "$CONTROL_DB_URL" \
-      --profile platform \
-      --yes \
-      --no-dump-schema >"$WORK/control-migrate.log" 2>&1 || {
+      --migrations-dir "$ROOT/db/migrations-ts" \
+      --project-schema zeroship \
+      --project-id zeroship >"$WORK/control-migrate.log" 2>&1 || {
         tail -40 "$WORK/control-migrate.log" || true
         fail "control DB platform migrations failed"
       }
