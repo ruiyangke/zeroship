@@ -462,6 +462,7 @@ impl Manifest {
     ///   `worker.modules` is 64-char lowercase sha256 hex.
     /// * Every `sourcemaps` key/value is sha256-hex (lowercase, 64 chars).
     /// * `resources` keys conform to the `rpc:` / URL / `*` shape.
+    /// * Resource CORS cannot combine the `"*"` origin with credentials.
     /// * Each resource has at most one routing action.
     /// * Override marker required when shadowing an inherited field.
     /// * `auth: anon` requires `publicly_accessible: true`.
@@ -572,6 +573,15 @@ impl Manifest {
             if !is_valid_resource_key(key) {
                 return Err(format!(
                     "resource key {key:?} is malformed: must be \"*\", \"/<path>\", or \"rpc:<id>\""
+                ));
+            }
+            // Credentialed CORS cannot use the wildcard origin.
+            if entry.cors.as_ref().is_some_and(|cors| {
+                cors.allow_credentials && cors.allow_origins.iter().any(|origin| origin == "*")
+            }) {
+                return Err(format!(
+                    "resource {key:?}: `cors.allow_credentials: true` is incompatible with the \
+                     `\"*\"` wildcard origin; list the exact origins instead"
                 ));
             }
             // Routing-action exclusivity: at most one of redirect/rewrite/static.
