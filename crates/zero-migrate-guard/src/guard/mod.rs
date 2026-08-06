@@ -638,15 +638,20 @@ struct BodyScopeDecisions<'a> {
 }
 
 impl BodyScopeDecisions<'_> {
+    /// Defer to [`SchemaScope::permits`] rather than re-deciding admission here.
+    ///
+    /// This used to be a second copy of that match, and the copy had drifted: it
+    /// carried an extra arm making `Single("")` permit every schema. `Single("")` is
+    /// what `GuardConfig::schema_scope` produces for a policy that owns NO schema,
+    /// i.e. the tightest posture there is, so the body scanner admitted every
+    /// cross-tenant reference for exactly the policy that should admit none.
+    /// `Unconfined` is the variant that means "permit everything", and it has to be
+    /// chosen deliberately.
+    ///
+    /// A `None` scope is the caller declining to confine at all; the body deny-list
+    /// still runs.
     fn permits(&self, schema: &str) -> bool {
-        match self.scope {
-            None | Some(SchemaScope::Unconfined) => true,
-            Some(SchemaScope::Single(owned)) if owned.is_empty() => true,
-            Some(SchemaScope::Single(owned)) => owned.eq_ignore_ascii_case(schema),
-            Some(SchemaScope::Allowlist(owned)) => {
-                owned.iter().any(|item| item.eq_ignore_ascii_case(schema))
-            }
-        }
+        self.scope.is_none_or(|scope| scope.permits(schema))
     }
 }
 

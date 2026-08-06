@@ -183,3 +183,33 @@ fn renaming_a_role_database_or_foreign_schema_is_denied() {
     g.check("ALTER TABLE app1.widgets RENAME TO gadgets")
         .expect("an owned-schema table rename stays allowed");
 }
+
+#[test]
+fn a_scope_owning_no_schema_permits_no_schema() {
+    // `GuardConfig::schema_scope` returns `Single("")` for a policy that owns no
+    // schema at all, which is the tightest posture there is. The body scanner kept
+    // its own copy of the admission match, and that copy had an extra arm treating
+    // the empty name as "permit everything" - so the one policy that should admit
+    // nothing admitted every cross-tenant reference.
+    let owns_nothing = SchemaScope::Single(String::new());
+    for body in [
+        "SELECT * FROM control.users",
+        "SELECT * FROM other_tenant.secrets",
+        "SELECT * FROM app1.widgets",
+    ] {
+        let err = check_raw_view_body_text(body, "view body", Some(&owns_nothing))
+            .expect_err(&format!("owning no schema must not admit: {body}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{body}`, got {err:?}"
+        );
+    }
+
+    // Permitting everything stays available, but only by asking for it.
+    check_raw_view_body_text(
+        "SELECT * FROM control.users",
+        "view body",
+        Some(&SchemaScope::Unconfined),
+    )
+    .expect("an explicit Unconfined posture still admits any schema");
+}
