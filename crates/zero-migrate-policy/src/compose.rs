@@ -483,7 +483,7 @@ pub(crate) fn pin_layer_key_to_default(
 
 /// The composed, UNFORGEABLE effective policy — the PDP surface the guard/engine
 /// query (II.3.2). Its fields are PRIVATE, it has NO `Deserialize` and NO public
-/// constructor: the ONLY ways to obtain one are [`admit`] / [`restrict`]
+/// constructor: the ONLY ways to obtain one are [`crate::admit`] / [`restrict`]
 /// from a [`RootCharter`] (or [`EffectivePolicy::deny_all`], the engine-derived
 /// floor). Holding one is proof it was composed under the host's root charter — this
 /// is the type-level boundary that replaces the old forgeable `OperatorCapability`
@@ -841,16 +841,41 @@ pub(crate) fn layered_value_at(
     Ok(default.clone())
 }
 
-/// The NON-DEFAULT grant rules of a LAYER STACK for `key` (H-4), each at its own
-/// `effective_scope` (excludes intact). These are the charter-side grant rules the
-/// `admit` escalation check subtracts, ONE AT A TIME (iterated per-rule `∖` — NEVER a
-/// `⊔`-materialized charter side, C-1). A default-valued rule grants nothing and is
-/// dropped. Masking (an upper layer narrowing a lower grant to default) is handled
-/// NOT here but by the caller's covered-region value comparison against the charter's
-/// LAYERED effective value ([`layered_value_at`]): in a masked region the effective
-/// value is `default`, so a non-default draft value there rejects on the value check
-/// even though the region was subtracted from the uncovered set. The two checks
-/// together are sound (fail-closed).
+/// EVERY grant rule scope of a LAYER STACK for `key` (H-4), each at its own
+/// `effective_scope` (excludes intact) — including rules whose value is at or below
+/// default.
+///
+/// These are the boundaries the `admit` escalation check partitions on: it subtracts
+/// them ONE AT A TIME (iterated per-rule `∖`, NEVER a `⊔`-materialized charter side,
+/// C-1) and then compares values at a witness inside each region.
+///
+/// A default-valued rule grants nothing, but it is still a PRESENCE MASK: under the
+/// layer stack's presence-based last-wins, an upper layer's rule decides the effective
+/// value wherever it covers, so a `false` rule punches a hole in a lower layer's
+/// grant. Dropping such a rule here used to leave that hole invisible to the
+/// partition, and the caller samples ONE witness per region — so the witness could
+/// land outside the hole, where the charter still granted, and an untrusted draft
+/// re-granting over the whole universe was admitted. The value comparison alone
+/// cannot recover a boundary the partition never drew.
+pub(crate) fn layered_grant_rule_scopes<'a>(layers: &'a [Layer], key: &KnobKey) -> Vec<&'a Scope> {
+    let mut out: Vec<&Scope> = Vec::new();
+    for layer in layers {
+        if let Some(km) = layer.grants.keys.get(key) {
+            for r in &km.rules {
+                out.push(&r.scope);
+            }
+        }
+    }
+    out
+}
+
+/// The subset of [`layered_grant_rule_scopes`] whose value rises above default.
+///
+/// This is the set the UNCOVERED-region arm subtracts, and it must stay the
+/// grant-bearing subset: a mask grants nothing, so subtracting it would treat its
+/// region as charter-covered. It would also make `All ∖ <mask>` unrepresentable and
+/// turn a precise escalation report into a fail-closed "not representable", which is
+/// safe but says nothing useful about what the draft did wrong.
 pub(crate) fn layered_nondefault_grant_rules<'a>(
     layers: &'a [Layer],
     key: &KnobKey,
@@ -860,7 +885,7 @@ pub(crate) fn layered_nondefault_grant_rules<'a>(
         if let Some(km) = layer.grants.keys.get(key) {
             for r in &km.rules {
                 if leq_value(&km.kind, &r.value, &km.default)? {
-                    continue; // default-valued rule grants nothing.
+                    continue;
                 }
                 out.push(&r.scope);
             }

@@ -18,16 +18,16 @@
 //! subtraction (never a `⊔`-materialized charter — the C-1 fix), and rejects a
 //! non-representable difference (fail-closed).
 //!
-//! `admit`'s `charter` is a finalized [`AdmitCharter`] (a [`RootCharter`], a
+//! `admit`'s `charter` is a finalized [`AdmitCharter`] (a [`crate::RootCharter`], a
 //! [`Charter`](crate::compose::Charter) from `finalize_charter`, or an already-composed
 //! [`EffectivePolicy`]); an un-finalized [`AssembledCharter`](crate::compose::AssembledCharter)
 //! deliberately does NOT implement `AdmitCharter`, so it cannot reach `admit` at the
 //! type level (MED).
 
 use crate::compose::{
-    check_inject_collisions, check_validate_vs_inject, layered_nondefault_grant_rules,
-    layered_value_at, pin_layer_key_to_default, render_scope, rules_of, witness_of, AdmitCharter,
-    ComposeError, EffectivePolicy, GrantModel, Layer, LayerTag,
+    check_inject_collisions, check_validate_vs_inject, layered_grant_rule_scopes,
+    layered_nondefault_grant_rules, layered_value_at, pin_layer_key_to_default, render_scope,
+    rules_of, witness_of, AdmitCharter, ComposeError, EffectivePolicy, GrantModel, Layer, LayerTag,
 };
 use crate::knob::KnobKey;
 use crate::registry::PolicyRegistry;
@@ -142,9 +142,10 @@ fn check_grant_key(
     //     `⊔` never materializes the charter side (C-1). Excludes on each charter rule
     //     survive (the ∖ construction keeps a subtrahend's holes). A non-representable
     //     ∖ at any step ⇒ reject (fail-closed).
-    let charter_rules = layered_nondefault_grant_rules(charter_layers, key)?;
+    let uncovered_rules = layered_nondefault_grant_rules(charter_layers, key)?;
+    let charter_rules = layered_grant_rule_scopes(charter_layers, key);
     let mut r = draft_granted.clone();
-    for c_scope in &charter_rules {
+    for c_scope in &uncovered_rules {
         match r.difference(c_scope) {
             Difference::Scope(s) => r = s,
             Difference::NotRepresentable => {
@@ -163,9 +164,16 @@ fn check_grant_key(
 
     // (2) COVERED region: partition the draft's granted scope by each charter grant
     //     rule's scope (via ⊓) and compare the draft's value to the charter's LAYERED
-    //     effective value at a witness of each region. This arm also catches masking:
-    //     where an upper charter layer narrows k to default, the layered effective
-    //     value is default, so a non-default draft value there rejects here.
+    //     effective value at a witness of each region.
+    //
+    //     The partition MUST draw a boundary at every rule, including one whose value
+    //     is at or below default. Such a rule grants nothing, but it masks: under
+    //     presence-based last-wins an upper layer's rule decides the effective value
+    //     wherever it covers. Since this arm samples ONE witness per region, a mask
+    //     that is not its own region is a hole the witness can miss — a root granting
+    //     `all` with a later layer denying `secret` produced a single region whose
+    //     witness sat outside `secret`, so a draft re-granting `all` was admitted and
+    //     got back exactly the authority that layer removed.
     for c_scope in &charter_rules {
         let region = draft_granted.meet(c_scope);
         if matches!(region, Scope::Nothing) {

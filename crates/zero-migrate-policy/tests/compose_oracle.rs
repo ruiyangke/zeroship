@@ -1559,3 +1559,78 @@ fn an_unnarrowed_universal_grant_is_still_top() {
     assert_eq!(ep.grant_region(&key), GrantRegion::Top);
     assert!(ep.grant_is_top(&key));
 }
+
+/// A draft cannot re-grant authority a later charter layer took away.
+///
+/// The charter grants `sql.raw` everywhere at the root and denies it at `secret` in a
+/// second layer. `admit` partitions the draft's granted scope by the charter's rule
+/// scopes and compares values at one witness per region, so `secret` has to be its own
+/// region: a rule whose value is at or below default grants nothing but still MASKS,
+/// and dropping it from the partition left a hole the single witness could miss.
+///
+/// The oracle sweep does not reach this shape - it generates one rule per key per
+/// document, so no charter it builds has a masked hole.
+#[test]
+fn a_draft_cannot_regrant_over_a_masked_hole() {
+    let reg = registry();
+    let root = TrustedDoc::register_catalog_entry(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
+        &reg,
+    )
+    .unwrap();
+    let masking_layer = TrustedDoc::register_catalog_entry(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = false\nscope = { include = [\"secret\"] }\n",
+        &reg,
+    )
+    .unwrap();
+    let charter = finalize_charter(overlay(&root, &masking_layer, &reg).unwrap()).unwrap();
+
+    let key = KnobKey::parse("sql.raw").unwrap();
+    let secret_t = ObjectName::table(b"secret".to_vec(), b"t".to_vec());
+    let silent = || {
+        PolicyDoc::parse_toml(
+            "policy_version = 1\n",
+            &reg,
+            zero_migrate_policy::LoadContext::NonRootLayer,
+        )
+        .unwrap()
+    };
+
+    // The charter itself denies at secret, so there is real authority to re-grant.
+    assert_eq!(
+        admit(&charter, &silent(), &reg)
+            .unwrap()
+            .grants(&key, &secret_t),
+        Some(KnobValue::Bool(false)),
+        "the masking layer must deny sql.raw at secret"
+    );
+
+    // An untrusted draft re-granting over the whole universe must be refused.
+    let draft = PolicyDoc::parse_toml(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let err = admit(&charter, &draft, &reg)
+        .expect_err("re-granting into a masked hole must not be admitted");
+    assert!(
+        matches!(err, ComposeError::GrantExceedsCharter { .. }),
+        "expected GrantExceedsCharter, got {err:?}"
+    );
+
+    // A draft that stays inside the charter is still admitted.
+    let ok_draft = PolicyDoc::parse_toml(
+        "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = { include = [\"app_main\"] }\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep =
+        admit(&charter, &ok_draft, &reg).expect("a draft within the charter is still admitted");
+    assert_eq!(
+        ep.grants(&key, &secret_t),
+        Some(KnobValue::Bool(false)),
+        "the mask survives an admitted draft"
+    );
+}
