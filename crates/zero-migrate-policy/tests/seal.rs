@@ -559,3 +559,34 @@ scope = { include = ["staging"] }
         .verify(MAC_KEY, &pa, &reg.digest(), DIALECT, MATCHER, CHARTER_VER)
         .is_ok());
 }
+
+/// Two globs that RENDER the same but match different sets must not seal the same.
+///
+/// The seal used to encode `SegGlob::render`, justified by render being injective
+/// over the `(prefix, suffix, has_star)` triple. That holds only while the triple is
+/// canonical - at most one `*`, none inside the literal pieces. `SegGlob::parse`
+/// enforces it, so the strict TOML loader cannot break it, but the public
+/// `SegGlob::infix` can.
+#[test]
+fn globs_rendering_alike_but_matching_differently_seal_differently() {
+    use zero_migrate_policy::scope::glob::SegGlob;
+
+    let a = SegGlob::infix(b"a*".to_vec(), b"b".to_vec());
+    let b = SegGlob::infix(b"a".to_vec(), b"*b".to_vec());
+
+    // The premise: same spelling, different membership.
+    assert_eq!(a.render(), b.render(), "the two globs render identically");
+    assert_ne!(a, b, "but they are not the same glob");
+    assert!(a.matches(b"a*zb") && !b.matches(b"a*zb"));
+    assert!(b.matches(b"az*b") && !a.matches(b"az*b"));
+
+    // The loader cannot produce either: a second `*` is refused at parse.
+    assert!(
+        SegGlob::parse("a**b").is_none(),
+        "the strict loader still refuses a second star"
+    );
+
+    // The canonical seal encoding must therefore separate them on the pieces rather
+    // than the spelling. That encoding is private, so the assertion lives beside it
+    // as a unit test in `seal.rs`; this test pins the premise it rests on.
+}

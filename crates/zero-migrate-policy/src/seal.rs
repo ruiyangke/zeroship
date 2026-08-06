@@ -382,13 +382,28 @@ fn write_patterns(b: &mut Vec<u8>, pats: &[Pattern]) {
     }
 }
 
-/// Canonical single-segment glob encoding: the rendered bytes suffice because
-/// `SegGlob::render` is injective over the canonical `(prefix, suffix, has_star)`
-/// triple, and a `*`-free render is a literal while a `*`-bearing one is a glob — but
-/// to be unambiguous we tag the star flag explicitly.
+/// Canonical single-segment glob encoding: the star flag, then the prefix and the
+/// suffix each length-prefixed.
+///
+/// This deliberately does NOT encode `SegGlob::render`. That was justified on the
+/// grounds that render is injective over the `(prefix, suffix, has_star)` triple,
+/// which holds only while the triple is canonical - at most one `*`, none inside the
+/// literal pieces. The strict loader guarantees that (`SegGlob::parse` refuses a
+/// second `*`), but the public `SegGlob::infix` does not, and two globs built through
+/// it render the same while matching different sets:
+///
+/// ```text
+/// infix("a*", "b") renders a**b and matches a*zb
+/// infix("a", "*b") renders a**b and matches az*b
+/// ```
+///
+/// Encoding the pieces separately makes the seal independent of that invariant
+/// rather than resting on it. Seals are in-memory and not persisted, so the encoding
+/// change invalidates nothing.
 fn write_seg(b: &mut Vec<u8>, g: &SegGlob) {
     b.push(u8::from(!g.is_literal())); // 1 = has star, 0 = literal
-    write_bytes(b, g.render().as_bytes());
+    write_bytes(b, g.prefix_bytes());
+    write_bytes(b, g.suffix_bytes());
 }
 
 /// Canonical inject-spec encoding: columns (name/ty/nullable/default) in doc order,
@@ -478,5 +493,36 @@ fn write_name_globs(b: &mut Vec<u8>, globs: &[crate::rule::NameGlob]) {
     b.extend_from_slice(&(globs.len() as u32).to_be_bytes());
     for g in globs {
         write_seg(b, &g.glob);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_seg;
+    use crate::scope::glob::SegGlob;
+
+    /// Two globs that render alike but match different sets must encode differently.
+    ///
+    /// `write_seg` used to encode `SegGlob::render`, justified by render being
+    /// injective over the `(prefix, suffix, has_star)` triple. That holds only while
+    /// the triple is canonical - at most one `*`, none inside the literal pieces.
+    /// `SegGlob::parse` enforces it, so the strict TOML loader cannot break it, but
+    /// the public `SegGlob::infix` can, and then two different globs sealed the same.
+    #[test]
+    fn seg_encoding_separates_globs_that_render_alike() {
+        let a = SegGlob::infix(b"a*".to_vec(), b"b".to_vec());
+        let b = SegGlob::infix(b"a".to_vec(), b"*b".to_vec());
+        assert_eq!(a.render(), b.render(), "premise: same spelling");
+        assert!(a.matches(b"a*zb") && !b.matches(b"a*zb"));
+        assert!(b.matches(b"az*b") && !a.matches(b"az*b"));
+
+        let mut ba = Vec::new();
+        let mut bb = Vec::new();
+        write_seg(&mut ba, &a);
+        write_seg(&mut bb, &b);
+        assert_ne!(
+            ba, bb,
+            "different membership must not share a seal encoding"
+        );
     }
 }

@@ -96,6 +96,21 @@ impl SegGlob {
         self.has_star && self.prefix.is_empty() && self.suffix.is_empty()
     }
 
+    /// The literal bytes before the `*` (the whole value when there is no star).
+    ///
+    /// For the seal's canonical encoding, which must distinguish globs that
+    /// [`Self::render`] spells identically.
+    #[must_use]
+    pub(crate) fn prefix_bytes(&self) -> &[u8] {
+        &self.prefix
+    }
+
+    /// The literal bytes after the `*` (empty when there is no star).
+    #[must_use]
+    pub(crate) fn suffix_bytes(&self) -> &[u8] {
+        &self.suffix
+    }
+
     #[must_use]
     pub fn is_literal(&self) -> bool {
         !self.has_star
