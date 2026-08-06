@@ -26,7 +26,7 @@ mod platform_cli {
     };
     use zeroship_migrate_adapter::CompioPgSession;
 
-    /// Serialize the two live-PG apply tests. Both provision a scratch DB and create
+    /// Serialize the three live-PG apply tests. Each provisions a scratch DB and creates
     /// the platform's CLUSTER-GLOBAL roles (`CREATE ROLE zeroship_control`, …); run in
     /// parallel they race on the shared `pg_authid` catalog and PG aborts one with
     /// `tuple concurrently updated`. `cargo test` runs test fns on multiple OS threads
@@ -34,6 +34,19 @@ mod platform_cli {
     /// apply tests from overlapping regardless of the caller's thread count. The
     /// DB-free author+lower test does not take it.
     static DB_APPLY_LOCK: Mutex<()> = Mutex::new(());
+
+    const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
+        "app_deploys",
+        "workflow_runs",
+        "workflow_blobs",
+        "workflow_signal_keys",
+        "workflow_broadcasts",
+        "workflow_steps",
+        "workflow_signals",
+        "workflow_subscriptions",
+        "workflow_schedules",
+        "workflow_rollout_config",
+    ];
 
     /// The repo-root `db/migrations-ts` directory (the crate is two levels below).
     fn migrations_dir() -> PathBuf {
@@ -340,6 +353,97 @@ mod platform_cli {
         .await
         {
             return Err("no table grants to role 'zeroship_control'".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Exercise the real ordered runner across a catalog refresh and verify that
+    /// the later workflow migration can still validate foreign-key value formats
+    /// authored by an earlier file. The environment gate matches the other live-PG
+    /// coverage in this suite.
+    #[compio::test]
+    async fn ordered_runner_retains_authored_fk_formats_across_catalog_refresh() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping logical-column retention regression: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let scratch = format!(
+            "zs_logical_columns_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let scratch_dsn = dsn_with_db(&url, &scratch);
+
+        {
+            let admin = admin_session(&url).await;
+            let _ = admin
+                .batch(&format!("DROP DATABASE IF EXISTS \"{scratch}\""))
+                .await;
+            admin
+                .batch(&format!("CREATE DATABASE \"{scratch}\""))
+                .await
+                .unwrap_or_else(|e| panic!("CREATE DATABASE scratch failed: {e}"));
+        }
+
+        let result = run_logical_column_retention_assertions(&scratch_dsn).await;
+
+        {
+            let admin = admin_session(&url).await;
+            let _ = admin
+                .batch(&format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE datname = '{scratch}' AND pid <> pg_backend_pid()"
+                ))
+                .await;
+            admin
+                .batch(&format!("DROP DATABASE IF EXISTS \"{scratch}\""))
+                .await
+                .expect("DROP DATABASE scratch");
+        }
+
+        result.expect("ordered runner must retain authored foreign-key formats");
+    }
+
+    async fn run_logical_column_retention_assertions(scratch_dsn: &str) -> Result<(), String> {
+        let cfg = PlatformMigrateConfig {
+            database_url: scratch_dsn.to_string(),
+            migrations_dir: migrations_dir(),
+            project_schema: "zeroship".to_string(),
+            project_id: "zeroship".to_string(),
+        };
+        let report = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("run_platform_migrations failed: {e}"))?;
+        if report.files != 12 {
+            return Err(format!("expected 12 files, saw {}", report.files));
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect assertion probe: {e}"))?;
+        let mut missing = Vec::new();
+        for table in DURABLE_WORKFLOW_JOURNAL_TABLES {
+            let sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                 WHERE table_schema = 'zeroship' AND table_name = '{table}')"
+            );
+            if !scalar_bool(&probe, &sql).await {
+                missing.push(table);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "durable-workflow journal tables missing after apply: {}",
+                missing.join(", ")
+            ));
         }
 
         Ok(())
