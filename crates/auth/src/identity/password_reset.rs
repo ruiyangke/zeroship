@@ -197,6 +197,42 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
     }))
 }
 
+/// Is there still a live reset row for `raw_token`?
+///
+/// This is NOT the authority on redemption: [`complete`] is, and it remains
+/// the single statement that consumes the token together with the password
+/// update. This exists so a caller can decline an already-dead token before
+/// spending an Argon2 hash (19 MiB and a blocking-pool slot) on the submitted
+/// password.
+///
+/// The predicates mirror [`complete`]'s candidate CTE exactly, so this never
+/// refuses a token [`complete`] would have accepted. It is not a
+/// check-then-use race either: a token that passes here and then loses to a
+/// concurrent redemption is still rejected by [`complete`], which decides
+/// correctness on its own.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Db`] on PG failure.
+pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
+    let token_hash = sha256(raw_token);
+    let rows = db
+        .query(
+            "SELECT 1 AS live \
+             FROM zeroship.magic_links ml \
+             JOIN zeroship.users u ON u.id = ml.user_id \
+             WHERE ml.token_hash = $1 \
+               AND ml.purpose = $2 \
+               AND ml.user_id IS NOT NULL \
+               AND ml.consumed_at IS NULL \
+               AND ml.expires_at > NOW()",
+            &[&token_hash.as_slice(), &PURPOSE],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset is_live: {e}")))?;
+    Ok(!rows.is_empty())
+}
+
 /// Atomically redeem a password-reset token and update the linked user's
 /// password hash. Returns `Ok(Some(_))` on success, `Ok(None)` if the
 /// token is invalid or expired.

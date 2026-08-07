@@ -59,6 +59,15 @@ impl Bucket {
         capacity: 30.0,
         refill_per_sec: 30.0 / 3600.0,
     };
+    /// Reset submission per-IP: 30 requests / hour. Deliberately the same
+    /// shape as `FORGOT_IP`, since a submitted reset cannot legitimately
+    /// outpace the issuance that produced its link. Per-IP is the only honest
+    /// key on this path: the token is attacker-chosen (so a per-token bucket
+    /// is free to evade) and the account is unknown until the token resolves.
+    pub const RESET_IP: Self = Self {
+        capacity: 30.0,
+        refill_per_sec: 30.0 / 3600.0,
+    };
     /// TOTP code verification per-user (ISS-11): 5 attempts burst, refill 5/15min.
     /// Bounds brute-force of a 6-digit code (and of the backup codes) on the
     /// confirm + login-challenge verify paths. Keyed per-user since the caller is

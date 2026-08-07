@@ -9,6 +9,7 @@
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use password_hash::{rand_core::OsRng, SaltString};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use crate::error::{AuthError, Result};
@@ -18,6 +19,22 @@ fn argon2() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
+/// Process-wide count of [`hash`] calls.
+///
+/// A handler that refuses a request before paying for a 19 MiB memory-hard
+/// hash and the `spawn_blocking` slot it occupies (`ui::reset` declines a
+/// dead token that way) can only be checked by observing whether the hasher
+/// ran: the response is deliberately identical either way, and the
+/// wall-clock version of the same assertion is load-sensitive and flakes.
+/// A relaxed increment beside Argon2id costs nothing measurable.
+static HASH_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of [`hash`] calls made since process start. Monotonic.
+#[must_use]
+pub fn hash_calls() -> u64 {
+    HASH_CALLS.load(Ordering::Relaxed)
+}
+
 /// Hash a password, returning a PHC string suitable for `zeroship.users.password_hash`.
 ///
 /// # Errors
@@ -25,6 +42,7 @@ fn argon2() -> Argon2<'static> {
 /// Returns `AuthError::Internal` on argon2 misconfiguration (shouldn't happen
 /// in practice — params are fixed at compile time).
 pub fn hash(password: &str) -> Result<String> {
+    HASH_CALLS.fetch_add(1, Ordering::Relaxed);
     let salt = SaltString::generate(&mut OsRng);
     let phc = argon2()
         .hash_password(password.as_bytes(), &salt)

@@ -1,23 +1,30 @@
 //! `/reset` GET + POST handlers.
 //!
 //! GET renders the new-password form with the reset token in a hidden
-//! field. POST validates CSRF + password length, atomically redeems the
-//! reset token (single-use), Argon2-hashes the new password on a
-//! `spawn_blocking` worker (the event loop stays free), updates
-//! `zeroship.users.password_hash`, emits a `password_changed` audit event,
-//! revokes every existing session, consumes outstanding email tokens,
-//! clears cross-device magic completions, and redirects to `/login`.
+//! field. POST validates CSRF + password length, rate-limits per IP,
+//! declines a token that has no live row, Argon2-hashes the new password on
+//! a `spawn_blocking` worker (the event loop stays free), atomically redeems
+//! the reset token (single-use) together with the password update, emits a
+//! `password_changed` audit event, revokes every existing session, consumes
+//! outstanding email tokens, clears cross-device magic completions, and
+//! redirects to `/login`.
+//!
+//! The limiter and the token pre-check both sit ahead of the hash on
+//! purpose. Argon2id at 19 MiB plus a slot in the blocking pool shared with
+//! `/login` and `/link` is far too much to spend on a request that a garbage
+//! token was always going to lose, and the CSRF pair a GET hands out is
+//! reusable (double-submit), so nothing else bounds the flood.
 //!
 //! Note: GET does not "peek" at the token. Token validity is checked
-//! only at POST time, at the moment of redemption. The form might
-//! render against an already-expired token; the user will see "reset
-//! link invalid or expired" on submit. The alternative — validating at
-//! GET and again at POST — costs an extra DB round-trip per render and
-//! the 1-hour TTL + 32-byte CSPRNG entropy makes pre-emptive feedback
-//! unnecessary.
+//! only at POST time. The form might render against an already-expired
+//! token; the user will see "reset link invalid or expired" on submit.
+//! The alternative — validating at GET and again at POST — costs an extra
+//! DB round-trip per render and the 1-hour TTL + 32-byte CSPRNG entropy
+//! makes pre-emptive feedback unnecessary.
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::StatusCode;
 use ntex::web::{
     types::{Form, Query, State},
     HttpRequest, HttpResponse,
@@ -31,6 +38,7 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::headers;
 use crate::identity::{password, password_reset};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::ui::ResetPage;
 
 #[derive(Debug, Deserialize)]
@@ -54,9 +62,10 @@ pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpR
     render_form(&cfg, &query.token, None)
 }
 
-/// `/reset` POST — validate token + length, atomically redeem the
-/// reset token, hash the new password, update the user, audit, revoke
-/// existing sessions, consume pending email tokens, and redirect to `/login`.
+/// `/reset` POST: validate CSRF + length, rate-limit, decline a dead token,
+/// hash the new password, atomically redeem the reset token together with the
+/// password update, audit, revoke existing sessions, consume pending email
+/// tokens, and redirect to `/login`.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -88,7 +97,55 @@ pub async fn post(
         );
     }
 
-    // 3. Hash on spawn_blocking — Argon2id is CPU-bound and synchronous;
+    // 3. Rate-limit per IP before the CPU-bound hash, the same placement
+    //    /signup and /link use. Keyed on the forwarded client IP (auth runs
+    //    behind the gateway, so the socket peer is the gateway and keying on
+    //    it would make this one global bucket).
+    let ip = headers::client_ip(&req);
+    let reset_ip_key = format!("reset_ip:{ip}");
+    match ratelimit::consume_or_throttle(db.as_ref(), &reset_ip_key, Bucket::RESET_IP).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "password_reset_throttled",
+                    outcome: "failure",
+                    auth_method: Some("password_reset"),
+                    detail: serde_json::json!({ "bucket": "reset_per_ip" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            return render_form_with_status(
+                &cfg,
+                &form.token,
+                Some("too many attempts, try again later"),
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %reset_ip_key, "password_reset rate-limit consume failed");
+            return render_form(&cfg, &form.token, Some("internal error"));
+        }
+    }
+
+    // 4. Decline a token that already has no live row, before paying for the
+    //    hash. Step 6 is still the authority: it consumes the token and sets
+    //    the password in one statement, and a token that passes here but
+    //    loses that race is rejected there. This only means a flood of
+    //    never-issued tokens costs a primary-key lookup instead of 19 MiB and
+    //    a blocking-pool slot shared with /login and /link.
+    match password_reset::is_live(db.as_ref(), &form.token).await {
+        Ok(true) => {}
+        Ok(false) => return reject_dead_token(db.as_ref(), &cfg, &form.token, &req).await,
+        Err(e) => {
+            tracing::error!(error = %e, "password_reset token pre-check failed");
+            return render_form(&cfg, &form.token, Some("internal error"));
+        }
+    }
+
+    // 5. Hash on spawn_blocking — Argon2id is CPU-bound and synchronous;
     //    parking the ntex event loop is a non-starter (same constraint as
     //    /login and /signup).
     let password_clone = form.password.clone();
@@ -105,25 +162,12 @@ pub async fn post(
         }
     };
 
-    // 4. Atomically consume the reset token with the password update,
+    // 6. Atomically consume the reset token with the password update,
     //    then audit, revoke existing sessions, and consume outstanding
     //    email tokens in one transaction.
     let completed = match complete_password_reset(db.as_ref(), &form.token, &phc, &req).await {
         Ok(Some(completed)) => completed,
-        Ok(None) => {
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "password_changed",
-                    outcome: "failure",
-                    auth_method: Some("password_reset"),
-                    detail: serde_json::json!({ "reason": "token_invalid_or_expired" }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            return render_form(&cfg, &form.token, Some("reset link invalid or expired"));
-        }
+        Ok(None) => return reject_dead_token(db.as_ref(), &cfg, &form.token, &req).await,
         Err(e) => {
             tracing::error!(error = %e, "password_reset completion failed");
             return render_form(&cfg, &form.token, Some("internal error"));
@@ -286,7 +330,39 @@ async fn complete_password_reset_tx(
     }))
 }
 
+/// Refuse a reset token that has no live row. Both the pre-check and the
+/// atomic consume land here, so the two arms are indistinguishable from
+/// outside: same audit event, same page, same status. Only the cost differs.
+async fn reject_dead_token(
+    db: &compio_postgres::Client,
+    cfg: &AuthConfig,
+    token: &str,
+    req: &HttpRequest,
+) -> HttpResponse {
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "password_changed",
+            outcome: "failure",
+            auth_method: Some("password_reset"),
+            detail: serde_json::json!({ "reason": "token_invalid_or_expired" }),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
+    render_form(cfg, token, Some("reset link invalid or expired"))
+}
+
 fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpResponse {
+    render_form_with_status(cfg, token, error, StatusCode::OK)
+}
+
+fn render_form_with_status(
+    cfg: &AuthConfig,
+    token: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     // Independent per-response CSP script nonce — must NOT be the CSRF token
     // (which is also a non-HttpOnly cookie + plaintext form field). See L3.
@@ -300,7 +376,7 @@ fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpRespon
     let body = page
         .render()
         .unwrap_or_else(|_| "<h1>error</h1>".to_string());
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header("Cache-Control", "no-store");
     resp.header("Pragma", "no-cache");
