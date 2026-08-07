@@ -24,7 +24,7 @@ fn db_url() -> Option<String> {
 
 async fn open_conn() -> Option<Client> {
     let Some(dsn) = db_url() else {
-        eprintln!("[oidc_backchannel_logout_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+        zeroship_test_support::skip("[oidc_backchannel_logout_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
         return None;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect test DB");

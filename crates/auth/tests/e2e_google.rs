@@ -38,7 +38,7 @@ use common::{location, native_authorize_return_to, read_set_cookie, test_auth_co
 async fn google_federation_creates_new_user() {
     // 0. Env-skip check.
     let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("[e2e_google] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_google] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -282,7 +282,7 @@ async fn google_federation_creates_new_user() {
 #[ntex::test]
 async fn google_federation_rejects_untrusted_domain_without_hd() {
     let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("[e2e_google untrusted] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_google untrusted] skip (need AUTH_DB_URL)");
         return;
     };
 

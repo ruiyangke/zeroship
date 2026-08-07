@@ -47,7 +47,6 @@ use zeroship_plugin_kv::{Backend, KvPlugin};
 use zeroship_plugin_kv::RedbBackend;
 #[cfg(feature = "redis")]
 use zeroship_plugin_kv::Redis;
-use std::io::Write as _;
 
 // ---------------------------------------------------------------------------
 // The JS app — exercises the full `env.kv` surface and self-asserts.
@@ -869,7 +868,7 @@ fn e2e_dragonfly_cluster() {
     // ?cluster=true&seeds=<comma-joined seeds>.
     let first = seeds.split(',').next().map(str::trim).unwrap_or("").to_string();
     if first.is_empty() {
-        let _ = std::io::stderr().write_all("e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS empty — skipping.\n".as_bytes());
+        zeroship_test_support::skip("e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS empty — skipping.");
         return;
     }
     let cluster_url = format!("{first}?cluster=true&seeds={seeds}");

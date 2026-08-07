@@ -68,6 +68,7 @@ compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 # Integration tests construct `GateState`, whose `meter` field is an
 # `Arc<zeroship_metering::Meter>` (coverage #27). They need the type in
 # scope to build the fixture.

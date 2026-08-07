@@ -27,7 +27,7 @@ async fn pg() -> Option<(compio_postgres::Client, String)> {
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     let Some((client, db_url)) = pg().await else {
-        eprintln!("skipping token_sweep_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping token_sweep_test (no AUTH_DB_URL)");
         return;
     };
     let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
@@ -224,7 +224,7 @@ async fn cleanup(
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
     let Some((client, db_url)) = pg().await else {
-        eprintln!("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
         return;
     };
     let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");

@@ -132,12 +132,12 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -228,12 +228,12 @@ async fn concurrent_issue_leaves_one_active_token() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -280,7 +280,7 @@ async fn concurrent_issue_leaves_one_active_token() {
 #[compio::test]
 async fn issue_then_redeem_happy_path() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -321,7 +321,7 @@ async fn issue_then_redeem_happy_path() {
 #[compio::test]
 async fn second_redeem_returns_none() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -361,7 +361,7 @@ async fn second_redeem_returns_none() {
 #[compio::test]
 async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -429,7 +429,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
 #[compio::test]
 async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -506,7 +506,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
 #[compio::test]
 async fn second_redeem_while_pending_returns_in_flight() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -544,7 +544,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
 #[compio::test]
 async fn stale_pending_redeem_burns_link_as_consumed() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -601,7 +601,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 #[compio::test]
 async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -657,7 +657,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
 #[compio::test]
 async fn expired_token_returns_none() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -693,7 +693,7 @@ async fn expired_token_returns_none() {
 #[compio::test]
 async fn new_issue_supersedes_previous_unconsumed() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -726,7 +726,7 @@ async fn new_issue_supersedes_previous_unconsumed() {
 #[compio::test]
 async fn login_issue_does_not_supersede_reset_token() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -768,7 +768,7 @@ async fn login_issue_does_not_supersede_reset_token() {
 #[compio::test]
 async fn magic_completion_invalidates_after_five_wrong_codes() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -841,7 +841,7 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
 #[compio::test]
 async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
     let Some(seed_client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
     let dsn = std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL present after pg");
@@ -919,7 +919,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
 #[compio::test]
 async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() {
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
 

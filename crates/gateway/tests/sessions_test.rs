@@ -15,12 +15,11 @@
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
-use std::io::Write as _;
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
+        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
         return;
     };
 

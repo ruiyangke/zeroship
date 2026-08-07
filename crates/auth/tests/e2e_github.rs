@@ -156,7 +156,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
 
     let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github native callback] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_github native callback] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -278,7 +278,7 @@ async fn github_native_confirmation_bounce_carries_return_to() {
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
 
     let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github native link] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_github native link] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -402,7 +402,7 @@ async fn github_federation_rejects_noreply_only_email() {
     eprintln!("[e2e_github noreply] mock provider at {}", mock.base);
 
     let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github noreply] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_github noreply] skip (need AUTH_DB_URL)");
         return;
     };
     eprintln!("[e2e_github noreply] auth server at {}", fx.auth_base);
@@ -533,7 +533,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     eprintln!("[e2e_github unverified] mock provider at {}", mock.base);
 
     let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github unverified] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[e2e_github unverified] skip (need AUTH_DB_URL)");
         return;
     };
     eprintln!("[e2e_github unverified] auth server at {}", fx.auth_base);

@@ -5,7 +5,6 @@
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
-use std::io::Write as _;
 use uuid::Uuid;
 
 #[path = "parity/mod.rs"]
@@ -2317,7 +2316,7 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -2351,7 +2350,7 @@ async fn c1_watchdog_reports_new_slot() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -2390,7 +2389,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -2432,7 +2431,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -2678,7 +2677,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -3606,7 +3605,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
@@ -3731,7 +3730,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -3854,7 +3853,7 @@ async fn p8a2_supervised_consumer_exits_on_slot_invalidated() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -4039,7 +4038,7 @@ async fn p8a2_auto_spawn_via_callback_short_circuits() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping — server wal_level is not 'logical'\n".as_bytes());
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
@@ -4219,7 +4218,7 @@ async fn vector_search_returns_k_nearest() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping: pgvector not installed in test environment\n".as_bytes());
+        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
         return release_pg(pool).await;
     }
 
@@ -4353,7 +4352,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
         .map(|rows| !rows.is_empty())
         .unwrap_or(false);
     if still_present {
-        let _ = std::io::stderr().write_all("Skipping: could not drop vector extension (likely in use by other objects)\n".as_bytes());
+        zeroship_test_support::skip("Skipping: could not drop vector extension (likely in use by other objects)");
         return release_pg(pool).await;
     }
 
@@ -4433,7 +4432,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping: pgvector not installed in test environment\n".as_bytes());
+        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
         return release_pg(pool).await;
     }
 
@@ -4862,7 +4861,7 @@ async fn near_returns_within_radius() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !postgis_available(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping: PostGIS not installed in test environment\n".as_bytes());
+        zeroship_test_support::skip("Skipping: PostGIS not installed in test environment");
         return release_pg(pool).await;
     }
 
@@ -4976,7 +4975,7 @@ async fn postgis_extension_missing_reports_typed_error() {
         .map(|rows| !rows.is_empty())
         .unwrap_or(false);
     if still_present {
-        let _ = std::io::stderr().write_all("Skipping: could not drop postgis extension (likely in use by other objects)\n".as_bytes());
+        zeroship_test_support::skip("Skipping: could not drop postgis extension (likely in use by other objects)");
         return release_pg(pool).await;
     }
 
@@ -6125,7 +6124,7 @@ async fn snapshot_during_migration_returns_typed_error() {
 async fn snapshot_restore_round_trip_pg() {
     let url = require_pg().await;
     if !pg_dump_on_path() {
-        let _ = std::io::stderr().write_all("Skipping — pg_dump not on PATH\n".as_bytes());
+        zeroship_test_support::skip("Skipping — pg_dump not on PATH");
         return;
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -6246,7 +6245,7 @@ async fn snapshot_restore_round_trip_pg() {
 async fn snapshot_uri_content_hash_round_trip() {
     let url = require_pg().await;
     if !pg_dump_on_path() {
-        let _ = std::io::stderr().write_all("Skipping — pg_dump not on PATH\n".as_bytes());
+        zeroship_test_support::skip("Skipping — pg_dump not on PATH");
         return;
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -6941,7 +6940,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&admin_pool).await {
-        let _ = std::io::stderr().write_all("Skipping: pgvector not installed in test environment\n".as_bytes());
+        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
         return release_pg(admin_pool).await;
     }
 
@@ -7112,7 +7111,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !postgis_extension_available(&admin_pool).await {
-        let _ = std::io::stderr().write_all("Skipping: postgis not installed in test environment\n".as_bytes());
+        zeroship_test_support::skip("Skipping: postgis not installed in test environment");
         return release_pg(admin_pool).await;
     }
 
@@ -7489,7 +7488,7 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping drop_namespace_pg_ordering — wal_level != logical\n".as_bytes());
+        zeroship_test_support::skip("Skipping drop_namespace_pg_ordering — wal_level != logical");
         return release_pg(pool).await;
     }
     let app = "p6a_drop_order";
@@ -7580,7 +7579,7 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping drop_namespace_idempotent — wal_level != logical\n".as_bytes());
+        zeroship_test_support::skip("Skipping drop_namespace_idempotent — wal_level != logical");
         return release_pg(pool).await;
     }
     let app = "p6a_drop_idem";
@@ -7635,7 +7634,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
-        let _ = std::io::stderr().write_all("Skipping drop_namespace_retries — wal_level != logical\n".as_bytes());
+        zeroship_test_support::skip("Skipping drop_namespace_retries — wal_level != logical");
         return release_pg(pool).await;
     }
     let app = "p6a_drop_retry";

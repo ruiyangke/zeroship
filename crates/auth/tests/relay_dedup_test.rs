@@ -35,7 +35,7 @@ async fn pg_or_skip() -> Option<compio_postgres::Client> {
 #[compio::test]
 async fn transient_503_then_retry_is_not_deduped_away() {
     let Some(client) = pg_or_skip().await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());
@@ -89,7 +89,7 @@ async fn transient_503_then_retry_is_not_deduped_away() {
 #[compio::test]
 async fn commit_is_idempotent_and_probe_tracks_it() {
     let Some(client) = pg_or_skip().await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());

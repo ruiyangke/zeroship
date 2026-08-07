@@ -47,7 +47,7 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
     let db_url = match std::env::var("AUTH_DB_URL") {
         Ok(db_url) => db_url,
         Err(_) => {
-            eprintln!("skipping link_ratelimit_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping link_ratelimit_test (no AUTH_DB_URL)");
             return;
         }
     };

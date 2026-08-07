@@ -148,7 +148,7 @@ impl M4TestCtx {
 fn verify_get_renders_interstitial_does_not_consume_token() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let (user_id, email, token) = ctx.seed_verification().await;
@@ -181,7 +181,7 @@ fn verify_get_renders_interstitial_does_not_consume_token() {
 fn verify_post_redeem_consumes_token_and_marks_verified() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let (user_id, email, token) = ctx.seed_verification().await;
@@ -222,7 +222,7 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
 fn verify_post_redeem_with_invalid_csrf_rejected() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let (_, email, token) = ctx.seed_verification().await;
@@ -243,7 +243,7 @@ fn verify_post_redeem_with_invalid_csrf_rejected() {
 fn verify_post_redeem_with_invalid_token_renders_error_page() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let app = init_app!(&ctx);
@@ -277,7 +277,7 @@ fn verify_post_redeem_with_invalid_token_renders_error_page() {
 fn verify_post_redeem_idempotent_second_call_returns_error() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let (_, email, token) = ctx.seed_verification().await;
@@ -316,7 +316,7 @@ fn verify_post_redeem_idempotent_second_call_returns_error() {
 fn reset_get_html_includes_history_replace_state_script() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let app = init_app!(&ctx);
@@ -332,7 +332,7 @@ fn reset_get_html_includes_history_replace_state_script() {
 fn cache_control_no_store_on_all_three_interstitials() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
+        zeroship_test_support::skip("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
         return;
     };
     let app = init_app!(&ctx);

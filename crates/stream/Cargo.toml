@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 futures = { workspace = true }
 
 [lints]

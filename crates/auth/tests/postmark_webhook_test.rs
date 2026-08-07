@@ -94,7 +94,7 @@ async fn boot(
 #[ntex::test]
 async fn postmark_webhook_handles_hard_bounce() {
     let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
 
@@ -145,7 +145,7 @@ async fn postmark_webhook_handles_hard_bounce() {
 #[ntex::test]
 async fn postmark_webhook_rejects_bad_auth() {
     let Some((srv, _pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
 
@@ -192,7 +192,7 @@ async fn postmark_webhook_rejects_bad_auth() {
     //         with `None`/`None`). Even a correct-looking header must 401
     //         because the server has nothing to compare against.
     let Some((srv_unconfigured, _pg2)) = boot(None, None).await else {
-        eprintln!("skip second-stage (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip second-stage (no AUTH_DB_URL)");
         return;
     };
     let some_auth = format!("Basic {}", STANDARD.encode("anyone:anything"));
@@ -224,7 +224,7 @@ async fn postmark_webhook_rejects_bad_auth() {
 #[ntex::test]
 async fn postmark_webhook_handles_spam_complaint() {
     let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
 

@@ -9,7 +9,8 @@
 //!     cargo test -p compio-redis --test cluster -- --nocapture
 
 use compio_redis::ClusterClient;
-use std::io::Write as _;
+
+mod common;
 
 fn seeds() -> Option<Vec<String>> {
     std::env::var("DRAGONFLY_CLUSTER_SEEDS").ok().map(|s|
@@ -23,7 +24,7 @@ fn seeds_refs(v: &[String]) -> Vec<&str> {
 #[compio::test]
 async fn connect_and_roundtrip() {
     let Some(s) = seeds() else {
-        let _ = std::io::stderr().write_all("skip: DRAGONFLY_CLUSTER_SEEDS not set\n".as_bytes());
+        common::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
         return;
     };
     let seeds = seeds_refs(&s);
@@ -159,7 +160,7 @@ async fn non_cluster_redis_behavior_is_bounded() {
     // We don't assert a specific variant — just that the failure is
     // observable and doesn't hang.
     let Some(url) = std::env::var("REDIS_TEST_URL").ok() else {
-        let _ = std::io::stderr().write_all("skip: REDIS_TEST_URL not set\n".as_bytes());
+        common::skip("skip: REDIS_TEST_URL not set");
         return;
     };
     match ClusterClient::connect(&[url.as_str()], 4).await {

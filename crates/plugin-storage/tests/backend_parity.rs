@@ -226,7 +226,6 @@ async fn run_large_stream(backend: &dyn Backend, label: &str) {
 use std::time::SystemTime;
 
 use zeroship_plugin_storage::backend::{ListEntry, ObjectMeta};
-use std::io::Write as _;
 
 /// A fake backend whose `get_stream` reports a chosen `advertised_size` but
 /// only ever yields `body` bytes. Lets the C2 test assert both the
@@ -386,7 +385,7 @@ fn start_minio() -> bool {
         ])
         .status();
     if !matches!(run, Ok(s) if s.success()) {
-        let _ = std::io::stderr().write_all("skip: failed to start MinIO container\n".as_bytes());
+        zeroship_test_support::skip("skip: failed to start MinIO container");
         return false;
     }
     for _ in 0..40 {
@@ -417,7 +416,7 @@ fn start_minio() -> bool {
             }
         }
     }
-    let _ = std::io::stderr().write_all("skip: MinIO did not become ready / bucket create failed\n".as_bytes());
+    zeroship_test_support::skip("skip: MinIO did not become ready / bucket create failed");
     minio_cleanup();
     false
 }
@@ -436,7 +435,7 @@ fn make_s3() -> zeroship_plugin_storage::S3 {
 #[test]
 fn s3_parity_and_large_stream() {
     if !docker_available() {
-        let _ = std::io::stderr().write_all("skip: docker unavailable\n".as_bytes());
+        zeroship_test_support::skip("skip: docker unavailable");
         return;
     }
     if !start_minio() {

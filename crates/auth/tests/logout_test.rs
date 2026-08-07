@@ -25,7 +25,7 @@ use common::test_auth_config;
 #[ntex::test]
 async fn logout_route_is_registered_returns_not_404() {
     let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -116,7 +116,7 @@ async fn logout_route_is_registered_returns_not_404() {
 #[ntex::test]
 async fn logout_post_is_registered_returns_not_404_or_405() {
     let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -196,7 +196,7 @@ async fn logout_post_revokes_local_session_cookie() {
     let db_url = match std::env::var("AUTH_DB_URL") {
         Ok(db_url) => db_url,
         Err(_) => {
-            eprintln!("[logout_test] skip (need AUTH_DB_URL)");
+            zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
             return;
         }
     };

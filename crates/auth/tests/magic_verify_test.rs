@@ -42,12 +42,12 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping magic_verify_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping magic_verify_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping magic_verify_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_verify_test (no AUTH_DB_URL)");
         return;
     };
 

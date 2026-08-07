@@ -33,7 +33,6 @@ use zeroship_gateway::proxy::HashRing;
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
 use zeroship_gateway::sync::RouteCache;
 use zeroship_gateway::{session_token, GateConfig, GateState};
-use std::io::Write as _;
 
 const ISSUER: &str = "https://auth.zeroship.ai/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/__zeroship/auth/callback";
@@ -546,7 +545,7 @@ async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let Some(db_url) = db_url() else {
-        let _ = std::io::stderr().write_all("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)\n".as_bytes());
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
         return;
     };
 
@@ -624,7 +623,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let Some(db_url) = db_url() else {
-        let _ = std::io::stderr().write_all("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)\n".as_bytes());
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
         return;
     };
 
@@ -685,7 +684,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
 #[allow(clippy::future_not_send)]
 async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let Some(db_url) = db_url() else {
-        let _ = std::io::stderr().write_all("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)\n".as_bytes());
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
         return;
     };
 

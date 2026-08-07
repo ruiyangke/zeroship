@@ -1,0 +1,11 @@
+[package]
+name = "zeroship-test-support"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only helpers shared across the workspace. Not published; consumed as a dev-dependency."
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

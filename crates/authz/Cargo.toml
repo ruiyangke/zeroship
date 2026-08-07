@@ -16,6 +16,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 compio = { workspace = true }
 
 [build-dependencies]
