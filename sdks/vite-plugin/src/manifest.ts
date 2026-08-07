@@ -50,12 +50,10 @@ export interface DiscoveredProcedure {
    */
   moduleSlug: string;
   /**
-   * Discriminator. Includes `action` (B3 capability-scoped wrapper);
-   * the manifest emitter folds `action` → omitted `kind` in the wire
-   * output for back-compat with the Rust-side `ProcedureKind` enum
-   * (which predates B3 and would reject an unknown value). The
-   * gateway's dispatch treats "no kind" as "no method/transport
-   * restriction" — matching action semantics.
+   * Discriminator. Every value reaches the wire, `action` included:
+   * `ProcedureKind` carries an `Action` variant, so an omitted kind reads
+   * as "unknown" to the gateway rather than as "action", and the two are
+   * not gated alike.
    */
   kind: "query" | "mutation" | "action" | "stream" | "subscription";
   /** True if the export is an async generator. */
@@ -773,17 +771,13 @@ function matchParen(src: string, openIdx: number): number {
  */
 function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
   const out: WireResource = {};
-  // B3: `action` is the SDK-side capability tag. The Rust-side
-  // `ProcedureKind` enum currently has {Query, Mutation, Stream,
-  // Subscription} only — adding `Action` to the wire format would
-  // ripple through bundle parsing, gateway dispatch, integration
-  // tests. For now we ship the capability typing on the SDK side and
-  // omit `kind` from the manifest for action procedures. The gateway
-  // treats "no kind" as "no method/transport restriction", which is
-  // exactly action's semantics (most permissive).
-  if (proc.kind !== "action") {
-    out.kind = proc.kind;
-  }
+  // Every capability, `action` included, goes on the wire. `ProcedureKind`
+  // carries an `Action` variant, so omitting it does not mean "action" to the
+  // gateway — it means "unknown", and the two are not gated alike. The CSRF
+  // origin guard fires on `Some(Mutation) | Some(Action)` or an unsafe method,
+  // so an omitted kind left an action reachable over GET without an origin
+  // check, even though an action is the most permissive capability there is.
+  out.kind = proc.kind;
 
   // Module-level $config has lowest priority among user-supplied metadata.
   // Per-procedure config wins.
