@@ -27,9 +27,12 @@ const OID_TEXT = 25;
 function poisonedPgModule() {
   return {
     types: {
-      getTypeParser(oid: number): (value: string) => unknown {
-        if (oid === OID_BOOL) return (value: string) => value; // raw 't' / 'f'
-        if (oid === OID_INT8) return (value: string) => value;
+      // EVERY oid, unconditionally. Listing the ones we happen to suspect would
+      // assert a set of instances; this asserts the property, that no parser the
+      // driver relies on is reachable through `setTypeParser`. A list only ever
+      // catches what its author already thought of, which is how a shadow that
+      // merely borrowed another oid's parser passed an earlier version of this.
+      getTypeParser(): (value: string) => unknown {
         return (value: string) => value;
       },
     },
