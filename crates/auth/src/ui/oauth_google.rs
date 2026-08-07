@@ -417,7 +417,6 @@ fn build_resolved_profile<'a>(
         provider: PROVIDER,
         subject: &id.subject,
         email: &id.email,
-        email_verified: id.email_verified,
         name: id.name.as_deref(),
         avatar_url: id.picture.as_deref(),
         provider_trusted_for_email,

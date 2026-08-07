@@ -49,9 +49,8 @@ const DEFAULT_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 /// login iframe and therefore need the relaxed `frame-ancestors` (design §4.3).
 /// `/login` + `/signup` cover both their GET render and their POST error
 /// re-render (`render_login_error` / the signup error render — same path, same
-/// middleware pass). `/consent` covers the interactive consent render; the
-/// `skip_consent` silent-accept path returns a body-less 302 for which the
-/// `frame-ancestors` is harmless. Federated bounces (`/oauth/google`, …) are
+/// middleware pass). `/consent` covers the interactive consent render, the
+/// only way this OP reaches a consent decision. Federated bounces (`/oauth/google`) are
 /// deliberately ABSENT — the federated IdP's own page is never framed (it stays
 /// a popup), so those keep the strict `XFO: DENY` default.
 const FRAMED_ROUTE_PATHS: &[&str] = &["/login", "/signup", "/consent"];
@@ -233,7 +232,12 @@ pub fn apply(headers: &mut HeaderMap, req_path: &str, frame_ancestor_origins: &[
     // no-cors subresource embedding, NOT being framed (design §4.3/§6.6).
     static_set(headers, "cross-origin-opener-policy", "same-origin");
     static_set(headers, "cross-origin-resource-policy", "same-origin");
-    static_set(headers, "cache-control", "no-store");
+    // `no-store` is the fail-closed DEFAULT, not an override: this middleware
+    // runs after the handler, so an unconditional insert would silently replace
+    // the deliberate cacheability of the two public metadata documents (JWKS +
+    // discovery), which every other handler in the crate never sets to anything
+    // but `no-store` anyway.
+    static_set_if_absent(headers, "cache-control", "no-store");
 
     // The relax only kicks in on a framed route that has at least one CONCRETE
     // configured ancestor origin. A route with only poison/empty entries stays
