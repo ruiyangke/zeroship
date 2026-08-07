@@ -154,6 +154,11 @@ scope = "all"
 /// cleanly (so DB-free CI stays green); when set to a DSN, the suite runs against it.
 pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
 
+/// The env var that turns a live-database skip into a test failure. Set it when a run
+/// is EXPECTED to have a database (CI, a release gate, a local run you want proved) so
+/// a missing DSN fails loudly instead of reporting green coverage that never ran.
+pub const REQUIRE_LIVE_DB_ENV: &str = "ZERO_MIGRATE_REQUIRE_LIVE_DB";
+
 /// Read the live-PG DSN from [`PG_URL_ENV`], or `None` when unset (→ skip).
 ///
 /// Accepts either the libpq keyword form
@@ -166,18 +171,68 @@ pub fn pg_url() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// Print the standard skip notice and return — used by every live test's early-out
-/// when [`PG_URL_ENV`] is unset. Returns `true` when the caller should skip.
+/// Whether [`REQUIRE_LIVE_DB_ENV`] demands that live-database tests actually run.
+///
+/// Anything but unset, empty, `0`, `false` or `no` counts as demanding a live run.
+#[must_use]
+pub fn live_db_required() -> bool {
+    std::env::var(REQUIRE_LIVE_DB_ENV).is_ok_and(|raw| {
+        let flag = raw.trim().to_ascii_lowercase();
+        !matches!(flag.as_str(), "" | "0" | "false" | "no")
+    })
+}
+
+/// Announce that this test binary is skipping its live-database coverage, or panic
+/// when [`REQUIRE_LIVE_DB_ENV`] says a live run was expected.
+///
+/// A skipped live suite used to be INVISIBLE rather than merely quiet: the early
+/// return still counts as a pass, so `cargo test` printed the same `30 passed` a
+/// genuine run prints, and the `eprintln!` explaining why was swallowed by libtest's
+/// output capture (which only intercepts the `print!`/`eprint!` macros). Writing to
+/// the process stderr handle bypasses that capture, so the notice survives a default
+/// `cargo test` and a database-free run reads differently from a real one.
+///
+/// The notice fires once per test binary: every gated test in the binary shares the
+/// same cause, so repeating it per test would bury the summary it sits next to.
+///
+/// # Panics
+/// Panics when [`REQUIRE_LIVE_DB_ENV`] is set and `env_var` is not, which fails the
+/// calling test rather than passing it without coverage.
+pub fn announce_live_db_skip(env_var: &str) {
+    use std::io::Write as _;
+    use std::sync::Once;
+
+    assert!(
+        !live_db_required(),
+        "{REQUIRE_LIVE_DB_ENV} demands a live database but {env_var} is unset, so this \
+         test has no coverage to offer; export a DSN or clear {REQUIRE_LIVE_DB_ENV}"
+    );
+
+    static NOTICE: Once = Once::new();
+    NOTICE.call_once(|| {
+        let banner = format!(
+            "\n\
+             ==================== LIVE-DATABASE COVERAGE SKIPPED ====================\n\
+             {env_var} is unset, so the gated tests in this binary report \"ok\"\n\
+             without touching a database. The passed count below says NOTHING about\n\
+             live coverage. Export a DSN to run them for real, or set\n\
+             {REQUIRE_LIVE_DB_ENV}=1 to turn this skip into a failure.\n\
+             ========================================================================\n"
+        );
+        // Ignore a broken stderr: a closed pipe must not fail an otherwise fine test.
+        let _ = std::io::stderr().write_all(banner.as_bytes());
+    });
+}
+
+/// Yield the live-PG DSN, or announce the skip and return from the calling test when
+/// [`PG_URL_ENV`] is unset.
 #[macro_export]
 macro_rules! skip_if_no_pg {
     () => {{
         match $crate::support::pg_url() {
             Some(url) => url,
             None => {
-                eprintln!(
-                    "skipping live-PG test: {} unset (set it to a DSN on :5440 to run)",
-                    $crate::support::PG_URL_ENV
-                );
+                $crate::support::announce_live_db_skip($crate::support::PG_URL_ENV);
                 return;
             }
         }
