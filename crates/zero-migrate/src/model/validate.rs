@@ -195,9 +195,31 @@ enum NamePosition {
 ///
 /// MySQL needs no help on the create side: it refuses an over-long identifier itself
 /// with `ER_TOO_LONG_IDENT`. The bound still runs there so the authored IR is portable.
-fn validate_authored_identifier_lengths(
+///
+/// Both the load gate ([`validate_ir_scoped`]) and the lower seam
+/// ([`crate::render::lower::IrAuthor::lower_steps`]) call this, because neither one is
+/// reachable only through the other: `lower_steps` is a public entry point no caller is
+/// obliged to route through the load gate.
+///
+/// # Errors
+/// The first over-long identifier, as an [`AuthoringError`].
+pub(crate) fn validate_authored_identifier_lengths(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_authored_identifier_lengths_op(op, target_dialect, op_index, ts_locations)?;
+    }
+    Ok(())
+}
+
+/// Bound one op's author-supplied identifiers, descending into the `dialectal` leg the
+/// lowering will select.
+fn validate_authored_identifier_lengths_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
@@ -205,46 +227,67 @@ fn validate_authored_identifier_lengths(
     // Only PostgreSQL truncates, so only PostgreSQL can hold an object whose authored
     // name cannot name it. Bounding the drop side elsewhere would strand real objects.
     let bound_drops = matches!(target_dialect, Dialect::Postgres);
-
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        let check = |kind: &str, name: &str, position: NamePosition| {
-            authored_name_within_bound(kind, name, position, op_index, ts_locations, target_dialect)
-        };
-        match op {
-            Op::CreateIndex {
-                name: Some(name), ..
-            } => check("index", name, NamePosition::Created)?,
-            Op::AddConstraint { constraint, .. } => {
+    let check = |kind: &str, name: &str, position: NamePosition| {
+        authored_name_within_bound(kind, name, position, op_index, ts_locations, target_dialect)
+    };
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            // Select the leg the lowering will select. An UNSELECTED leg never renders
+            // against this target's catalog, so bounding it would refuse an IR that is
+            // correct here. `dialectal` inside `dialectal` is refused elsewhere, so one
+            // level of descent covers the shape.
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_authored_identifier_lengths_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                    )?;
+                }
+            }
+        }
+        Op::CreateIndex {
+            name: Some(name), ..
+        } => check("index", name, NamePosition::Created)?,
+        Op::AddConstraint { constraint, .. } => {
+            if let Some(name) = constraint.name.as_deref() {
+                check("constraint", name, NamePosition::Created)?;
+            }
+        }
+        Op::CreateTable {
+            constraints,
+            indexes,
+            ..
+        } => {
+            for constraint in constraints {
                 if let Some(name) = constraint.name.as_deref() {
                     check("constraint", name, NamePosition::Created)?;
                 }
             }
-            Op::CreateTable {
-                constraints,
-                indexes,
-                ..
-            } => {
-                for constraint in constraints {
-                    if let Some(name) = constraint.name.as_deref() {
-                        check("constraint", name, NamePosition::Created)?;
-                    }
-                }
-                for index in indexes {
-                    if let Some(name) = index.name.as_deref() {
-                        check("index", name, NamePosition::Created)?;
-                    }
+            for index in indexes {
+                if let Some(name) = index.name.as_deref() {
+                    check("index", name, NamePosition::Created)?;
                 }
             }
-            Op::DropIndex { name, .. } if bound_drops => {
-                check("index", name, NamePosition::Dropped)?;
-            }
-            Op::DropConstraint { name, .. } | Op::ValidateConstraint { name, .. }
-                if bound_drops =>
-            {
-                check("constraint", name, NamePosition::Dropped)?;
-            }
-            _ => {}
         }
+        Op::DropIndex { name, .. } if bound_drops => {
+            check("index", name, NamePosition::Dropped)?;
+        }
+        Op::DropConstraint { name, .. } | Op::ValidateConstraint { name, .. } if bound_drops => {
+            check("constraint", name, NamePosition::Dropped)?;
+        }
+        _ => {}
     }
     Ok(())
 }

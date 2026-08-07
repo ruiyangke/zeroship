@@ -1,25 +1,25 @@
-//! Pin the lying journal a PostgreSQL identifier truncation produces.
-//!
-//! THIS SUITE ASSERTS A KNOWN DEFECT THAT IS NOT YET FIXED. Every assertion below
-//! describes what the engine does today, not what it should do.
+//! A PostgreSQL identifier truncation can no longer make the journal lie.
 //!
 //! PostgreSQL caps identifiers at 63 bytes (NAMEDATALEN) and truncates anything longer
 //! with only a NOTICE. The engine keeps the AUTHORED name while the catalog keeps the
-//! TRUNCATED one. A guarded drop probes the AUTHORED name against the INTROSPECTED
-//! snapshot, never matches the truncated catalog name, decides the work is already
-//! done, skips the statement, and journals it COMPLETED. The object survives and the
-//! migration history says it was removed.
+//! TRUNCATED one. That used to make a guarded drop probe the AUTHORED name against the
+//! INTROSPECTED snapshot, never match the truncated catalog name, decide the work was
+//! already done, skip the statement, and journal it COMPLETED while the object survived.
 //!
-//! Commit ddd679d bounded every authored identifier PostgreSQL would truncate, but
-//! that bound is a LOAD-time gate: `IrAuthor::lower`, `lower_steps` and `lower_plan`
-//! never call `validate_ir_scoped`, so the bound narrows the entry point without
-//! removing the hazard. Lowering an over-long name still reproduces the whole chain,
-//! which is exactly why it is worth pinning.
+//! The hazard is now closed at two seams, and this suite exercises both against a live
+//! server:
 //!
-//! IF THIS TEST STARTS FAILING, the most likely cause is that the hazard was closed at
-//! the lower seam or at the existence-probe seam. In that case INVERT the assertions to
-//! assert the correct behaviour (the drop is refused, or the guard resolves against the
-//! truncated catalog name and the object is actually removed). Do not delete it.
+//! - LOWER refuses the over-long authored name, so no such statement is ever rendered.
+//!   Commit ddd679d bounded the name at the LOAD gate only; `IrAuthor::lower`,
+//!   `lower_steps` and `lower_plan` now run the same bound, because they are public
+//!   entry points no caller is obliged to reach through the load gate.
+//! - The executor's existence PROBE refuses it too, because `Migration::existence_guard`
+//!   is a public field on a struct a consumer can build directly. An `ifExists` miss on
+//!   an over-long name whose TRUNCATED spelling is live is a lie, and the probe now says
+//!   so instead of returning the satisfied no-op.
+//!
+//! The remedy is the last assertion: name the constraint as the catalog holds it, and
+//! the drop applies, the object goes, and the journal tells the truth.
 //!
 //! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
 
@@ -28,6 +28,7 @@ mod support;
 use support::PgDevSession;
 
 use zero_migrate::model::ir::ExistenceGuard;
+use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
     apply, snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
@@ -99,15 +100,34 @@ async fn unique_constraint_names(session: &PgDevSession, schema: &str) -> Vec<St
         .collect()
 }
 
-/// A guarded drop of a name PostgreSQL truncated reports success, journals COMPLETED,
-/// and leaves the constraint in `pg_constraint`.
+fn drop_constraint_ir(name: &str) -> MigrationIr {
+    MigrationIr {
+        ir_version: 2,
+        name: format!("drop_constraint_{}", name.len()),
+        owner_app: "app_test".into(),
+        ops: vec![Op::DropConstraint {
+            table: "t".into(),
+            name: name.into(),
+            schema: None,
+            existence_guard: Some(ExistenceGuard::IfExists),
+        }],
+        flags: Default::default(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        checksum: None,
+    }
+}
+
+/// A guarded drop of a name PostgreSQL truncated is refused at lower and at the probe,
+/// and the remedy - naming the constraint as the catalog holds it - really removes it.
 ///
-/// This is the defect, asserted end to end: the catalog holds the truncated name, the
-/// guard verdict is the satisfied no-op, apply reports the migration applied, the
-/// journal records phase Completed, AND the constraint is still present afterwards.
-/// The last assertion is the point of the suite; the ones before it show why.
+/// Asserted end to end against a live server: the catalog holds the truncated name,
+/// lower refuses the authored one, a hand-built probe over the authored one fails closed
+/// naming the truncated spelling, and the truncated-name drop applies, journals
+/// Completed, and leaves `pg_constraint` empty of it.
 #[compio::test]
-async fn a_truncated_constraint_name_makes_a_guarded_drop_journal_a_lie() {
+async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a_lie() {
     use zero_migrate::driver::SqlSession;
 
     let url = skip_if_no_pg!();
@@ -149,22 +169,6 @@ async fn a_truncated_constraint_name_makes_a_guarded_drop_journal_a_lie() {
         "the authored 64-byte name is not what the catalog holds"
     );
 
-    let ir = MigrationIr {
-        ir_version: 2,
-        name: "drop_truncated_constraint".into(),
-        owner_app: "app_test".into(),
-        ops: vec![Op::DropConstraint {
-            table: "t".into(),
-            name: authored.clone(),
-            schema: None,
-            existence_guard: Some(ExistenceGuard::IfExists),
-        }],
-        flags: Default::default(),
-        depends_on: vec![],
-        supersedes: vec![],
-        preconditions: vec![],
-        checksum: None,
-    };
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
@@ -172,32 +176,56 @@ async fn a_truncated_constraint_name_makes_a_guarded_drop_journal_a_lie() {
         &support::no_inject(&cfg.project_schema),
     );
 
-    // The load-time bound from ddd679d does not run here: lower accepts the over-long
-    // name and carries it verbatim into the rendered DDL.
-    let migrations = author
-        .lower(&ir, &LiveSchema::default())
-        .expect("the guarded drop lowers despite the over-long name");
-    assert_eq!(migrations.len(), 1, "one migration lowers from one op");
+    // The lower seam. No statement carrying the authored name is ever rendered, so the
+    // whole downstream chain - the guard probe, the skip, the journalled completion -     // is unreachable from a lowered plan.
+    let refusal = author
+        .lower(&drop_constraint_ir(&authored), &LiveSchema::default())
+        .expect_err("lower must refuse a name PostgreSQL cannot hold")
+        .to_string();
     assert!(
-        migrations[0].up.contains(&authored),
-        "the lowered DDL carries the authored name, not the truncated one: {}",
-        migrations[0].up
+        refusal.contains("truncates identifiers"),
+        "lower was refused for the wrong reason: {refusal}"
     );
 
-    // The verdict the executor will compute, taken against the same live catalog.
+    // The probe backstop, which does not depend on lowering having run: a consumer can
+    // build a Migration carrying its own existence guard. An ifExists miss on the
+    // authored name is a lie whenever the truncated spelling is live.
     let live = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot the live schema");
-    let probe = migrations[0]
+    let probe = GuardProbe::Constraint {
+        schema: cfg.project_schema.clone(),
+        table: "t".into(),
+        name: authored.clone(),
+        direction: GuardDir::IfExists,
+        expect_kind: None,
+        expect_definition: None,
+    };
+    match decide(&probe, &live, SqlDialect::Postgres) {
+        GuardVerdict::FailDrift(divergence) => assert_eq!(
+            divergence.actual, truncated,
+            "the verdict must name the truncated spelling the catalog holds"
+        ),
+        verdict => panic!(
+            "the guard must refuse rather than read the drop as already done, got \
+             {verdict:?}"
+        ),
+    }
+
+    // The remedy: name the constraint as the catalog holds it. That drop lowers,
+    // applies, and the journal and the catalog agree afterwards.
+    let migrations = author
+        .lower(&drop_constraint_ir(&truncated), &LiveSchema::default())
+        .expect("the catalog's own spelling lowers");
+    assert_eq!(migrations.len(), 1, "one migration lowers from one op");
+    let remedy_probe = migrations[0]
         .existence_guard
         .as_ref()
         .expect("the guarded drop carries a probe");
-    let verdict = decide(probe, &live, SqlDialect::Postgres);
     assert_eq!(
-        verdict,
-        GuardVerdict::SatisfiedNoop,
-        "the authored name does not match the truncated catalog name, so the guard \
-         reads the drop as already done"
+        decide(remedy_probe, &live, SqlDialect::Postgres),
+        GuardVerdict::RunBare,
+        "the catalog's own spelling matches, so the drop runs"
     );
 
     let out = apply(&session, &cfg, &migrations, Approval::Approved, "app_test")
@@ -207,10 +235,6 @@ async fn a_truncated_constraint_name_makes_a_guarded_drop_journal_a_lie() {
         out.applied.len(),
         1,
         "apply reports the migration applied: {out:?}"
-    );
-    assert!(
-        out.skipped.is_empty(),
-        "the skip happens inside the migration, so nothing is reported skipped: {out:?}"
     );
 
     let journal = zero_migrate::applied(&session, &cfg)
@@ -223,12 +247,11 @@ async fn a_truncated_constraint_name_makes_a_guarded_drop_journal_a_lie() {
         "the journal records the drop as completed: {journal:?}"
     );
 
-    // The defect. The journal says the constraint was dropped; the catalog disagrees.
+    // The journal says the constraint was dropped, and now the catalog agrees.
     let after = unique_constraint_names(&session, &cfg.project_schema).await;
-    assert_eq!(
-        after,
-        vec![truncated],
-        "the constraint the journal says was dropped is still in pg_constraint"
+    assert!(
+        after.is_empty(),
+        "the constraint the journal says was dropped must really be gone: {after:?}"
     );
 
     drop_schemas(&session, &cfg).await;

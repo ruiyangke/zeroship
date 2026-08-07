@@ -63,6 +63,15 @@
 //!   On PG both sides are the `information_schema` spelling and the raw compare is
 //!   exact.
 //!
+//! - **An over-long constraint / index name on PostgreSQL** — PostgreSQL truncates an
+//!   identifier past 63 bytes with only a NOTICE, so the catalog holds a name the
+//!   authored one is never equal to. An `ifExists` miss on such a name is a lie
+//!   whenever the TRUNCATED spelling is present, and an `ifNotExists` `RunBare` would
+//!   create a truncated identity; both are refused. An `ifExists` name that is absent
+//!   in BOTH spellings still no-ops — that is what `ifExists` is for. PostgreSQL only:
+//!   SQLite has no cap and MySQL caps at 64 CHARACTERS, so the byte rule would strand
+//!   real objects there.
+//!
 //! The expected `data_type`/`nullable`/`unique`/`columns`/`kind` values are built
 //! by the SAME shared snapshot builders the lowering arms call
 //! (`build_table_snapshot` / `add_column_snapshot` / `create_index_snapshot` / the
@@ -71,6 +80,7 @@
 
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
+use crate::plan::author::PG_MAX_IDENT_BYTES;
 use crate::schema::query::{renderer as schema_renderer, SqlDialect};
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
@@ -145,7 +155,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             direction,
             expect,
             ..
-        } => decide_index(table, name, *direction, expect.as_ref(), live),
+        } => decide_index(table, name, *direction, expect.as_ref(), live, dialect),
         GuardProbe::Constraint {
             table,
             name,
@@ -160,6 +170,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             expect_kind.as_deref(),
             expect_definition.as_deref(),
             live,
+            dialect,
         ),
         GuardProbe::View {
             name, direction, ..
@@ -470,20 +481,30 @@ fn decide_index(
     direction: GuardDir,
     expect: Option<&(bool, Vec<String>)>,
     live: &SchemaSnapshot,
+    dialect: SqlDialect,
 ) -> GuardVerdict {
     // Look up the index under the table hint first; for the presence-only
     // `ifExists` (dropIndex) path the table hint may be absent/empty, so fall back
     // to scanning ALL tables for the index name (indexes are unique per schema).
-    let live_idx = live
-        .tables
-        .get(table)
-        .and_then(|t| t.indexes.iter().find(|i| i.name == name))
-        .or_else(|| {
-            live.tables
-                .values()
-                .flat_map(|t| &t.indexes)
-                .find(|i| i.name == name)
-        });
+    let find = |candidate: &str| {
+        live.tables
+            .get(table)
+            .and_then(|t| t.indexes.iter().find(|i| i.name == candidate))
+            .or_else(|| {
+                live.tables
+                    .values()
+                    .flat_map(|t| &t.indexes)
+                    .find(|i| i.name == candidate)
+            })
+    };
+    if let Some(verdict) =
+        truncated_identifier_backstop("index", name, direction, dialect, |candidate| {
+            find(candidate).is_some()
+        })
+    {
+        return verdict;
+    }
+    let live_idx = find(name);
     match direction {
         GuardDir::IfExists => {
             // dropIndex: presence-only on the index name.
@@ -552,11 +573,21 @@ fn decide_constraint(
     expect_kind: Option<&str>,
     expect_definition: Option<&str>,
     live: &SchemaSnapshot,
+    dialect: SqlDialect,
 ) -> GuardVerdict {
-    let live_con = live
-        .tables
-        .get(table)
-        .and_then(|t| t.constraints.iter().find(|c| c.name == name));
+    let find = |candidate: &str| {
+        live.tables
+            .get(table)
+            .and_then(|t| t.constraints.iter().find(|c| c.name == candidate))
+    };
+    if let Some(verdict) =
+        truncated_identifier_backstop("constraint", name, direction, dialect, |candidate| {
+            find(candidate).is_some()
+        })
+    {
+        return verdict;
+    }
+    let live_con = find(name);
     match direction {
         GuardDir::IfExists => {
             // dropConstraint: presence-only on the constraint name.
@@ -681,6 +712,80 @@ fn normalize_fk_definition(def: &str) -> String {
     out.push_str(table_seg);
     out.push_str(&rest[paren_rel..]);
     out
+}
+
+/// PostgreSQL's OWN spelling of an over-long identifier: the longest prefix of WHOLE
+/// characters that fits in [`PG_MAX_IDENT_BYTES`].
+///
+/// The budget is bytes (NAMEDATALEN) but the clip is on a character boundary — verified
+/// against a live PostgreSQL 18 server, where a 62-ASCII-byte prefix plus a two-byte
+/// character (64 bytes) becomes the 62 ASCII bytes rather than a 63rd byte that would
+/// split the codepoint. Mirrors the char-boundary discipline of
+/// [`crate::plan::author::cap_ident_name`].
+fn pg_truncated_identifier(name: &str) -> String {
+    let mut out = String::with_capacity(PG_MAX_IDENT_BYTES);
+    for ch in name.chars() {
+        if out.len() + ch.len_utf8() > PG_MAX_IDENT_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Refuse a guarded op whose authored name PostgreSQL cannot hold, so the verdict can
+/// never be a no-op the journal then records as done work.
+///
+/// A migration carrying a probe can reach the executor without lowering ever having run
+/// — `Migration::existence_guard` is a public field on a struct that is not
+/// `#[non_exhaustive]`, in a crate a consumer can depend on directly — so the bound the
+/// load gate and the lower seam enforce needs a last line here.
+///
+/// The rule is deliberately narrow, because a blanket refusal would break migrations
+/// that are correct today:
+///
+/// - `IfExists` — derive PostgreSQL's own truncated spelling and look THAT up in the
+///   same lookup scope. A present truncation means the miss on the authored name was a
+///   lie: the object is there and the drop would be skipped. An absent truncation means
+///   the drop's postcondition genuinely holds, so the ordinary satisfied no-op stands.
+/// - `IfNotExists` — refuse before the lookup, because `RunBare` would CREATE an object
+///   under the truncated name while the engine carries the authored one.
+///
+/// PostgreSQL ONLY. SQLite caps identifiers not at all and MySQL caps them at 64
+/// CHARACTERS rather than bytes, so an over-long name can name a real object in either
+/// catalog and applying the byte rule there would strand it.
+fn truncated_identifier_backstop(
+    kind: &str,
+    name: &str,
+    direction: GuardDir,
+    dialect: SqlDialect,
+    present: impl Fn(&str) -> bool,
+) -> Option<GuardVerdict> {
+    if !matches!(dialect, SqlDialect::Postgres) || name.len() <= PG_MAX_IDENT_BYTES {
+        return None;
+    }
+    let truncated = pg_truncated_identifier(name);
+    match direction {
+        GuardDir::IfNotExists => Some(drift(
+            &format!("{kind} {name}"),
+            "name",
+            name,
+            &format!(
+                "<{} bytes; PostgreSQL would create {truncated:?} instead>",
+                name.len()
+            ),
+        )),
+        GuardDir::IfExists => present(&truncated).then(|| {
+            drift(
+                &format!("{kind} {name}"),
+                "name",
+                name,
+                // Named exactly as the catalog holds it, which is also the remedy: name
+                // the object as PostgreSQL truncated it.
+                &truncated,
+            )
+        }),
+    }
 }
 
 /// Whether `table.column` exists in the live snapshot.

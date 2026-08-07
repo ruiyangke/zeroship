@@ -3033,6 +3033,7 @@ impl IrAuthor {
         ir: &MigrationIr,
         live: &LiveSchema,
     ) -> Result<Vec<PlanStep>, IrLowerError> {
+        self.validate_authored_identifier_lengths(ir)?;
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),
@@ -3095,6 +3096,23 @@ impl IrAuthor {
         validate_repeatable_ir_steps(ir, &out)?;
         stamp_ir_plan_steps(ir, &mut out);
         Ok(out)
+    }
+
+    /// Refuse an authored constraint/index identifier PostgreSQL would silently
+    /// truncate, before any of it reaches a rendered statement or a guard probe.
+    ///
+    /// The load gate runs the same bound, but lowering is a public entry point no
+    /// caller is obliged to reach through it, and an over-long name that survives to
+    /// lower produces a guarded drop the executor skips while journaling it completed.
+    /// Reported through the existing validation carrier so no new public error variant
+    /// is introduced.
+    fn validate_authored_identifier_lengths(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
+        crate::model::validate::validate_authored_identifier_lengths(
+            ir,
+            self.validation_dialect(),
+            &[],
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
     }
 
     const fn validation_dialect(&self) -> crate::model::validate::Dialect {
@@ -5829,6 +5847,7 @@ impl IrAuthor {
         guard_cfg: &GuardConfig,
         live: &LiveSchema,
     ) -> Result<GuardedLowerParts, IrGuardedLowerError> {
+        self.validate_authored_identifier_lengths(ir)?;
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),

@@ -22,12 +22,32 @@
 //! side is bounded on PostgreSQL ONLY: MySQL's limit is 64 CHARACTERS rather than
 //! bytes and SQLite has no identifier cap at all, so a universal drop-side bound would
 //! refuse a name that legitimately exists in those catalogs and strand the object.
+//!
+//! The bound is enforced at three seams, because each one is reachable without the
+//! others:
+//!
+//! - the LOAD gate (`validate_ir_scoped`), the authoring entry point;
+//! - the LOWER seam (`IrAuthor::lower` / `lower_steps` / `lower_plan`), which no
+//!   caller is obliged to reach through the load gate, and which is where a
+//!   `dialectal` leg is finally selected;
+//! - the executor's existence PROBE (`decide`), because `Migration::existence_guard`
+//!   is a public field on a struct a consumer can build directly, so a probe can
+//!   reach the executor without lowering ever having run.
 
-use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError, Dialect};
-use zero_migrate::{
-    ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
-    SchemaScope,
+use std::collections::BTreeMap;
+
+use zero_migrate::model::probe::{GuardDir, GuardProbe};
+use zero_migrate::model::snapshot::{
+    ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError, Dialect};
+use zero_migrate::render::existence_probe::{decide, GuardVerdict};
+use zero_migrate::{
+    ColType, IndexElement, IrAuthor, IrColumn, IrConstraint, IrConstraintKind, IrIndex, LiveSchema,
+    MigrationIr, Op, SchemaScope, SqlDialect,
+};
+
+mod support;
 
 const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite];
 
@@ -333,5 +353,405 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
     }
     for (label, factory) in drop_side_factories() {
         assert_refused_for_length(label, Dialect::Postgres, factory(&name));
+    }
+}
+
+// - The lower seam -
+//
+// `IrAuthor::lower` / `lower_steps` / `lower_plan` are public entry points that
+// no caller is obliged to reach through the load gate, so the bound has to run
+// there too.
+
+/// Lower one op through the real `IrAuthor`, returning the rendered error text.
+fn lower_error(op: Op, dialect: SqlDialect) -> Option<String> {
+    let author = IrAuthor::new("app", "app_idents", dialect, &support::no_inject("app"));
+    author
+        .lower(&ir(vec![op]), &LiveSchema::default())
+        .err()
+        .map(|error| error.to_string())
+}
+
+#[track_caller]
+fn assert_lower_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+    let error = lower_error(op, dialect).unwrap_or_else(|| {
+        panic!("{label} on {dialect:?} must refuse a truncatable name at lower")
+    });
+    assert!(
+        error.contains("truncates identifiers"),
+        "{label} on {dialect:?} was refused at lower for the wrong reason: {error}"
+    );
+}
+
+#[track_caller]
+fn assert_lower_not_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+    if let Some(error) = lower_error(op, dialect) {
+        assert!(
+            !error.contains("truncates identifiers"),
+            "{label} on {dialect:?} must not be refused at lower for identifier length: {error}"
+        );
+    }
+}
+
+/// The gap commit ddd679d left: the bound was a load-time gate only, so lowering an
+/// over-long authored name still carried it verbatim into the rendered DDL.
+#[test]
+fn lower_refuses_a_64_byte_authored_constraint_name() {
+    let name = ascii_name(MAX + 1);
+    assert_lower_refused_for_length("addConstraint", SqlDialect::Postgres, add_constraint(&name));
+    assert_lower_refused_for_length(
+        "dropConstraint",
+        SqlDialect::Postgres,
+        drop_constraint(&name),
+    );
+}
+
+#[test]
+fn lower_accepts_a_63_byte_authored_constraint_name() {
+    let name = ascii_name(MAX);
+    assert_lower_not_refused_for_length(
+        "addConstraint",
+        SqlDialect::Postgres,
+        add_constraint(&name),
+    );
+    assert_lower_not_refused_for_length(
+        "dropConstraint",
+        SqlDialect::Postgres,
+        drop_constraint(&name),
+    );
+}
+
+// - The `dialectal` wrapper -
+
+/// A `dropConstraint` buried in the PostgreSQL leg of a `dialectal` wrapper.
+fn dialectal_pg_drop_constraint(name: &str) -> Op {
+    Op::Dialectal {
+        default: None,
+        pg: Some(vec![drop_constraint(name)]),
+        sqlite: None,
+        mysql: None,
+    }
+}
+
+/// The same op in the `default` leg, which every dialect falls back to.
+fn dialectal_default_drop_constraint(name: &str) -> Op {
+    Op::Dialectal {
+        default: Some(vec![drop_constraint(name)]),
+        pg: None,
+        sqlite: None,
+        mysql: None,
+    }
+}
+
+/// A `dialectal` wrapper is not a hiding place. The load gate walked only top-level
+/// ops, so a nested over-long name escaped it even on the fully routed production path.
+#[test]
+fn the_load_gate_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
+    let name = ascii_name(MAX + 1);
+    assert_refused_for_length(
+        "dialectal pg dropConstraint",
+        Dialect::Postgres,
+        dialectal_pg_drop_constraint(&name),
+    );
+    assert_refused_for_length(
+        "dialectal default dropConstraint",
+        Dialect::Postgres,
+        dialectal_default_drop_constraint(&name),
+    );
+}
+
+#[test]
+fn the_lower_seam_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
+    let name = ascii_name(MAX + 1);
+    assert_lower_refused_for_length(
+        "dialectal pg dropConstraint",
+        SqlDialect::Postgres,
+        dialectal_pg_drop_constraint(&name),
+    );
+    assert_lower_refused_for_length(
+        "dialectal default dropConstraint",
+        SqlDialect::Postgres,
+        dialectal_default_drop_constraint(&name),
+    );
+}
+
+/// The leg that is NOT selected for the target dialect is not the engine's business:
+/// it never lowers, so bounding it would refuse an IR that is correct on this target.
+#[test]
+fn an_unselected_dialectal_leg_is_not_bounded() {
+    let name = ascii_name(MAX + 1);
+    let op = Op::Dialectal {
+        default: None,
+        pg: None,
+        sqlite: Some(vec![drop_constraint(&name)]),
+        mysql: None,
+    };
+    assert_not_refused_for_length("dialectal sqlite leg on postgres", Dialect::Postgres, op);
+}
+
+// - The executor's existence probe -
+//
+// `Migration::existence_guard` is a public field on a struct that is not
+// `#[non_exhaustive]`, in a crate a consumer can depend on directly, so a migration
+// carrying a probe can reach the executor without lowering ever having run. The
+// backstop is deliberately narrow: PostgreSQL only, and direction-aware.
+
+/// PostgreSQL's own truncation of `name`: the longest prefix of WHOLE characters that
+/// fits in [`MAX`] bytes. Verified against a live PostgreSQL 18 server - a name of 62
+/// ASCII bytes plus a two-byte character truncates to the 62 ASCII bytes, never to a
+/// split codepoint.
+fn pg_truncation(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if out.len() + ch.len_utf8() > MAX {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn constraint_snapshot(name: &str) -> ConstraintSnapshot {
+    ConstraintSnapshot {
+        name: name.to_string(),
+        kind: "UNIQUE".to_string(),
+        definition: "UNIQUE (c)".to_string(),
+        comment: None,
+    }
+}
+
+fn live_schema(
+    constraints: Vec<ConstraintSnapshot>,
+    indexes: Vec<IndexSnapshot>,
+) -> SchemaSnapshot {
+    let table = TableSnapshot {
+        columns: Vec::new(),
+        indexes,
+        constraints,
+        runtime_options: Default::default(),
+        partition_by: None,
+        comment: None,
+        stored_create_sql: None,
+    };
+    let mut tables = BTreeMap::new();
+    tables.insert("t".to_string(), table);
+    SchemaSnapshot {
+        tables,
+        ..Default::default()
+    }
+}
+
+fn constraint_probe(name: &str, direction: GuardDir) -> GuardProbe {
+    GuardProbe::Constraint {
+        schema: "app".into(),
+        table: "t".into(),
+        name: name.into(),
+        direction,
+        expect_kind: None,
+        expect_definition: None,
+    }
+}
+
+fn index_probe(name: &str, direction: GuardDir) -> GuardProbe {
+    GuardProbe::Index {
+        schema: "app".into(),
+        table: "t".into(),
+        name: name.into(),
+        direction,
+        expect: None,
+    }
+}
+
+/// One probe kind under test: a label, the probe builder, and the builder that puts a
+/// live object of that kind under the given name into the snapshot.
+type ProbeCase = (
+    &'static str,
+    fn(&str, GuardDir) -> GuardProbe,
+    fn(&str) -> SchemaSnapshot,
+);
+
+fn live_with_constraint(name: &str) -> SchemaSnapshot {
+    live_schema(vec![constraint_snapshot(name)], Vec::new())
+}
+
+fn live_with_index(name: &str) -> SchemaSnapshot {
+    live_schema(
+        Vec::new(),
+        vec![IndexSnapshot::btree(
+            name.to_string(),
+            false,
+            vec!["c".to_string()],
+        )],
+    )
+}
+
+fn probe_cases() -> Vec<ProbeCase> {
+    vec![
+        (
+            "constraint",
+            constraint_probe as fn(&str, GuardDir) -> GuardProbe,
+            live_with_constraint as fn(&str) -> SchemaSnapshot,
+        ),
+        ("index", index_probe, live_with_index),
+    ]
+}
+
+fn empty_live() -> SchemaSnapshot {
+    live_schema(Vec::new(), Vec::new())
+}
+
+/// The defect at its last seam. An over-long `ifExists` name whose TRUNCATED spelling
+/// is what the catalog holds must never read as "already gone": that verdict skips the
+/// statement and journals it completed while the object survives.
+#[test]
+fn an_over_long_if_exists_name_whose_truncation_is_live_fails_closed_on_postgres() {
+    let authored = ascii_name(MAX + 1);
+    let truncated = pg_truncation(&authored);
+    for (label, probe, live) in probe_cases() {
+        match decide(
+            &probe(&authored, GuardDir::IfExists),
+            &live(&truncated),
+            SqlDialect::Postgres,
+        ) {
+            GuardVerdict::FailDrift(divergence) => assert_eq!(
+                divergence.actual, truncated,
+                "{label} must name the truncated spelling the catalog holds"
+            ),
+            verdict => panic!(
+                "{label}: an over-long ifExists name whose truncation is live must fail \
+                 closed, got {verdict:?}"
+            ),
+        }
+    }
+}
+
+/// The truncation the backstop derives must be PostgreSQL's own, which clips on a
+/// CHARACTER boundary. A 62-ASCII-byte prefix plus one two-byte character is 64 bytes
+/// and truncates to the 62 ASCII bytes, not to a 63rd byte that would split the
+/// codepoint.
+#[test]
+fn the_derived_truncation_clips_on_a_character_boundary() {
+    let authored = format!("{}\u{e9}", ascii_name(MAX - 1));
+    assert_eq!(authored.len(), MAX + 1, "the fixture must be one byte over");
+    let truncated = pg_truncation(&authored);
+    assert_eq!(
+        truncated,
+        ascii_name(MAX - 1),
+        "PostgreSQL drops the whole trailing character rather than splitting it"
+    );
+    for (label, probe, live) in probe_cases() {
+        match decide(
+            &probe(&authored, GuardDir::IfExists),
+            &live(&truncated),
+            SqlDialect::Postgres,
+        ) {
+            GuardVerdict::FailDrift(divergence) => assert_eq!(divergence.actual, truncated),
+            verdict => panic!("{label}: expected a fail-closed verdict, got {verdict:?}"),
+        }
+    }
+}
+
+/// The narrow half of the backstop. When even the TRUNCATED spelling is absent, the
+/// drop's postcondition genuinely holds, so the satisfied no-op is correct and must
+/// survive: refusing here would break migrations that are correct today.
+#[test]
+fn an_over_long_if_exists_name_absent_in_every_spelling_still_noops() {
+    let authored = ascii_name(MAX + 1);
+    for (label, probe, _live) in probe_cases() {
+        assert_eq!(
+            decide(
+                &probe(&authored, GuardDir::IfExists),
+                &empty_live(),
+                SqlDialect::Postgres
+            ),
+            GuardVerdict::SatisfiedNoop,
+            "{label}: a genuinely absent object is what ifExists is for"
+        );
+    }
+}
+
+/// The create side. `RunBare` on an over-long name would CREATE a truncated identity
+/// the engine then carries under the authored name, so it is refused before the lookup.
+#[test]
+fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
+    let authored = ascii_name(MAX + 1);
+    for (label, probe, _live) in probe_cases() {
+        match decide(
+            &probe(&authored, GuardDir::IfNotExists),
+            &empty_live(),
+            SqlDialect::Postgres,
+        ) {
+            GuardVerdict::FailDrift(_) => {}
+            verdict => panic!(
+                "{label}: an over-long ifNotExists name must not create a truncated \
+                 identity, got {verdict:?}"
+            ),
+        }
+    }
+}
+
+/// A name WITHIN the bound keeps every verdict it has today, on every dialect and in
+/// both directions. This is the common correct case and the backstop must be invisible
+/// to it.
+#[test]
+fn a_within_bound_name_keeps_its_verdict_on_every_dialect() {
+    let name = ascii_name(MAX);
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for (label, probe, live) in probe_cases() {
+            assert_eq!(
+                decide(&probe(&name, GuardDir::IfExists), &live(&name), dialect),
+                GuardVerdict::RunBare,
+                "{label} ifExists on {dialect:?}: a live object still runs the drop"
+            );
+            assert_eq!(
+                decide(&probe(&name, GuardDir::IfExists), &empty_live(), dialect),
+                GuardVerdict::SatisfiedNoop,
+                "{label} ifExists on {dialect:?}: an absent object still no-ops"
+            );
+            assert_eq!(
+                decide(&probe(&name, GuardDir::IfNotExists), &empty_live(), dialect),
+                GuardVerdict::RunBare,
+                "{label} ifNotExists on {dialect:?}: an absent object still creates"
+            );
+        }
+    }
+}
+
+/// MySQL caps identifiers at 64 CHARACTERS rather than bytes and SQLite does not cap
+/// them at all, so an over-long name can name a real object in either catalog. The byte
+/// rule must never reach them.
+#[test]
+fn an_over_long_name_keeps_its_verdict_on_mysql_and_sqlite() {
+    let authored = ascii_name(MAX + 1);
+    let truncated = pg_truncation(&authored);
+    for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for (label, probe, live) in probe_cases() {
+            assert_eq!(
+                decide(
+                    &probe(&authored, GuardDir::IfExists),
+                    &live(&authored),
+                    dialect
+                ),
+                GuardVerdict::RunBare,
+                "{label} ifExists on {dialect:?}: the catalog can hold the full name"
+            );
+            assert_eq!(
+                decide(
+                    &probe(&authored, GuardDir::IfExists),
+                    &live(&truncated),
+                    dialect
+                ),
+                GuardVerdict::SatisfiedNoop,
+                "{label} ifExists on {dialect:?}: no truncated spelling is derived"
+            );
+            assert_eq!(
+                decide(
+                    &probe(&authored, GuardDir::IfNotExists),
+                    &empty_live(),
+                    dialect
+                ),
+                GuardVerdict::RunBare,
+                "{label} ifNotExists on {dialect:?}: an absent object still creates"
+            );
+        }
     }
 }
