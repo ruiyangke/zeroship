@@ -45,6 +45,31 @@ test("bool parsing survives a poisoned global type parser", () => {
   assert.equal(typeof parseBool("f"), "boolean", "the scoped parser must yield a boolean");
 });
 
+test("name[] borrows the text[] parser so catalog column lists decode", () => {
+  // pg-types registers array parsers for 1000, 1009, 1015 and 1016, but not for
+  // 1003. Catalog introspection returns name[] from array_agg(attname), so
+  // without a shadow the raw literal crosses and the seam's Vec<String> decode
+  // fails. Verified against pg-types/lib/textParsers.js rather than assumed.
+  const OID_NAME_ARRAY = 1003;
+  const OID_TEXT_ARRAY = 1009;
+  const module = {
+    types: {
+      getTypeParser(oid: number): (value: string) => unknown {
+        // Only text[] has a real array parser here, exactly as pg-types leaves it.
+        if (oid === OID_TEXT_ARRAY) return (value: string) => value.slice(1, -1).split(",");
+        return (value: string) => value;
+      },
+    },
+  };
+
+  const scoped = __testing.connectionScopedTypes(module as never);
+  assert.deepEqual(
+    scoped.getTypeParser(OID_NAME_ARRAY)("{a,b}"),
+    ["a", "b"],
+    "name[] must decode as an array, not as the raw literal",
+  );
+});
+
 test("exact-integer pinning still holds and other oids still delegate", () => {
   const scoped = __testing.connectionScopedTypes(poisonedPgModule() as never);
 

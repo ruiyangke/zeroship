@@ -74,6 +74,8 @@ export type HostDriver = (
 const OID_INT8 = 20;
 const OID_NUMERIC = 1700;
 const OID_INT8_ARRAY = 1016;
+const OID_NAME_ARRAY = 1003;
+const OID_TEXT_ARRAY = 1009;
 
 /**
  * Build a connection-scoped `types` object whose `getTypeParser(oid, format)`
@@ -106,6 +108,16 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
         // reaches precondition guards on destructive migrations and the
         // catalog-drift comparison, neither of which raises anything when wrong.
         return (value: string): boolean => value === "t";
+      }
+      if (oid === OID_NAME_ARRAY) {
+        // `name[]` has no default array parser: pg-types registers 1000, 1009,
+        // 1015 and 1016, and not 1003. Catalog introspection returns it from
+        // `array_agg(attname)`, so without this the value crosses as the raw
+        // literal `{a,b}` and fails the seam's Vec<String> decode. Reuse the
+        // `text[]` parser, whose array-literal syntax is identical.
+        return defaults.getTypeParser(OID_TEXT_ARRAY as never, format as never) as (
+          value: string,
+        ) => unknown;
       }
       if (oid === OID_INT8_ARRAY) {
         // int8[]: the ARRAY parser composed over a string element parser, so each
