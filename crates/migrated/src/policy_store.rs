@@ -156,6 +156,19 @@ impl AppPolicyStore {
         Ok(rows.iter().map(AppPolicyVersion::from_row).collect())
     }
 
+    /// Open a connection for one store operation.
+    ///
+    /// This is per-operation on purpose, and it is NOT an oversight to be fixed
+    /// by reusing the long-lived control client the service already holds.
+    /// `insert_version` runs `BEGIN`, takes a transaction-scoped advisory lock,
+    /// and `COMMIT`s; sharing one client across concurrent requests would
+    /// interleave those statements and put two callers in one transaction,
+    /// which defeats the lock it depends on.
+    ///
+    /// A connection pool would be the usual answer and is not available here:
+    /// `compio_postgres::Pool` is single-threaded (`Cell`-based, not `Send`),
+    /// while the service state it would live in is shared across workers and
+    /// must be `Send + Sync`.
     async fn connect(&self) -> Result<Client, AppPolicyStoreError> {
         let (client, conn) = compio_postgres::connect(&self.dsn, NoTls)
             .await
