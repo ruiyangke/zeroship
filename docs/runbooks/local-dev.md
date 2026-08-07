@@ -163,6 +163,11 @@ Then open `http://localhost:8000/apps/db-todos/`.
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
 cargo test -p zeroship-control
+# The control suites that need a live, migrated Postgres are behind the
+# `live-db-tests` feature, so the line above runs only the database-free ones.
+# To run the whole crate, provision the database first (tests/run_billing_suite.sh
+# does both):
+cargo test -p zeroship-control --features live-db-tests
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
