@@ -1467,6 +1467,22 @@ fn runtime_app_role_name(app_id: &str) -> String {
     format!("app_{app_id}_role")
 }
 
+/// PRECONDITION: `schema` and `migrator_role` must contain no single quote.
+///
+/// The `DO` block below embeds their `quote_ident` forms inside single-quoted
+/// `EXECUTE '…'` strings. `quote_ident` doubles internal double-quotes and does
+/// nothing to single ones, so a name containing `'` would terminate the EXECUTE
+/// literal early and the remainder would be parsed as SQL.
+///
+/// That is safe today, and only because of where the values come from: `schema`
+/// is `app_id.to_string()` (a `Uuid`, so hex and hyphens), and `role` is derived
+/// from it as `app_{schema}_role`. Neither can carry a quote. The guarantee lives
+/// about a thousand lines from here and nothing at this call site enforced it,
+/// which is the whole reason to write it down - a future caller passing a
+/// creator-supplied name would find no local objection.
+///
+/// The durable fix is to stop pre-interpolating and let the block quote its own
+/// identifiers with `format('%I', …)`.
 async fn provision_runtime_app_role(
     conn: &compio_postgres::Client,
     schema: &str,
