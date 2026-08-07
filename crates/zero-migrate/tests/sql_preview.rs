@@ -418,6 +418,65 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     );
 }
 
+/// DIALECT-TRUTHFUL GUARD LABEL: the `-- [runtime-resolved]` guard line must
+/// describe the apply of the dialect the preview was lowered for. PostgreSQL and
+/// SQLite genuinely run `existence_probe::decide` (run / satisfied-noop /
+/// fail-drift). MySQL evaluates NO probe at all, so its label must say the guard is
+/// dropped and the bare DDL below runs unconditionally. The ONE MySQL exception is
+/// `dropView`, whose lowered DDL carries a native `DROP VIEW IF EXISTS`.
+///
+/// Does NOT assert apply behaviour (no DB is opened here) and does NOT cover the
+/// op-less `.sql` plan path, which is exercised by the goldens instead.
+#[test]
+fn guard_label_is_truthful_per_dialect() {
+    const ADD_COLUMN_IR: &str = r#"{"ir_version":1,"name":"g","ops":[
+      {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"}
+    ]}"#;
+    const DROP_VIEW_IR: &str = r#"{"ir_version":1,"name":"dv","ops":[
+      {"op":"dropView","name":"old_codes","existenceGuard":"ifExists"}
+    ]}"#;
+    const PROBE_CLAIM: &str = "catalog-probed at apply (run / satisfied-noop / fail-drift)";
+
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for ir in [ADD_COLUMN_IR, DROP_VIEW_IR] {
+            let out = render_ir_envelope_sql(ir, dialect, &opts()).expect("renders offline");
+            assert!(
+                out.contains(PROBE_CLAIM),
+                "{dialect:?} DOES probe at apply and must keep the probe wording:\n{out}"
+            );
+        }
+    }
+
+    let out =
+        render_ir_envelope_sql(ADD_COLUMN_IR, SqlDialect::Mysql, &opts()).expect("renders offline");
+    assert!(
+        out.contains(RUNTIME_RESOLVED)
+            && out.contains("NOT honoured on MySQL")
+            && out.contains("the apply evaluates no catalog probe")
+            && out.contains("runs unconditionally")
+            && out.contains("a re-run errors instead of no-opping"),
+        "the MySQL guard label must say the guard is dropped:\n{out}"
+    );
+    assert!(
+        !out.contains("catalog-probed")
+            && !out.contains("satisfied-noop")
+            && !out.contains("fail-drift"),
+        "MySQL runs no probe, so the label must promise no probe verdict:\n{out}"
+    );
+
+    let out =
+        render_ir_envelope_sql(DROP_VIEW_IR, SqlDialect::Mysql, &opts()).expect("renders offline");
+    assert!(
+        out.contains("honoured natively on MySQL by the IF EXISTS clause below")
+            && !out.contains("catalog-probed"),
+        "MySQL dropView is honoured by a native clause, not a probe:\n{out}"
+    );
+    assert!(
+        out.contains("DROP VIEW IF EXISTS `public`.`old_codes`"),
+        "the native MySQL clause the label cites must actually be in the statement:\n{out}"
+    );
+}
+
 /// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
 /// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
 /// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect

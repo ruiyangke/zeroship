@@ -209,6 +209,7 @@ pub enum Feature {
     AlterColumnUsing,
     SequenceDefault,
     RenameColumnGuard,
+    ExistenceGuardProbe,
     InsertOnConflict,
     MaterializedView,
     CreateOrReplaceMaterializedView,
@@ -388,7 +389,28 @@ const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
     "per-column index collations are PostgreSQL-only",
 );
 
+/// Whether an authored `ifNotExists`/`ifExists` is ENFORCED at apply. PostgreSQL
+/// and SQLite run `render::existence_probe::decide` against the live catalog under
+/// the apply lock; the MySQL backend calls it nowhere, so the guard is dropped and
+/// the bare DDL runs unconditionally.
+///
+/// Declares the ENFORCEMENT only. It does NOT say whether a given op accepts a
+/// guard at all (`renameColumn` is refused on every dialect - see
+/// `Feature::RenameColumnGuard`), and it does NOT cover `dropView`, whose lowered
+/// DDL is `DROP VIEW IF EXISTS` on every dialect and is therefore honoured by MySQL
+/// itself. Validation never gates on this feature: it is declared so the generated
+/// support matrix states the guard story per dialect.
+const EXISTENCE_GUARD_PROBE: DialectSupport = DialectSupport::new(
+    supported(RenderMode::LiveResolved),
+    supported(RenderMode::LiveResolved),
+    unsupported(
+        UNSUPPORTED,
+        "the MySQL backend evaluates no existence-guard catalog probe at apply, so a guarded statement runs unconditionally and a re-run errors; the sole exception is dropView, whose DDL carries a native DROP VIEW IF EXISTS",
+    ),
+);
+
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
@@ -447,12 +469,13 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
-    Feature::SequenceDefault,
-    PG_ONLY_SEQUENCE_DEFAULT,
-)];
+pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
+    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
+];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(
         Feature::ExpressionIndex,
         DialectSupport::new(
@@ -490,18 +513,24 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const PARTITION_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
-    Feature::PartitionDdl,
-    DialectSupport::all_supported(RenderMode::Offline),
-)];
-
-pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
-    Feature::AlterColumnUsing,
-    DialectSupport::unsupported_all(
-        UNSUPPORTED,
-        "setColumnType.using expression rendering is deferred in the current engine",
+pub(crate) const PARTITION_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
+    FeatureSupport::new(
+        Feature::PartitionDdl,
+        DialectSupport::all_supported(RenderMode::Offline),
     ),
-)];
+];
+
+pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
+    FeatureSupport::new(
+        Feature::AlterColumnUsing,
+        DialectSupport::unsupported_all(
+            UNSUPPORTED,
+            "setColumnType.using expression rendering is deferred in the current engine",
+        ),
+    ),
+];
 
 pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::RenameColumnGuard,
@@ -512,6 +541,7 @@ pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::n
 )];
 
 pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(
         Feature::ForeignKeyNoLocalColumn,
         UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN,
@@ -529,10 +559,10 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
-    Feature::SequenceDefault,
-    PG_ONLY_SEQUENCE_DEFAULT,
-)];
+pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[
+    FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
+    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
+];
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,

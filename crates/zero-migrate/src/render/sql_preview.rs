@@ -28,12 +28,17 @@
 //!   12-step rebuild (it does not even lower offline — fails closed with
 //!   [`IrLowerError::SqliteRenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
 //! - **`backfill`** — a runtime windowed loop.
-//! - **any existence-guard-carrying op** (`ifNotExists`/`ifExists`) — the apply is
-//!   a runtime catalog probe + run / satisfied-noop / fail-drift decision
+//! - **any existence-guard-carrying op** (`ifNotExists`/`ifExists`): on PostgreSQL
+//!   and SQLite the apply is a runtime catalog probe + run / satisfied-noop /
+//!   fail-drift decision
 //!   ([`guard_probe`](crate::render::existence_probe), explicitly NOT offline-renderable). The
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
-//!   the engine never emits.
+//!   the engine never emits. The MySQL backend evaluates NO probe, so a MySQL
+//!   preview says so instead ([`guard_label`]): the bare DDL runs unconditionally,
+//!   except for `dropView`, whose lowered MySQL DDL carries a native
+//!   `DROP VIEW IF EXISTS`. This is a preview-text distinction only: it changes no
+//!   lowered statement and no apply behaviour on any dialect.
 //! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** — require
 //!   live structure; named FK add/drop changes lower to the live 12-step rebuild
 //!   and are not flattened into ordinary offline SQL
@@ -181,7 +186,7 @@ impl Rendered {
 /// `dialect` selects the header label and the MySQL session envelope.
 #[must_use]
 pub fn render_plan_sql(plan: &AppliedPlan, dialect: SqlDialect, _opts: &PreviewOpts) -> String {
-    let rendered = render_plan_steps(plan);
+    let rendered = render_plan_steps(plan, dialect);
     let wrap_mysql = needs_mysql_session_envelope(dialect, &rendered);
     let mut out = String::new();
     write_plan_header(&mut out, plan, DialectCaption::Lowered(dialect));
@@ -209,7 +214,7 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &Previe
     let caption = DialectCaption::VerbatimRawSql { requested: dialect };
     let rendered_plans = plans
         .iter()
-        .map(render_plan_steps)
+        .map(|plan| render_plan_steps(plan, dialect))
         .collect::<Vec<Vec<Rendered>>>();
     let total_statements = rendered_plans
         .iter()
@@ -428,7 +433,7 @@ fn render_ir_ops(
         match author.lower_plan(&one, &working_live) {
             Ok(plan) => {
                 for step in &plan.steps {
-                    render_step(op, guard, step, &mut out);
+                    render_step(op, guard, step, dialect, &mut out);
                 }
             }
             Err(e) => {
@@ -500,24 +505,34 @@ fn single_op_ir(parent: &MigrationIr, op: Op) -> MigrationIr {
 
 /// Walk an already-lowered plan's steps into render lines (the `.sql`-artifact and
 /// AppliedPlan path). Guard detection here is best-effort from the step alone
-/// (`Migration.existence_guard`), since a `.sql` plan carries no op list.
-fn render_plan_steps(plan: &AppliedPlan) -> Vec<Rendered> {
+/// (`Migration.existence_guard`), since a `.sql` plan carries no op list. `dialect`
+/// is the dialect the plan was lowered for; it selects the guard label's apply
+/// story (see [`guard_label`]) and is REQUIRED rather than defaulted, so a caller
+/// cannot silently inherit one dialect's apply semantics for another's preview.
+fn render_plan_steps(plan: &AppliedPlan, dialect: SqlDialect) -> Vec<Rendered> {
     let mut out = Vec::new();
     for step in &plan.steps {
         // On the AppliedPlan path we have no `Op`; pass `None` for the op + read the
         // guard off the migration when present.
-        render_step_no_op(step, &mut out);
+        render_step_no_op(step, dialect, &mut out);
     }
     out
 }
 
 /// Render one step WITH its originating op (the IR envelope path), so existence
-/// guards and online renames are labeled with the op's subject.
-fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mut Vec<Rendered>) {
+/// guards and online renames are labeled with the op's subject. `dialect` reaches
+/// [`guard_label`] only; it changes no rendered statement.
+fn render_step(
+    op: &Op,
+    guard: Option<ExistenceGuard>,
+    step: &PlanStep,
+    dialect: SqlDialect,
+    out: &mut Vec<Rendered>,
+) {
     match step {
         PlanStep::Ddl(m) => {
             if let Some(g) = guard.or_else(|| authored_probe(m).map(|_| guard_dir(m))) {
-                out.push(Rendered::label(guard_label(op, g)));
+                out.push(Rendered::label(guard_label(op, g, dialect)));
             }
             push_statement(&m.up, out);
         }
@@ -546,16 +561,33 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
     }
 }
 
-/// Render one step with NO op context (the `.sql` / AppliedPlan path).
-fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
+/// Render one step with NO op context (the `.sql` / AppliedPlan path). `dialect` is
+/// the dialect the plan was lowered for and selects the guard label's apply story,
+/// exactly as on the op-carrying path.
+fn render_step_no_op(step: &PlanStep, dialect: SqlDialect, out: &mut Vec<Rendered>) {
     match step {
         PlanStep::Ddl(m) => {
             if let Some(p) = authored_probe(m) {
-                out.push(Rendered::label(format!(
-                    "{RUNTIME_RESOLVED} guarded DDL ({}): catalog-probed at apply \
-                     (run / satisfied-noop / fail-drift); the statement below is the bare DDL",
-                    probe_kind(p)
-                )));
+                let kind = probe_kind(p);
+                out.push(Rendered::label(match dialect {
+                    SqlDialect::Postgres | SqlDialect::Sqlite => format!(
+                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): catalog-probed at apply \
+                         (run / satisfied-noop / fail-drift); the statement below is the bare DDL"
+                    ),
+                    // A `view` probe is stamped only by `dropView`, whose MySQL DDL
+                    // carries a native `DROP VIEW IF EXISTS`; every other probe kind
+                    // reaching MySQL is dropped on the floor at apply.
+                    SqlDialect::Mysql if kind == "view" => format!(
+                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): honoured natively on MySQL by \
+                         the IF EXISTS clause below; the apply evaluates no catalog probe, so \
+                         there is no drift check"
+                    ),
+                    SqlDialect::Mysql => format!(
+                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): NOT honoured on MySQL; the \
+                         apply evaluates no catalog probe, so the bare DDL below runs \
+                         unconditionally and a re-run errors instead of no-opping"
+                    ),
+                }));
             }
             push_statement(&m.up, out);
         }
@@ -718,18 +750,56 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
 }
 
 /// The runtime-resolved label for a guard-carrying op (op context available).
-fn guard_label(op: &Op, g: ExistenceGuard) -> String {
+///
+/// The apply story is DIALECT-SPECIFIC and the label states the one that is true
+/// for `dialect`. PostgreSQL and SQLite evaluate
+/// [`existence_probe::decide`](crate::render::existence_probe::decide) under the
+/// apply lock; MySQL evaluates no probe at all, so on MySQL the guard is either
+/// carried by a native clause in the statement below
+/// ([`mysql_guard_is_native`]) or silently dropped.
+///
+/// Does NOT change the statement rendered beneath the label on any dialect, and
+/// does NOT change apply behaviour - this is preview text only.
+fn guard_label(op: &Op, g: ExistenceGuard, dialect: SqlDialect) -> String {
     let kind = op_kind_tag(op);
     let subject = op_subject(op);
     let dir = match g {
         ExistenceGuard::IfNotExists => "ifNotExists",
         ExistenceGuard::IfExists => "ifExists",
     };
-    format!(
-        "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): catalog-probed at apply \
-         (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply runs \
-         when the probe says run"
-    )
+    match dialect {
+        SqlDialect::Postgres | SqlDialect::Sqlite => format!(
+            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): catalog-probed at apply \
+             (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply \
+             runs when the probe says run"
+        ),
+        SqlDialect::Mysql if mysql_guard_is_native(op) => format!(
+            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): honoured natively on MySQL by the \
+             IF EXISTS clause below; the apply evaluates no catalog probe, so there is no \
+             drift check"
+        ),
+        SqlDialect::Mysql => format!(
+            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): NOT honoured on MySQL; the apply \
+             evaluates no catalog probe, so the bare DDL below runs unconditionally and a \
+             re-run errors instead of no-opping"
+        ),
+    }
+}
+
+/// Whether MySQL lowering carries this op's existence guard as a NATIVE SQL clause
+/// rather than dropping it. `dropView` is the only such op among the 22 that
+/// [`Op::legal_existence_guard`](crate::model::ir::Op::legal_existence_guard)
+/// admits: its lowering emits `DROP VIEW IF EXISTS` on every dialect.
+///
+/// `dropSequence` also emits a native `IF EXISTS`, but sequences are unsupported on
+/// MySQL and its lowering fails closed before any label is rendered, so it is
+/// deliberately absent here. Does NOT cover the vendor ops (`dropTrigger` and
+/// friends carry their own `ifExists` field, not an `ExistenceGuard`), and does NOT
+/// speak for PostgreSQL or SQLite, which probe in addition to any native clause.
+/// Defaults to `false` so a newly guardable op is over-warned rather than
+/// mis-promised.
+const fn mysql_guard_is_native(op: &Op) -> bool {
+    matches!(op, Op::DropView { .. })
 }
 
 /// A `Dml` comment line (op context): the op kind + native bind count.

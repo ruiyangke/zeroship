@@ -89,8 +89,12 @@ export type {
 };
 
 // Existence guards (`ifNotExists` / `ifExists`) are inline boolean options on the
-// relevant op specs. The executor honors them via catalog probes under lock; see
-// `docs/writing-migrations.md` (existence-guard section).
+// relevant op specs. The PostgreSQL and SQLite executors honor them via catalog
+// probes under lock. The MySQL executor evaluates NO probe, so a guard is dropped
+// there and the statement runs unconditionally; the sole MySQL exception is
+// `dropView`, which lowers to a native `DROP VIEW IF EXISTS`. Does NOT cover
+// `dropTrigger`'s separate `ifExists` option, which is a native clause on all
+// three targets. See `docs/writing-migrations.md` (existence-guard section).
 
 // ── Sensitive-data column facets (#173/#174) ──
 //

@@ -32,6 +32,7 @@ fn feature_label(feature: Feature) -> &'static str {
         Feature::AlterColumnUsing => "Custom `USING` expression",
         Feature::SequenceDefault => "Sequence-backed default",
         Feature::RenameColumnGuard => "Rename-column existence guard",
+        Feature::ExistenceGuardProbe => "`ifNotExists`/`ifExists` enforced at apply",
         Feature::InsertOnConflict => "Insert with `ON CONFLICT`",
         Feature::MaterializedView => "Materialized view",
         Feature::CreateOrReplaceMaterializedView => "`CREATE OR REPLACE MATERIALIZED VIEW`",
