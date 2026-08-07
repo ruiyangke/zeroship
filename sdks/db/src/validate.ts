@@ -135,14 +135,21 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be a string` };
       return;
     }
-    if (min !== undefined && value.length < min) {
+    // Count CHARACTERS, which is what the bound and the message both promise.
+    // `String.length` is UTF-16 code units, so anything outside the Basic
+    // Multilingual Plane - emoji, CJK extensions, most mathematical symbols -
+    // counts double. That made validation stricter than storage: PostgreSQL
+    // counts varchar(n) in characters, so varchar(3) accepts three emoji while
+    // a code-unit check refused them.
+    const charCount = [...value].length;
+    if (min !== undefined && charCount < min) {
       errors[key] = {
         path: key,
         message: `${key} must be at least ${min} characters`,
       };
       return;
     }
-    if (max !== undefined && value.length > max) {
+    if (max !== undefined && charCount > max) {
       errors[key] = {
         path: key,
         message: `${key} must be at most ${max} characters`,
