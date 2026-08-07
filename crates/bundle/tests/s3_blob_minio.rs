@@ -21,6 +21,7 @@ use zeroship_bundle::{
 };
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
+use std::io::Write as _;
 
 const ACCESS_KEY: &str = "minioadmin";
 const SECRET_KEY: &str = "minioadmin";
@@ -66,7 +67,7 @@ fn start_minio() -> bool {
         ])
         .status();
     if !matches!(run, Ok(s) if s.success()) {
-        eprintln!("skip: failed to start MinIO container");
+        let _ = std::io::stderr().write_all("skip: failed to start MinIO container\n".as_bytes());
         return false;
     }
     for _ in 0..40 {
@@ -90,7 +91,7 @@ fn start_minio() -> bool {
             }
         }
     }
-    eprintln!("skip: MinIO did not become ready / bucket create failed");
+    let _ = std::io::stderr().write_all("skip: MinIO did not become ready / bucket create failed\n".as_bytes());
     cleanup();
     false
 }
@@ -150,7 +151,7 @@ fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
 #[test]
 fn s3_blob_store_roundtrip_and_parity() {
     if !docker_available() {
-        eprintln!("skip: docker unavailable");
+        let _ = std::io::stderr().write_all("skip: docker unavailable\n".as_bytes());
         return;
     }
     if !start_minio() {

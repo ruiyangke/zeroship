@@ -10,6 +10,7 @@
 //! convention — no live PG in CI by default), but the same-origin guard +
 //! cookie-clear parts run unconditionally.
 
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -536,7 +537,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 #[ntex::test]
 async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
     let Some(dsn) = std::env::var("GATEWAY_ANCHORS_DB_URL").ok() else {
-        eprintln!("skipping (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);

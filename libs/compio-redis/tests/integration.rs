@@ -6,6 +6,7 @@
 //!   REDIS_TEST_URL=redis://127.0.0.1:6390 cargo test -p compio-redis -- --nocapture
 
 use compio_redis::{Client, Pool};
+use std::io::Write as _;
 
 fn test_url() -> Option<String> {
     std::env::var("REDIS_TEST_URL").ok()
@@ -14,7 +15,7 @@ fn test_url() -> Option<String> {
 #[compio::test]
 async fn ping_set_get_del_roundtrip() {
     let Some(url) = test_url() else {
-        eprintln!("skip: REDIS_TEST_URL not set");
+        let _ = std::io::stderr().write_all("skip: REDIS_TEST_URL not set\n".as_bytes());
         return;
     };
     let mut c = Client::connect(&url).await.expect("connect");

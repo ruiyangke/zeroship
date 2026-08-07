@@ -18,6 +18,7 @@
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_gateway::identities;
+use std::io::Write as _;
 
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<Client> {
@@ -87,7 +88,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
 #[compio::test]
 async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     let Some(mut client) = pg_or_skip().await else {
-        eprintln!("[identities_relay_test] skip (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("[identities_relay_test] skip (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
@@ -140,7 +141,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
 #[compio::test]
 async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let Some(mut client) = pg_or_skip().await else {
-        eprintln!("[identities_relay_test] skip (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("[identities_relay_test] skip (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());

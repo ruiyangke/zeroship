@@ -22,6 +22,7 @@
 //! test JWKS endpoint; for verifier-only checks see
 //! `crates/core/src/logout_token.rs::tests`.
 
+use std::io::Write as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,7 +51,7 @@ use zeroship_gateway::{
 #[compio::test]
 async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -512,7 +513,7 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
 #[ntex::test]
 async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -655,7 +656,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 #[ntex::test]
 async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -810,7 +811,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
 #[ntex::test]
 async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -998,7 +999,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
 #[ntex::test]
 async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -1146,7 +1147,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
 #[ntex::test]
 async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -1319,7 +1320,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
 #[ntex::test]
 async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succeeds() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -1471,7 +1472,7 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
 #[ntex::test]
 async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
 
@@ -1712,7 +1713,7 @@ fn build_handler_state_with_route(
 #[ntex::test]
 async fn per_app_bcl_writes_token_family_marker() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -1865,7 +1866,7 @@ async fn per_app_bcl_writes_token_family_marker() {
 #[ntex::test]
 async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -2031,7 +2032,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
 #[ntex::test]
 async fn per_app_bcl_deletes_reload_recovery_anchor() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");

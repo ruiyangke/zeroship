@@ -1,5 +1,6 @@
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
+use std::io::Write as _;
 use uuid::Uuid;
 use zeroship_authz::{
     enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
@@ -363,7 +364,7 @@ where
     Fut: Future<Output = ()>,
 {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("skipping (no AUTH_DB_URL)");
+        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
         return;
     };
     compio::runtime::Runtime::new()
