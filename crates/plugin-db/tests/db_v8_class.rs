@@ -477,8 +477,11 @@ fn db_platform_handle_reachable_via_private_symbol() {
             "__platform.{name} must be a function on the capability handle"
         );
     }
-    // And the namespace getters resolve to objects.
-    for name in ["migrations", "replication"] {
+    // And the namespace getters resolve to objects. `replication` is the only
+    // one left: the migrations namespace went away with the SDK that backed it,
+    // and migrations are now applied by the migration service rather than
+    // through `env.db`.
+    for name in ["replication"] {
         let key = v8::String::new(scope, name).unwrap();
         let v = handle_obj.get(scope, key.into()).expect("get");
         assert!(

@@ -17,10 +17,10 @@
 //! `#[v8_method]` on `Collection` that calls into the
 //! `crate::crud::dispatch_*` helpers.
 //!
-//! ## Platform-internal surface (P9 PR 4 — behind `__platform`)
+//! ## Platform-internal surface (behind `__platform`)
 //!
 //! `registerModel`, `setMaskPolicy`, `startReplicationConsumer`, and the
-//! `migrations` / `replication` namespaces moved off `env.db` to the
+//! `replication` namespace moved off `env.db` to the
 //! [`super::db_platform::DbPlatform`] capability handle. That handle is
 //! set on this `Db` object under the `ZS_PLATFORM` private symbol in
 //! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
