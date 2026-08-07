@@ -191,6 +191,12 @@ export type Expr =
   | { node: "case"; branches: CaseBranch[]; else?: Expr | null }
   | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
+  // Exact RFC 9562 UUID generators, evaluated in the database. The dialect
+  // renderer owns the concrete expression: `uuidV4` must preserve the `0100`
+  // version nibble and the `10` RFC variant bits; `uuidV7` fails closed on an
+  // unsupported target/server version rather than substituting another version.
+  | { node: "uuidV4" }
+  | { node: "uuidV7" }
   | { node: "cast"; operand: Expr; target: CastTarget }
   | { node: "between"; operand: Expr; low: Expr; high: Expr }
   | { node: "like"; operand: Expr; pattern: Expr }
@@ -239,6 +245,35 @@ export interface IdentityCol {
   always: boolean;
 }
 
+/** Canonical VALUE-level format metadata, independent of physical SQL storage.
+ *  Externally tagged in serde's natural representation: a TypeID is
+ *  `{ typeId: { prefix } }`; a ULID is the bare unit-variant string `"ulid"`.
+ *  The physical storage type stays explicit on the column's `type`; validation
+ *  checks the format/type pairing. */
+export type ValueFormat =
+  /** TypeID 0.3, stored canonically as `<prefix>_<suffix>` (or the bare suffix
+   *  when `prefix` is empty). `prefix` carries no separator underscore. */
+  | { typeId: { prefix: string } }
+  /** ULID, stored as exactly 26 canonical uppercase Crockford Base32 characters
+   *  with the 128-bit overflow bound enforced. */
+  | "ulid";
+
+/** Target and behaviour for a TYPED SINGLE-column foreign-key reference. The
+ *  local column's storage type stays fully specified by the column's `type`;
+ *  this facet adds only the target identity and referential actions, and never
+ *  infers or replaces the local type from a live catalog. Composite foreign keys
+ *  deliberately do NOT use this shape — they remain table-level constraints with
+ *  ordered local/referenced column lists. */
+export interface ColumnReference {
+  table: string;
+  column: string;
+  onDelete?: RefAction | null;
+  onUpdate?: RefAction | null;
+  /** Explicit FK constraint name. Absent means the name is derived as
+   *  `<table>_<column>_fkey`. */
+  name?: string | null;
+}
+
 /** A column definition inside `createTable` / `addColumn`. */
 export interface IrColumn {
   name: string;
@@ -246,6 +281,11 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
+  /** Canonical value-level format metadata (closed {@link ValueFormat}).
+   *  Default-absent. */
+  valueFormat?: ValueFormat | null;
+  /** A typed SINGLE-column foreign-key reference facet. Default-absent. */
+  references?: ColumnReference | null;
   /** **P2a §2b** — the `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
    *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
   idPrefix?: string | null;
@@ -389,11 +429,40 @@ export interface IrOnConflict {
   doUpdate?: { [column: string]: IrValue } | null;
 }
 
-/** A batched-backfill knob. */
+/** A batched-backfill knob. SDK-LOCAL ergonomics — the engine schema has no
+ *  matching `$defs` entry; the wire shape is the `backfill` op itself. */
 export interface IrBatch {
   cursorColumn: string;
   batchSize: number;
 }
+
+/** The invariant that keeps a resumable backfill's ordered cursor tuple immutable
+ *  for the full operation, INCLUDING the time between an interrupted apply and its
+ *  resume. Internally tagged on `mode`. */
+export type CursorStability =
+  /** Install a zero-migrate-owned database guard that rejects updates to any
+   *  cursor component until durable backfill completion. */
+  | { mode: "guardUpdates" }
+  /** Rely on a named application/maintenance invariant forbidding cursor updates,
+   *  explicitly acknowledged by the operator. */
+  | { mode: "externalInvariant"; name: string };
+
+/** APPLY-ENGINE value generation, evaluated independently for every row a batched
+ *  backfill selects. Deliberately separate from `Expr`'s DATABASE-side UUID nodes
+ *  (`uuidV4`/`uuidV7`): it is accepted only through {@link BackfillSetValue}, never
+ *  as an insert/update value or a column default. */
+export type PerRowGenerator =
+  | "uuidV4"
+  | "uuidV7"
+  | "ulid"
+  /** A canonical TypeID whose suffix encodes a UUIDv7. */
+  | { typeId: { prefix: string } };
+
+/** A value accepted specifically by `backfill.set`. Ordinary DML values keep their
+ *  existing scalar/expression wire image; the apply-engine generator arm is an
+ *  explicit `{ perRow }` wrapper, so it can be confused with neither a literal nor
+ *  a database UUID expression. */
+export type BackfillSetValue = IrValue | { perRow: PerRowGenerator };
 
 /** §A2 — the closed trigger action: either call an operator-provided function
  *  (PG render path) or carry a structured trigger body (SQLite render path). */
@@ -449,6 +518,26 @@ export type OrderItem =
   | { kind: "colRef"; table?: string | null; name: string; dir?: OrderDir | null }
   | { kind: "expr"; expr: Expr; dir?: OrderDir | null };
 
+/** The explicit lifecycle change for a table's primary-key constraint
+ *  (`alterPrimaryKey`), internally tagged on `kind`.
+ *
+ *  Deliberately narrower than a general ID migration: it carries only the final
+ *  constraint mutation plus the one generation transition that may be coupled to
+ *  it. Columns, values, candidate uniqueness, and foreign keys must already have
+ *  been staged before this op is applied. `expectedColumns` is an EXACT ordered
+ *  live-key precondition, never a discovery hint. */
+export type AlterPrimaryKeyAction =
+  | { kind: "add"; columns: string[] }
+  | {
+      kind: "replace";
+      expectedColumns: string[];
+      columns: string[];
+      /** Old generated-integer columns whose identity facet must be removed as
+       *  part of the same target-specific operation. */
+      dropIdentityFrom?: string[] | null;
+    }
+  | { kind: "drop"; expectedColumns: string[]; dropIdentityFrom?: string[] | null };
+
 /** **VENDOR** — one CREATE FUNCTION argument. */
 export interface FuncArg {
   name?: string | null;
@@ -482,7 +571,7 @@ export type Op =
   | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; valueFormat?: ValueFormat | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";
@@ -507,6 +596,15 @@ export type Op =
   | { op: "setColumnDefault"; table: string; column: string; value: IrDefault; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumnDefault"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  // Explicitly add/replace/drop a table primary key once every prerequisite is
+  // already staged. Apply verifies the live key EXACTLY and performs no column,
+  // data, uniqueness, or foreign-key migration of its own.
+  | { op: "alterPrimaryKey"; table: string; action: AlterPrimaryKeyAction; schema?: string | null }
+  // Reconcile one imported integer identity column's generator, never moving an
+  // already-ahead generator backward. `writesQuiesced` is operator-authored
+  // coordination metadata: the engine records and surfaces it but cannot prove
+  // concurrent application writers are actually quiesced.
+  | { op: "synchronizeIdentity"; table: string; column: string; writesQuiesced: string; schema?: string | null }
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -514,7 +612,11 @@ export type Op =
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: IrValue }; filter?: Expr | null; name: string; schema?: string | null }
+  // A resumable, cursor-paged backfill. `cursorColumns` is the ORDERED cursor
+  // tuple paged over lexicographically, and `cursorStability` is the (required)
+  // invariant keeping every component of it immutable across an interrupted
+  // apply and its resume.
+  | { op: "backfill"; table: string; cursorColumns: string[]; cursorStability: CursorStability; batchSize: SafeU64; set: { [column: string]: BackfillSetValue }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "dialectal"; default?: Op[] | null; pg?: Op[] | null; sqlite?: Op[] | null; mysql?: Op[] | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }

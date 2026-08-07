@@ -56,7 +56,8 @@ const TS = {
     "createTable", "createPartition", "attachPartition", "detachPartition", "dropPartition",
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
-    "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
+    "setColumnDefault", "dropColumnDefault", "renameColumn",
+    "alterPrimaryKey", "synchronizeIdentity", "addConstraint",
     "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "dialectal", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
@@ -67,7 +68,8 @@ const TS = {
   ].sort(),
   // Expr node tags.
   Expr: [
-    "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
+    "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth",
+    "uuidV4", "uuidV7", "cast",
     "between", "like", "distinctFrom", "agg",
     "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgExtract", "pgInterval",
     "dialect",
@@ -94,7 +96,10 @@ const TS = {
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
-  SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
+  // `genRandomUuid` is a SOURCE ALIAS ONLY and no longer survives as an IR
+  // token: the engine replaced it with the dedicated `uuidV4`/`uuidV7` Expr
+  // nodes, so it is absent from the schema's closed `SynthFn` set.
+  SynthFn: ["concatWs", "splitPart", "now"].sort(),
   CastTarget: ["text", "int", "real", "boolean", "bytes", "uuid"].sort(),
   ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
   PgExtractField: [
@@ -147,7 +152,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
-  addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
+  addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "valueFormat", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
@@ -157,6 +162,10 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   setColumnDefault: ["column", "existenceGuard", "schema", "table", "value"].sort(),
   dropColumnDefault: ["column", "existenceGuard", "schema", "table"].sort(),
   renameColumn: ["existenceGuard", "from", "schema", "table", "to", "type"].sort(),
+  // Explicit PK lifecycle + imported-identity generator reconciliation. Neither
+  // carries an `existenceGuard`: both assert their live precondition exactly.
+  alterPrimaryKey: ["action", "schema", "table"].sort(),
+  synchronizeIdentity: ["column", "schema", "table", "writesQuiesced"].sort(),
   setTableOptions: ["options", "schema", "table"].sort(),
   addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
@@ -165,7 +174,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
   update: ["schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
-  backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
+  backfill: ["batchSize", "cursorColumns", "cursorStability", "filter", "name", "schema", "set", "table"].sort(),
   dialectal: ["default", "mysql", "pg", "sqlite"].sort(),
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
   dropView: ["existenceGuard", "materialized", "name", "schema"].sort(),
