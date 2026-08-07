@@ -4,7 +4,7 @@
 //! AAD binds a ciphertext to its logical context. AES-GCM verifies the
 //! AAD as part of decryption: any mismatch produces a tag-verification
 //! failure (the SDK-visible `encryption_aead_failed` error). Per the
-//! Camp-A resolution in `docs/proposals/p5-encryption-backup-implementation-plan.md`
+//! Camp-A resolution in `docs/archive/p5-encryption-backup-implementation-plan.md`
 //! §13 (2026-05-24), plugin-db binds:
 //!
 //! - **Randomised mode**: `(collection, column, row_pk_bytes)`.

@@ -71,7 +71,7 @@ pub mod session;
 pub(crate) mod spatial;
 // `sqlite-vec` vec0 vtable lifecycle + MATCH query composition.
 // Supersedes the earlier pure-Rust flat scan (see
-// `docs/proposals/p4-search-implementation-plan.md` §10, 2026-05-24
+// `docs/archive/p4-search-implementation-plan.md` §10, 2026-05-24
 // reassessment). The `impl VectorIndex for SqliteBackend` block at
 // the bottom of this file orchestrates the five idempotent DDL
 // statements + the JOIN+MATCH search path; the SQL primitives
@@ -108,7 +108,7 @@ use session::{SqliteSession, SqliteSessionHandle};
 /// SQLite backend handle. One instance per worker thread (mirrors
 /// [`crate::backend::PostgresBackend`]'s lifecycle).
 ///
-/// **Field set** (`docs/proposals/p1-sqlite-implementation-plan.md` §2.1):
+/// **Field set** (`docs/archive/p1-sqlite-implementation-plan.md` §2.1):
 ///
 /// - `session`: the writer-actor handle. Owns the single
 ///   `rusqlite::Connection` for this backend and serialises all DDL
@@ -1570,7 +1570,7 @@ impl crate::backend::SessionMinter for SqliteBackend {
 // ---------------------------------------------------------------------------
 //
 // Swapped from the earlier pure-Rust flat scan (the
-// original Q-P4-D decision in `docs/proposals/p4-search-implementation-plan.md`
+// original Q-P4-D decision in `docs/archive/p4-search-implementation-plan.md`
 // §10). Reassessment dated 2026-05-24 corrected the bundled-vs-`.so`
 // mistake: the `sqlite-vec` Rust crate compiles the C extension
 // statically and registers it via `sqlite3_auto_extension`

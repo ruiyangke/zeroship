@@ -8,7 +8,7 @@
 //!
 //! The baseline ships `version_flag = 0x01` (AAD = `(collection, column,
 //! row_pk_bytes?)`). The post-system-fields proposal (see
-//! `docs/proposals/platform-system-fields.md` §8) introduces a
+//! `docs/archive/platform-system-fields.md` §8) introduces a
 //! `version_flag = 0x02` shape where AAD additionally binds the
 //! row-version bytes. The leading byte is reserved from day one so
 //! the upgrade requires no in-place data migration of existing

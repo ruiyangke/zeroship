@@ -42,7 +42,7 @@ use crate::query::IndexKind;
 /// for Pass-1 DDL via its [`crate::backend::SqlExecutor`] super-bound;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
 /// by Pass 2. See `docs/archive/p0-implementation-plan.md` §"PR 2"
-/// and `docs/proposals/db-system-design.md` §7.
+/// and `docs/archive/db-system-design.md` §7.
 /// The `EncryptedColumn` super-bound lets the
 /// `MaskBackfill` / `MaskRewrite` dispatch decrypt encrypted columns
 /// before applying the mask transform. Inside `run_op` the

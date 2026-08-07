@@ -22,7 +22,7 @@
 //! - [`aad`] — canonical, length-prefixed AAD construction.
 //!   `Randomised` mode binds `(collection, column, row_pk_bytes)`;
 //!   `Deterministic` mode binds `(collection, column)` only.
-//!   See `docs/proposals/p5-encryption-backup-implementation-plan.md`
+//!   See `docs/archive/p5-encryption-backup-implementation-plan.md`
 //!   §13 (Camp A resolution, 2026-05-24).
 //! - [`wire`] — versioned framing: `[version_flag (1B) | nonce (12B)
 //!   | ciphertext + tag (NB)]`. Version flag `0x01` is reserved for

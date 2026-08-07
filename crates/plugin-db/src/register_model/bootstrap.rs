@@ -88,7 +88,7 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// preserving the borrow-lifetime `'p` that threads through
 /// [`LockGuard`] (Open Q5 resolution; see
 /// `docs/archive/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
-/// `docs/proposals/db-system-design.md` §7).
+/// `docs/archive/db-system-design.md` §7).
 ///
 /// The lock site is classified as
 /// `LockScope::GlobalApp { app_id, name: "register_model" }` — the

@@ -4,7 +4,7 @@
 //! `<other_app>` prefix differs from the calling app's id. The check
 //! exists so creators cannot accidentally (or intentionally) build a
 //! schema whose physical FK crosses a per-app SQLite file boundary —
-//! see design `docs/proposals/db-system-design.md` §18 Q1 for the
+//! see design `docs/archive/db-system-design.md` §18 Q1 for the
 //! ATTACH-isolation reasoning. Although the motivation is SQLite-
 //! specific (PG can express cross-schema FKs natively), the platform
 //! policy is "every FK stays inside one app's namespace" on both
@@ -47,7 +47,7 @@ use crate::error::DbError;
 /// (one call per `bootstrap::build_ctx` invocation, with the per-
 /// collection field set), so the walk is O(fields-in-one-collection).
 ///
-/// **Error envelope** matches the contract in `docs/proposals/p1-sqlite-implementation-plan.md`
+/// **Error envelope** matches the contract in `docs/archive/p1-sqlite-implementation-plan.md`
 /// §6: `DbError::Configuration { code: "cross_app_fk_forbidden", ... }`.
 /// The static `.code` is the canonical SDK-visible classifier; the
 /// `hint` carries operator-facing remediation text.

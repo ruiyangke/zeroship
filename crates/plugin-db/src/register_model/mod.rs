@@ -1,7 +1,7 @@
 //! `db.registerModel(collection, schema, indexes)` — the four-phase DDL
 //! pipeline.
 //!
-//! Proposal A2 (docs/proposals/zeroship-db.md) defines the contract:
+//! Proposal A2 (docs/archive/zeroship-db.md) defines the contract:
 //!
 //! 1. **Bootstrap** (`bootstrap`) — create the per-app schema, the
 //!    `__zeroship_migrations` audit table (idempotent), acquire the
@@ -257,7 +257,7 @@ async fn exec_register_model(
 /// now, so the `PooledClient<'p>` lifetime still threads through to
 /// `apply` but no concrete-type leak remains in this signature. Open
 /// Q5 resolution per `docs/archive/p0-implementation-plan.md`
-/// §"PR 3" + §3 Q5 and `docs/proposals/db-system-design.md` §7.
+/// §"PR 3" + §3 Q5 and `docs/archive/db-system-design.md` §7.
 #[cfg(any(test, feature = "test-helpers"))]
 pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
     backend: &B,

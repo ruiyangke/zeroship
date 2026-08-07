@@ -3,7 +3,7 @@
 //! The MaskedValue surface (`sdks/db/src/types.ts`) calls into this
 //! module via the `zeroship.db.unmaskField` native op (registered as a
 //! `#[v8_method]` on `Db`). The flow follows §6 of
-//! `docs/proposals/sensitive-field-masking.md`:
+//! `docs/archive/sensitive-field-masking.md`:
 //!
 //! 1. Look up the column's mask metadata (classification) from the
 //!    cached schema. A column with no mask declaration cannot be

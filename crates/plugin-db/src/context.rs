@@ -256,7 +256,7 @@ pub struct IsolateDbContext {
     mask_policies: HashMap<String, crate::crud::mask_policy::MaskPolicy>,
 
     /// Backend handle wrapping the pool, as the typed
-    /// [`BackendHandle`] enum (see `docs/proposals/db-system-design.md`
+    /// [`BackendHandle`] enum (see `docs/archive/db-system-design.md`
     /// §5.5 and `docs/archive/p0-implementation-plan.md`).
     /// Created alongside the pool by [`Self::set_pool`] so consumers
     /// can call `ctx.backend()` to get a [`BackendHandle`] without

@@ -91,7 +91,7 @@ pub use sqlite::SqliteBackend;
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
 /// `docs/archive/p0-implementation-plan.md` and the
-/// converged design at `docs/proposals/db-system-design.md` §7).
+/// converged design at `docs/archive/db-system-design.md` §7).
 /// Consumer bounds narrow onto this trait (and [`LockManager`])
 /// instead of the omnibus [`Backend`] super-trait; see the
 /// deferred-backlog [C1] entry in `docs/reviews/plugin-db-deferred.md`.
@@ -171,7 +171,7 @@ pub trait SqlExecutor: 'static {
 /// plugin-db crate performs.
 ///
 /// **§7 / §10.5 distinction** (see
-/// `docs/proposals/db-system-design.md`):
+/// `docs/archive/db-system-design.md`):
 ///
 /// - [`LockScope::GlobalApp`] — **cross-process visibility**. The lock
 ///   must be observable by every worker process pointed at the same
@@ -271,7 +271,7 @@ impl LockScope {
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
 /// `docs/archive/p0-implementation-plan.md` and
-/// `docs/proposals/db-system-design.md` §7). The `: SqlExecutor`
+/// `docs/archive/db-system-design.md` §7). The `: SqlExecutor`
 /// super-bound is load-bearing — every method takes a `&Self::Client`
 /// and that associated type lives on [`SqlExecutor`].
 ///
@@ -532,7 +532,7 @@ pub trait LockManager: SqlExecutor {
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
 /// `docs/archive/p0-implementation-plan.md` and the
-/// converged design at `docs/proposals/db-system-design.md` §7). Carries
+/// converged design at `docs/archive/db-system-design.md` §7). Carries
 /// the single `ensure_app_schema` method that used to live on
 /// [`Backend`] directly; consumer bounds in
 /// `register_model/bootstrap.rs` narrow onto this trait.
@@ -554,7 +554,7 @@ pub trait NamespaceManager: 'static {
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
 /// `docs/archive/p0-implementation-plan.md` and
-/// `docs/proposals/db-system-design.md` §7). The trait owns the
+/// `docs/archive/db-system-design.md` §7). The trait owns the
 /// `LiveSchema` associated type that used to live on [`Backend`] —
 /// pinning it here means consumer bounds like
 /// `<B: SchemaIntrospect<LiveSchema = LiveSchema>>` in
@@ -589,7 +589,7 @@ pub trait SchemaIntrospect: 'static {
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
 /// `docs/archive/p0-implementation-plan.md` and
-/// `docs/proposals/db-system-design.md` §7). The single method —
+/// `docs/archive/db-system-design.md` §7). The single method —
 /// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
 /// a SQLSTATE-driven retry loop and writes structured audit rows on
 /// every retry. The `: SqlExecutor` super-bound is load-bearing: the
@@ -629,7 +629,7 @@ pub trait IndexBuilder: SqlExecutor {
 /// table".
 ///
 /// Introduced per decision AW-1 in
-/// `docs/proposals/p1-sqlite-implementation-plan.md` §3.5 + §10. The
+/// `docs/archive/p1-sqlite-implementation-plan.md` §3.5 + §10. The
 /// trait exists so [`IndexBuilder::create_index_with_recovery`] (and
 /// future audit-emitting hooks) can stamp rows without hard-coding the
 /// PG-only [`crate::audit::write_audit_row`] free function.
@@ -799,7 +799,7 @@ pub struct MintedToken {
 /// SQL-dialect strategy — the seam every per-engine SQL-string
 /// builder route through.
 ///
-/// See `docs/proposals/p1-sqlite-implementation-plan.md` §5. The six
+/// See `docs/archive/p1-sqlite-implementation-plan.md` §5. The six
 /// methods listed below are the minimum-viable hook set; additional
 /// hooks (RETURNING/upsert/JSON/vector/FTS) fill in alongside
 /// the consumers that need them.
@@ -877,7 +877,7 @@ pub trait DialectBuilder: 'static {
 /// helpers stay as free functions in `crate::audit::*` taking
 /// `&Pool` / `&Client`, and generic consumers reach the pool through
 /// `backend.pool_handle()`. See `docs/archive/p0-implementation-plan.md`
-/// §3 Q1 and `docs/proposals/db-system-design.md` §7.
+/// §3 Q1 and `docs/archive/db-system-design.md` §7.
 ///
 /// **Feature gating**: this trait is unconditional at HEAD. The `impl`
 /// side moves onto the PG backend only; a hypothetical
@@ -910,7 +910,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// we take the PG extension-trait path and defer cross-backend
 /// lifetime threading. See
 /// `docs/archive/p0-implementation-plan.md` §3 Q5 and
-/// `docs/proposals/db-system-design.md` §7.
+/// `docs/archive/db-system-design.md` §7.
 ///
 /// The `: LockManager<Client = compio_postgres::Client>` super-bound
 /// is load-bearing: the returned `PooledClient` is the
@@ -1105,7 +1105,7 @@ impl Drop for BrokerPauseGuard {
 /// column and run a top-k nearest-neighbour query" slice of the
 /// data-store boundary.
 ///
-/// See `docs/proposals/p4-search-implementation-plan.md`
+/// See `docs/archive/p4-search-implementation-plan.md`
 /// §2. The PG impl wraps `pgvector` (`CREATE INDEX … USING
 /// ivfflat`, `<->` / `<#>` / `<=>` operators by metric). The SQLite
 /// impl is a pure-Rust flat scan over a `BLOB` column holding
@@ -1301,7 +1301,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 // ===========================================================================
 //
 // Two capability traits defined per
-// `docs/proposals/p5-encryption-backup-implementation-plan.md` §2 + §9.
+// `docs/archive/p5-encryption-backup-implementation-plan.md` §2 + §9.
 // Neither joins the [`Backend`] super-trait composition or the
 // [`RegisterBackend`] marker — they're admin-surface accessors routed
 // via dedicated `BackendHandle::as_encrypted_column_*` /
@@ -1335,7 +1335,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 ///   [`BackendHandle`], no boxed dyn in the hot path.
 ///
 /// **Per-row AAD policy** (the riskiest decision, resolved Camp A in
-/// `docs/proposals/p5-encryption-backup-implementation-plan.md` §13):
+/// `docs/archive/p5-encryption-backup-implementation-plan.md` §13):
 /// callers pass the row PK in AAD for `EncryptionMode::Randomised`
 /// (typed_id PKs are minted SDK-side so the PK is always available
 /// before INSERT — no chicken-and-egg). `EncryptionMode::Deterministic`
@@ -1582,7 +1582,7 @@ impl Drop for SchemaPendingGuard {
 ///
 /// See the "Ergonomics" step in
 /// `docs/archive/p0-implementation-plan.md` and
-/// `docs/proposals/db-system-design.md` §7.
+/// `docs/archive/db-system-design.md` §7.
 // The `EncryptedColumn` super-bound is required for
 // the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
 // (the backfill decrypts encrypted columns before applying the mask
@@ -1667,7 +1667,7 @@ pub trait Backend:
 /// [`crate::context::IsolateDbContext`].
 ///
 /// **Why an enum, not `Box<dyn Backend>`** (closes
-/// `docs/proposals/db-system-design.md` §5.5 and
+/// `docs/archive/db-system-design.md` §5.5 and
 /// `docs/archive/p0-implementation-plan.md`):
 ///
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
@@ -1700,7 +1700,7 @@ pub enum BackendHandle {
     /// SQLite backend handle, wrapping
     /// [`crate::backend::sqlite::SqliteBackend`]. The inner type's
     /// capability-impl behaviour follows
-    /// `docs/proposals/p1-sqlite-implementation-plan.md` §9.
+    /// `docs/archive/p1-sqlite-implementation-plan.md` §9.
     Sqlite(Rc<SqliteBackend>),
 }
 

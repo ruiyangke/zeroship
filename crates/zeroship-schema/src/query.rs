@@ -1482,7 +1482,7 @@ fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
 ///
 /// The PK on `id` covers `id` lookups via the implicit unique index;
 /// `version` is not indexed (every UPDATE bumps it; the index would
-/// thrash). See §5 of `docs/proposals/platform-system-fields.md` for
+/// thrash). See §5 of `docs/archive/platform-system-fields.md` for
 /// the rationale.
 ///
 /// Dialect controls the `ON` clause syntax:
@@ -2435,7 +2435,7 @@ fn field_to_column_for_dialect(
     // Sentinel-on-DDL is the same regex-on-DDL pattern used for
     // vector dims; sidecar `__zs_schema_meta` is the upgrade path
     // (deferred). See
-    // `docs/proposals/p5-encryption-backup-implementation-plan.md` §5.
+    // `docs/archive/p5-encryption-backup-implementation-plan.md` §5.
     let enc_comment_owned;
     let enc_comment: &str = if let Some(body) = encryption_sentinel_for_field(def) {
         enc_comment_owned = format!(" {body}");
