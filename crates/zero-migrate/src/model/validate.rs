@@ -219,6 +219,9 @@ fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool 
 /// This key deliberately records only declarations authored by migration IR.
 /// Catalog introspection cannot reconstruct semantic value-format contracts such
 /// as TypeID prefixes or ULID casing, so it must never populate this map.
+/// A reference into a target absent from this map may still be proved against
+/// the live catalog's own format evidence by `catalog_proves_reference_format`,
+/// which confirms an authored expectation rather than supplying a contract.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalColumnKey {
     pub schema: Option<String>,
@@ -281,6 +284,87 @@ pub type LogicalColumnContracts = BTreeMap<LogicalColumnKey, LogicalColumnContra
 enum MissingLogicalDeclaration {
     DeferToLower,
     Reject,
+}
+
+/// Live catalog columns a reference check may consult to prove the value format
+/// of a target that has no authored contract.
+///
+/// Keyed by bare table name, exactly like `LiveSchema::table_snapshots`: an
+/// introspected snapshot already covers one project schema, so the reference's
+/// schema qualifier adds nothing here. Load-time validation has no catalog and
+/// uses [`Self::none`], which proves nothing.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CatalogFormatEvidence<'a> {
+    tables: Option<&'a BTreeMap<String, crate::model::snapshot::TableSnapshot>>,
+}
+
+impl<'a> CatalogFormatEvidence<'a> {
+    /// Consult this introspected table map.
+    pub(crate) const fn new(
+        tables: &'a BTreeMap<String, crate::model::snapshot::TableSnapshot>,
+    ) -> Self {
+        Self {
+            tables: Some(tables),
+        }
+    }
+
+    /// No catalog is available, so no target can be proved.
+    pub(crate) const fn none() -> Self {
+        Self { tables: None }
+    }
+
+    fn column(
+        self,
+        table: &str,
+        column: &str,
+    ) -> Option<&'a crate::model::snapshot::ColumnSnapshot> {
+        self.tables?
+            .get(table)?
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+    }
+}
+
+/// Whether the live catalog independently proves the value format that a
+/// format-bearing local column requires of its reference target.
+///
+/// The expected format always comes from the AUTHORED local contract; the
+/// catalog is only ever asked to confirm it, never to supply it. Evidence
+/// counts only when the target column enforces the format LOCALLY:
+///   - PostgreSQL: the native `uuid` type, which is itself the canonical UUID
+///     contract, so the renderer emits no UUID CHECK there.
+///   - MySQL and SQLite: the engine's own exact UUID spelling CHECK, recovered
+///     into `ColumnSnapshot::catalog_uuid_format_check`.
+///   - Every dialect: an exactly equal TypeID/ULID CHECK recovered into
+///     `ColumnSnapshot::value_format`.
+///
+/// What this deliberately does NOT prove: a chained typed reference, which
+/// omits its own format CHECK and inherits safety through its foreign key. Such
+/// a target leaves no local catalog evidence, so it stays rejected. This proof
+/// also says nothing about storage type, character set, collation, nullability,
+/// or candidate-key eligibility; those remain the separate checks that already
+/// run over the same reference.
+fn catalog_proves_reference_format(
+    catalog: CatalogFormatEvidence<'_>,
+    target_dialect: Dialect,
+    table: &str,
+    column: &str,
+    local: &LogicalColumnContract,
+) -> bool {
+    let Some(target) = catalog.column(table, column) else {
+        return false;
+    };
+    if let Some(expected) = &local.value_format {
+        return target.value_format.as_ref() == Some(expected);
+    }
+    if !matches!(local.ty, crate::model::ir::ColType::Uuid) {
+        return false;
+    }
+    match target_dialect {
+        Dialect::Postgres => target.data_type.trim().eq_ignore_ascii_case("uuid"),
+        Dialect::Mysql | Dialect::Sqlite => target.catalog_uuid_format_check,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1718,6 +1802,7 @@ fn validate_one_column_reference(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
+    catalog: CatalogFormatEvidence<'_>,
     target_dialect: Dialect,
     op_index: usize,
     ts_locations: &[Option<String>],
@@ -1737,6 +1822,13 @@ fn validate_one_column_reference(
         [] => {
             if missing == MissingLogicalDeclaration::Reject
                 && reference_is_format_bearing(local_contract)
+                && !catalog_proves_reference_format(
+                    catalog,
+                    target_dialect,
+                    &reference.table,
+                    &reference.column,
+                    local_contract,
+                )
             {
                 return Err(reference_validation_error(
                     local,
@@ -1884,6 +1976,7 @@ fn validate_column_references_op(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
+    catalog: CatalogFormatEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -1909,6 +2002,7 @@ fn validate_column_references_op(
                         declared,
                         schema_mode,
                         missing,
+                        catalog,
                     )?;
                 }
             }
@@ -1944,6 +2038,7 @@ fn validate_column_references_op(
                     declared,
                     schema_mode,
                     missing,
+                    catalog,
                     target_dialect,
                     op_index,
                     ts_locations,
@@ -1980,6 +2075,7 @@ fn validate_column_references(
             &declared,
             schema_mode,
             MissingLogicalDeclaration::DeferToLower,
+            CatalogFormatEvidence::none(),
         )?;
     }
     Ok(())
@@ -1989,13 +2085,14 @@ fn validate_column_references(
 ///
 /// `seed` contains authored logical declarations retained from earlier ordered
 /// artifacts. Current declarations are overlaid before validation, so forward
-/// references within this artifact are deterministic. Missing format-bearing
-/// targets are rejected because a catalog cannot recover `ValueFormat`; missing
+/// references within this artifact are deterministic. A missing format-bearing
+/// target is rejected unless `catalog` independently proves its format; missing
 /// plain primitives are left for lower's physical catalog compatibility check.
 ///
 /// # Errors
 /// Returns [`CODE_OP_INVALID`] for an ambiguous target, a logical/storage/format/
-/// collation mismatch, or a formatted reference with no authored target metadata.
+/// collation mismatch, or a formatted reference with no authored target metadata
+/// and no live catalog evidence.
 pub(crate) fn validate_column_references_for_lower(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
@@ -2003,6 +2100,7 @@ pub(crate) fn validate_column_references_for_lower(
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
+    catalog: CatalogFormatEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
@@ -2021,6 +2119,7 @@ pub(crate) fn validate_column_references_for_lower(
             &declared,
             schema_mode,
             MissingLogicalDeclaration::Reject,
+            catalog,
         )?;
     }
     Ok(())
@@ -2085,6 +2184,7 @@ fn validate_table_foreign_key_constraint(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
+    catalog: CatalogFormatEvidence<'_>,
     target_dialect: Dialect,
     op_index: usize,
     ts_locations: &[Option<String>],
@@ -2218,7 +2318,16 @@ fn validate_table_foreign_key_constraint(
         };
 
         if let (Some(local), None) = (local, target) {
-            if missing == MissingLogicalDeclaration::Reject && reference_is_format_bearing(local) {
+            if missing == MissingLogicalDeclaration::Reject
+                && reference_is_format_bearing(local)
+                && !catalog_proves_reference_format(
+                    catalog,
+                    target_dialect,
+                    references_table,
+                    target_column,
+                    local,
+                )
+            {
                 return Err(error(
                     format!(
                         "position {} local column {local_column:?} carries {}, but the referenced target has no authored value-format metadata",
@@ -2314,6 +2423,7 @@ fn validate_table_foreign_keys_op(
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
+    catalog: CatalogFormatEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -2339,6 +2449,7 @@ fn validate_table_foreign_keys_op(
                         declared,
                         schema_mode,
                         missing,
+                        catalog,
                     )?;
                 }
             }
@@ -2371,6 +2482,7 @@ fn validate_table_foreign_keys_op(
                     declared,
                     schema_mode,
                     missing,
+                    catalog,
                     target_dialect,
                     op_index,
                     ts_locations,
@@ -2398,6 +2510,7 @@ fn validate_table_foreign_keys_op(
                 declared,
                 schema_mode,
                 missing,
+                catalog,
                 target_dialect,
                 op_index,
                 ts_locations,
@@ -2484,6 +2597,7 @@ fn validate_table_foreign_keys(
             &mut declared,
             schema_mode,
             MissingLogicalDeclaration::DeferToLower,
+            CatalogFormatEvidence::none(),
         )?;
     }
     Ok(())
@@ -2492,7 +2606,8 @@ fn validate_table_foreign_keys(
 /// Strict ordered-tuple validation for table-level foreign keys. The authored
 /// declaration graph is authoritative for logical types and value formats; an
 /// unmanaged primitive target may still be proved from the live catalog by the
-/// lowerer.
+/// lowerer, and an unmanaged format-bearing target may be proved by `catalog`
+/// when it carries the target's own format evidence.
 pub(crate) fn validate_table_foreign_keys_for_lower(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
@@ -2500,6 +2615,7 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
+    catalog: CatalogFormatEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
@@ -2518,6 +2634,7 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
             &mut declared,
             schema_mode,
             MissingLogicalDeclaration::Reject,
+            catalog,
         )?;
     }
     Ok(())
@@ -10558,6 +10675,7 @@ mod tests {
             &LogicalColumnContracts::new(),
             "app",
             None,
+            CatalogFormatEvidence::none(),
         )
         .expect_err("a catalog cannot invent missing TypeID metadata");
         assert!(
@@ -10582,6 +10700,7 @@ mod tests {
             &LogicalColumnContracts::new(),
             "app",
             None,
+            CatalogFormatEvidence::none(),
         )
         .expect("a missing primitive target is left for physical catalog validation");
     }

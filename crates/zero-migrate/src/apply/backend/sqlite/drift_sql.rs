@@ -460,6 +460,12 @@ async fn introspect_columns(
             identity,
             sqlite_rowid,
             value_format,
+            // Retain the engine's own UUID contract as catalog evidence. The
+            // id-default classification above consumes the recovered CHECK
+            // without recording that the column enforces the UUID spelling
+            // locally, and `value_format` cannot carry it (UUID is not a
+            // `ValueFormat`).
+            catalog_uuid_format_check: has_uuid_format_check,
             id_default,
             mysql_default_generated: None,
             encryption_sentinel: None,

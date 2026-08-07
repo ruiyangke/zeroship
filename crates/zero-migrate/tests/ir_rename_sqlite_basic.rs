@@ -636,6 +636,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 identity: None,
                 sqlite_rowid: false,
                 value_format: None,
+                catalog_uuid_format_check: false,
                 id_default: None,
                 mysql_default_generated: None,
                 case_sensitive: None,

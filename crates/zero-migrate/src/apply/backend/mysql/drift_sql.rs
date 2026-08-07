@@ -216,6 +216,9 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             identity,
             sqlite_rowid: false,
             value_format: None,
+            // Set below from the CHECK pass, which is the only place the
+            // engine's own UUID contract is recoverable on MySQL.
+            catalog_uuid_format_check: false,
             id_default: identity.map(|_| {
                 recover_mysql_id_default(default.as_deref(), has_default_generated(&extra), false)
             }),
@@ -299,8 +302,13 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
                     Some(expression_default),
                 ),
             });
-            if let RecoveredFormatCheck::Value(format) = recovered {
-                column.value_format = Some(format);
+            match recovered {
+                // Retain the engine's own UUID contract as catalog evidence.
+                // `value_format` cannot carry it (UUID is not a `ValueFormat`),
+                // and the id-default classification above consumes it without
+                // recording that the column enforces the UUID spelling locally.
+                RecoveredFormatCheck::Uuid => column.catalog_uuid_format_check = true,
+                RecoveredFormatCheck::Value(format) => column.value_format = Some(format),
             }
         }
     }

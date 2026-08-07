@@ -730,6 +730,7 @@ mod tests {
             identity: None,
             sqlite_rowid: false,
             value_format: None,
+            catalog_uuid_format_check: false,
             id_default: None,
             mysql_default_generated: None,
             case_sensitive: None,

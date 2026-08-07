@@ -75,6 +75,22 @@ pub struct ColumnSnapshot {
     /// inherit format safety through their foreign key leave this field `None`;
     /// their reference constraint is the drift contract.
     pub value_format: Option<ValueFormat>,
+    /// Whether the live catalog carries the engine's own exact UUID spelling
+    /// CHECK for this column on MySQL or SQLite. PostgreSQL never sets it: its
+    /// native `uuid` type is the contract and the renderer emits no CHECK.
+    ///
+    /// This exists so a reference whose target has no authored contract can
+    /// still be proved from the catalog. It is INTROSPECTION-ONLY metadata and
+    /// MUST NOT be compared: author-built desired snapshots always leave it
+    /// `false`, so it is excluded from `PartialEq`, `Hash`, and the drift
+    /// attribute diff. Comparing it would report permanent phantom drift on
+    /// every UUID column, and on SQLite a column-attribute difference is
+    /// reconciled by a full table rebuild.
+    ///
+    /// A typed reference column that omits its own CHECK and inherits format
+    /// safety through its foreign key leaves this `false`; that inheritance is
+    /// not local catalog evidence.
+    pub catalog_uuid_format_check: bool,
     /// Semantic drift key for a default on an ID-bearing column.
     ///
     /// `None` means this is not an ID-default comparison surface. `Some(Absent)`
@@ -175,6 +191,9 @@ impl std::fmt::Debug for ColumnSnapshot {
             .field("id_default", &self.id_default)
             .field("case_sensitive", &self.case_sensitive)
             .field("collation", &self.collation);
+        if self.catalog_uuid_format_check {
+            s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);
+        }
         if self.mysql_text_storage.is_some() {
             s.field("mysql_text_storage", &self.mysql_text_storage);
         }

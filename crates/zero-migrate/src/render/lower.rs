@@ -527,6 +527,9 @@ impl LiveSchema {
             SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
             SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
         };
+        // The accumulator's own introspected tables are the catalog evidence a
+        // reference into an unmanaged target is proved against.
+        let catalog = crate::model::validate::CatalogFormatEvidence::new(&self.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             target,
@@ -534,6 +537,7 @@ impl LiveSchema {
             &self.logical_columns,
             project_schema,
             default_schema,
+            catalog,
         )?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
             ir,
@@ -542,6 +546,7 @@ impl LiveSchema {
             &self.logical_columns,
             project_schema,
             default_schema,
+            catalog,
         )?;
         self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
@@ -3037,6 +3042,9 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        // A format-bearing reference into a target with no authored contract may
+        // still be proved by the live catalog's own format evidence.
+        let catalog = crate::model::validate::CatalogFormatEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
@@ -3044,6 +3052,7 @@ impl IrAuthor {
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
+            catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
@@ -3053,6 +3062,7 @@ impl IrAuthor {
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
+            catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
@@ -5828,6 +5838,9 @@ impl IrAuthor {
             self.default_schema.as_deref(),
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        // A format-bearing reference into a target with no authored contract may
+        // still be proved by the live catalog's own format evidence.
+        let catalog = crate::model::validate::CatalogFormatEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
@@ -5835,6 +5848,7 @@ impl IrAuthor {
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
+            catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
@@ -5844,6 +5858,7 @@ impl IrAuthor {
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
+            catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
