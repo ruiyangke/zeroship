@@ -82,12 +82,29 @@ fn no_tracked_source_file_contains_a_nul_byte() {
     );
 
     let mut offenders = Vec::new();
+    let mut read = 0usize;
     for path in &files {
+        // The skip exists for a path `git ls-files` names but the working tree
+        // does not hold - a submodule gitlink, a sparse checkout. It must not
+        // become a way for the whole scan to succeed at reading nothing.
         let Ok(bytes) = fs::read(root.join(path)) else { continue };
+        read += 1;
         if bytes.contains(&0) {
             offenders.push(path.clone());
         }
     }
+
+    // Enumerating and READING are different failures and the count above only
+    // guards the first. If the root stopped resolving, every read would fail,
+    // every file would be skipped, `offenders` would be empty, and this would
+    // report a clean tree having opened nothing. Planting a NUL proves the test
+    // can say no; it proves nothing about why it says yes.
+    assert!(
+        read * 10 >= files.len() * 9,
+        "only {read} of {} enumerated files were actually opened and read - a scan \
+         that reads nothing must not report a clean tree",
+        files.len(),
+    );
 
     assert!(
         offenders.is_empty(),
