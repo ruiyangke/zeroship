@@ -1,4 +1,4 @@
-// Drift guard for the generated dialect table (DSL redesign Phase 0, S0.1).
+// Drift guard for the generated dialect table.
 //
 // The single source is
 // `third_party/zero-migrate/crates/zero-migrate/dialect-support.toml`; the

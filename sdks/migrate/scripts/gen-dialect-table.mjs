@@ -1,12 +1,12 @@
-// Generate the single-source dialect-support table (DSL redesign Phase 0, S0.1).
+// Generate the single-source dialect-support table.
 //
 // Reads the hand-authored sidecar
 // `third_party/zero-migrate/crates/zero-migrate/dialect-support.toml` — one
 // row per (op-kind, variant) with a per-dialect disposition — and emits BOTH
 // downstream artifacts from that one source:
 //   (a) third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs
-//       — a const lookup the Rust engine will consume (S0.2; NOT wired yet —
-//       S0.1 is additive).
+//       - a const lookup for the Rust engine. NOTHING consumes it yet; this
+//       generator is additive.
 //   (b) sdks/migrate/src/generated/dialect-table.ts — the TS mirror for the SDK
 //       surface + the future S10 core-export walk.
 //
@@ -135,8 +135,7 @@ function emitRust(rows) {
 //! One [\`DispositionRow\`] per (op-kind, variant) recording the token's
 //! disposition on each dialect. Faithfulness to the engine's live
 //! \`Support::decision()\` is proven by
-//! \`tests/dialect_table_faithfulness.rs\`. S0.1 is ADDITIVE — no engine code
-//! consumes this table yet (that is S0.2).
+//! \`tests/dialect_table_faithfulness.rs\`. Nothing consumes this table yet.
 `;
 
   const body = `
@@ -147,8 +146,8 @@ use crate::model::support::Dialect;
 pub enum Disposition {
     /// Core construct that renders/validates on this dialect.
     Portable,
-    /// P12 — native where supported, absence-tolerable elsewhere. Reserved for
-    /// the redesign; no current row uses it.
+    /// Native where supported, absence-tolerable elsewhere. Reserved; no
+    /// current row uses it.
     TransparentDegradable,
     /// Vendor-tier construct admitted on this dialect.
     Vendor,
@@ -218,7 +217,7 @@ function emitTs(rows) {
 // third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs.
 // Faithfulness to the engine's live Support::decision() is proven Rust-side by
 // tests/dialect_table_faithfulness.rs; the TS drift test pins this file (and the
-// Rust one) against the sidecar. S0.1 is ADDITIVE — no consumer reads it yet.
+// Rust one) against the sidecar. Nothing reads it yet.
 `;
 
   const body = `
