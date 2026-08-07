@@ -7135,7 +7135,7 @@ impl IrAuthor {
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
             SqlDialect::Mysql => Err(IrLowerError::RenameLower(
-                "renameColumn is not live-rendered for MySQL in render-only Phase 1".to_string(),
+                "renameColumn is render-only for MySQL, not live-rendered".to_string(),
             )),
         }
     }

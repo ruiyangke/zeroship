@@ -3535,7 +3535,7 @@ columns = [
 
     #[test]
     fn p7_id_prefix_decl_emits_single_id_column() {
-        // **P7** — a legacy internal ID descriptor is a prefix declaration for the
+        // A legacy internal ID descriptor is a prefix declaration for the
         // policy-injected `id` PK column, NOT a second column. The emitter must
         // skip it: exactly one `id` column (the injected PK), no duplicate,
         // and no reserved-name rejection.

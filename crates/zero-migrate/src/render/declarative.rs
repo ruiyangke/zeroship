@@ -6546,7 +6546,7 @@ impl DeclarativeAuthor {
                 Ok(crate::render::step::RenameStep::SqliteRebuild(rebuild))
             }
             SqlDialect::Mysql => Err(DeclarativeError::UnsupportedInV1(
-                "renameColumn is not live-rendered for MySQL in render-only Phase 1".to_string(),
+                "renameColumn is render-only for MySQL, not live-rendered".to_string(),
             )),
         }
     }

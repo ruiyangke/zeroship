@@ -515,13 +515,13 @@ impl MigrationBackend for SqliteBackend {
         // a later surface; reject here rather than silently dropping the edges.
         if !supersedes.is_empty() {
             return Err(ApplyError::Backend(
-                "sqlite backend P2: supersession (squash) journaling is not yet implemented (P5/P6)"
+                "sqlite backend: supersession (squash) journaling is not yet implemented"
                     .to_string(),
             ));
         }
         if kind != "apply" {
             return Err(ApplyError::Backend(format!(
-                "sqlite backend P2: journal kind '{kind}' not yet implemented (only 'apply')"
+                "sqlite backend: journal kind '{kind}' is not yet implemented (only 'apply')"
             )));
         }
         // Existence-guard catalog probe (SQLite). Mirror the PG
