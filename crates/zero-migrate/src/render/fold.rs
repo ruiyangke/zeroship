@@ -1558,6 +1558,25 @@ pub fn fold_ops_onto(
                     col.id_default.is_some() || matches!(value, IrDefault::Nextval { .. });
                 col.default = Some(rendered);
                 if tracks_id_default {
+                    // The arms below spell `character varying` BARE but never
+                    // `character varying(N)`, which is what the desired side emits
+                    // for a bounded string (`schema::query` renders
+                    // `character varying({len})`; `render::declarative`'s
+                    // `varchar_len_from_data_type` strips exactly that prefix). That
+                    // asymmetry is deliberate and load-bearing on the fact that a
+                    // BOUNDED string column never reaches here: `tracks_id_default`
+                    // needs `id_default` set, which only the value-format path does,
+                    // and both value-format builders declare base type `text`
+                    // (`ids.typeId` and `ids.ulid` in the authoring DSL). `valueFormat`
+                    // has no public setter, so it cannot be attached to a `t.string()`.
+                    // The other route in, `identity`/`nextval`, is integer-typed.
+                    //
+                    // Widening the list would therefore add an arm nothing can select.
+                    // If a bounded string ever DOES gain an ID default, this dispatch
+                    // silently picks `authored_id_default` where lowering picked
+                    // `authored_text_id_default` for the same column, and the fold
+                    // diverges from the DDL it is supposed to mirror - so change the
+                    // invariant and this comment together, or not at all.
                     let data_type = col.data_type.trim().to_ascii_lowercase();
                     let default = if data_type == "uuid" {
                         authored_uuid_id_default(
