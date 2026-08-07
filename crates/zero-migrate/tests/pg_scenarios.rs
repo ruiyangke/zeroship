@@ -3930,3 +3930,260 @@ async fn a_guard_denied_down_is_refused_before_it_runs() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// Scenario - a guarded MASKED addColumn is a TWO-OBJECT op
+// ---------------------------------------------------------------------------
+
+/// Lower a masked `addColumn` through the shipped `IrAuthor` on the PostgreSQL
+/// dialect, with or without the `ifNotExists` guard. Returns the lowered units in
+/// plan order: unit 0 adds the MAIN column, unit 1 adds the `<column>_masked` sibling
+/// plus its `zero-migrate:mask` sentinel `COMMENT`. `ir_name` seeds the deterministic
+/// unit versions, so two calls with different names describe the same op as two
+/// independent plans.
+fn lower_masked_add_column(cfg: &ExecutorConfig, ir_name: &str, guarded: bool) -> Vec<Migration> {
+    let guard = if guarded {
+        r#","existenceGuard":"ifNotExists""#
+    } else {
+        ""
+    };
+    let authored: MigrationIr = serde_json::from_str(&format!(
+        r#"{{"ir_version":1,"name":"{ir_name}","ops":[
+          {{"op":"addColumn","table":"accounts","column":"ssn","type":"text",
+            "nullable":true,"mask":{{"kind":"last4","classification":"pii"}}{guard}}}
+        ]}}"#
+    ))
+    .expect("parse the masked addColumn IR");
+    let resolved =
+        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
+            .expect("resolve the no-inject table policy");
+    IrAuthor::new(
+        &cfg.project_schema,
+        "app_test",
+        SqlDialect::Postgres,
+        &support::no_inject("app"),
+    )
+    .lower(&resolved, &LiveSchema::default())
+    .expect("the masked addColumn lowers on PostgreSQL")
+}
+
+/// Is `version` net-applied in the journal?
+async fn journal_applied(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+    version: &MigrationId,
+) -> bool {
+    zero_migrate::applied(session, cfg)
+        .await
+        .expect("journal read")
+        .iter()
+        .any(|e| e.version == version.as_str())
+}
+
+/// A masked `addColumn` lowers to TWO units over TWO DIFFERENT objects - the MAIN
+/// column and the `<col>_masked` sibling - and `apply_transactional` gives each unit
+/// its own transaction and its own journal row. Unit 0 has therefore already COMMITTED
+/// by the time unit 1 takes its catalog snapshot, in the same batch and on a clean
+/// database.
+///
+/// The failure this pins is the #81 shape on a new op: unit 1's existence guard names
+/// the MAIN column rather than the sibling, so it probes `ssn`, finds it present and
+/// matching (unit 0 just added it), returns `SatisfiedNoop`, SKIPS the sibling's `ADD
+/// COLUMN` - and still journals the unit completed. Silent skip under a green journal,
+/// and the runtime mask read-pass has no sibling to write to.
+///
+/// Asserts the PAIR from the server, because neither half alone is the defect: a
+/// journaled-but-absent sibling is the bug; an absent sibling with the unit still
+/// pending would merely be an incomplete deploy.
+///
+/// Does NOT cover MySQL (that backend evaluates no probe at all, so the guard is
+/// dropped and the bare DDL runs - a separate defect), and asserts the sibling COLUMN
+/// only, not the `zero-migrate:mask` sentinel `COMMENT` riding the same `up`.
+#[compio::test]
+async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let base = mig(
+        MigrationId::generate(),
+        "base",
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    let units = lower_masked_add_column(&cfg, "masked_add_fresh", true);
+    assert_eq!(
+        units.len(),
+        2,
+        "a masked addColumn lowers to the main column plus the `_masked` sibling"
+    );
+
+    let mut plan = vec![base.clone()];
+    plan.extend(units.iter().cloned());
+    apply(&session, &cfg, &plan, Approval::None, "app_test")
+        .await
+        .expect("the guarded masked addColumn applies");
+
+    assert!(
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
+        "unit 0 added the main column"
+    );
+    assert!(
+        journal_applied(&session, &cfg, &units[1].version).await,
+        "the sibling unit journaled as applied"
+    );
+    assert!(
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+        "the sibling unit journaled green, so `ssn_masked` must exist on the server"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// The same defect across a PROCESS RESTART rather than within one batch. Unit 0
+/// committed its DDL and its journal row in one transaction and unit 1 never ran, so
+/// the arming below is the exact durable state a process death between the two units
+/// leaves behind. The resume re-derives unit 1 as pending and must create the sibling.
+///
+/// Distinct from the clean-apply arm above because the probe here reads a catalog
+/// written by an EARLIER apply invocation, which is the state the `ifNotExists` guard
+/// exists to make re-runnable.
+#[compio::test]
+async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_resume() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let base = mig(
+        MigrationId::generate(),
+        "base",
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply the base table");
+
+    let units = lower_masked_add_column(&cfg, "masked_add_crash", true);
+
+    // ARM the post-crash state: apply the plan truncated after unit 0.
+    apply(
+        &session,
+        &cfg,
+        &[base.clone(), units[0].clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("unit 0 applies");
+    assert!(
+        !column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+        "the crash landed before unit 1, so the sibling is absent"
+    );
+    assert!(
+        !journal_applied(&session, &cfg, &units[1].version).await,
+        "unit 1 never journaled, so the resume sees it pending"
+    );
+
+    // RESUME - the same plan, now complete.
+    apply(
+        &session,
+        &cfg,
+        &[base.clone(), units[0].clone(), units[1].clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the resume applies");
+
+    assert!(
+        journal_applied(&session, &cfg, &units[1].version).await,
+        "the resume journaled the sibling unit as applied"
+    );
+    assert!(
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+        "the resume journaled the sibling unit green, so `ssn_masked` must exist"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// The CONTROL for the two arms above. The precondition - both columns already on the
+/// server - is built by the UNGUARDED masked `addColumn`, which stamps no probe and so
+/// runs both units bare. The guarded op is then authored as a second plan over that
+/// catalog and must stay a clean no-op: every unit `SatisfiedNoop`s, nothing is
+/// re-added or dropped, and both units journal green.
+///
+/// This passes before AND after the sibling-probe fix. Without it a red arm would only
+/// prove that something about guarded masked addColumn is broken; with it, the red arms
+/// are pinned to the SIBLING'S PROBE specifically - the idempotent re-run the guard
+/// exists for still works, and the fix must not turn it into a duplicate-column error.
+#[compio::test]
+async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_present() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let base = mig(
+        MigrationId::generate(),
+        "base",
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    let unguarded = lower_masked_add_column(&cfg, "masked_add_unguarded", false);
+    let mut plan = vec![base.clone()];
+    plan.extend(unguarded.iter().cloned());
+    apply(&session, &cfg, &plan, Approval::None, "app_test")
+        .await
+        .expect("the unguarded masked addColumn applies");
+    assert!(
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await
+            && column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+        "the unguarded plan runs both units bare and creates both columns"
+    );
+
+    // The GUARDED op as a second plan: fresh versions, so both units are pending and
+    // both reach the probe against a catalog that already satisfies them.
+    let guarded = lower_masked_add_column(&cfg, "masked_add_guarded_noop", true);
+    let mut replay = vec![base.clone()];
+    replay.extend(guarded.iter().cloned());
+    apply(&session, &cfg, &replay, Approval::None, "app_test")
+        .await
+        .expect("the guarded plan is a clean no-op, not a duplicate-column error");
+
+    for unit in &guarded {
+        assert!(
+            journal_applied(&session, &cfg, &unit.version).await,
+            "the satisfied no-op still journals `{}` net-applied",
+            unit.name
+        );
+    }
+    assert!(
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await
+            && column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+        "the no-op left both columns in place"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}

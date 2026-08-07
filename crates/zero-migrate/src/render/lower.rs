@@ -4314,26 +4314,52 @@ impl IrAuthor {
                 self.apply_uuid_column_metadata(&source_col, &mut col)?;
                 self.apply_value_format_column_metadata(&source_col, &mut col)?;
                 self.apply_id_default_column_metadata(&source_col, &mut col);
+                // Lower the main column, then the masked sibling (if any) as a second
+                // ADD COLUMN - both ride the same migration unit list.
+                let mut units = vec![decl.lower_add_column(table, &col)];
+                if let Some(sibling) = &masked_sibling {
+                    units.push(decl.lower_add_column(table, sibling));
+                }
                 // addColumn ifNotExists: verify (data_type, nullable)
-                // from the SAME shared-builder column snapshot the ADD renders from.
+                // from the SAME shared-builder column snapshot each ADD renders from.
                 // **F1** — the decider compares the canonical SQLite affinity (consistent
                 // with the differ); a present-matching column is an idempotent
-                // SatisfiedNoop, a genuine affinity change diverges. The guard probes the
-                // MAIN column (the sibling is an engine-managed implementation detail).
+                // SatisfiedNoop, a genuine affinity change diverges.
+                //
+                // A MASKED addColumn is a TWO-OBJECT op: the main column and the
+                // `<col>_masked` sibling are separate units, hence separate transactions
+                // and separate journal rows, so unit 0 has already COMMITTED by the time
+                // unit 1 snapshots the catalog. Stamping one MAIN-column probe on both
+                // (what the generic stamp below does) made unit 1 probe `<col>`, read it
+                // present and matching, return SatisfiedNoop, SKIP its own ADD COLUMN and
+                // journal green - the sibling never existed and the runtime mask
+                // read-pass had nothing to write to. Attribute an OBJECT-SCOPED probe to
+                // each unit instead and leave `probe == None`, the same shape
+                // `createTable` and a composite-FK `addConstraint` use, so each unit
+                // SatisfiedNoops only for ITS OWN column.
+                //
+                // Covers the two objects this arm lowers and nothing else: the sentinel
+                // `COMMENT ON COLUMN` rides the sibling's own `up`, so it is gated by the
+                // sibling's probe and not separately verified; a sibling that is present
+                // but MISSING its sentinel comment still reads as satisfied.
                 if let Some(g) = guard {
-                    probe = Some(crate::model::probe::GuardProbe::Column {
+                    units[0].0.existence_guard = Some(crate::model::probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
                         direction: g.into(),
                         expect: Some((col.data_type.clone(), col.nullable)),
                     });
-                }
-                // Lower the main column, then the masked sibling (if any) as a second
-                // ADD COLUMN — both ride the same migration unit list.
-                let mut units = vec![decl.lower_add_column(table, &col)];
-                if let Some(sibling) = masked_sibling {
-                    units.push(decl.lower_add_column(table, &sibling));
+                    if let Some(sibling) = &masked_sibling {
+                        units[1].0.existence_guard =
+                            Some(crate::model::probe::GuardProbe::Column {
+                                schema: eff_schema.clone(),
+                                table: table.clone(),
+                                column: sibling.name.clone(),
+                                direction: g.into(),
+                                expect: Some((sibling.data_type.clone(), sibling.nullable)),
+                            });
+                    }
                 }
                 units
             }
@@ -5188,19 +5214,28 @@ impl IrAuthor {
         // plan-id/ordinal identity discipline and rewrites sibling dependencies.
         // stamp the existence-guard probe onto each lowered unit.
         //
-        // For SINGLE-OBJECT ops (addColumn, createIndex, dropTable, dropColumn,
-        // dropIndex, addConstraint, dropConstraint, …) the arm above built ONE
-        // `probe` describing that one object. A single-object op may still emit a
-        // multi-STATEMENT unit list (e.g. addColumn's `ADD COLUMN` + follow-on
-        // `COMMENT ON COLUMN`), but those statements all describe the SAME object, so
-        // stamping the one probe on every unit is correct: each re-probes the live
-        // catalog under the held lock and gets the same verdict.
+        // For SINGLE-OBJECT ops (createIndex, dropTable, dropColumn, dropIndex,
+        // addConstraint, dropConstraint, ...) the arm above built ONE `probe`
+        // describing that one object. Such an op may still emit a multi-STATEMENT
+        // unit (e.g. addColumn's `ADD COLUMN` + follow-on `COMMENT ON COLUMN`), but
+        // those statements share ONE unit, ONE transaction and ONE journal row, so
+        // the single probe still describes everything that unit does.
         //
-        // `createTable` and a composite-FK `addConstraint` are multi-OBJECT ops:
-        // each attributes an object-scoped probe to every unit inside its arm and
-        // leaves `probe == None` here. Do not clobber those per-unit probes with a
-        // single shared one. Detect that case (guard set, no shared probe, units
-        // already carry per-unit guards) and skip the generic stamp.
+        // WHAT MAKES THE STAMP SOUND IS THAT EVERY UNIT IT TOUCHES DESCRIBES THE SAME
+        // OBJECT - not that the units re-probe under one held lock. Units are
+        // separate transactions and separate journal rows, and unit 0 has COMMITTED
+        // before unit 1 snapshots the catalog, so a unit carrying a probe for a
+        // DIFFERENT object reads that other object as satisfied, returns
+        // SatisfiedNoop, skips its own DDL and journals green. "The same verdict" is
+        // the failure mode for a multi-object arm, never the justification.
+        //
+        // An arm that lowers MORE THAN ONE OBJECT must therefore attribute an
+        // object-scoped probe to every unit inside the arm and leave `probe == None`
+        // here: `createTable`, a composite-FK `addConstraint`, and a masked
+        // `addColumn` (main column + `<col>_masked` sibling) all do. Do not clobber
+        // those per-unit probes with a single shared one. Detect that case (guard
+        // set, no shared probe, units already carry per-unit guards) and skip the
+        // generic stamp.
         // The stamp is keyed on the PROBE, not on the author's guard: an unguarded
         // createIndex builds an ownership-only probe that must reach the executor the
         // same way a guarded one does. The fail-closed arm below stays keyed on the
