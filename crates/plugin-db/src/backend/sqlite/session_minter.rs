@@ -3,12 +3,11 @@
 //!
 //! ## Why this module exists
 //!
-//! `docs/proposals/p3-sqlite-auth-implementation-plan.md` §5
-//! specifies SQLite's session-minter as **in-memory only**: no
+//! SQLite's session minter is **in-memory only**: no
 //! `__zeroship_sessions` table, no ATTACH, no schema. Tokens are
 //! signed with `HMAC-SHA256(secret, payload)`; replay protection is
 //! a bounded LRU set (default 10K). Process restart resets the
-//! cache — acceptable per design §12 ("Dev tier").
+//! cache — acceptable for the dev tier.
 //!
 //! ## Cross-backend payload equivalence
 //!

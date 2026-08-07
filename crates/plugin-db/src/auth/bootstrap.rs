@@ -829,9 +829,8 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
 /// byte-for-byte today's behaviour. When non-NULL, the trait-impl
 /// path passes `token.backend_pid` so HMAC verification reproduces
 /// the mint-time payload even when init runs on a fresh pool client
-/// with a different `pg_backend_pid()`. See
-/// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §10
-/// (Q-P3-A — the riskiest decision).
+/// with a different `pg_backend_pid()` (Q-P3-A, the riskiest
+/// decision in this area).
 ///
 /// `pg_backend_pid()` is also used as the `session_ctx.pid` key —
 /// it intentionally stays bound to the **current** backend (the row

@@ -6,9 +6,6 @@
 //! ships a `CommitPacket` over a `flume` channel to a publisher task
 //! that calls [`crate::broker::publish`] on the compio thread.
 //!
-//! Source plan: `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-//! §2.2-2.5, §4-5, §11.
-//!
 //! ## Hook → publisher data flow
 //!
 //! ```text

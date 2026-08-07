@@ -1,8 +1,5 @@
 //! Backend abstraction — "the data store boundary".
 //!
-//! See `docs/reviews/plugin-db-architecture-review-2026-05-21.md` for the
-//! rationale behind this seam.
-//!
 //! ## What this is
 //!
 //! A single trait, [`Backend`], that captures everything the
@@ -702,13 +699,12 @@ pub trait AuditWriter: 'static {
 /// anchor used by both the PG SECURITY DEFINER pipeline and the
 /// upcoming SQLite in-process minter.
 ///
-/// See `docs/proposals/p3-sqlite-auth-implementation-plan.md` §3. The
-/// trait declaration is **not** feature-gated — both backends
+/// The trait declaration is **not** feature-gated — both backends
 /// implement it. The PG impl lives at the bottom of
 /// `crate::auth::session` and wraps SECURITY DEFINER functions managed
 /// by `crate::auth::bootstrap`. The SQLite impl lives in
 /// `crate::backend::sqlite::session_minter` and is gated only by the
-/// `sqlite` feature — dev tier per the design doc, no SQL surface,
+/// `sqlite` feature — dev tier, no SQL surface,
 /// HMAC-SHA256 + bounded LRU nonce cache in Rust.
 ///
 /// ## Token canonical payload
@@ -944,8 +940,7 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
 /// of the data-store boundary.
 ///
 /// Introduced as the cross-backend surface for SQLite's
-/// `preupdate_hook`-driven CDC arm (`docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-/// §2.1, §2.5). PG and SQLite both implement this on adapter types
+/// `preupdate_hook`-driven CDC arm. PG and SQLite both implement this on adapter types
 /// (`change_stream_pg::PgChangeStream` and
 /// `backend::sqlite::cdc::SqliteChangeStream`) rather than on the
 /// backend itself so the `ConsumerHandle` associated type can diverge

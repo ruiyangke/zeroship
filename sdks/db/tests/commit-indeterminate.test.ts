@@ -8,8 +8,7 @@
  *     can walk the cause chain to surface the underlying driver error)
  *
  * The rollback rejection is silently swallowed by the SDK today — the
- * audit (`db-robustness-gaps-2026-05-19.md`, Gap E) flagged that as a
- * separate gap; this test only pins what IS reachable from
+ * robustness audit flagged that as a separate gap (Gap E); this test only pins what IS reachable from
  * `result.error`.
  */
 import { test, describe } from "node:test";

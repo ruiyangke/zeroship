@@ -141,8 +141,7 @@ pub mod audit;
 // The `auth` module is always compiled: the PG-side submodules
 // (`bootstrap`, `keys`, `session`) carry the per-app role + session
 // machinery, and `auth::util` is the shared-helper subtree the SQLite
-// `SessionMinter` impl reuses. See
-// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6.
+// `SessionMinter` impl reuses.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod auth;
 #[cfg(feature = "test-helpers")]
