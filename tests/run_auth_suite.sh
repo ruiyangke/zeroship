@@ -7,9 +7,12 @@
 # The auth tests resolve their database from AUTH_DB_URL / PG_TEST_URL and
 # return early when neither is set. Cargo captures test output by default, so a
 # skipped test is indistinguishable from a passing one: `cargo test -p
-# zeroship-auth` reports success while 66 test bodies do nothing at all. A suite
+# zeroship-auth` reports success while test bodies do nothing at all. A suite
 # that passes because it never ran is worse than a red one, because it is
 # trusted.
+#
+# This script reports the real passed and skipped counts on every run, so no
+# figure is written down here to go stale.
 #
 # This script provisions an isolated database, points the tests at it, and then
 # checks that they ACTUALLY RAN. If any test reports that it skipped, the run
