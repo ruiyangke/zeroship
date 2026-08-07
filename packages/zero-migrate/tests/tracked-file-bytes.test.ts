@@ -93,12 +93,17 @@ test("no tracked file contains a NUL byte", () => {
   // and the gate reports a clean tree having opened nothing - green for a reason
   // unrelated to the property it asserts. Verified by pointing repoRoot at a
   // non-existent directory: the gate passed before this assertion existed.
+  // Proportional, not a fixed floor. A floor stops scaling: at 408 tracked files a
+  // floor of 300 tolerates 108 silently unread, and the gap widens with every file
+  // added. Tie the bound to what git enumerated so the tolerance stays the size of
+  // the exception it exists for.
+  const minScanned = Math.ceil(files.length * 0.9);
   assert.ok(
-    scanned >= MIN_TRACKED_FILES,
-    `only ${scanned} of ${files.length} tracked files were actually opened and read. ` +
-      "The per-file skip is meant for a submodule gitlink or a sparse checkout, not " +
-      "for a repository root that does not resolve; a scan that reads nothing must " +
-      "not report a clean tree.",
+    scanned >= minScanned,
+    `only ${scanned} of ${files.length} tracked files were actually opened and read ` +
+      `(at least ${minScanned} required). The per-file skip is meant for a submodule ` +
+      "gitlink or a sparse checkout, not for a repository root that does not resolve; " +
+      "a scan that reads nothing must not report a clean tree.",
   );
 
   assert.deepEqual(
