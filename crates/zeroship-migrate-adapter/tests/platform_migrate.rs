@@ -477,6 +477,29 @@ mod platform_cli {
             return Err("schema 'zeroship' missing".to_string());
         }
 
+        // (1a) no index name is at or past PostgreSQL's 63-byte identifier limit.
+        //
+        // PostgreSQL truncates a longer name silently, so two distinct authored
+        // names can collapse onto one index with only a NOTICE. The engine refuses
+        // an over-long name on an explicit index op, but a UNIQUE or PRIMARY KEY
+        // constraint name is not covered by that check, and PostgreSQL names the
+        // backing index after the constraint. Those are our longest identifiers, so
+        // the corpus is guarded here until the engine closes it. A stored name of
+        // exactly 63 bytes is already indistinguishable from a truncated one.
+        if !scalar_bool(
+            &probe,
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_indexes \
+             WHERE schemaname = 'zeroship' AND length(indexname) >= 63)",
+        )
+        .await
+        {
+            return Err(
+                "an index name in schema 'zeroship' reached PostgreSQL's 63-byte \
+                 identifier limit and may have been silently truncated"
+                    .to_string(),
+            );
+        }
+
         // (2) key tables from each conceptual domain (control/auth/billing/sandbox)
         //     all live in the `zeroship` schema.
         for table in [
