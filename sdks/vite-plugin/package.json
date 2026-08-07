@@ -60,7 +60,7 @@
     "mime": "^3.0.0",
     "tar": "^7.5.13",
     "unenv": "2.0.0-rc.24",
-    "zero-migrate": "file:/home/ruiyang/Projects/zero-migrate/sdks/migrate",
-    "zero-migrate-node": "file:/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-node"
+    "zero-migrate": "workspace:*",
+    "zero-migrate-node": "workspace:*"
   }
 }

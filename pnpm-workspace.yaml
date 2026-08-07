@@ -1,6 +1,12 @@
 packages:
   - "sdks/*"
   - "examples/*"
+  # The vendored migration engine. It is in the workspace so the vite-plugin
+  # can depend on it by `workspace:*` rather than by an absolute path into a
+  # sibling checkout that only exists on one machine - which is what made the
+  # sdk CI job unable to install at all.
+  - "third_party/zero-migrate/packages/*"
+  - "third_party/zero-migrate/crates/zero-migrate-node"
 
 # Centralised dependency versions — referenced as "catalog:" in package.json.
 # Default catalog targets React 19; the `react18` named catalog is for
