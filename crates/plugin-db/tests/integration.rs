@@ -7814,8 +7814,17 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
 /// "dozens of tests cannot connect".
 ///
 /// So pin the number of direct construction sites. Adding a test that opens its
-/// own pool now fails here and has to be a deliberate edit; adding one that uses
-/// the helpers does not touch this count.
+/// own pool or raw client now fails here and has to be a deliberate edit; adding
+/// one that uses the helpers does not touch this count.
+///
+/// SCOPE, stated because a check that does not say what it covers gets trusted
+/// for more than it checks: this counts direct constructions across EVERY `.rs`
+/// file in this tests directory - pooled and raw - and asserts it saw at least
+/// two files, so a narrowed scan fails loudly instead of quietly passing. It does
+/// NOT cover other crates. control, auth, gateway, migrated and both compio libs
+/// all construct connections in their tests with no teardown at all; the same
+/// leak was measured in control (peak backends climbing 0 to 8 across ten tests
+/// under `--test-threads=1`). Nothing here guards those.
 ///
 /// Sound as a text check because these are CONSTRUCTION sites: a constructor has
 /// to be written literally to be called, so it cannot hide behind indirection the
@@ -7836,23 +7845,43 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
 /// that it is the only thing constructing a pool, or that its own teardown runs -
 /// because at that point the helper is the property worth guarding.
 #[test]
-fn direct_pool_construction_sites_do_not_grow() {
-    // Split so this test's own needle is not part of what it counts.
-    let direct = concat!("Pool", "::connect(");
-    let with_config = concat!("Pool", "::connect_with_config(");
-    let source = include_str!("integration.rs");
+fn direct_connection_sites_do_not_grow() {
+    // Split so this test's own needles are not part of what it counts.
+    let needles = [
+        concat!("Pool", "::connect("),
+        concat!("Pool", "::connect_with_config("),
+        concat!("compio_postgres", "::connect("),
+    ];
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
 
-    let sites = source.matches(direct).count() + source.matches(with_config).count();
-    const PINNED: usize = 108;
+    let mut sites = 0usize;
+    let mut files = 0usize;
+    for entry in std::fs::read_dir(dir).expect("read the tests directory") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read a test file");
+        files += 1;
+        for needle in needles {
+            sites += source.matches(needle).count();
+        }
+    }
 
+    const PINNED: usize = 116;
+    assert!(
+        files >= 2,
+        "expected to scan the whole tests directory, saw {files} file(s) - if this \
+         drops the count is measuring less than it claims"
+    );
     assert!(
         sites <= PINNED,
-        "this file now opens {sites} pools directly, up from {PINNED}. A pool opened \
-         without a `release_pg`/`drain_pg` teardown outlives its runtime and leaks a \
-         server connection. Pair the new one with a teardown, then raise PINNED. \
-         If you are adding a shared pool-owning helper instead, do not lower PINNED \
-         to match - this test counts sites and a helper is one site however many \
-         tests call it, so it would pass forever without checking anything. Replace \
-         it with a check over the helper."
+        "the tests directory now opens {sites} connections directly, up from {PINNED}. \
+         A pool or client opened without a `release_pg`/`drain_pg` teardown outlives \
+         its runtime and leaks a server connection. Pair the new one with a teardown, \
+         then raise PINNED. If you are adding a shared connection-owning helper \
+         instead, do not lower PINNED to match - this counts sites, and a helper is \
+         one site however many tests call it, so it would pass forever without \
+         checking anything. Replace this with a check over the helper."
     );
 }
