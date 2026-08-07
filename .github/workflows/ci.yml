@@ -223,4 +223,32 @@ jobs:
       # The migrate type layer reads @zeroship/db's built types; build SDKs first.
       - run: pnpm build
       - run: pnpm --filter @zeroship/migrate run check
-      - run: pnpm --filter @zeroship/migrate test
+      # Until now this job ran exactly one JavaScript suite, and could not
+      # install to reach even that, so no JS test in this repo has ever gated a
+      # merge. @zeroship/db alone is 503 tests. That is the mechanism behind two
+      # defects already found: the db suite sat at over a hundred failures long
+      # enough that nobody noticed, and the vite-plugin shipped a dependency it
+      # never declared.
+      #
+      # Written as exclusions, not an allow-list, so a new package is gated the
+      # day it appears rather than the day someone remembers to add it. The
+      # three below are excluded by name because they fail today for one shared
+      # reason, and each exclusion is a debt with an owner:
+      #
+      #   zero-migrate           vendored third-party code at a pinned commit.
+      #                          Its suite is not ours to gate; it became
+      #                          visible only because the pin joined the
+      #                          workspace.
+      #   @zeroship/migrate      6 golden/drift failures. Its fixtures resolve
+      #                          into third_party/zero-migrate, so they compare
+      #                          committed artifacts against that same pin.
+      #   @zeroship/vite-plugin  7 gen-types drift failures, same root cause.
+      #
+      # All three are the committed generated artifacts having drifted from the
+      # vendored engine. Fixing that removes all three exclusions at once; it
+      # waits on the decision about which engine commit is authoritative.
+      - run: >
+          pnpm -r --no-bail test
+          --filter='!zero-migrate'
+          --filter='!@zeroship/migrate'
+          --filter='!@zeroship/vite-plugin'
