@@ -266,8 +266,16 @@ pub enum Action {
         status: u16,
     },
 
-    /// Internal URL rewrite. Mutates the request path and restarts
-    /// rule walking from index 0 (with a hop limit to prevent loops).
+    /// Internal URL rewrite. NOT IMPLEMENTED: `validate()` accepts this
+    /// action, and the gateway then discards `to` and forwards the request
+    /// under its ORIGINAL path (`router/dispatch.rs`, the `ResolvedAction::
+    /// Rewrite` arm, which does `let _ = to`). A manifest declaring a rewrite
+    /// therefore deploys cleanly and does nothing.
+    ///
+    /// The intended semantics are to mutate the request path and restart rule
+    /// walking from index 0, which needs re-entering `lookup_resource` under a
+    /// hop limit so a rewrite cycle cannot loop. Neither the re-entry nor the
+    /// hop limit exists yet, so there is no loop to bound.
     Rewrite { to: String },
 }
 
