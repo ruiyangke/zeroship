@@ -87,9 +87,35 @@ status=0
 cargo test -p zeroship-auth -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
-echo "==> Gateway backchannel-logout tests (also AUTH_DB_URL-gated)"
-cargo test -p zeroship-gateway --test backchannel_logout_test -- \
-  --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
+# Every other AUTH_DB_URL-gated binary in the workspace. These self-skip exactly
+# like the auth crate's, and until they were listed here nothing ever ran them
+# with a database: `cargo test --workspace` provisions none, and no other gate
+# names them. Measured on zeroship-authz before adding it - "ok. 1 passed" in
+# 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with one. Same
+# count, same exit code, only the clock differed.
+#
+# `oidc_rp_e2e` is deliberately absent: it also wants CONTROL_TEST_DB, which
+# this script does not provision, so it would skip and fail the check below.
+# tests/run_billing_suite.sh owns the CONTROL_TEST_DB half.
+echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
+for spec in \
+  "zeroship-authz:" \
+  "zeroship-mailer:" \
+  "zeroship-gateway:backchannel_logout_test" \
+  "zeroship-gateway:auth_token_anchors_test" \
+  "zeroship-gateway:identities_relay_test" \
+  "zeroship-gateway:sessions_test" \
+; do
+  pkg="${spec%%:*}"
+  bin="${spec#*:}"
+  if [ -n "$bin" ]; then
+    cargo test -p "$pkg" --test "$bin" -- \
+      --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
+  else
+    cargo test -p "$pkg" -- \
+      --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
+  fi
+done
 
 echo "------------------------------------------------------------------"
 # The point of the whole script: a test that skipped is not a test that passed.
