@@ -2042,7 +2042,7 @@ pub(crate) fn dispatch_search<'s>(
         // the failure is shape-level, not data-level.
         let err = DbError::Configuration {
             code: "invalid_search_args",
-            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3+)"
+            message: "search: args must include `vector` or `text`"
                 .to_string(),
             hint: Some(
                 "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
