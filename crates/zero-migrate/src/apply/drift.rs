@@ -916,15 +916,38 @@ pub async fn snapshot_schema<D: SqlSession>(
                 && (udt_name == "_text" || format_type.eq_ignore_ascii_case("text[]"))
             {
                 "text[]".to_string()
-            } else if data_type.eq_ignore_ascii_case("character") {
-                match r
-                    .try_get::<_, Option<i32>>("character_maximum_length")
-                    .ok()
-                    .flatten()
-                {
-                    Some(len) if len > 0 => format!("character({len})"),
-                    _ => data_type,
-                }
+            } else if let Some(len) = r
+                .try_get::<_, Option<i32>>("character_maximum_length")
+                .ok()
+                .flatten()
+                .filter(|len| *len > 0)
+            {
+                // Recompose a length-qualified type's LENGTH into `data_type`.
+                // `information_schema` reports the bare base name in `data_type` and
+                // splits the modifier out into `character_maximum_length`, while the
+                // desired snapshot spells the length INLINE (`character varying(255)`
+                // for `t.string()`, `character(10)` for `t.char()`). Without this the
+                // two sides can never compare equal, so every length-qualified column
+                // false-drifts -- and `t.string()` defaults to `length: 255`, which
+                // makes `character varying(255)` the DEFAULT string type. Keyed on the
+                // catalog datum rather than on a list of type names: PostgreSQL
+                // populates `character_maximum_length` for exactly the four types that
+                // take a length (`character`, `character varying`, `bit`,
+                // `bit varying`) and leaves it NULL everywhere else, so a per-name arm
+                // would leave the same gap open for the next type. Widens the previous
+                // `character`-only arm; `character(N)` keeps its exact spelling.
+                //
+                // Does NOT cover the modifiers information_schema reports through
+                // OTHER catalog columns: `numeric(p, s)` precision/scale and
+                // `time`/`timestamp`/`interval` precision stay BARE on BOTH sides on
+                // purpose -- the desired side deliberately routes decimal precision to
+                // `ddl_type_override` and keeps `numeric` as the comparison key (see
+                // `render::lower::author_type_override`), so recomposing those here
+                // would CREATE the drift this removes. Arrays and domains never reach
+                // this arm (the `ARRAY`/`type_kind` arms above claim them first, and
+                // PostgreSQL reports a NULL `character_maximum_length` for an array of
+                // a bounded type anyway).
+                format!("{data_type}({len})")
             } else {
                 data_type
             };
