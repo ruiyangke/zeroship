@@ -41,6 +41,35 @@ real traffic is not. A reproducer needs an app with both a live and a pinned
 workflow isolate on one thread, an in-flight RPC registered in the live one, and
 eviction of the pinned one.
 
+**Finding 14 (HIGH, pinned runtimes never receive same-deploy policy changes):
+MECHANISM CONFIRMED, not fixed - the fix has design content.** Three links:
+
+- `cache.rs:324-335` `get_workflow_runtime` looks a pinned runtime up by
+  `PinnedWorkflowKey::new(app_id, deploy_hash)`. The key carries no net policy, no
+  env version and no runtime limits.
+- `cache.rs:601-608` `all_app_ids` collects from `cache.isolates` only. It never
+  reads `cache.workflow_isolates`, so reconciliation cannot see a pinned runtime.
+- `sync.rs` therefore refreshes normal isolates on a policy, env or limits change
+  and leaves pinned ones untouched.
+
+So a net-policy change that keeps the same deploy hash - tightening a raw-TCP
+allow to a deny, say - is applied to normal dispatch and NOT to subsequent
+workflow replays on a pinned isolate. The same holds for a rotated secret, which
+matters because `sync.rs` already carries an explicit invariant that an env-only
+version bump must reload so rotation actually applies. Pinned isolates sit outside
+that invariant.
+
+Deliberately NOT fixed here. The obvious repairs both have consequences worth a
+decision: folding a policy fingerprint into the key turns a policy change into a
+NEW pinned isolate rather than a replacement, which spends the per-app budget; and
+having reconciliation evict pinned entries needs a position on evicting one mid
+replay. Deploy-pinned replay exists precisely to hold a deploy steady, so the
+invalidation rule is a semantic choice rather than a bug fix.
+
+Note the neighbouring half of finding 13 does NOT reproduce: `cache.rs:573`
+retains against `key.app_id`, so pinned entries ARE dropped when an app is
+deleted.
+
 **Finding 15 (HIGH, live deploy to no deploy leaves stale code cached): CONFIRMED
 and FIXED.** `needs_reload` compared with `is_some_and`, so a remote hash of `None`
 read as unchanged and an undeployed app kept serving cached code while its limits,
