@@ -5,6 +5,13 @@
 //! leaves the event in place so the NEXT DRAIN of the same process replays the
 //! same `event_id`.
 //!
+//! When the append itself fails there is no WAL copy to replay from, and
+//! `Meter::drain` has already zeroed the counters, so the producer holds the
+//! batch in memory (bounded by [`DEFAULT_MAX_RETAINED_EVENTS`]) and carries it
+//! into the next append. Retries are verbatim: the same `event_id` the
+//! forwarder dedups on, and the same `event_time` that decides which billing
+//! period the usage lands in.
+//!
 //! It does NOT survive a process restart in the shipped configuration, and an
 //! earlier version of this comment claimed it did. The default WAL path is
 //! derived from `producer_source`, and both binaries that use it mint that
@@ -25,8 +32,9 @@
 //! fail-closed change, or an intermittent partial loss becomes a permanent
 //! total one.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError};
@@ -37,6 +45,23 @@ use crate::Meter;
 
 pub const DEFAULT_OUTBOX_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_USAGE_EVENTS_TOPIC: &str = "usage-events";
+
+/// How many events a producer holds in memory for retry after a failed WAL
+/// append. The bound is a count, not a byte budget, because that is the only
+/// quantity the producer can enforce without measuring per-event heap use.
+///
+/// Deliberately NOT a staleness horizon. The two consumers of the usage stream
+/// treat a late event differently: the spend-recompute snapshot ignores any
+/// event whose `event_time` falls outside the period it is recomputing, so a
+/// retry that arrives after that period settles no longer moves enforcement.
+/// The provider forwarder has no such gate - it attributes and bills whatever
+/// decodes. Expiring retained events on a staleness rule would therefore throw
+/// away revenue that would still have been invoiced. Old retained events lose
+/// their enforcement value; they keep their billing value.
+///
+/// Beyond this many retained events the oldest are dropped; see
+/// [`UsageOutbox::retain_for_retry`] for why that direction was chosen.
+pub const DEFAULT_MAX_RETAINED_EVENTS: usize = 100_000;
 
 /// Resolved usage-stream producer settings. The source of these values is the
 /// caller's concern (config-file overlay, env, CLI) — this crate only consumes
@@ -163,6 +188,11 @@ pub struct UsageOutbox {
     stream: Arc<dyn StreamTransport>,
     topic: String,
     wal: Arc<UsageWal>,
+    /// Events whose WAL append failed, held verbatim until an append succeeds.
+    /// Shared across clones because every clone publishes into the same WAL and
+    /// must see the same backlog. Oldest first.
+    retained: Arc<Mutex<VecDeque<UsageEvent>>>,
+    max_retained: usize,
 }
 
 impl std::fmt::Debug for UsageOutbox {
@@ -171,6 +201,7 @@ impl std::fmt::Debug for UsageOutbox {
             .field("stream", &self.stream.id())
             .field("topic", &self.topic)
             .field("wal_path", &self.wal.path)
+            .field("retained", &self.retained_len())
             .finish()
     }
 }
@@ -185,12 +216,85 @@ impl UsageOutbox {
             stream,
             topic: topic.into(),
             wal: Arc::new(UsageWal::open(wal_path)?),
+            retained: Arc::new(Mutex::new(VecDeque::new())),
+            max_retained: DEFAULT_MAX_RETAINED_EVENTS,
         })
+    }
+
+    /// Override how many events this producer retains in memory after a failed
+    /// WAL append.
+    #[must_use]
+    pub fn with_max_retained_events(mut self, max_retained: usize) -> Self {
+        self.max_retained = max_retained;
+        self
     }
 
     #[must_use]
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    /// Whether any event is waiting in memory for a WAL append to succeed. A
+    /// caller that only publishes when it has fresh events must also publish
+    /// when this is true, or a backlog left by a failed append never drains on
+    /// an idle node.
+    #[must_use]
+    pub fn has_pending_retry(&self) -> bool {
+        self.retained_len() > 0
+    }
+
+    #[must_use]
+    pub fn retained_len(&self) -> usize {
+        self.lock_retained().len()
+    }
+
+    /// A poisoned lock means some other caller panicked mid-publish. Recovering
+    /// the buffer is better than propagating the panic: the alternative kills
+    /// the outbox task and drops every retained event.
+    fn lock_retained(&self) -> std::sync::MutexGuard<'_, VecDeque<UsageEvent>> {
+        self.retained.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Take the retry backlog and put `events` after it, oldest first.
+    fn batch_with_retained(&self, events: &[UsageEvent]) -> Vec<UsageEvent> {
+        let mut retained = self.lock_retained();
+        let mut batch = Vec::with_capacity(retained.len() + events.len());
+        batch.extend(retained.drain(..));
+        batch.extend_from_slice(events);
+        batch
+    }
+
+    /// Hold a batch whose WAL append failed so the next append can carry it.
+    ///
+    /// The events are kept verbatim. `event_id` is the idempotency key the
+    /// forwarder dedups on, and `event_time` decides which billing period the
+    /// usage lands in, so a retry has to present the same event the first
+    /// attempt did - re-measuring or re-stamping would move usage between
+    /// periods.
+    ///
+    /// Over `max_retained` the oldest events are dropped. Dropping is a real
+    /// loss and it under-bills; it is bounded and logged, where an unbounded
+    /// buffer would grow until the process died and lose everything. Oldest
+    /// rather than newest because the newest window is what spend enforcement
+    /// acts on and is the one still certain to fall inside the open period.
+    fn retain_for_retry(&self, batch: Vec<UsageEvent>) {
+        let mut retained = self.lock_retained();
+        retained.extend(batch);
+        let overflow = retained.len().saturating_sub(self.max_retained);
+        if overflow > 0 {
+            let dropped_value: u64 = retained
+                .drain(..overflow)
+                .map(|event| event.value)
+                .fold(0, u64::saturating_add);
+            tracing::error!(
+                dropped = overflow,
+                dropped_value,
+                retained = retained.len(),
+                max_retained = self.max_retained,
+                topic = %self.topic,
+                "meter outbox retry buffer full; dropped oldest usage events (under-billing)"
+            );
+        }
     }
 
     /// Durably append usage events to the local WAL without touching the
@@ -204,50 +308,61 @@ impl UsageOutbox {
     /// Persist a drained window, then publish every unacked WAL event. Each
     /// `UsageEvent` is one stream record because the forwarder decodes each
     /// record payload as a single event.
+    ///
+    /// `events` is joined by any backlog a previous failed append left in
+    /// memory, so a caller that has nothing new still flushes that backlog.
     pub async fn publish_events(&self, events: &[UsageEvent]) -> OutboxPublishResult {
-        let append_failures = match self.enqueue_events(events) {
-            Ok(()) => Vec::new(),
+        let batch = self.batch_with_retained(events);
+        if let Err(error) = self.enqueue_events(&batch) {
+            // The caller drained its counters to build `events`, so this batch
+            // is the only copy that exists. Hold it for the next append instead
+            // of letting the window die with this call.
+            let error = error.to_string();
+            let failed = batch
+                .iter()
+                .map(|event| OutboxFailure {
+                    event_id: event.event_id.clone(),
+                    app_id: event.subject.app,
+                    meter: event.meter.clone(),
+                    error: format!("wal append: {error}"),
+                })
+                .collect();
+            let attempted = batch.len();
+            self.retain_for_retry(batch);
+            tracing::error!(
+                attempted,
+                retained = self.retained_len(),
+                error = %error,
+                "meter outbox WAL append failed; retaining events for retry"
+            );
+            return OutboxPublishResult {
+                attempted,
+                published: 0,
+                failed,
+            };
+        }
+        let pending = match self.wal.load_pending() {
+            Ok(pending) => pending,
             Err(error) => {
+                // Not retained, unlike the append failure above: the append
+                // committed, so the WAL owns these events and replays them on
+                // the next call. Retaining as well would publish each twice.
                 let error = error.to_string();
                 tracing::error!(
-                    attempted = events.len(),
                     error = %error,
-                    "meter outbox WAL append failed; refusing unprotected publish"
+                    "meter outbox WAL read failed; events stay in the WAL for the next attempt"
                 );
                 return OutboxPublishResult {
-                    attempted: events.len(),
+                    attempted: batch.len(),
                     published: 0,
-                    failed: events
+                    failed: batch
                         .iter()
                         .map(|event| OutboxFailure {
                             event_id: event.event_id.clone(),
                             app_id: event.subject.app,
                             meter: event.meter.clone(),
-                            error: format!("wal append: {error}"),
-                        })
-                        .collect(),
-                };
-            }
-        };
-        let pending = match self.wal.load_pending() {
-            Ok(pending) => pending,
-            Err(error) => {
-                let error = error.to_string();
-                tracing::error!(
-                    error = %error,
-                    "meter outbox WAL read failed; refusing unprotected publish"
-                );
-                return OutboxPublishResult {
-                    attempted: events.len(),
-                    published: 0,
-                    failed: append_failures
-                        .into_iter()
-                        .chain(events.iter().map(|event| OutboxFailure {
-                            event_id: event.event_id.clone(),
-                            app_id: event.subject.app,
-                            meter: event.meter.clone(),
                             error: format!("wal read: {error}"),
-                        }))
+                        })
                         .collect(),
                 };
             }
@@ -520,7 +635,10 @@ pub fn spawn_outbox_task(meter: Arc<Meter>, outbox: UsageOutbox, config: OutboxC
         loop {
             compio::time::sleep(config.interval).await;
             let events = meter.drain();
-            if events.is_empty() {
+            // An empty drain still needs a publish when a previous append
+            // failed, otherwise the retained backlog never flushes on a node
+            // that has gone idle.
+            if events.is_empty() && !outbox.has_pending_retry() {
                 continue;
             }
             let result = outbox.publish_events(&events).await;
@@ -729,6 +847,147 @@ mod tests {
             assert_eq!(third.attempted, 0);
             assert_eq!(third.published, 0);
             assert!(third.failed.is_empty());
+        });
+    }
+
+    /// Overwrite the WAL's sequence cursor through the live `Database` the
+    /// outbox already holds. redb is single-writer, so the test cannot open a
+    /// second handle on the same file; going through `wal.db` also means the
+    /// injection needs no test-only hook in the production type.
+    ///
+    /// Setting the cursor to `u64::MAX` makes the next `append` overflow and
+    /// abort its write transaction, which is a real failure of the real append
+    /// path rather than a stubbed error.
+    fn set_next_seq(wal: &UsageWal, next_seq: u64) {
+        let tx = wal.db.begin_write().expect("begin seed write");
+        {
+            let mut meta = tx.open_table(WAL_META).expect("open meta for seeding");
+            meta.insert(NEXT_SEQ_KEY, next_seq).expect("seed next_seq");
+        }
+        tx.commit().expect("commit seed");
+    }
+
+    /// A failed WAL append must not destroy the drained window. `Meter::drain`
+    /// already zeroed the counters, so the events in flight are the only copy
+    /// left anywhere.
+    #[test]
+    fn wal_append_failure_retains_drained_counts_for_verbatim_retry() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let meter = Meter::with_source("worker-test");
+            let app = Uuid::new_v4();
+            meter.increment(&app.to_string(), "requests", 7);
+            meter.increment(&app.to_string(), "db_reads", 3);
+
+            let events = meter.drain();
+            assert_eq!(events.len(), 2);
+            assert!(
+                meter.drain().is_empty(),
+                "drain zeroed the counters: these events are the only copy"
+            );
+
+            let stream = Arc::new(FakeStream::default());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let outbox = UsageOutbox::new(
+                stream.clone(),
+                "usage-events-test",
+                dir.path().join("outbox.redb"),
+            )
+            .expect("open outbox WAL");
+
+            set_next_seq(&outbox.wal, u64::MAX);
+            let first = outbox.publish_events(&events).await;
+
+            assert_eq!(first.published, 0);
+            assert_eq!(first.failed.len(), 2);
+            for failure in &first.failed {
+                assert!(
+                    failure.error.contains("wal append sequence overflow"),
+                    "the append error path was taken, not some later failure: {}",
+                    failure.error
+                );
+            }
+            assert!(
+                stream.published.lock().unwrap().is_empty(),
+                "nothing reached the stream"
+            );
+            assert!(
+                outbox.wal.load_pending().expect("read wal").is_empty(),
+                "the append aborted, so the WAL holds nothing: the counts survive only if retained"
+            );
+
+            // The disk recovers. No new drain happens - the counters are gone,
+            // so anything published now can only come from the retained window.
+            set_next_seq(&outbox.wal, 0);
+            let second = outbox.publish_events(&[]).await;
+            assert_eq!(second.published, 2, "the retained window is republished");
+            assert!(second.failed.is_empty());
+
+            let published: Vec<UsageEvent> = stream
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.event.clone())
+                .collect();
+            assert_eq!(published.len(), 2);
+            for original in &events {
+                assert!(
+                    published.contains(original),
+                    "retry is verbatim - same event_id, event_time and value: {original:?}"
+                );
+            }
+
+            let third = outbox.publish_events(&[]).await;
+            assert_eq!(third.attempted, 0, "retained events are not republished");
+            assert_eq!(stream.published.lock().unwrap().len(), 2);
+        });
+    }
+
+    /// The retain buffer is capped, and overflow drops the oldest events. That
+    /// is a loss, but a bounded and logged one on a node whose WAL has been
+    /// failing long enough to accumulate `max_retained_events` windows.
+    #[test]
+    fn retained_events_are_capped_and_drop_oldest() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let stream = Arc::new(FakeStream::default());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let outbox = UsageOutbox::new(
+                stream.clone(),
+                "usage-events-test",
+                dir.path().join("outbox.redb"),
+            )
+            .expect("open outbox WAL")
+            .with_max_retained_events(2);
+
+            set_next_seq(&outbox.wal, u64::MAX);
+            let mut drained = Vec::new();
+            for value in 1..=3u64 {
+                let meter = Meter::with_source("worker-test");
+                meter.increment(&Uuid::new_v4().to_string(), "requests", value);
+                let events = meter.drain();
+                assert_eq!(events.len(), 1);
+                let result = outbox.publish_events(&events).await;
+                assert_eq!(result.published, 0);
+                drained.push(events[0].clone());
+            }
+
+            set_next_seq(&outbox.wal, 0);
+            let flush = outbox.publish_events(&[]).await;
+            assert_eq!(flush.published, 2, "the cap holds at two events");
+
+            let published: Vec<UsageEvent> = stream
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.event.clone())
+                .collect();
+            assert!(
+                !published.contains(&drained[0]),
+                "the oldest retained event was dropped"
+            );
+            assert!(published.contains(&drained[1]));
+            assert!(published.contains(&drained[2]));
         });
     }
 
