@@ -170,6 +170,96 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
     Value::Object(obj)
 }
 
+/// Release everything this test opened against Postgres, then wait for the
+/// sockets to actually close.
+///
+/// Every test here runs on a private compio runtime that is torn down the
+/// moment the test body returns. A connection's socket is owned by a detached
+/// driver task, and dropping the pool only asks that task to shut down - the
+/// `Terminate` write and socket drop still have to be driven. If the runtime
+/// goes away first the socket is orphaned: an io_uring submission co-owns the
+/// descriptor and is never reclaimed, so the descriptor and the server-side
+/// backend survive for the whole process. Enough tests doing that exhausts
+/// `max_connections`, and the rest of the suite fails to connect at all.
+///
+/// Calling this last keeps the binary inside a bounded connection budget no
+/// matter how many tests it holds.
+async fn release_pg(pool: std::rc::Rc<Pool>) {
+    drop(pool);
+    drain_pg().await;
+}
+
+/// The half of [`release_pg`] that owns no pool, for tests whose handles have
+/// already gone out of scope. Every handle must be dropped first: a live one
+/// keeps its connection counted and makes this wait out its whole budget.
+async fn drain_pg() {
+    // The context can hold its own pool handle and a parked transaction
+    // client; those keep connections counted, so clear it before waiting.
+    zeroship_plugin_db::reset_context_for_tests();
+    if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
+        eprintln!(
+            "DRAIN-TIMEOUT: {} connection(s) still live",
+            compio_postgres::live_connections()
+        );
+    }
+}
+
+/// The connection budget this whole binary is allowed to hold at once,
+/// expressed as open sockets in the process.
+///
+/// Well under a stock server's `max_connections` of 100, and well under a
+/// stock `RLIMIT_NOFILE` of 1024, so neither limit is what this trips on.
+const SOCKET_CEILING: usize = 24;
+
+/// Sockets this process currently has open.
+fn open_sockets() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("procfs is required to count this process's sockets")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            std::fs::read_link(e.path())
+                .is_ok_and(|target| target.to_string_lossy().starts_with("socket:"))
+        })
+        .count()
+}
+
+/// A test must not leave Postgres connections behind when its runtime dies.
+///
+/// Runs the exact lifecycle every test in this file runs - fresh thread, fresh
+/// compio runtime, pool, query, teardown - many more times than the suite has
+/// tests, and asserts the process never accumulates connections. Without a
+/// teardown that waits for the sockets to close, each iteration orphans its
+/// connections and the count climbs until the server refuses new clients.
+///
+/// Deliberately not a `#[compio::test]`: the runtime lifecycle is the subject.
+#[test]
+fn connections_do_not_outlive_the_runtime_that_opened_them() {
+    const ITERATIONS: usize = 40;
+
+    let baseline = open_sockets();
+    for _ in 0..ITERATIONS {
+        std::thread::spawn(|| {
+            compio::runtime::Runtime::new()
+                .expect("cannot create runtime")
+                .block_on(async {
+                    let url = require_pg().await;
+                    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+                    pool.execute("SELECT 1", &[]).await.unwrap();
+                    release_pg(pool).await;
+                });
+        })
+        .join()
+        .expect("worker thread panicked");
+    }
+
+    let leaked = open_sockets().saturating_sub(baseline);
+    assert!(
+        leaked <= SOCKET_CEILING,
+        "{ITERATIONS} pool lifecycles leaked {leaked} sockets (ceiling {SOCKET_CEILING}); \
+         connections are outliving the runtime that opened them"
+    );
+}
+
 use zeroship_plugin_db::query::*;
 
 #[compio::test]
@@ -211,6 +301,7 @@ async fn insert_and_find() {
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "Hello");
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +329,7 @@ async fn insert_many_round_trip() {
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     let count: i64 = rows[0].get("count");
     assert_eq!(count, 3);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +356,7 @@ async fn update_one_inc() {
     let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Counter"}), &json!({"views": {"$inc": 3}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["views"], 8);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +381,7 @@ async fn update_one_dec_mul() {
     let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Math"}), &json!({"views": {"$mul": 2}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["views"], 14);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +429,7 @@ async fn update_one_jsonb_array_ops() {
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
     assert!(!tags.contains(&json!("go")));
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +468,7 @@ async fn update_many_round_trip() {
     for row in &rows {
         assert_eq!(row["views"], 1);
     }
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +512,7 @@ async fn delete_operations() {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +558,7 @@ async fn filter_comparison_operators() {
     let bq = build_find(SCHEMA, "notes", &json!({"category": {"$ne": "food"}}), None, None, None, None).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +594,7 @@ async fn filter_logical_operators() {
     let bq = build_find(SCHEMA, "notes", &json!({"$not": {"category": "food"}}), None, None, None, None).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +624,7 @@ async fn filter_pattern_operators() {
     let bq = build_find(SCHEMA, "notes", &json!({"title": {"$ilike": "%hello%"}}), None, None, None, None).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +657,7 @@ async fn find_with_options() {
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "B"); // 2nd highest
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +681,7 @@ async fn find_with_projection() {
     // Should NOT have body, id, views, etc.
     assert!(rows[0].get("body").is_none());
     assert!(rows[0].get("id").is_none());
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +715,7 @@ async fn distinct_values() {
     let bq = build_distinct(SCHEMA, "notes", "category", &json!({"category": {"$ne": "science"}})).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +747,7 @@ async fn count_with_filter() {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +789,7 @@ async fn aggregate_full() {
     assert_eq!(rows[0]["total"], 60);
     assert_eq!(rows[0]["lo"], 10);
     assert_eq!(rows[0]["hi"], 30);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +823,7 @@ async fn aggregate_multi_group() {
     // tech/rust=2, tech/go=1, food/pasta=1
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["cnt"], 2); // highest count first
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +860,7 @@ async fn aggregate_having() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["category"], "tech");
     assert_eq!(rows[0]["cnt"], 3);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +897,7 @@ async fn null_handling() {
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "WithBody");
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +924,7 @@ async fn mixed_update() {
     assert_eq!(updated[0]["views"], 15);
     let tags = updated[0]["tags"].as_array().unwrap();
     assert!(tags.contains(&json!("new")));
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +944,7 @@ async fn timestamps_as_numbers() {
     // Should be a reasonable Unix millisecond timestamp (after 2020)
     assert!(ts > 1_577_836_800_000); // 2020-01-01
     assert!(ts < 2_000_000_000_000); // ~2033
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +1002,7 @@ async fn aggregate_having_postgres_docs_example() {
     assert_eq!(rows[0]["city"], "Hayward");
     assert_eq!(rows[0]["cnt"], 3);
     assert_eq!(rows[0]["max_temp"], 41);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1125,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
             panic!("idempotent re-run failed for {}: {e}", spec.sql);
         });
     }
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1170,7 @@ async fn a3_audit_table_created_and_idempotent() {
     zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
         .await
         .unwrap();
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1338,7 @@ async fn a3_audit_table_check_alter_upgrades_existing_constraint() {
         bad_code, "23514",
         "unknown status must fail with check_violation (23514), got: {bad_err}"
     );
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1400,7 @@ async fn a2_first_deploy_writes_audit_rows() {
         assert_eq!(st, "applied", "{kind} should be applied, got {st} (deploy_id={dep})");
         assert_eq!(dep, "test_deploy_1");
     }
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1369,6 +1484,7 @@ async fn a2_destructive_drop_column_refused_strict() {
         names.contains(&"legacy_score".to_string()),
         "legacy_score must remain after refused deploy; got: {names:?}"
     );
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,6 +1534,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         .unwrap();
     let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>("column_name")).collect();
     assert!(names.contains(&"legacy_score".to_string()));
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,6 +1593,7 @@ async fn a2_additive_add_column_applied() {
     assert_eq!(rows.len(), 1);
     let st: String = rows[0].get("status");
     assert_eq!(st, "applied");
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1651,7 @@ async fn a2_not_null_on_non_empty_refused() {
         .find(|p| p["field"] == "ssn")
         .expect("ssn add_column op should be listed");
     assert_eq!(ssn_op["change_kind"], "add_column");
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,6 +1749,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
             &[],
         )
         .await;
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,6 +1798,7 @@ async fn a2_required_with_default_is_compatible() {
         .unwrap();
     let st: String = rows[0].get("status");
     assert_eq!(st, "active");
+    release_pg(pool).await;
 }
 // ---------------------------------------------------------------------------
 // B2 — typed cross-table relations: foreign keys at the DB level
@@ -1751,6 +1872,7 @@ SELECT con.conname AS name,
     assert_eq!(on_update, "r");
     let deferrable: bool = rows[0].get("deferrable");
     assert!(deferrable, "expected DEFERRABLE INITIALLY DEFERRED");
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -1779,6 +1901,7 @@ async fn b2_ref_blocks_orphan_insert() {
         err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
         "expected foreign_key_violation, got: {err_str}"
     );
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -1826,6 +1949,7 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
         err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
         "expected foreign_key_violation, got: {err_str}"
     );
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -1894,6 +2018,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         .unwrap();
     let n: i64 = count_rows[0].get("n");
     assert_eq!(n, 0, "CASCADE should have deleted all child posts");
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2020,6 +2145,8 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
     let nb: i64 = count_rows[0].get("nb");
     assert_eq!(na, 1);
     assert_eq!(nb, 1);
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2102,6 +2229,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
             || err_str.contains("add_foreign_key"),
         "expected FK validation failure, got: {err_str}"
     );
+    release_pg(pool).await;
 }
 
 // ===========================================================================
@@ -2191,7 +2319,7 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "c1_setup_app";
@@ -2216,6 +2344,7 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
     assert_eq!(second.slot, first.slot);
 
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2224,7 +2353,7 @@ async fn c1_watchdog_reports_new_slot() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "c1_watchdog_app";
@@ -2254,6 +2383,7 @@ async fn c1_watchdog_reports_new_slot() {
     );
 
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2262,7 +2392,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "c1_abandoned_app";
@@ -2291,6 +2421,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
         .unwrap();
 
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2303,7 +2434,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "c1_restart_app";
@@ -2328,6 +2459,8 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     assert_eq!(resumed.slot, first_slot);
 
     c1_cleanup(&pool2, app).await;
+    drop(pool2);
+    drain_pg().await;
 }
 
 // NOTE: a "publication-only on wal_level=replica" sanity test was
@@ -2517,6 +2650,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
     sub.close();
     zeroship_plugin_db::broker::drop_app(None);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2546,7 +2680,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "p8a2_app";
@@ -2645,6 +2779,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     consumer_handle.cancel().await;
     zeroship_plugin_db::broker::drop_app(None);
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 // ===========================================================================
@@ -2755,6 +2890,7 @@ async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
     // first.minted_initial_hmac_key was false, a previous run left a
     // key; either is OK.
     let _ = first;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2786,7 +2922,7 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
                  cannot connect as test role (pg_hba?): {e}"
             );
             b8c_drop_role(&pool, role).await;
-            return;
+            return release_pg(pool).await;
         }
     };
 
@@ -2811,6 +2947,7 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
 
     drop(role_pool);
     b8c_drop_role(&pool, role).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2846,7 +2983,7 @@ async fn b8c_per_app_role_cannot_read_hmac_keys() {
                  cannot connect as test role: {e}"
             );
             b8c_drop_role(&pool, role).await;
-            return;
+            return release_pg(pool).await;
         }
     };
 
@@ -2864,6 +3001,7 @@ async fn b8c_per_app_role_cannot_read_hmac_keys() {
 
     drop(role_pool);
     b8c_drop_role(&pool, role).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2905,6 +3043,8 @@ async fn b8c_per_app_role_can_init_session_via_function() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_init_app");
     assert_eq!(rows[0].get::<_, String>("actor_kind"), "platform");
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2945,6 +3085,8 @@ async fn b8c_init_session_rejects_expired_token() {
         }
         other => panic!("expected ValidationFailed, got: {other:?}"),
     }
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -2988,6 +3130,8 @@ async fn b8c_init_session_rejects_replay_nonce() {
         }
         other => panic!("expected ValidationFailed, got: {other:?}"),
     }
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3029,6 +3173,8 @@ async fn b8c_init_session_rejects_tampered_signature() {
         }
         other => panic!("expected ValidationFailed, got: {other:?}"),
     }
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3144,6 +3290,7 @@ async fn b8c_key_rotation_grace_window_accepts_both() {
     // both.
     let _ = token_under_previous;
     drop(client_b);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3195,7 +3342,7 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
                  cannot connect as test role: {e}"
             );
             b8c_drop_role(&pool, role).await;
-            return;
+            return release_pg(pool).await;
         }
     };
     let rc = role_pool.get().await.unwrap();
@@ -3257,6 +3404,7 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
     drop(rc);
     drop(role_pool);
     b8c_drop_role(&pool, role).await;
+    release_pg(pool).await;
 }
 
 // -----------------------------------------------------------------------
@@ -3323,6 +3471,8 @@ async fn b8c_init_session_p_pid_null_uses_pg_backend_pid() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_p_pid_null_app");
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3398,6 +3548,9 @@ async fn b8c_session_minter_trait_init_succeeds_on_different_pool_client() {
         "session_ctx row must be written for the trait-routed init (got 0 rows)"
     );
     assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_minter_app");
+    drop(probe);
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3442,6 +3595,8 @@ async fn b8c_session_minter_trait_rejects_tampered_signature() {
         }
         other => panic!("expected ValidationFailed(session_invalid_signature), got: {other:?}"),
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3453,7 +3608,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
@@ -3516,6 +3671,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     assert_eq!(v2["created"], false);
 
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -3555,6 +3711,7 @@ async fn b8c_consumer_runs_under_platform_role_grants() {
     let public_ok: bool = rows[0].get("public_ok");
     assert!(platform_ok, "platform role must have EXECUTE");
     assert!(!public_ok, "PUBLIC must NOT have EXECUTE");
+    release_pg(pool).await;
 }
 
 // ===========================================================================
@@ -3576,7 +3733,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "p8a2_sup_recon";
@@ -3676,6 +3833,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     sup_handle.cancel().await;
     zeroship_plugin_db::broker::drop_app(None);
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 /// The supervisor exits cleanly when the slot is externally
@@ -3698,7 +3856,7 @@ async fn p8a2_supervised_consumer_exits_on_slot_invalidated() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "p8a2_sup_inval";
@@ -3777,6 +3935,7 @@ async fn p8a2_supervised_consumer_exits_on_slot_invalidated() {
     );
 
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 /// Two apps sharing a worker thread: app A has an active consumer
@@ -3882,7 +4041,7 @@ async fn p8a2_auto_spawn_via_callback_short_circuits() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "p8a2_auto_app";
@@ -3943,6 +4102,7 @@ async fn p8a2_auto_spawn_via_callback_short_circuits() {
     sup_handle.cancel().await;
     zeroship_plugin_db::broker::drop_app(None);
     c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
 }
 
 /// Hex-encode bytes — duplicated locally to avoid pulling in the
@@ -4061,7 +4221,7 @@ async fn vector_search_returns_k_nearest() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&pool).await {
         eprintln!("Skipping: pgvector not installed in test environment");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "vector_topk";
@@ -4157,6 +4317,8 @@ async fn vector_search_returns_k_nearest() {
     for r in &rows {
         assert!(r.get("_distance").is_some(), "row missing _distance: {r}");
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 2 test gate** — `pgvector_extension_missing_reports_typed_error`.
@@ -4193,7 +4355,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
         .unwrap_or(false);
     if still_present {
         eprintln!("Skipping: could not drop vector extension (likely in use by other objects)");
-        return;
+        return release_pg(pool).await;
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
@@ -4252,6 +4414,8 @@ async fn pgvector_extension_missing_reports_typed_error() {
         }
         other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 2 test gate** — `vector_dimension_mismatch_rejected_at_insert`.
@@ -4271,7 +4435,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&pool).await {
         eprintln!("Skipping: pgvector not installed in test environment");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "vector_dim_mismatch";
@@ -4316,6 +4480,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
         msg.contains("128") || msg.contains("256") || msg.to_lowercase().contains("vector"),
         "error message must mention dim mismatch: {msg}"
     );
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -4457,6 +4622,8 @@ async fn fts_search_matches_substring() {
     for r in &rows {
         assert!(r.get("_rank").is_some(), "row missing _rank: {r}");
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 3 test gate** — `fts_and_filter_compose`.
@@ -4555,6 +4722,8 @@ async fn fts_and_filter_compose() {
             "filter must restrict to lang=en: {r}"
         );
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 3 test gate (bonus)** — `fts_trigger_keeps_index_in_sync_after_update`.
@@ -4670,6 +4839,8 @@ async fn fts_trigger_keeps_index_in_sync_after_update() {
         "trigger must surface beta after UPDATE, got {} hits",
         beta_hits.len()
     );
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 3 test gate** — `near_returns_within_radius`.
@@ -4693,7 +4864,7 @@ async fn near_returns_within_radius() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !postgis_available(&pool).await {
         eprintln!("Skipping: PostGIS not installed in test environment");
-        return;
+        return release_pg(pool).await;
     }
 
     let app = "near_radius";
@@ -4776,6 +4947,8 @@ async fn near_returns_within_radius() {
     for r in &rows {
         assert!(r.get("_distance_m").is_some(), "row missing _distance_m: {r}");
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 PR 3 test gate** — `postgis_extension_missing_reports_typed_error`.
@@ -4805,7 +4978,7 @@ async fn postgis_extension_missing_reports_typed_error() {
         .unwrap_or(false);
     if still_present {
         eprintln!("Skipping: could not drop postgis extension (likely in use by other objects)");
-        return;
+        return release_pg(pool).await;
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
@@ -4843,6 +5016,8 @@ async fn postgis_extension_missing_reports_typed_error() {
         }
         other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 // ===========================================================================
@@ -4975,6 +5150,8 @@ async fn encrypted_column_round_trip_randomised() {
         .decrypt(&key, EncryptionMode::Randomised, &raw, &aad)
         .expect("decrypt");
     assert_eq!(recovered, plaintext);
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P5 PR 2 — Camp A fence**: copying ciphertext from row A into row
@@ -5074,6 +5251,8 @@ async fn encrypted_randomised_row_swap_rejected() {
         }
         other => panic!("expected ValidationFailed encryption_aead_failed, got {other:?}"),
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P5 PR 2 — gate #2**: deterministic mode produces identical
@@ -5159,6 +5338,8 @@ async fn encrypted_deterministic_equality_lookup() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 5, "deterministic equality lookup must match all 5 shared-ssn rows");
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P4 ROUND-TRIP e2e** — the proof both halves cohere: a collection with an
@@ -5318,6 +5499,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         out["phone"]
     );
     assert_eq!(out["phone"]["classification"], json!("pci"));
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -5432,6 +5614,7 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
 
     // Sanity teardown.
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    release_pg(pool).await;
 }
 
 /// **P5 (a) — behaviour-identical CRUD with NO runtime DDL.** The engine creates
@@ -5601,6 +5784,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     );
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    release_pg(pool).await;
 }
 
 /// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
@@ -5630,6 +5814,8 @@ async fn encrypted_column_missing_key_typed_error() {
         }
         other => panic!("expected Configuration column_key_not_configured, got {other:?}"),
     }
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **I1** — the SECURITY DEFINER `__zeroship_admin.get_column_key`
@@ -5696,6 +5882,8 @@ async fn pg_admin_table_key_source_reads_bytea_directly() {
         "resolve_key must use the admin-table root, not the env-var fallback",
     );
     assert_eq!(resolved.k_siv, expected_k_siv);
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -5729,6 +5917,7 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
         "BYTEA decoding must not reinterpret raw binary bytes as a \
          text-protocol \\x... payload",
     );
+    release_pg(pool).await;
 }
 
 // ===========================================================================
@@ -5840,6 +6029,8 @@ async fn pitr_pg_records_target() {
     )
     .await
     .unwrap();
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P5 PR 4 — fence**: when the per-app `register_model` advisory
@@ -5918,6 +6109,8 @@ async fn snapshot_during_migration_returns_typed_error() {
     // advisory lock when the backend session terminates.
     drop(lock_client);
     lock_conn_task.detach();
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P5 PR 4 — gate #1**: round-trip snapshot+restore. Insert rows
@@ -6037,6 +6230,8 @@ async fn snapshot_restore_round_trip_pg() {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
         .await
         .unwrap();
+    drop(backend);
+    release_pg(pool).await;
 }
 
 /// **P5 PR 4 — fence**: the `SnapshotHandle.content_hash` returned by
@@ -6107,6 +6302,8 @@ async fn snapshot_uri_content_hash_round_trip() {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
         .await
         .unwrap();
+    drop(backend);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -6156,6 +6353,7 @@ async fn p55_pr1_register_model_refuses_masked_suffix_field() {
         msg.contains("reserved field name") && msg.contains("_masked"),
         "expected reserved-suffix message, got: {msg}"
     );
+    release_pg(pool).await;
 }
 
 /// A schema declaring a column named after one of the six default
@@ -6196,6 +6394,7 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
         msg.contains("reserved field name"),
         "expected reserved-name message, got: {msg}"
     );
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -6378,6 +6577,7 @@ async fn per_app_role_created_at_provision() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6461,6 +6661,8 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
             .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
             .await;
     }
+    drop(client);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6490,6 +6692,7 @@ async fn per_app_role_has_no_replication_attr() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6540,6 +6743,7 @@ async fn per_app_role_grant_scoped_to_schema() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6626,6 +6830,7 @@ async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_a}\""), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6679,6 +6884,7 @@ async fn client_sql_runs_under_per_app_role() {
     drop(client);
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6724,6 +6930,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -6735,7 +6942,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pgvector_available(&admin_pool).await {
         eprintln!("Skipping: pgvector not installed in test environment");
-        return;
+        return release_pg(admin_pool).await;
     }
 
     let app = "p6a_vector_role_fence";
@@ -6813,6 +7020,8 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let _ = admin_pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
+    drop(backend);
+    release_pg(admin_pool).await;
 }
 
 #[compio::test]
@@ -6891,6 +7100,9 @@ async fn fts_search_runs_under_per_app_role_via_rls() {
     let _ = admin_pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
+    drop(admin_backend);
+    drop(backend);
+    release_pg(admin_pool).await;
 }
 
 #[compio::test]
@@ -6901,7 +7113,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !postgis_extension_available(&admin_pool).await {
         eprintln!("Skipping: postgis not installed in test environment");
-        return;
+        return release_pg(admin_pool).await;
     }
 
     let app = "p6a_spatial_role_fence";
@@ -6983,6 +7195,8 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let _ = admin_pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
+    drop(backend);
+    release_pg(admin_pool).await;
 }
 
 #[compio::test]
@@ -7080,6 +7294,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     let _ = admin_pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
+    release_pg(admin_pool).await;
 }
 
 #[compio::test]
@@ -7122,6 +7337,7 @@ async fn wal_connection_stays_platform_role() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -7219,6 +7435,8 @@ async fn drop_namespace_defers_on_active_subscription() {
     assert!(schema_exists(&pool, app).await, "deferred drop must NOT drop the schema");
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -7262,6 +7480,8 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
     assert!(!schema_exists(&pool, app).await, "schema must be dropped under --force");
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -7270,7 +7490,7 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping drop_namespace_pg_ordering — wal_level != logical");
-        return;
+        return release_pg(pool).await;
     }
     let app = "p6a_drop_order";
     c1_cleanup(&pool, app).await;
@@ -7305,6 +7525,8 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     assert!(!schema_exists(&pool, app).await, "schema must be dropped");
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -7349,6 +7571,8 @@ async fn drop_namespace_drops_per_app_role_last() {
     assert!(!role_exists(&pool, app).await, "per-app role dropped last");
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -7357,7 +7581,7 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping drop_namespace_idempotent — wal_level != logical");
-        return;
+        return release_pg(pool).await;
     }
     let app = "p6a_drop_idem";
     c1_cleanup(&pool, app).await;
@@ -7396,6 +7620,8 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     );
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 #[compio::test]
@@ -7410,7 +7636,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping drop_namespace_retries — wal_level != logical");
-        return;
+        return release_pg(pool).await;
     }
     let app = "p6a_drop_retry";
     c1_cleanup(&pool, app).await;
@@ -7451,6 +7677,8 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     assert!(!role_exists(&pool, app).await, "retry must drop the role");
 
     c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -7574,4 +7802,5 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
     let _ = pool
         .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await;
+    release_pg(pool).await;
 }

@@ -132,6 +132,10 @@ pub struct Connection<S, T> {
     /// parameter status). `None` until someone calls
     /// `Connection::notifications()`.
     async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
+    /// Keeps this connection counted in `live_connections()` for exactly as
+    /// long as it owns its socket, so `drain_connections` can wait for the
+    /// socket to be released instead of guessing at a sleep.
+    _live: crate::live::LiveConnectionGuard,
 }
 
 impl<S, T> Connection<S, T>
@@ -153,6 +157,7 @@ where
             responses: VecDeque::new(),
             pending_responses: VecDeque::new(),
             async_sender: None,
+            _live: crate::live::LiveConnectionGuard::new(),
         }
     }
 
@@ -714,10 +719,14 @@ where
             responses,
             pending_responses,
             async_sender,
+            _live,
         } = self;
 
         match stream.try_into_split() {
             Ok((read_half, write_half)) => {
+                // `_live` must outlive the loop: the split halves still own the
+                // socket, so the connection is not released until they are.
+                let _live = _live;
                 Self::run_multiplexed(read_half, write_half, parameters, receiver, async_sender)
                     .await
             }
@@ -730,6 +739,7 @@ where
                     responses,
                     pending_responses,
                     async_sender,
+                    _live,
                 };
                 conn.run_serialized().await
             }
