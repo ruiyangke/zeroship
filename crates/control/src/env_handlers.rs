@@ -25,7 +25,14 @@ fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
 
-async fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+/// Shared admin-bucket rate limit. `pub(crate)` because the app lifecycle and
+/// deploy handlers in `api.rs` need the SAME bucket as the env handlers: a caller
+/// throttled on one surface must not get a fresh allowance by switching to the
+/// other.
+pub(crate) async fn admin_rate_limit(
+    req: &web::HttpRequest,
+    state: &AppState,
+) -> Option<web::HttpResponse> {
     http_util::rate_limit(
         req,
         state.control_pg.as_ref(),

@@ -247,6 +247,18 @@ impl Drop for Fixture {
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
+    // The default admin quota is deliberately far above anything a test issues,
+    // so the limiter never interferes with a test that is about something else.
+    build_test_state_with_admin_quota(db_url, label, Quota::per_minute(10_000, 100)).await
+}
+
+/// Same fixture with a caller-chosen admin quota, for the tests that are ABOUT
+/// the limiter and need one small enough to trip.
+async fn build_test_state_with_admin_quota(
+    db_url: &str,
+    label: &str,
+    admin_quota: Quota,
+) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
 
@@ -293,7 +305,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         worker_key: SecretString::new(String::new()),
-        admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        admin_limiter: Arc::new(RateLimiter::new(admin_quota)),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         insecure_dev: false,
         trust_proxy: false,
@@ -996,5 +1008,57 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
         dir_is_empty(&fx.blob_root.join("blobs")),
         "a deploy for a nonexistent app must not leave blobs behind: the app is \
          never created, so nothing will ever reference, bill, or garbage-collect them",
+    );
+}
+
+/// Deploy is rate limited.
+///
+/// It is the most expensive endpoint the control plane exposes - it streams a
+/// body to disk, mmaps it, and writes every blob in the bundle - and nothing
+/// bounded how often one caller could ask for that.
+///
+/// The caller is AUTHENTICATED on purpose. `AuthzGuard` is an extractor, so an
+/// unauthenticated request is rejected before any handler body runs and would
+/// never reach the limiter: a version of this test without credentials passes
+/// through 31 straight 401s and proves nothing.
+#[compio::test]
+async fn deploy_is_rate_limited() {
+    let db_url = db_url();
+    // Small admin quota so 31 requests actually cross it.
+    let fx =
+        build_test_state_with_admin_quota(&db_url, "ratelimit", Quota::per_minute(5, 60)).await;
+    let app_id = Uuid::new_v4();
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
+    )
+    .await;
+
+    // The admin bucket allows 30/minute per caller; go one past it.
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let mut statuses = Vec::new();
+    for _ in 0..31 {
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/apps/{app_id}/deploy"))
+            .header("authorization", pat.bearer())
+            .header("content-type", "application/x-zship")
+            .set_payload(b"never read".to_vec())
+            .to_request();
+        statuses.push(test::call_service(&app, req).await.status());
+    }
+
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "31 authenticated deploys must trip the limiter; got {statuses:?}",
+    );
+    assert!(
+        dir_is_empty(&fx.deploy_tmp_dir),
+        "a throttled deploy must not stream its body to tmp",
     );
 }
