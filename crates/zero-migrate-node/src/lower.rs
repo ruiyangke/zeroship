@@ -396,7 +396,7 @@ fn lower_ordered_envelopes_to_plans_inner(
 
         let projection_ops = ops_without_completed_journal_evidence(&artifact, journal_entries)?;
         if !projection_ops.is_empty() {
-            for (op, inflight) in projection_ops {
+            for PendingProjectionOp { op, inflight, span } in projection_ops {
                 let mut candidate = pending_ops.clone();
                 candidate.push(op.clone());
                 match fold_ops_onto(
@@ -422,10 +422,62 @@ fn lower_ordered_envelopes_to_plans_inner(
                         // the matching journal step as inflight.
                     }
                     Err(error) => {
-                        return Err(format!(
-                            "failed to project pending schema after envelope {:?}: {error}",
-                            resolved.name
-                        ));
+                        // The fold is guard-blind: an `ifNotExists` op over an object
+                        // the live catalog already carries folds to a duplicate error,
+                        // which would refuse the plan the guard exists to absorb. Ask
+                        // the executor's own probe, unit by unit, against the live
+                        // snapshot the fold started from.
+                        //
+                        // NOT MySQL. MySQL evaluates no existence probe at apply time,
+                        // so a satisfied verdict here would send bare DDL to a backend
+                        // that cannot check anything; its leg keeps refusing.
+                        let verdict = if dialect == SqlDialect::Mysql {
+                            ProjectionGuardVerdict::NotSatisfied
+                        } else {
+                            let span = artifact.op_spans.get(span).ok_or_else(|| {
+                                format!("lowered operation has no plan-step span at index {span}")
+                            })?;
+                            projection_guard_verdict(&artifact, span, &base_snapshot, dialect)?
+                        };
+                        match verdict {
+                            ProjectionGuardVerdict::AllUnitsSatisfied
+                                if guard_skip_preserves_ownership(
+                                    &registry, &op, dialect, owner_app,
+                                ) =>
+                            {
+                                // Every unit's declared shape is already live, so the
+                                // projection keeps that shape and drops the op. The
+                                // executor still probes and journals it completed.
+                            }
+                            ProjectionGuardVerdict::AllUnitsSatisfied => {
+                                return Err(format!(
+                                    "failed to project pending schema after envelope {:?}: {error}; \
+                                     the existence guard is satisfied, but dropping the operation \
+                                     would change project ownership the incoming registry does not \
+                                     record - refusing rather than claiming an object this project \
+                                     does not own",
+                                    resolved.name
+                                ));
+                            }
+                            ProjectionGuardVerdict::Divergent(divergence) => {
+                                return Err(format!(
+                                    "failed to project pending schema after envelope {:?}: \
+                                     existence-guard drift: {} field `{}` declared {} but the live \
+                                     database has {} - the guarded op was refused fail-closed",
+                                    resolved.name,
+                                    divergence.object,
+                                    divergence.field,
+                                    divergence.expected,
+                                    divergence.actual
+                                ));
+                            }
+                            ProjectionGuardVerdict::NotSatisfied => {
+                                return Err(format!(
+                                    "failed to project pending schema after envelope {:?}: {error}",
+                                    resolved.name
+                                ));
+                            }
+                        }
                     }
                 }
                 advance_ownership_registry(
@@ -809,12 +861,24 @@ fn plan_has_no_journal_evidence(
     }))
 }
 
+/// One operation the pending-schema projection must still fold, paired with the
+/// lowered-plan metadata the projection needs to reason about it.
+struct PendingProjectionOp {
+    /// The effective, dialect-selected operation.
+    op: Op,
+    /// Whether any step this operation lowered to is journaled `started`.
+    inflight: bool,
+    /// Index into [`LoweredArtifact::op_spans`] this operation came from, so the
+    /// projection can reach the operation's individual lowered units.
+    span: usize,
+}
+
 fn ops_without_completed_journal_evidence(
     artifact: &LoweredArtifact,
     journal_entries: &[AppliedEntry],
-) -> Result<Vec<(Op, bool)>, String> {
+) -> Result<Vec<PendingProjectionOp>, String> {
     let mut pending = Vec::new();
-    for span in &artifact.op_spans {
+    for (index, span) in artifact.op_spans.iter().enumerate() {
         let mut completed = false;
         let mut inflight = false;
         for range in std::iter::once(&span.step_range).chain(&span.additional_step_ranges) {
@@ -834,7 +898,11 @@ fn ops_without_completed_journal_evidence(
                 .any(|step| step_has_journal_phase(step, journal_entries, Phase::Started));
         }
         if !completed {
-            pending.push((span.op.clone(), inflight));
+            pending.push(PendingProjectionOp {
+                op: span.op.clone(),
+                inflight,
+                span: index,
+            });
         }
     }
     Ok(pending)
@@ -871,6 +939,104 @@ fn step_has_journal_phase(
             has_version(rename.migration.version.as_str())
         }
     }
+}
+
+/// The aggregate existence-guard verdict for ONE lowered operation, read unit by
+/// unit rather than for the raw [`Op`].
+///
+/// A guarded `createTable` lowers to separate table, index, and deferred-constraint
+/// units, each carrying its own object-scoped probe. Reading only the first unit
+/// would report a matching existing table as fully satisfied while its secondary
+/// index is still absent, so `AllUnitsSatisfied` requires EVERY unit to be
+/// satisfied. Non-DDL steps and unguarded units never contribute a satisfied
+/// verdict.
+enum ProjectionGuardVerdict {
+    /// Every lowered unit reports the declared shape already present (or already
+    /// absent, for an `ifExists` guard).
+    AllUnitsSatisfied,
+    /// A unit's object exists with a shape that diverges from the declared one, or
+    /// with a shape that cannot be proven equal to it.
+    Divergent(zero_migrate::render::existence_probe::Divergence),
+    /// A unit is unguarded, is not a DDL step, or its guard still has work to do.
+    NotSatisfied,
+}
+
+/// Decide the per-unit existence-guard verdict for `span` against `snapshot`.
+///
+/// This runs the SAME [`decide`](zero_migrate::render::existence_probe::decide) the
+/// executor runs, so the projection and the apply-time probe cannot disagree about
+/// whether an object is already present. It deliberately does NOT read the fold's
+/// error kind: `FoldError::DuplicateTable` reports NAME presence alone, and acting
+/// on it would skip an operation over a wrong-shaped table.
+///
+/// `snapshot` is the catalog the fold started from, NOT the catalog as it will
+/// stand once earlier pending operations in the same plan have run. An operation
+/// whose object an earlier pending operation reshapes is therefore still decided
+/// against the pre-plan shape, and the executor's own probe remains the authority
+/// at apply time.
+fn projection_guard_verdict(
+    artifact: &LoweredArtifact,
+    span: &zero_migrate::render::lower::LoweredOpSpan,
+    snapshot: &zero_migrate::model::snapshot::SchemaSnapshot,
+    dialect: SqlDialect,
+) -> Result<ProjectionGuardVerdict, String> {
+    use zero_migrate::render::existence_probe::{decide, GuardVerdict};
+
+    let mut units = 0usize;
+    let mut all_satisfied = true;
+    let mut divergence = None;
+    for range in std::iter::once(&span.step_range).chain(&span.additional_step_ranges) {
+        let steps = artifact.plan.steps.get(range.clone()).ok_or_else(|| {
+            format!(
+                "lowered operation has invalid plan-step range {}..{} for {} steps",
+                range.start,
+                range.end,
+                artifact.plan.steps.len()
+            )
+        })?;
+        for step in steps {
+            units += 1;
+            let probe = match step {
+                zero_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
+                _ => None,
+            };
+            match probe.map(|probe| decide(probe, snapshot, dialect)) {
+                Some(GuardVerdict::SatisfiedNoop) => {}
+                Some(GuardVerdict::FailDrift(found)) => {
+                    all_satisfied = false;
+                    divergence.get_or_insert(found);
+                }
+                Some(GuardVerdict::RunBare) | None => all_satisfied = false,
+            }
+        }
+    }
+    if let Some(divergence) = divergence {
+        return Ok(ProjectionGuardVerdict::Divergent(divergence));
+    }
+    if all_satisfied && units > 0 {
+        return Ok(ProjectionGuardVerdict::AllUnitsSatisfied);
+    }
+    Ok(ProjectionGuardVerdict::NotSatisfied)
+}
+
+/// Whether dropping `op` from the projection leaves the ownership registry exactly
+/// as it stood.
+///
+/// [`advance_ownership_registry`] claims a `createTable` target for the lowering app
+/// UNCONDITIONALLY, with no prior-owner check. An operation dropped because its
+/// guard reports the object already present must therefore have no registry effect
+/// at all: otherwise this app would silently take over a table another app created,
+/// journal the migration completed, and leave nothing behind to re-examine it. Ops
+/// with no ownership effect trivially qualify.
+fn guard_skip_preserves_ownership(
+    registry: &BTreeMap<String, String>,
+    op: &Op,
+    dialect: SqlDialect,
+    owner_app: &str,
+) -> bool {
+    let mut projected = registry.clone();
+    advance_ownership_registry(&mut projected, std::slice::from_ref(op), dialect, owner_app);
+    projected == *registry
 }
 
 fn inflight_projection_already_reflected(
