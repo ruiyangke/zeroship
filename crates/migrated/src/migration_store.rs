@@ -261,6 +261,23 @@ impl MigrationStore {
         Ok(())
     }
 
+    /// Open a connection for one store operation.
+    ///
+    /// The sibling [`AppPolicyStore::connect`](crate::policy_store) does the same
+    /// thing for a reason that does NOT apply here: its write path runs a
+    /// transaction and so needs an owned session. Nothing in this store opens a
+    /// transaction. Every method above is a single autocommit statement, and the
+    /// concurrency safety is in the SQL - each status transition carries its
+    /// expected prior status in the `WHERE` clause and reports `0 rows updated`
+    /// when it loses, so two racing callers cannot both win regardless of which
+    /// session they ran on.
+    ///
+    /// So a shared pipelined `Arc<Client>` would be correct here, and is what the
+    /// control plane holds for exactly this kind of traffic. The trade taken
+    /// instead: per-operation connect costs a handshake per statement, and buys
+    /// that a dropped or poisoned session costs ONE request rather than every
+    /// request until the process restarts. Reconsider it if the handshake ever
+    /// shows up in a measurement - it has not been measured.
     async fn connect(&self) -> Result<Client, MigrationStoreError> {
         let (client, conn) = compio_postgres::connect(&self.dsn, NoTls)
             .await
