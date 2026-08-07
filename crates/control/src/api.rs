@@ -383,6 +383,20 @@ pub async fn deploy(
     state: State<Arc<AppState>>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
+    // Deploy is the most expensive endpoint here - it streams a body to disk,
+    // mmaps it, and writes every blob in the bundle - and nothing bounded how
+    // often one caller could ask for that. Shares the env handlers' admin bucket
+    // so a caller cannot get a fresh allowance by switching surface.
+    //
+    // This runs AFTER authentication, not before it: `AuthzGuard` is an
+    // extractor, so its `FromRequest` has already rejected an unauthenticated
+    // caller by the time any handler body executes. Bounding the pre-auth cost
+    // would take middleware, not a call here. What this does bound is
+    // everything after auth, which is where the disk and blob-store work is.
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
+
     // Authz + uuid + content-type rejections happen BEFORE any body byte
     // is consumed, so rejected callers cannot tie up tmp file slots.
     let uid = match id.parse::<Uuid>() {
