@@ -302,7 +302,13 @@ fn main() -> std::io::Result<()> {
     );
     let max_isolates = cli.max_isolates;
     let max_pinned_isolates_per_app = cli.max_pinned_isolates_per_app;
-    let poll_interval = cli.poll_interval;
+    let poll_interval = match crate::sync::validate_poll_interval_secs(cli.poll_interval) {
+        Ok(secs) => secs,
+        Err(message) => {
+            tracing::error!("worker: {message}");
+            std::process::exit(2);
+        }
+    };
     let db_url = zeroship_core::config::obtain_secret(
         "DATABASE_URL / --db",
         &cli.db,

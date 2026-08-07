@@ -212,6 +212,24 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
 /// `info.env_version`, so comparing against it would mask the rotation).
 /// `loaded == None` (isolate cached but nothing recorded) is treated as
 /// "unknown state" → reload, never "assume current".
+/// Reject a polling interval the reconcile loops cannot run on.
+///
+/// Zero is the case that matters. The per-thread jitter divides by the interval,
+/// so a zero interval panics every reconcile task while the HTTP server keeps
+/// serving: the process looks healthy and deploy, env and policy reconciliation
+/// is simply dead. The version poller would also spin with no sleep between
+/// control-plane calls.
+pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
+    if secs == 0 {
+        return Err(
+            "poll interval must be at least 1 second: zero stops reconciliation \
+             entirely and spins against the control plane"
+                .to_string(),
+        );
+    }
+    Ok(secs)
+}
+
 pub fn needs_reload(
     loaded: Option<&cache::LoadedMeta>,
     local_limits: Option<RuntimeLimits>,
@@ -619,6 +637,17 @@ mod tests {
             "SEC-7: env-only version bump (hash + limits unchanged) must \
              reload the isolate so secret rotation actually applies"
         );
+    }
+
+    #[test]
+    fn poll_interval_of_zero_is_rejected() {
+        assert!(
+            super::validate_poll_interval_secs(0).is_err(),
+            "zero divides the reconcile jitter and would panic every reconcile \
+             task while the server kept serving"
+        );
+        assert_eq!(super::validate_poll_interval_secs(1), Ok(1));
+        assert_eq!(super::validate_poll_interval_secs(60), Ok(60));
     }
 
     /// A cached app whose deploy GOES AWAY must reload, which is how the stale
