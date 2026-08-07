@@ -117,13 +117,15 @@ async fn get_consent_native(
 
 // ─── POST /consent/accept and /consent/deny ──────────────────────────────
 
+/// Accepting consent is all-or-nothing: the grant row IS the channel that
+/// carries the decision from this handler back to `/oauth2/authorize`, which
+/// re-reads it via `consent_covers` after the redirect. There is deliberately
+/// no "remember this choice" toggle, because a non-persisted acceptance would
+/// send the browser back to a `/consent` prompt that can never be satisfied.
 #[derive(Debug, Deserialize)]
 pub struct ConsentDecisionForm {
     pub csrf: Option<String>,
     pub return_to: Option<String>,
-    /// HTML form checkbox: `Some("on")` when ticked, `None` when not.
-    #[serde(default)]
-    pub remember: Option<String>,
 }
 
 /// `/consent/accept` POST — validates CSRF, verifies the grantor can delegate
@@ -919,6 +921,43 @@ fn render_error_forbidden(message: PublicErrorMessage) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The accept form must offer no control the OP cannot act on. A "remember
+    /// this choice" toggle in particular cannot be honoured: the grant row this
+    /// handler writes is the only channel that carries the decision back to
+    /// `/oauth2/authorize`, so a consent the user asked us not to persist would
+    /// bounce the browser straight back to `/consent` forever.
+    #[test]
+    fn accept_form_offers_no_control_the_op_cannot_honour() {
+        let page = ConsentPage {
+            return_to: "/oauth2/authorize?client_id=oac_test",
+            csrf: "csrf-token",
+            client_id: "oac_test",
+            client_name: "Test App",
+            client_logo_uri: None,
+            scopes: vec![ConsentScopeView {
+                label: "Verify your identity".to_owned(),
+                description: None,
+                unrecognized: false,
+            }],
+            can_grant: true,
+            grant_error: None,
+        };
+        let html = page.render().expect("render consent page");
+
+        assert!(
+            html.contains("form=\"consent-accept\""),
+            "the Allow button must still be rendered; got {html}"
+        );
+        assert!(
+            !html.contains("name=\"remember\""),
+            "the accept form must not offer a remember toggle the OP ignores; got {html}"
+        );
+        assert!(
+            !html.to_lowercase().contains("remember this choice"),
+            "the consent copy must not promise a durability choice; got {html}"
+        );
+    }
 
     #[test]
     fn renders_scope_labels() {

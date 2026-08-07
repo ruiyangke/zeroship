@@ -42,9 +42,12 @@ pub async fn record_rp_participation(
     sub: &str,
     backchannel_logout_uri: Option<&str>,
 ) -> Result<()> {
-    let Some(uri) = backchannel_logout_uri.map(str::trim).filter(|uri| !uri.is_empty()) else {
+    if backchannel_logout_uri
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
         return Ok(());
-    };
+    }
     let idp_session_id = Uuid::parse_str(sid)
         .map_err(|e| AuthError::Internal(format!("BCL sid is not an idp session UUID: {e}")))?;
     if client_id.trim().is_empty() {
@@ -67,17 +70,6 @@ pub async fn record_rp_participation(
     )
     .await
     .map_err(|e| AuthError::Db(format!("record BCL RP participation: {e}")))?;
-
-    // Force the OP-visible client URI mirror to stay populated even if the row
-    // was provisioned before the column existed.
-    db.execute(
-        "UPDATE zeroship.oauth_clients \
-         SET backchannel_logout_uri = COALESCE(backchannel_logout_uri, $2) \
-         WHERE client_id = $1",
-        &[&client_id, &uri],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("record BCL client URI: {e}")))?;
 
     Ok(())
 }

@@ -240,8 +240,8 @@ pub async fn callback(
     };
 
     // Build the ResolvedProfile. The github picker guarantees
-    // `chosen.verified == true`, so both `email_verified` and
-    // `provider_trusted_for_email` are unconditionally true here.
+    // `chosen.verified == true`, so `provider_trusted_for_email` is
+    // unconditionally true here.
     let raw_profile = serde_json::to_value(&id).ok();
     let profile = build_resolved_profile(&id, raw_profile.as_ref());
 
@@ -410,7 +410,6 @@ fn build_resolved_profile<'a>(
         provider: PROVIDER,
         subject: &id.subject,
         email: &id.email,
-        email_verified: true,
         name: id.name.as_deref().or(Some(&id.login)),
         avatar_url: id.avatar_url.as_deref(),
         provider_trusted_for_email: true,
@@ -473,7 +472,6 @@ mod tests {
         let g = id("alice@example.com", Some("Alice"));
         let p = build_resolved_profile(&g, None);
         assert!(p.provider_trusted_for_email);
-        assert!(p.email_verified);
         assert_eq!(p.provider, "github");
         assert_eq!(p.subject, "12345");
         assert_eq!(p.email, "alice@example.com");
