@@ -86,21 +86,28 @@ test("lookupDisposition resolves rows and misses cleanly", () => {
   assert.equal(lookupDisposition("noSuchOp", "base"), undefined);
 });
 
-test("committed generated dialect tables (TS + Rust) are up to date (regenerate + diff)", () => {
+// Only the TS mirror is asserted here, and that is a narrowing.
+//
+// This used to also require our generator to reproduce the engine's committed
+// `dialect_table.rs` byte for byte. That assertion was false - our generator has
+// fallen behind the submodule's own and emits a pre-rename source path, a process
+// marker, and no `#[rustfmt::skip]` - and it was not ours to make: the file lives
+// in a vendored submodule we do not commit to, produced by that submodule's
+// generator. Worse, the remedy it named was to run OUR generator, which would
+// have overwritten that file with the inferior output and then let this test pass
+// by comparing our generator against itself.
+//
+// The engine's copy is gated on the engine's side. What zeroship owns, and what
+// this pins, is that our TS mirror matches the sidecar.
+test("the committed dialect-table.ts is up to date (regenerate + diff)", () => {
   const dir = mkdtempSync(join(tmpdir(), "zs-gendialect-"));
   const tsTmp = join(dir, "dialect-table.ts");
-  const rustTmp = join(dir, "dialect_table.rs");
   execFileSync(process.execPath, [genScript], {
-    env: { ...process.env, GEN_DIALECT_TS_OUT: tsTmp, GEN_DIALECT_RUST_OUT: rustTmp },
+    env: { ...process.env, GEN_DIALECT_TS_OUT: tsTmp },
   });
   assert.equal(
     readFileSync(tsTmp, "utf8"),
     readFileSync(committedTs, "utf8"),
     "src/generated/dialect-table.ts is stale — run `pnpm --filter @zeroship/migrate gen:dialect-table`",
-  );
-  assert.equal(
-    readFileSync(rustTmp, "utf8"),
-    readFileSync(committedRust, "utf8"),
-    "crates/zeroship-migrate/src/model/dialect_table.rs is stale — run `pnpm --filter @zeroship/migrate gen:dialect-table`",
   );
 });

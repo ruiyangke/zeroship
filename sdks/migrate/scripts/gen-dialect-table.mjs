@@ -28,12 +28,21 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const sidecarPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/dialect-support.toml");
 
-// Output paths default to the committed artifacts; the drift test overrides them
-// via env vars to regenerate into temp files and byte-compare (the "regenerate +
+// The TS mirror defaults to the committed artifact; the drift test overrides it
+// via env var to regenerate into a temp file and byte-compare (the "regenerate +
 // diff" freshness gate, matching gen-ir-types' GEN_IR_OUT).
+//
+// The Rust half is emitted ONLY when an output path is given. It used to default
+// to the copy inside third_party/zero-migrate, which meant the command this
+// generator's own drift message tells you to run would overwrite a vendored file
+// - and overwrite it with a WORSE one, because this generator has fallen behind
+// the submodule's own: it writes a source path from before that crate was
+// renamed, re-introduces a process marker in a doc comment, and drops the
+// `#[rustfmt::skip]` that keeps the committed Rust byte-stable under `cargo fmt`.
+// The submodule's artifact belongs to the submodule's generator.
 const rustOut = process.env.GEN_DIALECT_RUST_OUT
   ? resolve(process.env.GEN_DIALECT_RUST_OUT)
-  : resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs");
+  : null;
 const tsOut = process.env.GEN_DIALECT_TS_OUT
   ? resolve(process.env.GEN_DIALECT_TS_OUT)
   : resolve(here, "../src/generated/dialect-table.ts");
@@ -242,9 +251,11 @@ const text = await readFile(sidecarPath, "utf8");
 const rows = parseSidecar(text);
 validateRows(rows);
 
-await mkdir(dirname(rustOut), { recursive: true });
+if (rustOut) {
+  await mkdir(dirname(rustOut), { recursive: true });
+  await writeFile(rustOut, emitRust(rows), "utf8");
+  console.log(`wrote ${rustOut}`);
+}
 await mkdir(dirname(tsOut), { recursive: true });
-await writeFile(rustOut, emitRust(rows), "utf8");
 await writeFile(tsOut, emitTs(rows), "utf8");
-console.log(`wrote ${rustOut}`);
 console.log(`wrote ${tsOut} (${rows.length} rows)`);
