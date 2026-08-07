@@ -356,16 +356,33 @@ describe("with: type-level inference (compile-time)", () => {
 // hit even though each relation hits a disjoint target table.
 // ---------------------------------------------------------------------------
 
+/** The interval one artificially-delayed `find` occupied. */
+interface SlowSpan {
+  collection: string;
+  start: number;
+  end: number;
+}
+
 describe("with: parallel relation loading", () => {
-  /** Build a mock that injects an artificial 50ms delay into every
-   *  `find` against the named target tables. Allows us to assert that
-   *  two relation loaders run concurrently (≈ 50ms, not 100ms). */
+  /**
+   * Build a mock that injects an artificial delay into every `find` against
+   * the named target tables, and records the interval each delayed call
+   * occupied.
+   *
+   * Those intervals are the evidence. Two loads that overlap in time ran
+   * concurrently; two that do not, ran in series. That is the property under
+   * test, stated directly. Timing the whole call instead and comparing it to
+   * a ceiling proves the same thing only while the machine is idle - under
+   * load the scheduler can push a genuinely parallel pair past any ceiling
+   * that a sequential pair would have to exceed.
+   */
   function makeSlowMock(
     tables: Record<string, Record<string, AnyRec>>,
     slowTargets: Set<string>,
     delayMs: number,
-  ): { native: ZeroshipDb; calls: CallLog } {
+  ): { native: ZeroshipDb; calls: CallLog; spans: SlowSpan[] } {
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
+    const spans: SlowSpan[] = [];
     const native = {
       registerModel: () => Promise.resolve(),
       // P9 PR 3: native `transaction(callback)` orchestrator stub.
@@ -375,7 +392,9 @@ describe("with: parallel relation loading", () => {
           async find(filter: AnyRec, opts: AnyRec) {
             calls.find.push({ collection: name, filter, opts });
             if (slowTargets.has(name)) {
+              const start = performance.now();
               await new Promise((r) => setTimeout(r, delayMs));
+              spans.push({ collection: name, start, end: performance.now() });
             }
             const rows = tables[name] ?? {};
             const idClause = filter.id as { $in?: string[] } | string | undefined;
@@ -402,7 +421,7 @@ describe("with: parallel relation loading", () => {
         };
       },
     };
-    return { native: native as unknown as ZeroshipDb, calls };
+    return { native: native as unknown as ZeroshipDb, calls, spans };
   }
 
   test("two slow relations load in parallel, not sequentially", async () => {
@@ -428,9 +447,7 @@ describe("with: parallel relation loading", () => {
       { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
     );
 
-    const started = performance.now();
     const { data, error } = await db.todos.find({}, { with: { userId: true, projectId: true } });
-    const elapsed = performance.now() - started;
 
     assert.equal(error, null);
     assert.ok(data);
@@ -440,11 +457,24 @@ describe("with: parallel relation loading", () => {
     assert.deepEqual(t100.userId, { id: "1", name: "Alice" });
     assert.deepEqual(t100.projectId, { id: "10", name: "Apollo" });
 
-    // Sequential: ≥ 100ms (50 + 50). Parallel: ~50ms. We give parallel
-    // a generous 80ms ceiling to cover scheduler jitter on slow CI.
+    // Both relations must actually have been delayed, or there is nothing
+    // to overlap and the assertion below would hold vacuously.
+    assert.deepEqual(
+      mock.spans.map((s) => s.collection).sort(),
+      ["projects", "users"],
+      "both relation targets must have taken the slow path",
+    );
+
+    // The two loads overlap: each began before the other ended. A sequential
+    // loader produces disjoint intervals no matter how the machine is loaded,
+    // so this separates the two implementations and nothing else does.
+    const [a, b] = mock.spans;
     assert.ok(
-      elapsed < 80,
-      `expected < 80ms for parallel relation loading, got ${elapsed.toFixed(1)}ms (sequential would be >= 100ms)`,
+      a.start < b.end && b.start < a.end,
+      `expected the relation loads to overlap in time, got ` +
+        `${a.collection} [${a.start.toFixed(1)}, ${a.end.toFixed(1)}] and ` +
+        `${b.collection} [${b.start.toFixed(1)}, ${b.end.toFixed(1)}] ` +
+        `(disjoint intervals mean they ran in series)`,
     );
   });
 });
