@@ -1287,10 +1287,10 @@ importers:
         version: 2.0.0-rc.24
       zero-migrate:
         specifier: file:/home/ruiyang/Projects/zero-migrate/sdks/migrate
-        version: file:../../../zero-migrate/sdks/migrate
+        version: file:../zero-migrate/sdks/migrate
       zero-migrate-node:
         specifier: file:/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-node
-        version: file:../../../zero-migrate/crates/zero-migrate-node
+        version: file:../zero-migrate/crates/zero-migrate-node
     devDependencies:
       '@types/mime':
         specifier: ^3.0.4
@@ -1301,6 +1301,9 @@ importers:
       '@zeroship/rpc':
         specifier: workspace:*
         version: link:../rpc
+      '@zeroship/workflows':
+        specifier: workspace:*
+        version: link:../workflows
       acorn:
         specifier: ^8.16.0
         version: 8.16.0
@@ -7673,12 +7676,12 @@ packages:
     resolution: {integrity: sha512-CzhO+pFNo8ajLM2d2IW/R93ipy99LWjtwblvC1RsoSUMZgyLbYFr221TnSNT7GjGdYui6P459mw9JH/g/zW2ug==}
     engines: {node: '>=18'}
 
-  zero-migrate-node@file:../../../zero-migrate/crates/zero-migrate-node:
-    resolution: {directory: ../../../zero-migrate/crates/zero-migrate-node, type: directory}
+  zero-migrate-node@file:../zero-migrate/crates/zero-migrate-node:
+    resolution: {directory: ../zero-migrate/crates/zero-migrate-node, type: directory}
     engines: {node: '>=18'}
 
-  zero-migrate@file:../../../zero-migrate/sdks/migrate:
-    resolution: {directory: ../../../zero-migrate/sdks/migrate, type: directory}
+  zero-migrate@file:../zero-migrate/sdks/migrate:
+    resolution: {directory: ../zero-migrate/sdks/migrate, type: directory}
 
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
@@ -14186,9 +14189,9 @@ snapshots:
 
   yoctocolors@2.1.2: {}
 
-  zero-migrate-node@file:../../../zero-migrate/crates/zero-migrate-node: {}
+  zero-migrate-node@file:../zero-migrate/crates/zero-migrate-node: {}
 
-  zero-migrate@file:../../../zero-migrate/sdks/migrate: {}
+  zero-migrate@file:../zero-migrate/sdks/migrate: {}
 
   zod-to-json-schema@3.25.2(zod@3.25.76):
     dependencies:

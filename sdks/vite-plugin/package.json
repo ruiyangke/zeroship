@@ -29,12 +29,19 @@
   },
   "peerDependencies": {
     "vite": "^8.0.0",
-    "@zeroship/rpc": "workspace:*"
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/workflows": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@zeroship/workflows": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/mime": "^3.0.4",
     "@types/node": "catalog:",
     "@zeroship/rpc": "workspace:*",
+    "@zeroship/workflows": "workspace:*",
     "acorn": "^8.16.0",
     "tsx": "catalog:",
     "typescript": "catalog:",
