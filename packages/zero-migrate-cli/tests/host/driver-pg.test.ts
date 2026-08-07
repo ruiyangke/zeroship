@@ -313,9 +313,12 @@ test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw 
 });
 
 // ---------------------------------------------------------------------------
-// A full apply against a fully poisoned global map: the catalog facts and the
-// exact journal are unchanged, so nothing the apply path reads depends on a
-// parser a host app can rewrite.
+// A full apply against a fully poisoned global map: the apply completes, the
+// catalog facts land, and the journal's checksum anchor comes back unchanged.
+//
+// This is a smoke arm, not a pin oracle. Measured: it still passes with every pin in
+// `connectionScopedTypes` removed, so it is not sensitive to the pins themselves.
+// The arms above are where those are proven.
 // ---------------------------------------------------------------------------
 test("apply survives a fully poisoned global pg.types map", async (t) => {
   // The gate's client doubles as the admin connection: it is opened before the
@@ -359,17 +362,23 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
       "the authored columns exist despite the poisoned globals",
     );
 
-    // The journal's int8 `event_seq` stayed exact (the oid-20 pin) and every step
-    // shares the one `Checksum::of_ir` anchor.
+    // Every applied step shares the one `Checksum::of_ir` anchor.
+    //
+    // This read does NOT prove the oid-20 pin, though it used to claim it did, over a
+    // `event_seq::text` cast that had PostgreSQL format the value server-side. Two
+    // further reasons, both measured. The read goes through `adm`, the gate's client,
+    // constructed with no `types`, so the pin is not in this path with or without the
+    // cast. And the poison above leaks the RAW WIRE TEXT, which for an int8 is exactly
+    // the digits the pin's verbatim-string parser returns: a borrowed oid-20 parser
+    // and the pin both hand back the string "9007199254740993" under it, so no
+    // assertion on the value can tell them apart here. The pin is proven where it is
+    // exercised: the property arm at the top of this file, and e2e-pg's `history()`
+    // arm, which asserts `typeof eventSeq === "bigint"`.
     const journal = await adm.query(
-      `SELECT version, checksum, event_seq::text AS event_seq
-       FROM "${meta}".schema_migrations
+      `SELECT checksum FROM "${meta}".schema_migrations
        WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     assert.ok(journal.rows.length > 0, "the apply journaled at least one step");
-    for (const row of journal.rows) {
-      assert.match(String(row.event_seq), /^\d+$/, "event_seq is an exact integer string");
-    }
     assert.equal(
       new Set(journal.rows.map((r) => r.checksum)).size,
       1,
