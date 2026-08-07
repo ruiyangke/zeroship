@@ -5,8 +5,8 @@
 //
 // The recorder twin was collapsed: there is no longer a hand-kept
 // `migrate_ops.js`. The SDK recorder (`src/ops.ts`) and the engine-embedded
-// recorder (`dist/embedded-recorder.js`, the `tsup` build output the engine host
-// consumes) are now the SAME source,
+// recorder (`dist/embedded-recorder.js`, the `tsup` build output this suite
+// imports) are now the SAME source,
 // compiled two ways. This test is the artifact-identity assertion:
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
@@ -27,9 +27,11 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-// The COMPILED engine-embedded recorder artifact (the file the engine host
-// consumes). Importing it directly makes this an oracle against the
-// real shipped engine recording, not a self-referential restatement of the source.
+// The COMPILED engine-embedded recorder artifact (the tracked build output).
+// Importing it directly makes this an oracle against the shipped bytes rather
+// than a self-referential restatement of the source. It does NOT prove the Rust
+// engine reads this file: nothing under crates/ does, and ops reach the engine
+// over the N-API bridge already recorded.
 import {
   __begin as engBegin,
   __drain as engDrain,
