@@ -2048,3 +2048,84 @@ async fn authz_receives_the_callers_request_id_pg() {
     drop(tmp);
     cleanup_app(&conn, &app_id).await;
 }
+
+/// Re-submitting the SAME gated migration must reuse the pending row, not mint a
+/// second one.
+///
+/// A creator's CI retries a failed deploy; each retry used to insert another
+/// `pending_approval` row with a fresh id. The operator then sees N rows for one
+/// decision, approving one leaves N-1 stale rows pending forever, and nothing
+/// reaps them. The content is what gets approved, so identical content is one
+/// pending migration however many times it is submitted.
+#[ntex::test]
+async fn resubmitting_a_gated_migration_reuses_the_pending_row_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrated::configure),
+    )
+    .await;
+
+    // Create the table first so the DROP below is a real destructive change.
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer creator-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    assert_eq!(test::call_service(&svc, req).await.status(), StatusCode::OK);
+
+    // Submit the gated migration twice with byte-identical bodies.
+    let gated = with_policy(drop_notes_request(), require_approval_policy());
+    let mut ids = Vec::new();
+    for attempt in 0..2 {
+        let req = test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer creator-token")
+            .set_json(&gated)
+            .to_request();
+        let resp = test::call_service(&svc, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "attempt {attempt} must be held for approval"
+        );
+        let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+        assert_eq!(body["error"], "migration_requires_operator_approval");
+        ids.push(
+            body["migration_id"]
+                .as_str()
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .expect("pending migration id"),
+        );
+    }
+
+    assert_eq!(
+        ids[0], ids[1],
+        "a re-submission must name the migration already awaiting approval"
+    );
+
+    let rows = conn
+        .query(
+            "SELECT count(*)::bigint AS n FROM zeroship.migrated_migrations \
+              WHERE app_id = $1 AND status = 'pending_approval'",
+            &[&app_id],
+        )
+        .await
+        .expect("count pending");
+    let pending: i64 = rows[0].get("n");
+    assert_eq!(
+        pending, 1,
+        "two submissions of one migration must leave ONE pending row, found {pending}"
+    );
+
+    drop(tmp);
+    cleanup_app(&conn, &app_id).await;
+}
