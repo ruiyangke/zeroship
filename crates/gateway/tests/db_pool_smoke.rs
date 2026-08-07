@@ -17,11 +17,12 @@
 //!     (no per-call reconnect), and the returned `Rc` is shared.
 
 use zeroship_gateway::db::DbConfig;
+use std::io::Write as _;
 
 #[compio::test]
 async fn pool_checkout_runs_concurrent_trivial_queries() {
     let Ok(dsn) = std::env::var("GATEWAY_POOL_SMOKE_URL") else {
-        eprintln!("skipping (no GATEWAY_POOL_SMOKE_URL)");
+        let _ = std::io::stderr().write_all("skipping (no GATEWAY_POOL_SMOKE_URL)\n".as_bytes());
         return;
     };
 

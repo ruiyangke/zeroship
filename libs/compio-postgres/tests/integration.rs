@@ -11,6 +11,7 @@
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, Error, NoTls, Pool};
+use std::io::Write as _;
 
 fn test_url() -> String {
     std::env::var("PG_TEST_URL")
@@ -34,7 +35,7 @@ async fn require_pg() -> String {
     match connect(&url).await {
         Ok(_client) => url, // Client dropped -> driver task exits
         Err(e) => {
-            eprintln!("Skipping — Postgres not reachable: {e}");
+            let _ = std::io::stderr().write_all(format!("Skipping — Postgres not reachable: {e}\n").as_bytes());
             std::process::exit(0);
         }
     }

@@ -15,6 +15,7 @@
 //! env-skip convention — no live PG in CI by default). The mock-OP
 //! single-flight test and the cookie/Origin tests run unconditionally.
 
+use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1275,7 +1276,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // gateway_sessions row is created. The global UUID never reaches the
     // browser.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip token_exchange (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip token_exchange (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1415,7 +1416,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip token_email_swap (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip token_email_swap (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1463,7 +1464,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 #[ntex::test]
 async fn token_exchange_fails_closed_when_no_alias() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip token_email_failclosed (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip token_email_failclosed (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1509,7 +1510,7 @@ async fn token_exchange_fails_closed_when_no_alias() {
 #[ntex::test]
 async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip abs_expiry (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip abs_expiry (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1562,7 +1563,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // and returns the identity projection — with NO JWT and NO real email in
     // the body, and the pws_ id (never the global UUID).
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip session_mint_recovers (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip session_mint_recovers (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1712,7 +1713,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     // sid=NULL, so a logout_token carrying sid matched zero rows and left the
     // anchor alive; /session?mint=1 could re-mint the user after global logout.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip bcl_refreshed_session (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip bcl_refreshed_session (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(BCL_REFRESH_CLIENT_ID));
@@ -1906,7 +1907,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     // `?mint=1`; otherwise the second mint would replay the stale token and the
     // OP's reuse detection would kill the family with `invalid_grant`.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip session_mint_persists_rotated_refresh_token (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip session_mint_persists_rotated_refresh_token (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2006,7 +2007,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     // dead. The gateway must delete the server-held anchor, clear recovery
     // cookies, and surface `login_required` rather than treating it as retryable.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip session_mint_invalid_grant_deletes_anchor (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip session_mint_invalid_grant_deletes_anchor (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2096,7 +2097,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
     // returns the relay-swapped identity projection — NO anchor read, NO OP
     // round-trip, NO JWT in the body.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip session_steady_state (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip session_steady_state (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2170,7 +2171,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     // verify under CLIENT_ID; a DIFFERENT client_id MUST fail (the audience
     // binding that stops a cookie minted for app A from authenticating app B).
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip session_minted_cookie_verifies_locally (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip session_minted_cookie_verifies_locally (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2371,7 +2372,7 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
 #[allow(clippy::future_not_send)]
 async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let auth_dsn = match std::env::var("AUTH_DB_URL") {
@@ -2504,7 +2505,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
 #[allow(clippy::future_not_send)]
 async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip interactive_cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip interactive_cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let auth_dsn = match std::env::var("AUTH_DB_URL") {
@@ -2643,7 +2644,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
 #[allow(clippy::future_not_send)]
 async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip mint_racing_concurrent_reset (no GATEWAY_ANCHORS_DB_URL)");
+        let _ = std::io::stderr().write_all("[anchors] skip mint_racing_concurrent_reset (no GATEWAY_ANCHORS_DB_URL)\n".as_bytes());
         return;
     };
     let auth_dsn = match std::env::var("AUTH_DB_URL") {

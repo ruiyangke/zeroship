@@ -24,6 +24,7 @@ use zeroship_control::{
 };
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
+use std::io::Write as _;
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -281,7 +282,7 @@ fn run_id(value: &Value) -> String {
 #[compio::test]
 async fn create_conflicts_status_and_cross_app_isolation() {
     let Some(db_url) = db_url() else {
-        eprintln!("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        let _ = std::io::stderr().write_all("skipping workflow_instance_api_test (no CONTROL_TEST_DB)\n".as_bytes());
         return;
     };
     let fx = build_fixture(&db_url, "create").await;
@@ -544,7 +545,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
 #[compio::test]
 async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let Some(db_url) = db_url() else {
-        eprintln!("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        let _ = std::io::stderr().write_all("skipping workflow_instance_api_test (no CONTROL_TEST_DB)\n".as_bytes());
         return;
     };
     let fx = build_fixture(&db_url, "signal").await;
@@ -753,7 +754,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
 #[compio::test]
 async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let Some(db_url) = db_url() else {
-        eprintln!("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        let _ = std::io::stderr().write_all("skipping workflow_instance_api_test (no CONTROL_TEST_DB)\n".as_bytes());
         return;
     };
     let fx = build_fixture(&db_url, "control").await;

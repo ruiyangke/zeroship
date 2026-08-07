@@ -1,6 +1,7 @@
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -570,7 +571,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
 #[compio::test]
 async fn v8_binding_round_trips_through_the_control_instance_api() {
     let Some(db_url) = db_url() else {
-        eprintln!("skipping workflow plugin control round-trip (no CONTROL_TEST_DB)");
+        let _ = std::io::stderr().write_all("skipping workflow plugin control round-trip (no CONTROL_TEST_DB)\n".as_bytes());
         return;
     };
     let fx = build_fixture(&db_url, "round-trip").await;

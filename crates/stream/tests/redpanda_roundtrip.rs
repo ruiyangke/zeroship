@@ -5,11 +5,12 @@ use futures::executor::block_on;
 use serde_json::json;
 use zeroship_stream::adapters;
 use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
+use std::io::Write as _;
 
 #[test]
 fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
     let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
-        println!("skipping redpanda roundtrip: REDPANDA_BROKERS is unset");
+        let _ = std::io::stdout().write_all("skipping redpanda roundtrip: REDPANDA_BROKERS is unset\n".as_bytes());
         return;
     };
     let brokers = brokers.to_string_lossy().to_string();
@@ -101,7 +102,7 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
 #[test]
 fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
     let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
-        println!("skipping redpanda rewind: REDPANDA_BROKERS is unset");
+        let _ = std::io::stdout().write_all("skipping redpanda rewind: REDPANDA_BROKERS is unset\n".as_bytes());
         return;
     };
     let brokers = brokers.to_string_lossy().to_string();
