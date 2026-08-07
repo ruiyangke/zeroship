@@ -157,10 +157,14 @@ fn infrastructure_error_response(
 // ---------------------------------------------------------------------------
 
 pub async fn create_app(
+    req: web::HttpRequest,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
     body: Json<CreateAppBody>,
 ) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     if let Err(resp) = authz.require(Action::AppsWrite, Resource::Any, &state).await {
         return resp;
     }
@@ -204,9 +208,13 @@ pub async fn create_app(
 }
 
 pub async fn list_apps(
+    req: web::HttpRequest,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     if let Err(resp) = authz.require(Action::AppsRead, Resource::Any, &state).await {
         return resp;
     }
@@ -260,10 +268,14 @@ async fn fleet_wide_reader(
 }
 
 pub async fn get_app(
+    req: web::HttpRequest,
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -340,10 +352,14 @@ pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeErr
 }
 
 pub async fn delete_app(
+    req: web::HttpRequest,
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
