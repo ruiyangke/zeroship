@@ -63,6 +63,7 @@ fn require_pg_or_skip() -> Option<String> {
                 })
                 .detach();
                 drop(client);
+                drain_open_connections().await;
                 true
             }
             Err(_) => false,
@@ -87,6 +88,23 @@ const APP_SCHEMA: &str = "default";
 /// sentinel emission the relocated engine produces), then the handlers'
 /// `registerModel` call is a faithful no-op — exactly the production order
 /// (engine-at-deploy, runtime-reads-only).
+/// Release this runtime's connections before it falls out of scope.
+///
+/// Every helper here builds its own runtime and drops it when the block ends.
+/// Closing a connection is asynchronous, so a runtime that stops first leaves
+/// the socket - and the server-side backend - alive for the life of the test
+/// process. Draining inside the block keeps the runtime alive long enough to
+/// finish the close.
+async fn drain_open_connections() {
+    zeroship_plugin_db::reset_context_for_tests();
+    if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
+        eprintln!(
+            "DRAIN-TIMEOUT: {} connection(s) still live",
+            compio_postgres::live_connections()
+        );
+    }
+}
+
 fn reset_schema(url: &str) {
     let url = url.to_string();
     compio::runtime::Runtime::new().unwrap().block_on(async move {
@@ -119,6 +137,7 @@ fn reset_schema(url: &str) {
         )
         .await
         .expect("engine/deploy stand-in must create the notes table");
+        drain_open_connections().await;
     });
 }
 
@@ -132,7 +151,10 @@ fn count_notes(url: &str) -> i64 {
         .detach();
         let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{APP_SCHEMA}\".\"notes\"");
         let rows = client.query(&sql, &[]).await.unwrap();
-        rows[0].get::<_, i64>("c")
+        let count = rows[0].get::<_, i64>("c");
+        drop(client);
+        drain_open_connections().await;
+        count
     })
 }
 
