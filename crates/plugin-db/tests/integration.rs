@@ -35,8 +35,21 @@ async fn require_pg() -> String {
             url
         }
         Err(e) => {
-            eprintln!("Skipping — Postgres not reachable: {e}");
-            std::process::exit(0);
+            // Fail this test rather than exiting the process.
+            //
+            // `std::process::exit(0)` here ended the whole binary with a
+            // SUCCESS status the moment any one test could not reach the
+            // database. Every test still queued was abandoned, every result
+            // already produced was discarded - including failures - and cargo
+            // reported the suite as passing. A run that printed
+            // "delete_operations ... FAILED" still exited 0.
+            //
+            // A panic costs the honest thing instead: this test fails, its
+            // siblings keep running, and the summary says what happened. The
+            // target is opt-in behind `required-features = ["test-helpers"]`,
+            // so reaching here means someone asked for the live-Postgres suite
+            // and did not have Postgres - which is a failure, not a pass.
+            panic!("live-Postgres suite requires a reachable server at PG_TEST_URL: {e}");
         }
     }
 }
