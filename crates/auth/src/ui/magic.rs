@@ -57,7 +57,9 @@ use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
-use crate::store::{sessions, users};
+use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
+use crate::store::{sessions, totp as totp_store, users};
+use crate::ui::login::render_challenge;
 use crate::ui::{
     render_token_interstitial, ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage,
     MagicShowCodePage, PublicErrorMessage, TokenRedeemInterstitial,
@@ -685,6 +687,50 @@ async fn same_device_finish(
     target: &MagicTarget,
     req: &HttpRequest,
 ) -> HttpResponse {
+    let MagicTarget::ReturnTo(native_return_to) = target;
+
+    // A confirmed second factor gates this mint exactly as it gates `/login`.
+    // The link is consumed BEFORE the challenge is rendered, so abandoning the
+    // challenge cannot leave a replayable token behind.
+    match totp_store::is_enabled(db, user_id).await {
+        Ok(true) => {
+            match magic_link::finalize_consume(db, token_hash, reserved_at).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::error!("magic_link finalize consume updated no rows");
+                    return render_error_page(PublicErrorMessage::ContactSupport);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "magic_link finalize consume failed");
+                    return render_error_page(PublicErrorMessage::ContactSupport);
+                }
+            }
+            audit::emit(
+                db,
+                &AuditEvent {
+                    event_type: "magic_redeemed_same_device",
+                    outcome: "success",
+                    user_id: Some(&user_id),
+                    auth_method: Some("magic"),
+                    detail: json!({ "second_factor": "required" }),
+                    ..AuditEvent::from_request(req)
+                },
+            )
+            .await;
+            return magic_challenge(cfg, db, user_id, native_return_to).await;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user_id, "magic totp is_enabled check failed");
+            if let Err(e) =
+                magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await
+            {
+                tracing::warn!(error = %e, "magic_link clear pending after totp check failed");
+            }
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    }
+
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
@@ -739,7 +785,6 @@ async fn same_device_finish(
     )
     .await;
 
-    let MagicTarget::ReturnTo(native_return_to) = target;
     let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
@@ -749,6 +794,111 @@ async fn same_device_finish(
     // Clear the requesting-device cookie so a future stray click can't
     // be replayed in a same-device check.
     resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
+    resp.finish()
+}
+
+/// Raise the TOTP challenge for a magic-link user.
+///
+/// Reads `credential_version` off the live row so a password reset or forced
+/// logout between the two POSTs invalidates the stash, the same binding the
+/// password path's challenge carries.
+#[allow(clippy::future_not_send)]
+async fn magic_challenge(
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+    user_id: Uuid,
+    native_return_to: &str,
+) -> HttpResponse {
+    let credential_version = match users::find_by_id(db, &user_id.to_string()).await {
+        Ok(Some(u)) => u.credential_version,
+        Ok(None) => return render_error_page(PublicErrorMessage::SessionExpired),
+        Err(e) => {
+            tracing::error!(error = %e, "magic challenge find_by_id failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let mut resp = render_challenge(
+        cfg,
+        &TotpChallenge::new(
+            user_id,
+            credential_version,
+            native_return_to.to_string(),
+            FirstFactor::Magic,
+        ),
+    );
+    // Clear the requesting-device nonce here too: the magic row backing it is
+    // already consumed, so keeping it would only preserve a stale replay input.
+    if let Ok(value) = HeaderValue::from_str(&magic_csrf_clear_cookie(cfg.insecure_dev)) {
+        resp.headers_mut().append(SET_COOKIE, value);
+    }
+    resp
+}
+
+/// Mint the magic-link session once `/login/2fa` has verified the second
+/// factor. The magic row was consumed when the challenge was raised, so the
+/// only work left is the session row.
+///
+/// `amr`/`acr` name the factors the user actually presented - a magic link and
+/// a TOTP or backup code. They must not read as a password login.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn finish_after_second_factor(
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+    user: &users::UserRow,
+    return_to: &str,
+    req: &HttpRequest,
+) -> HttpResponse {
+    // Re-impose magic's own continuation contract on the signed return target.
+    let Some(MagicTarget::ReturnTo(native_return_to)) =
+        MagicTarget::from_return_to(Some(return_to))
+    else {
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    };
+
+    let session = match sessions::create(
+        db,
+        &sessions::CreateSession {
+            user_id: user.id,
+            auth_method: "magic",
+            amr: vec!["magic".into(), "otp".into()],
+            acr: Some("urn:zeroship:magic"),
+            expected_credential_version: Some(user.credential_version),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "magic second-factor sessions::create failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    };
+
+    if let Err(e) = users::touch_last_login(db, user.id).await {
+        tracing::warn!(error = %e, user_id = %user.id, "magic touch_last_login failed");
+    }
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "magic_completed_second_factor",
+            outcome: "success",
+            user_id: Some(&user.id),
+            auth_method: Some("magic"),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
+
+    let mut resp = return_to::see_other(&native_return_to);
+    resp.header(
+        SET_COOKIE,
+        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+    );
+    resp.header("cache-control", "no-store");
+    resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
     resp.finish()
 }
 
@@ -1024,7 +1174,59 @@ pub async fn complete(
         return render_error_page(PublicErrorMessage::AccountTemporarilyLocked);
     }
 
-    // 6. Mint session + resume the selected continuation target.
+    // 6. A confirmed second factor gates this mint too. Finalize the completion
+    //    row first so an abandoned challenge cannot leave a replayable code.
+    match totp_store::is_enabled(db.as_ref(), user_id).await {
+        Ok(true) => {
+            match completions_store::finalize_consume(
+                db.as_ref(),
+                &form.csrf_nonce,
+                &completion.reserved_at,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::error!("magic_completions finalize consume updated no rows");
+                    return render_error_page(PublicErrorMessage::ContactSupport);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "magic_completions finalize consume failed");
+                    return render_error_page(PublicErrorMessage::ContactSupport);
+                }
+            }
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "magic_complete",
+                    outcome: "success",
+                    user_id: Some(&user_id),
+                    auth_method: Some("magic"),
+                    detail: json!({ "second_factor": "required" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            let MagicTarget::ReturnTo(native_return_to) = &form_target;
+            return magic_challenge(&cfg, db.as_ref(), user_id, native_return_to).await;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user_id, "magic complete totp is_enabled check failed");
+            if let Err(e) = completions_store::clear_consume_pending(
+                db.as_ref(),
+                &form.csrf_nonce,
+                Some(&completion.reserved_at),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "magic_completions clear pending after totp check failed");
+            }
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    }
+
+    // 7. Mint session + resume the selected continuation target.
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {

@@ -19,7 +19,7 @@ use crate::oidc::authorization_code::{
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
-use crate::sessions::totp_challenge::{self, TotpChallenge};
+use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
 use crate::store::{sessions, totp as totp_store, users};
 use crate::ui::{LoginPage, PublicErrorMessage, TotpChallengePage};
 
@@ -218,33 +218,15 @@ async fn post_native(
 
     match totp_store::is_enabled(db, verified.id).await {
         Ok(true) => {
-            let stash = TotpChallenge::new(
-                verified.id,
-                verified.credential_version,
-                return_to.clone(),
+            return render_challenge(
+                cfg,
+                &TotpChallenge::new(
+                    verified.id,
+                    verified.credential_version,
+                    return_to.clone(),
+                    FirstFactor::Password,
+                ),
             );
-            let cookie = stash.encode(cfg.stash_signing_key.as_bytes());
-            let csrf_token = csrf::generate_token();
-            let page = TotpChallengePage {
-                return_to: &return_to,
-                csrf: &csrf_token,
-                error: None,
-            };
-            let body = match page.render() {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::error!(error = %e, "render totp_challenge.html failed");
-                    return render_error(PublicErrorMessage::ContactSupport);
-                }
-            };
-            let mut resp = HttpResponse::Ok();
-            resp.content_type("text/html; charset=utf-8");
-            resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
-            resp.header(
-                SET_COOKIE,
-                totp_challenge::set_cookie(&cookie, cfg.insecure_dev),
-            );
-            return resp.body(body);
         }
         Ok(false) => {}
         Err(e) => {
@@ -263,6 +245,39 @@ async fn post_native(
         None,
     )
     .await
+}
+
+/// Render the TOTP challenge page for `stash`: the signed factor-1 cookie plus
+/// a fresh CSRF cookie, and the form that POSTs both back to `/login/2fa`.
+///
+/// Every mint path that must demand a second factor renders through here, so
+/// there is ONE challenge body and one cookie pair to reason about. The stash
+/// carries the `return_to` the form echoes back, which `post_2fa` re-compares
+/// against the signed copy.
+#[must_use]
+pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpResponse {
+    let cookie = stash.encode(cfg.stash_signing_key.as_bytes());
+    let csrf_token = csrf::generate_token();
+    let page = TotpChallengePage {
+        return_to: &stash.return_to,
+        csrf: &csrf_token,
+        error: None,
+    };
+    let body = match page.render() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "render totp_challenge.html failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("text/html; charset=utf-8");
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(
+        SET_COOKIE,
+        totp_challenge::set_cookie(&cookie, cfg.insecure_dev),
+    );
+    resp.body(body)
 }
 
 /// Complete a verified login: create the IdP session row, bump `last_login_at`,
@@ -342,10 +357,12 @@ pub struct TotpForm {
     pub return_to: Option<String>,
 }
 
-/// `/login/2fa` POST — the second factor (ISS-11).
+/// `/login/2fa` POST - the second factor (ISS-11).
 ///
-/// Reached only after `/login` POST verified the password for a TOTP-enabled
-/// user and set the signed `__Host-zsidp_2fa` cookie. Algorithm:
+/// Reached after any mint path cleared its first factor for a TOTP-enabled user
+/// and set the signed `__Host-zsidp_2fa` cookie: `/login` (password), the
+/// magic-link redeem and completion, and the `/link` account-link confirm.
+/// Algorithm:
 ///
 /// 1. CSRF (double-submit).
 /// 2. Decode + verify the signed challenge cookie (factor-1 attestation). A
@@ -354,8 +371,10 @@ pub struct TotpForm {
 ///    password change / forced logout since factor 1 invalidates the challenge.
 /// 4. Rate-limit the verify (per-user) so the 6-digit code + backup codes can't
 ///    be brute-forced.
-/// 5. Accept a valid TOTP code (±1 step skew) OR an unused backup code (marked
-///    used on redeem). Only then `finish_login` creates the native session.
+/// 5. Accept a valid TOTP code (+/-1 step skew) OR an unused backup code
+///    (marked used on redeem).
+/// 6. Only then complete, in the flow named by the stash's `first_factor`, so
+///    the session's `amr`/`acr` describe the factors actually presented.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn post_2fa(
     req: HttpRequest,
@@ -514,16 +533,50 @@ pub async fn post_2fa(
     )
     .await;
 
-    finish_login_native(
-        cfg.as_ref(),
-        db.as_ref(),
-        user.id,
-        user.credential_version,
-        &return_to,
-        &["pwd", "otp"],
-        Some(()),
-    )
-    .await
+    // 6. Complete in the flow that raised the challenge. Each arm owns the
+    // session shape its own factors justify, so `amr`/`acr` describe what the
+    // user actually did rather than what `/login` would have done.
+    match &stash.first_factor {
+        FirstFactor::Password => {
+            finish_login_native(
+                cfg.as_ref(),
+                db.as_ref(),
+                user.id,
+                user.credential_version,
+                &return_to,
+                &["pwd", "otp"],
+                Some(()),
+            )
+            .await
+        }
+        FirstFactor::Magic => {
+            crate::ui::magic::finish_after_second_factor(
+                cfg.as_ref(),
+                db.as_ref(),
+                &user,
+                &return_to,
+                &req,
+            )
+            .await
+        }
+        FirstFactor::OauthLink {
+            provider,
+            subject,
+            email,
+        } => {
+            crate::ui::link::finish_after_second_factor(
+                cfg.as_ref(),
+                db.as_ref(),
+                &user,
+                provider,
+                subject,
+                email,
+                &return_to,
+                &req,
+            )
+            .await
+        }
+    }
 }
 
 /// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
