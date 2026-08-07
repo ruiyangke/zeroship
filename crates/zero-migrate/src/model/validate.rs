@@ -141,59 +141,160 @@ pub fn validate_ir_scoped(
     validate_per_row_destinations(ir, target_dialect, ts_locations)?;
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
-    validate_authored_index_name_lengths(ir, target_dialect, ts_locations)?;
+    validate_authored_identifier_lengths(ir, target_dialect, ts_locations)?;
     Ok(())
 }
 
-/// Refuse an authored index name the target would silently truncate.
+/// Which side of an object's lifecycle an author-supplied identifier sits on. The two
+/// sides carry different failure modes and, deliberately, different dialect scopes.
+#[derive(Clone, Copy)]
+enum NamePosition {
+    /// The name the engine will CREATE and then carry forward as the object's identity.
+    Created,
+    /// The name the engine will use to FIND an object that already exists.
+    Dropped,
+}
+
+/// Refuse an author-supplied constraint/index identifier the target would silently
+/// truncate.
 ///
 /// PostgreSQL caps identifiers at 63 bytes and truncates anything longer with only a
-/// NOTICE, so two authored names differing after byte 63 become the same index. The
-/// engine emits `CREATE INDEX IF NOT EXISTS`, so the second one is then a no-op that
-/// reports success: the snapshot records two indexes, the catalog holds one, and every
-/// later diff re-issues the same no-op create. No error surfaces at any point.
+/// NOTICE. The engine keeps the AUTHORED name while the catalog keeps the TRUNCATED
+/// one, and every downstream lookup is keyed on the authored name. Both sides of an
+/// object's lifecycle then lie, in different ways.
+///
+/// On the CREATE side one identity splits into two: two authored names sharing their
+/// first 63 bytes become a single catalog object, the guarded create is a no-op that
+/// reports success, the snapshot records an object the catalog does not hold, and every
+/// later diff re-issues the same no-op. No error surfaces at any point.
+///
+/// On the DROP side the journal lies outright. A guarded drop probes the AUTHORED name
+/// against the INTROSPECTED snapshot; the truncated catalog name never matches, so the
+/// verdict is a satisfied no-op, the executor skips the statement, and the journal
+/// records it COMPLETED. The object is still in the database and the journal says it is
+/// gone. An UNGUARDED PostgreSQL drop is resolved by the server's own truncation, so a
+/// UNIQUE index is really dropped while the approval gate stays silent, because the
+/// uniqueness lookup keys on a live name the truncated one is never equal to.
+///
+/// The dialect scope differs by side, and the difference is load-bearing. The CREATE
+/// side is bounded on EVERY dialect, because the authored name is what the engine
+/// carries forward regardless of target. The DROP side is bounded on PostgreSQL ONLY:
+/// MySQL's limit is 64 CHARACTERS rather than bytes and SQLite has no identifier cap at
+/// all, so a universal drop-side bound would refuse a name that legitimately exists in
+/// those catalogs and strand the object with no way to remove it. PostgreSQL is safe
+/// because an object PostgreSQL truncated has a physical name of at most 63 bytes by
+/// definition, so the bound can never refuse a name that could have dropped a real
+/// object; the remedy for a legacy over-long PostgreSQL object is to name it as the
+/// catalog holds it.
 ///
 /// Refusing beats capping. `cap_ident_name` exists and is collision-safe, but every
-/// call site is an ENGINE-derived name; silently renaming a name the author chose
-/// would trade a visible failure for an invisible one. This mirrors
-/// [`validate_column_reference_constraint_name`], which bounds the one other
-/// author-supplied identifier for exactly this reason.
+/// call site is an ENGINE-derived name; silently renaming a name the author chose would
+/// trade a visible failure for an invisible one. This mirrors
+/// [`validate_column_reference_constraint_name`], which bounds the author-supplied
+/// foreign-key constraint name for exactly this reason.
 ///
-/// MySQL needs no help: it refuses an over-long identifier itself with
-/// `ER_TOO_LONG_IDENT`.
-fn validate_authored_index_name_lengths(
+/// MySQL needs no help on the create side: it refuses an over-long identifier itself
+/// with `ER_TOO_LONG_IDENT`. The bound still runs there so the authored IR is portable.
+fn validate_authored_identifier_lengths(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
-    let max = crate::plan::author::PG_MAX_IDENT_BYTES;
+    // Only PostgreSQL truncates, so only PostgreSQL can hold an object whose authored
+    // name cannot name it. Bounding the drop side elsewhere would strand real objects.
+    let bound_drops = matches!(target_dialect, Dialect::Postgres);
+
     for (op_index, op) in ir.ops.iter().enumerate() {
-        let Op::CreateIndex {
-            name: Some(name), ..
-        } = op
-        else {
-            continue;
+        let check = |kind: &str, name: &str, position: NamePosition| {
+            authored_name_within_bound(kind, name, position, op_index, ts_locations, target_dialect)
         };
-        if name.len() <= max {
-            continue;
+        match op {
+            Op::CreateIndex {
+                name: Some(name), ..
+            } => check("index", name, NamePosition::Created)?,
+            Op::AddConstraint { constraint, .. } => {
+                if let Some(name) = constraint.name.as_deref() {
+                    check("constraint", name, NamePosition::Created)?;
+                }
+            }
+            Op::CreateTable {
+                constraints,
+                indexes,
+                ..
+            } => {
+                for constraint in constraints {
+                    if let Some(name) = constraint.name.as_deref() {
+                        check("constraint", name, NamePosition::Created)?;
+                    }
+                }
+                for index in indexes {
+                    if let Some(name) = index.name.as_deref() {
+                        check("index", name, NamePosition::Created)?;
+                    }
+                }
+            }
+            Op::DropIndex { name, .. } if bound_drops => {
+                check("index", name, NamePosition::Dropped)?;
+            }
+            Op::DropConstraint { name, .. } | Op::ValidateConstraint { name, .. }
+                if bound_drops =>
+            {
+                check("constraint", name, NamePosition::Dropped)?;
+            }
+            _ => {}
         }
-        return Err(partition_error(
-            CODE_OP_INVALID,
-            op_index,
-            ts_locations,
-            target_dialect,
+    }
+    Ok(())
+}
+
+/// Bound one author-supplied identifier at [`crate::plan::author::PG_MAX_IDENT_BYTES`].
+///
+/// The bound is BYTES, not characters, because PostgreSQL's NAMEDATALEN is a byte
+/// budget: a name short in characters but long in bytes is truncated exactly as an
+/// over-long ASCII name is.
+fn authored_name_within_bound(
+    kind: &str,
+    name: &str,
+    position: NamePosition,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    target_dialect: Dialect,
+) -> Result<(), AuthoringError> {
+    let max = crate::plan::author::PG_MAX_IDENT_BYTES;
+    if name.len() <= max {
+        return Ok(());
+    }
+    let (reason, fix) = match position {
+        NamePosition::Created => (
             format!(
-                "index name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
+                "{kind} name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
                  bytes, so it would silently collide with any other name sharing its first \
                  {max} bytes",
                 name.len()
             ),
-            format!("use an index name of at most {max} bytes"),
-        ));
-    }
-    Ok(())
+            format!("use a {kind} name of at most {max} bytes"),
+        ),
+        NamePosition::Dropped => (
+            format!(
+                "{kind} name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
+                 bytes, so no catalog object can carry it: the guarded probe would find no \
+                 match, the statement would be skipped, and the journal would record it \
+                 completed while the object remained",
+                name.len()
+            ),
+            format!("name the {kind} as the catalog holds it, at most {max} bytes"),
+        ),
+    };
+    Err(partition_error(
+        CODE_OP_INVALID,
+        op_index,
+        ts_locations,
+        target_dialect,
+        reason,
+        fix,
+    ))
 }
 
 #[derive(Debug)]
