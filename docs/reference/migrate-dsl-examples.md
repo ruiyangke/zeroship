@@ -25,14 +25,14 @@ A migration is a `.ts` module exporting a `name` plus `up()` (and optionally `do
 functions are parameterless and author against the ambient per-migration recorder.
 
 ```ts
-import { table, t, now, genRandomUuid, currentSetting, currentUser, interval, concatWs } from "@zeroship/migrate";
+import { table, t, now, uuidV4, currentSetting, currentUser, interval, concatWs } from "@zeroship/migrate";
 
 export const name = "create_users";
 
 export function up() {
   table("users").create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       email: t.text().notNull(),
       created_at: t.timestamp().notNull().default(now()),
     },
@@ -127,7 +127,7 @@ t.encrypted({ of: t.text() })
 ### Bridging from the runtime schema
 
 ```ts
-import { fromDb, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
+import { fromDb, now, uuidV4, currentSetting, currentUser, interval } from "@zeroship/migrate";
 // Lift a live @zeroship/db field into a migration ColumnDef through the ONE shared ColType lexicon
 const col = fromDb(dbField);
 ```
@@ -156,7 +156,7 @@ t.text().default("pending")
 t.boolean().default(true)
 
 // Function defaults are expressions over the portable value-constructor set
-t.uuid().default(genRandomUuid())
+t.uuid().default(uuidV4())
 t.timestamp().default(now())
 
 // Empty-container defaults
@@ -422,7 +422,7 @@ uses the same closed,
   "/",
   1)
 (col) => now()
-(col) => genRandomUuid()
+(col) => uuidV4()
 
 // CASE expression — explicit when/then branches,
   with an optional else
@@ -446,7 +446,7 @@ import { lit,
   maxValue,
   nextval,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -460,7 +460,7 @@ minValue / maxValue           // partition-bound sentinels (see §12)
 ## 9. Enum types
 
 ```ts
-import { enumType, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
+import { enumType, now, uuidV4, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 enumType("order_status").create({ values: ["pending", "paid", "shipped"], schema: "zeroship" });
 enumType("order_status").comment("lifecycle of an order");
@@ -480,7 +480,7 @@ import {
   domain,
   t,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -514,7 +514,7 @@ import {
   nextval,
   t,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -540,7 +540,7 @@ A partition is authored from the parent table handle:
 the parent's `partitionBy`.
 
 ```ts
-import { table, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
+import { table, t, minValue, maxValue, now, uuidV4, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 // 1) Parent declares the partition strategy at create()
 table("sandbox_events",
@@ -603,7 +603,7 @@ Two forms: the portable structured `SelectAst` builder,
 import { view,
   countStar,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -695,7 +695,7 @@ table("apps",
 ```ts
 import { table,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -808,7 +808,7 @@ table("users").backfill({
 ```ts
 import { comment,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,
@@ -853,7 +853,7 @@ license to accumulate raw SQL.
 ```ts
 import { lintDeterminism,
   now,
-  genRandomUuid,
+  uuidV4,
   currentSetting,
   currentUser,
   interval,

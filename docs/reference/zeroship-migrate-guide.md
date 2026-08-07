@@ -312,14 +312,14 @@ export interface Migration { name?: string; up(): void; down?(): void; }
 `up`/`down` are parameterless and author against the ambient recorder. The examples doc authors it as module-level named exports (`export const name`, `export function up()`, `export function down()`) which is equivalent:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export const name = "create_users";
 
 export function up() {
   table("users").create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       email: t.text().notNull(),
       created_at: t.timestamp().notNull().default(now()),
     },
@@ -349,7 +349,7 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 
 | `t.*` factory | Options | Wire `ColType` | Per-dialect intent |
 | --- | --- | --- | --- |
-| `t.id(opts?)` | `{ prefix }` | `uuid` + `.primaryKey()` + `.default(genRandomUuid())`; `idPrefix` facet | UUID PK; `prefix` records the typed-id brand (`usr_<base62>`) — create-only |
+| `t.id(opts?)` | `{ prefix }` | `uuid` + `.primaryKey()` + `.default(uuidV4())`; `idPrefix` facet | UUID PK; `prefix` records the typed-id brand (`usr_<base62>`) — create-only |
 | `t.text(opts?)` | `{ caseSensitive }` | `text`; facet if `caseSensitive:false` | PG `text`; `false` → citext / `COLLATE NOCASE` / `_ci` |
 | `t.textArray()` | — | `textArray` | PG `text[]` / SQLite `TEXT` / MySQL `JSON` |
 | `t.numeric(opts?)` | `{ precision, scale }` default **(38, 9)** | `{ decimal: { precision, scale } }` | `NUMERIC(p,s)` |
@@ -398,13 +398,13 @@ Two lowering rules: a column that is both `.unique()` and `.primaryKey()` emits 
 
 ```ts
 t.bigInt().default(0)            t.text().default("pending")      t.boolean().default(true)
-t.uuid().default(genRandomUuid())   t.timestamp().default(now())   // function defaults are expressions
+t.uuid().default(uuidV4())   t.timestamp().default(now())   // function defaults are expressions
 t.json().default({})   t.json().default([])   t.textArray().default([])   // empty-container defaults
 t.json().notNull().default({ max_sockets: 4, egress_ceiling_bytes: 10485760 })  // arbitrary jsonb VALUE — integers only in v1
 t.bigInt().notNull().default(nextval("orders_id_seq", { schema: "zeroship" }))   // sequence-backed (PG vendor)
 ```
 
-Scalars pass through `toIrScalar` (`ops.ts:949-967`): branded `decimal("...")` → `{decimal}`, `byteValue(...)`/`Uint8Array` → `{bytes:base64}`, a non-integer JS number → `{decimal}`, a `bigint` throws. JSON defaults accept integers only (`|v| < 2**53`). Column defaults are validated immutable/non-volatile by `validateDefaultExpr` ([§4.7](#4-authoring-the-expression-sublanguage)). Value constructors exported for defaults/expressions are top-level imports: `now()`, `genRandomUuid()`, `currentSetting(name, {missingOk?})`, `currentUser()`, `interval(duration)` (`ops.ts:1241-1273`), `nextval(name, {schema?})`, `decimal(str)`, `byteValue(bytes)`, `lit(value)`.
+Scalars pass through `toIrScalar` (`ops.ts:949-967`): branded `decimal("...")` → `{decimal}`, `byteValue(...)`/`Uint8Array` → `{bytes:base64}`, a non-integer JS number → `{decimal}`, a `bigint` throws. JSON defaults accept integers only (`|v| < 2**53`). Column defaults are validated immutable/non-volatile by `validateDefaultExpr` ([§4.7](#4-authoring-the-expression-sublanguage)). Value constructors exported for defaults/expressions are top-level imports: `now()`, `uuidV4()`, `uuidV7()`, `currentSetting(name, {missingOk?})`, `currentUser()`, `interval(duration)` (`ops.ts:1241-1273`), `nextval(name, {schema?})`, `decimal(str)`, `byteValue(bytes)`, `lit(value)`.
 
 ### 3.7 The fluent `table()` handle grammar
 
@@ -702,8 +702,8 @@ The standard five (`count/sum/avg/min/max`) render byte-identically on all three
 
 Rather than one polymorphic handle, the recorder hands out **different builder objects** per position (see the tier map in [§3.17](#317-the-builder-tier-map-which-slot-gets-which-restricted-builder)): `makeBuilder()` (full column accessor + `case`), `immutableExprBuilder()` (same handle shape, then validated for immutable scalar contexts), `checkWithPgBuilder()` (same, but allows PG-immutable nodes for PG checks), `domainValueBuilder()` (only the `VALUE` chain plus `case`), and `defaultBuilder()` (only `case`). There are no builder namespaces. Two JS-side walkers and two Rust backstops enforce the contexts:
 
-- **`validateImmutableExpr`** (`ops.ts:2123`): rejects volatile `fnSynth` (`now`/`genRandomUuid`), `currentSetting`/`currentUser`, non-immutable scalar/synth helpers, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. It walks aggregate arguments and `stringAgg` delimiters but does not reject the aggregate node itself; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop is authoritative for aggregate placement.
-- **`validateDefaultExpr`** (`ops.ts:1085`): rejects `colRef` ("a column default cannot reference a column"), `extract`, `dialect`, and all `pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `genRandomUuid`, `concatWs`, `splitPart` — so `now()`/`genRandomUuid()` **are** permitted in a default despite being volatile, but a column ref is not. It also walks aggregate arguments and delimiters; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop rejects aggregates in defaults.
+- **`validateImmutableExpr`** (`ops.ts:2123`): rejects volatile `fnSynth` (`now`) and the volatile `uuidV4`/`uuidV7` nodes, `currentSetting`/`currentUser`, non-immutable scalar/synth helpers, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. It walks aggregate arguments and `stringAgg` delimiters but does not reject the aggregate node itself; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop is authoritative for aggregate placement.
+- **`validateDefaultExpr`** (`ops.ts:1085`): rejects `colRef` ("a column default cannot reference a column"), `extract`, `dialect`, and all `pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `concatWs`, `splitPart`, and the dedicated `uuidV4`/`uuidV7` nodes are admitted by their own arms — so `now()`/`uuidV4()` **are** permitted in a default despite being volatile, but a column ref is not. It also walks aggregate arguments and delimiters; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop rejects aggregates in defaults.
 - **Rust backstops**: `IMMUTABLE_CONTEXT_VOLATILE` rejects volatile functions in immutable SQL contexts, and `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts. These are the fail-closed gates for artifacts that bypass or outpace the TS/JS surface.
 
 The `DefaultBuilder` exposes only `{ case }` — deliberately no column accessor — so a default callback cannot reference columns by construction. Aggregates remain type-reachable through prebuilt chains/top-level imports and are rejected by Rust validation.
@@ -715,7 +715,8 @@ Receiver-less value producers are **top-level named exports** (from `index.ts:29
 | Import | Wire node | Notes |
 |---|---|---|
 | `now()` | `{ node:"fnSynth", fn:"now" }` | |
-| `genRandomUuid()` | `fnSynth fn:"genRandomUuid"` | |
+| `uuidV4()` | `{ node:"uuidV4" }` | dedicated Expr node, not a `fnSynth` |
+| `uuidV7()` | `{ node:"uuidV7" }` | dedicated Expr node; fails closed on a target that cannot produce a v7 |
 | `currentSetting(name, { missingOk? })` | `fnCall fn:"currentSetting"` | PG-vendor; rejected in immutable/default positions |
 | `currentUser()` | `fnCall fn:"currentUser"` | PG-vendor |
 | `interval(duration)` | `{ node:"pgInterval", duration }` | structured `Duration`, see below |
@@ -724,11 +725,11 @@ Receiver-less value producers are **top-level named exports** (from `index.ts:29
 | `byteValue(bytes\|b64)` | branded → `{ bytes }` | |
 | `nextval(name, { schema? })` | branded default → `{ nextval: {...} }` | default-only carrier |
 
-`interval` takes a structured `Duration` (`types.ts:135`) with integer fields `years, months, days, hours, minutes, seconds`; `pgDuration` requires ≥1 field, rejects unknown/non-integer fields, canonicalizes order. A top-level import cannot know its final expression position, so a volatile constructor placed in an *immutable* index/generated slot is caught at **validate time** (via `validateImmutableExpr` and its Rust backstop, [§7.6](#7-the-validate-gate--error-taxonomy)), not at tsc. Native-symbol shorthand: passing the bare native identities `Date.now`/`Math.random`/`crypto.randomUUID` (no parens) in a DML/value slot still normalizes to `fnSynth now`/`genRandomUuid`; in a **default** slot those bare symbols are **rejected** (`rejectRemovedDefaultFunctionValue`, `ops.ts:1064`) with a message steering to `.default(now())`.
+`interval` takes a structured `Duration` (`types.ts:135`) with integer fields `years, months, days, hours, minutes, seconds`; `pgDuration` requires ≥1 field, rejects unknown/non-integer fields, canonicalizes order. A top-level import cannot know its final expression position, so a volatile constructor placed in an *immutable* index/generated slot is caught at **validate time** (via `validateImmutableExpr` and its Rust backstop, [§7.6](#7-the-validate-gate--error-taxonomy)), not at tsc. Native-symbol shorthand: passing the bare native identities `Date.now`/`Math.random`/`crypto.randomUUID` (no parens) in a DML/value slot still normalizes to `fnSynth now` / the `uuidV4` node; in a **default** slot those bare symbols are **rejected** (`rejectRemovedDefaultFunctionValue`, `ops.ts:1064`) with a message steering to `.default(now())`.
 
 Typical usage:
 ```ts
-id:         t.uuid().primaryKey().default(genRandomUuid()),
+id:         t.uuid().primaryKey().default(uuidV4()),
 created_at: t.timestamp().notNull().default(now()),
 using:      (col) => col("app_id").eq(currentSetting("shop.tenant").cast({ to: "uuid" })),  // callback only where you must reference a column
 ```
@@ -740,7 +741,7 @@ using:      (col) => col("app_id").eq(currentSetting("shop.tenant").cast({ to: "
 In expression/value position, each leg is itself an expression wrapped by `exprArg`; the node records in canonical leg order `default, pg, sqlite, mysql` → `{ node:"dialect", default?, pg?, sqlite?, mysql? }`:
 
 ```ts
-default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
+default(dialect({ pg: uuidV4(), sqlite: now(), mysql: myUuid }))
 dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
 ```
 
@@ -863,6 +864,8 @@ The expression AST (`expr.rs`) is **closed** and **never parsed from text** — 
 | `case` | `Case@324` | `branches: Vec<CaseBranch>`, `else: Option<Box<Expr>>` |
 | `fnCall` | `FnCall@332` | `fn: ScalarFn` (allow-listed), `args` |
 | `fnSynth` | `FnSynth@340` | `fn: SynthFn` (engine-synthesized), `args` |
+| `uuidV4` | `UuidV4@360` | none — a DB-evaluated RFC 9562 v4 UUID; the renderer preserves the version/variant bits |
+| `uuidV7` | `UuidV7@364` | none — a DB-evaluated RFC 9562 v7 UUID; fails closed rather than substituting another version |
 | `cast` | `Cast@348` | `operand`, `target: CastTarget` |
 | `between` | `Between@357` | `operand`, `low`, `high` — portable inclusive range |
 | `like` | `Like@373` | `operand`, `pattern` — portable syntax |
@@ -876,7 +879,7 @@ The expression AST (`expr.rs`) is **closed** and **never parsed from text** — 
 | `pgInterval` | `PgInterval@461` | `duration: Duration`. PG-only |
 | `dialect` | `Dialectal@495` | `default`/`pg`/`sqlite`/`mysql` each `Option<Box<Expr>>` — the one Layer-2 escape; renders the matching leg else `default`, else refused fail-closed |
 
-**Closed lexicons** (serde rejects any out-of-set token at deserialize): `BinaryOp` (`eq, ne, lt, le, gt, ge, and, or, add, sub, mul, div, concat`); `UnaryOp` (`not, isNull, isNotNull, isTrue, isFalse`); `ScalarFn` (`coalesce, nullif, lower, upper, trim, length, abs, mod, round, floor, ceil, substr, replace, currentSetting, currentUser`); `SynthFn` (`concatWs, splitPart, now, genRandomUuid`); `CastTarget` (`text, int, real, boolean, bytes, uuid`); `ExtractField` (`year, month, day, hour, minute, dow`); `PgExtractField` (snake_case: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`); `AggFunc` (`count, sum, avg, min, max, stringAgg, arrayAgg, boolAnd, boolOr`).
+**Closed lexicons** (serde rejects any out-of-set token at deserialize): `BinaryOp` (`eq, ne, lt, le, gt, ge, and, or, add, sub, mul, div, concat`); `UnaryOp` (`not, isNull, isNotNull, isTrue, isFalse`); `ScalarFn` (`coalesce, nullif, lower, upper, trim, length, abs, mod, round, floor, ceil, substr, replace, currentSetting, currentUser`); `SynthFn` (`concatWs, splitPart, now`); `CastTarget` (`text, int, real, boolean, bytes, uuid`); `ExtractField` (`year, month, day, hour, minute, dow`); `PgExtractField` (snake_case: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`); `AggFunc` (`count, sum, avg, min, max, stringAgg, arrayAgg, boolAnd, boolOr`).
 
 ### 6.4 `IrScalar` — the custom serialization and why
 
@@ -994,7 +997,7 @@ Every `CODE_*` constant (`validate.rs:55-141`):
 | `VECTOR_METRIC_MISPLACED` | A `vector_metric` on a non-`Vector` column. `:95` |
 | `COLUMN_FACET_CONFLICT` | Mutually-exclusive facets (`default`+`generated`, `identity`+`generated`). `:98` |
 | `COLUMN_DEFAULT_TYPE` | A default invalid for the declared type (e.g. `{}` on `text[]`). `:101` |
-| `IMMUTABLE_CONTEXT_VOLATILE` | A volatile function (`now()`, `genRandomUuid()`) in an immutable context. `:104` |
+| `IMMUTABLE_CONTEXT_VOLATILE` | A volatile function (`now()`, `uuidV4()`) in an immutable context. `:104` |
 | `AGGREGATE_IN_SCALAR_CONTEXT` | An aggregate appeared in a scalar context (index expr/predicate, generated column, CHECK, or column DEFAULT). `:107` |
 | `SEQUENCE_OPTION_INVALID` | `increment = 0`, `cache < 1`, or `minValue > maxValue`. `:110` |
 | `VENDOR_OP_DENIED` | A privileged vendor op whose required `VendorCapability` isn't granted. `:116` |
@@ -1021,7 +1024,7 @@ The dispatch runs a fixed sequence BEFORE the per-op expression-slot walk (`vali
 
 ### 7.7 The immutable-context volatility backstop
 
-Top-level `now()`/`genRandomUuid()` imports make volatile nodes *type-reachable* in immutable slots. **The Rust validator is the authoritative backstop**. Three-function design:
+Top-level `now()`/`uuidV4()` imports make volatile nodes *type-reachable* in immutable slots. **The Rust validator is the authoritative backstop**. Three-function design:
 
 1. **Volatility classification** — `ExprVolatility { Immutable, Stable, Volatile }` (`validate.rs:326`). `scalar_fn_volatility`: `CurrentSetting`/`CurrentUser` are **Stable**; the rest are **Immutable**. `synth_fn_volatility`: `Now`/`GenRandomUuid` are **Volatile**; `ConcatWs`/`SplitPart` are **Immutable**.
 2. **The recursive walker** — `first_volatile_function(expr) -> Option<&'static str>` (`validate.rs:388-441`) descends the entire closed `Expr` AST and returns the name of the first volatile function.
