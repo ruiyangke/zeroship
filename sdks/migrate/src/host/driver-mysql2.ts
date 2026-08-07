@@ -63,6 +63,18 @@ export interface MysqlSessionOptions {
 /**
  * Open a pinned host MySQL session and return the `hostDriver` callback + `close()`.
  * BIGINT crosses as a string (exact-integer domain, §D.2).
+ *
+ * The returned `connection` has `multipleStatements` ENABLED, which a default
+ * mysql2 connection does not. The engine needs it because it issues
+ * multi-statement DDL batches, and that is safe for engine traffic: the SQL is
+ * rendered by the engine, never assembled from caller strings.
+ *
+ * It is not safe for YOUR traffic. Anything you run on this handle carries a
+ * widened injection surface - a single injected `;` starts a second statement
+ * rather than erroring - so a query built by interpolating untrusted input into
+ * SQL becomes arbitrary statement execution here, where on a default connection
+ * it would not. Use parameter binding on this handle, or open your own
+ * connection for application queries.
  */
 export async function openMysqlSession(
   url: string,
