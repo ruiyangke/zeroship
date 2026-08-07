@@ -57,7 +57,12 @@ pub enum GenTypesError {
     #[error("gen-types: produce ops from declared descriptors failed: {0}")]
     Produce(crate::ProduceError),
     /// The fold-and-recover seam refused the op stream (incoherent schema).
-    #[error("gen-types: fold the schema source failed: {0}")]
+    ///
+    /// The message names the DECLARED OPS as the input on purpose. The fold runs
+    /// before any TypeScript is rendered, and an earlier wording ("fold the schema
+    /// source") read as though the emitter had rejected something it had just
+    /// produced, which sent two separate investigations into the renderer.
+    #[error("gen-types: fold the declared ops into a schema failed: {0}")]
     Fold(crate::FoldError),
     /// `--check`: the generated artifact on disk diverges from the freshly-generated
     /// one. Names the file + a unified-ish diff preview.
