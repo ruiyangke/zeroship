@@ -100,7 +100,6 @@ impl Fixture {
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
-            logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).

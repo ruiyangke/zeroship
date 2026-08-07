@@ -455,10 +455,6 @@ pub struct AppState {
     /// Platform auth-provider token verifier for third-party OAuth bearer
     /// access tokens. Used only after local PAT verification fails.
     pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
-    /// In-process replay cache for OIDC Back-Channel Logout
-    /// `logout_token.jti` claims. Replays are answered with 200 for
-    /// webhook idempotency but do not run session revocation again.
-    pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
     /// Provider factories available in this process. Boot registers built-ins
     /// explicitly, then builds the role-addressed billing stack below.
     pub provider_registry: Arc<metering::provider::ProviderRegistry>,

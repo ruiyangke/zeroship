@@ -1517,7 +1517,6 @@ fn main() -> std::io::Result<()> {
             .expect("control: bundled authz policies parse"),
         pat_issuer,
         auth_provider,
-        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         provider_registry,
         billing_stack,
         billing_stream,
