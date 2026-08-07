@@ -443,7 +443,7 @@ async fn preauthenticate_refresh(
     let raw_token = required_param(params.refresh_token.as_deref(), "refresh_token")?;
     let client_id = authenticated_client_id(db, params.client_id.as_deref(), client_auth).await?;
     let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(issuer, &client, client_auth).await?;
+    authenticate_client(issuer, &client, client_auth)?;
     if !client.refresh_allowed {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     }
@@ -614,7 +614,7 @@ pub async fn revoke_post(
             .header("pragma", "no-cache")
             .finish(),
         Err(err) if err.error == "invalid_client" => {
-            super::authorization_code::oauth_error_response(err)
+            super::authorization_code::client_auth_error_response(err)
         }
         Err(err) if err.status == ntex::http::StatusCode::BAD_REQUEST => HttpResponse::Ok()
             .header("cache-control", "no-store")
@@ -647,7 +647,7 @@ async fn revoke_inner(
         Err(_) => return Ok(()),
     };
     let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(issuer, &client, &client_auth).await?;
+    authenticate_client(issuer, &client, &client_auth)?;
     if let Ok(claims) = issuer.verify_access_token(raw_token) {
         if claims.client_id == client.client_id {
             kill_families_for_subject(refresh_pool, &claims.client_id, &claims.sub).await?;
@@ -837,15 +837,25 @@ pub(super) async fn authenticated_client_id(
     }
 }
 
-pub(super) async fn authenticate_for_refresh(
+/// Authenticate the client behind a token-endpoint request, by the credential
+/// it was actually registered with.
+///
+/// Shared by every grant and every client-authenticated endpoint
+/// (authorization_code, refresh_token, introspect, revoke): RFC 6749 4.1.3
+/// requires a client issued credentials to present them on ALL of them, so the
+/// authorization_code grant cannot have a laxer rule than the refresh grant for
+/// the same client. `token_endpoint_auth_method` is what decides, not
+/// `brokered`: the DB CHECK only pins `brokered => client_secret_basic`, so a
+/// confidential client can perfectly well be non-brokered.
+pub(super) fn authenticate_client(
     issuer: &Issuer,
     client: &OAuthClient,
     client_auth: &ClientAuth,
 ) -> Result<(), OAuthError> {
-    // Brokered-first (MED-2): a brokered client authenticates by derive-and-
-    // compare against the per-app broker secret, NOT a stored hash (it has none
-    // — client_secret_hash is NULL). Without this branch the client_secret_basic
-    // arm below would verify against the NULL hash and brokered refresh would be
+    // Brokered-first: a brokered client authenticates by derive-and-compare
+    // against the per-app broker secret, NOT a stored hash (it has none:
+    // client_secret_hash is NULL). Without this branch the client_secret_basic
+    // arm below would verify against the NULL hash and brokered auth would be
     // a fail-closed dead-end (the gateway's oac_ clients keep the refresh anchor).
     if client.brokered {
         return crate::oidc::authorization_code::authenticate_brokered_client(

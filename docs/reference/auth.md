@@ -173,7 +173,12 @@ matches, enforces PKCE S256, and uses the app client's sector identifier to
 derive pairwise `pws_...` subjects.
 
 Brokered clients authenticate at token exchange with a per-client broker secret
-derived from `AUTH_BROKER_SECRET_FILE`; public clients are PKCE-only.
+derived from `AUTH_BROKER_SECRET_FILE`. Any other client registered with a
+`client_secret_basic` or `client_secret_post` method presents that secret on
+every grant it uses, `authorization_code` included; only clients registered
+with `token_endpoint_auth_method = none` are PKCE-only. A client that fails
+authentication gets `401` with `invalid_client` and a `WWW-Authenticate`
+challenge.
 
 ## Data Model
 

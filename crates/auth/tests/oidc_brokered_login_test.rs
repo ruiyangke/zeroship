@@ -336,7 +336,7 @@ async fn brokered_refresh_grant_requires_broker_secret() {
     let no_secret = refresh_request(&fx, &refresh_token, None)
         .await
         .expect("refresh without secret");
-    assert_eq!(no_secret.status().as_u16(), 400);
+    assert_eq!(no_secret.status().as_u16(), 401);
     assert_eq!(
         no_secret.json::<Value>().await.expect("json")["error"],
         "invalid_client",
@@ -602,7 +602,8 @@ async fn token_request(
 }
 
 async fn assert_invalid_client_without_tokens(resp: cyper::Response) {
-    assert_eq!(resp.status().as_u16(), 400);
+    // RFC 6749 5.2: `invalid_client` at the token endpoint is 401, not 400.
+    assert_eq!(resp.status().as_u16(), 401);
     let body = resp.json::<Value>().await.expect("oauth error json");
     assert_eq!(body["error"], "invalid_client");
     assert!(
