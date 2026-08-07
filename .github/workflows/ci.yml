@@ -205,12 +205,21 @@ jobs:
   sdk:
     runs-on: ubuntu-latest
     steps:
+      # The only checkout in this file that used to omit submodules, which was
+      # invisible until the vendored engine became a workspace member: without
+      # it, `third_party/zero-migrate` is an empty directory, the workspace
+      # globs match nothing, and install fails on an unresolvable link.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/ (it is gitignored there and built
+      # from source), so it has to be built before anything that imports it.
+      - run: pnpm --filter zero-migrate build
       # The migrate type layer reads @zeroship/db's built types; build SDKs first.
       - run: pnpm build
       - run: pnpm --filter @zeroship/migrate run check
