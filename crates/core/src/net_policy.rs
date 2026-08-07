@@ -102,7 +102,11 @@ impl HostPort {
             return Err("bare '*' is not a valid node:net allowlist host".to_string());
         }
         let star_count = self.host.bytes().filter(|b| *b == b'*').count();
-        if star_count > 0 && !self.host.starts_with("*.") {
+        let valid_wildcard = self
+            .host
+            .strip_prefix("*.")
+            .is_some_and(|suffix| !suffix.is_empty());
+        if star_count > 0 && (star_count != 1 || !valid_wildcard) {
             return Err(format!(
                 "wildcard allowlist host '{}' must use the '*.example.com' form",
                 self.host
@@ -225,6 +229,28 @@ mod tests {
         assert!(HostPort::try_new("*.workers.dev", 443).is_err());
         assert!(HostPort::try_new("*.neon.tech", 5432).is_err());
         assert!(HostPort::try_new("db.neon.tech", 5432).is_ok());
+    }
+
+    #[test]
+    fn operator_review_host_validation_accepts_literal_and_single_wildcard() {
+        assert!(HostPort::try_new("example.com", 443).is_ok());
+        assert!(HostPort::try_new("*.example.com", 443).is_ok());
+    }
+
+    #[test]
+    fn operator_review_host_validation_rejects_bare_wildcard_suffix() {
+        assert!(
+            HostPort::try_new("*.", 443).is_err(),
+            "bare wildcard suffix must be rejected"
+        );
+    }
+
+    #[test]
+    fn operator_review_host_validation_rejects_additional_wildcards() {
+        assert!(
+            HostPort::try_new("*.*.example.com", 443).is_err(),
+            "additional wildcards must be rejected"
+        );
     }
 
     #[test]
