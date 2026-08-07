@@ -29,7 +29,7 @@ export type AuthLevel = "anon" | "user" | "admin";
  *
  * The five kinds split into two axes:
  *
- *  - **Capability** (B3 from `docs/proposals/zeroship-db.md`):
+ *  - **Capability** (B3 from `docs/archive/zeroship-db.md`):
  *    - `query`     — DB reads only, no `fetch()`.
  *    - `mutation`  — DB read + write, no `fetch()`.
  *    - `action`    — full surface: `fetch()`, `ctx.runQuery`,

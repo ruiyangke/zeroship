@@ -185,7 +185,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 /// dev server.
 ///
 /// This is the explicit DNS-rebinding guard described in
-/// `docs/proposals/websocket-native.md` §VIII.1.
+/// `docs/archive/websocket-native.md` §VIII.1.
 pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
     use std::io::{Error, ErrorKind};
 

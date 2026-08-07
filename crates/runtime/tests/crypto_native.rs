@@ -2,7 +2,7 @@
 //! `CryptoKey` directly in an isolated V8 context (no Runtime), so the
 //! tests run the native install path even before the polyfill flip.
 //!
-//! Per `docs/proposals/webcrypto-native.md` §X.1.
+//! Per `docs/archive/webcrypto-native.md` §X.1.
 
 #![allow(unsafe_code, missing_debug_implementations)]
 

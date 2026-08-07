@@ -1,5 +1,5 @@
 //! HMAC — sign/verify/generateKey/importKey/exportKey. See
-//! `docs/proposals/webcrypto-native.md` §IV.8.
+//! `docs/archive/webcrypto-native.md` §IV.8.
 
 #![allow(dead_code)]
 

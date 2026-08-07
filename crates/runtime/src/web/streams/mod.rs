@@ -1,7 +1,7 @@
 //! Native WHATWG Streams implementation.
 //!
 //! Spec: https://streams.spec.whatwg.org/
-//! Design: `docs/proposals/streams-native.md`
+//! Design: `docs/archive/streams-native.md`
 //!
 //! # Module layout (per design §I.2)
 //!

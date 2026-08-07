@@ -1,5 +1,5 @@
 //! AES-CTR / AES-CBC / AES-GCM / AES-KW. Per
-//! `docs/proposals/webcrypto-native.md` §IV.2 / §IV.3 / §IV.4.
+//! `docs/archive/webcrypto-native.md` §IV.2 / §IV.3 / §IV.4.
 
 #![allow(dead_code)]
 

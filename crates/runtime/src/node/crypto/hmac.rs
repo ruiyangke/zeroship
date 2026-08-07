@@ -1,6 +1,6 @@
 //! `Hmac` class — `crypto.createHmac(algorithm, key, options?)`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §V.3. Same
+//! See `docs/archive/node-crypto-native.md` §V.3. Same
 //! surface as Hash: update + digest. **No `copy()`** — Hmac doesn't
 //! have one in Node.
 //!

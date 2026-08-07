@@ -281,7 +281,7 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// == marker == receiver). Adding it is opt-in and additive — no
 /// existing class is affected.
 ///
-/// See `docs/proposals/macro-v8-state.md` for the full design,
+/// See `docs/archive/macro-v8-state.md` for the full design,
 /// substitution table, and migration plan for `Request` / `Response`.
 #[proc_macro_attribute]
 pub fn v8_state_marker(_attr: TokenStream, item: TokenStream) -> TokenStream {

@@ -1,7 +1,7 @@
 //! `generateKeyPairSync` / `generateKeyPair` / `generateKeySync` /
 //! `generateKey`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §II.7.
+//! See `docs/archive/node-crypto-native.md` §II.7.
 //!
 //! Strategy: for every supported asymmetric type (`rsa`, `ec`,
 //! `ed25519`, `x25519`) we delegate to aws-lc-rs's keygen helpers

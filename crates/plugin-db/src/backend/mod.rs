@@ -93,8 +93,14 @@ pub use sqlite::SqliteBackend;
 /// `docs/archive/p0-implementation-plan.md` and the
 /// converged design at `docs/archive/db-system-design.md` §7).
 /// Consumer bounds narrow onto this trait (and [`LockManager`])
-/// instead of the omnibus [`Backend`] super-trait; see the
-/// deferred-backlog [C1] entry in `docs/reviews/plugin-db-deferred.md`.
+/// instead of the omnibus [`Backend`] super-trait. That carve is
+/// finished: nothing takes `dyn Backend`, and the `&PostgresBackend`
+/// parameters that remain are the deliberate Postgres-only accessors
+/// on [`BackendHandle`] (`as_postgres`, `as_backup_pg`,
+/// `as_encrypted_column_pg`) plus their private callers. Those sit
+/// outside the capability traits by design - replication and WAL
+/// consumption are Postgres-specific - rather than being a migration
+/// someone left half-done.
 ///
 /// Not `Send + Sync` on purpose — the compio runtime is
 /// single-threaded per worker, so we don't pay for atomics or

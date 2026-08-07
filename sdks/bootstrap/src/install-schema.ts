@@ -403,7 +403,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
 
 /**
  * Expand a top-level `t.union(...)` into a flat `NormalizedSchema`
- * (proposal §C2). See `docs/proposals/zeroship-db.md` for the full
+ * (proposal §C2). See `docs/archive/zeroship-db.md` for the full
  * rules; in short: every non-discriminator field becomes a nullable
  * top-level column, fields shared across variants must agree on
  * `type`, and the discriminator becomes a NOT NULL column with an

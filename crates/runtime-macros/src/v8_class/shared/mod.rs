@@ -1,5 +1,5 @@
 //! Shared codegen primitives for `#[v8_class]`. See
-//! `docs/proposals/runtime-macros-refactor.md` §4.1 and §3.8. Hosts
+//! `docs/archive/runtime-macros-refactor.md` §4.1 and §3.8. Hosts
 //! helpers shared across `emit/` submodules so
 //! per-callback codegen sites delegate to one canonical implementation
 //! instead of hand-rolling 10 LOC of brand-check + External-recovery

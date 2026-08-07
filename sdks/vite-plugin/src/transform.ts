@@ -31,7 +31,7 @@ const SCHEDULE_IMPORT_NAMES = new Set(["schedule", "every", "cronExpr"]);
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
- *  B3 capability mapping (see `docs/proposals/zeroship-db.md` §B3):
+ *  B3 capability mapping (see `docs/archive/zeroship-db.md` §B3):
  *    - `query`  → DB-read tx, no fetch
  *    - `mutation` → DB-write tx, no fetch
  *    - `action` / `stream` / `subscription` / `procedure` →

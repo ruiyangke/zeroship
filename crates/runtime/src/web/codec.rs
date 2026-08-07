@@ -42,7 +42,7 @@
 //!
 //! ## Design references
 //!
-//! `docs/proposals/compression-streams-native.md` records the design
+//! `docs/archive/compression-streams-native.md` records the design
 //! tradeoffs that shaped this implementation.
 
 use std::io::Write;

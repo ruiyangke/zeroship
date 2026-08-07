@@ -149,7 +149,7 @@ const rule: RuleModule = {
         "appears to do a sequential scan (single-field equality without an " +
         "obvious index). Match the runtime warning emitted in dev mode.",
       recommended: true,
-      url: "https://github.com/zeroship-dev/zeroship/blob/main/docs/proposals/zeroship-db.md#d1-index-awareness",
+      url: "https://github.com/zeroship-dev/zeroship/blob/main/docs/reference/db.md#named-indexes",
     },
     schema: [],
     messages: {

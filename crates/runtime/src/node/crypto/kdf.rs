@@ -1,6 +1,6 @@
 //! KDF ops — `pbkdf2Sync`, `pbkdf2`, `hkdfSync`, `hkdf`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §VI.2.
+//! See `docs/archive/node-crypto-native.md` §VI.2.
 //!
 //! Sync variants run on the V8 thread (user opted in by picking the
 //! `*Sync` API). Async variants (`pbkdf2(...callback)` and the

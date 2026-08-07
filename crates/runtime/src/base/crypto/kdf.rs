@@ -1,6 +1,6 @@
 //! Key derivation: PBKDF2 + HKDF + scrypt.
 //!
-//! See `docs/proposals/node-crypto-native.md` §VI.2 + §III.2a.
+//! See `docs/archive/node-crypto-native.md` §VI.2 + §III.2a.
 //! scrypt drops to aws-lc-sys raw FFI (`EVP_PBE_scrypt`) because the
 //! high-level aws-lc-rs surface does not expose it.
 

@@ -1,6 +1,6 @@
 //! Streaming + one-shot digest contexts.
 //!
-//! See `docs/proposals/node-crypto-native.md` §I.5. The kernel's
+//! See `docs/archive/node-crypto-native.md` §I.5. The kernel's
 //! `DigestContext` wraps `aws_lc_rs::digest::Context`
 //! incrementally; the one-shot helper is what WebCrypto's
 //! `subtle.digest()` calls. Stage A: SHA-1/256/384/512 (the four

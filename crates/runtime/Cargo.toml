@@ -108,7 +108,7 @@ bench-bins = []
 # can opt out via `--no-default-features`.
 default = ["runtime_tls", "runtime_native_websocket"]
 runtime_tls = ["dep:compio-tls", "dep:rustls-native-certs"]
-# Per docs/proposals/websocket-native.md D-25 (cutover cadence):
+# Per docs/archive/websocket-native.md D-25 (cutover cadence):
 #  Landing 1: native behind feature flag, polyfill default — current.
 #  Landing 2: flip default to native; polyfill remains as fallback.
 #  Landing 3: delete polyfill.
@@ -128,7 +128,7 @@ runtime_legacy_websocket = []
 [dev-dependencies]
 # Compile-fail snapshot tests for proc-macro diagnostics. Locks in
 # `#[v8_constructor(post_init = ...)]` error spans for malformed shapes
-# (MAC-02, design `docs/proposals/macro-constructor-post-init.md` §6.2).
+# (MAC-02, design `docs/archive/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
 rcgen = "0.14"
 # Wave F (RPC v2 phase 1): microbench for `default.rpc(...)` dispatch.
@@ -137,7 +137,7 @@ criterion = { workspace = true }
 # RPC v2 phase 1 — Wave F. Measures the production single-call dispatch
 # path (`extract_zs_v1_id` → `parse_rpc_body` → `RpcContext::build_js_object`
 # → `with_rpc_context_in_als` → `rpc_fn.call` → `classify_rpc_return`).
-# Per `docs/proposals/rpc-v2.md` §5, the result decides whether phase 1
+# Per `docs/proposals/rpc.md` §5, the result decides whether phase 1
 # stays on single-call or amends to a two-step `#[v8_method(fastcall)]`
 # enqueue ABI.
 [[bench]]

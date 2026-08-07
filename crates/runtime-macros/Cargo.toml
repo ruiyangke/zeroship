@@ -14,7 +14,7 @@ proc-macro2 = { workspace = true }
 
 [dev-dependencies]
 # Insta snapshot tests for the v8_class proc-macro's emit. Locks the
-# no-attribute path against drift (design `docs/proposals/macro-v8-state.md`
+# no-attribute path against drift (design `docs/archive/macro-v8-state.md`
 # §5.1 / §6.4) and the new `#[v8_state_marker]` path against unintended
 # changes. Bumps require `cargo insta accept` with reviewer audit.
 insta = "1"

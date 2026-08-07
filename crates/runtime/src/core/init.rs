@@ -2288,7 +2288,7 @@ pub fn load_polyfills_and_modules(
     install_headers(scope);
 
     // Native WHATWG Streams. See
-    // `docs/proposals/streams-native.md`. ReadableStream,
+    // `docs/archive/streams-native.md`. ReadableStream,
     // WritableStream,
     // TransformStream, *Controller, *Reader, *Writer, BYOBReader,
     // BYOBRequest, and the async-iter prototype patches are all
@@ -3318,7 +3318,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     // (`__cryptoHashSync` / `__cryptoHmacSync` were the v1 sync hash/HMAC
     // ad-hoc V8 callbacks consumed by the JS shim at
     // `sdks/vite-plugin/src/node-compat.ts`. Stage B of
-    // `docs/proposals/node-crypto-native.md` replaced them with a
+    // `docs/archive/node-crypto-native.md` replaced them with a
     // boundary object; the post-Stage-B migration moved the surface
     // into a V8 SyntheticModule registered as `node:crypto` (see
     // `crate::core::native_modules`). The thunks are long gone.)
@@ -3825,7 +3825,7 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
 /// modules).
 ///
 /// The implementation lives in `crate::headers` (Headers struct,
-/// HeadersIterator, install_global). See `docs/proposals/headers-native.md`
+/// HeadersIterator, install_global). See `docs/archive/headers-native.md`
 /// for the design.
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
@@ -3874,7 +3874,7 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 /// *DefaultController, *DefaultWriter, *DefaultReader, BYOBReader,
 /// BYOBRequest, the async-iter prototype patches,
 /// ByteLengthQueuingStrategy, and CountQueuingStrategy. See
-/// `docs/proposals/streams-native.md` for the design.
+/// `docs/archive/streams-native.md` for the design.
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);

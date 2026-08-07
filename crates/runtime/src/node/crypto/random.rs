@@ -1,7 +1,7 @@
 //! Random ops — `randomBytes`, `randomFillSync`, `randomFill`,
 //! `randomInt`, `randomUUID`, `getRandomValues`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §VI.5.
+//! See `docs/archive/node-crypto-native.md` §VI.5.
 //!
 //! All sync: backed by the existing thread-local 4 KB CSPRNG buffer
 //! (`crate::crypto::fast_random`) which amortises one syscall over

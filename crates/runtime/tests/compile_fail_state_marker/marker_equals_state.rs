@@ -1,6 +1,6 @@
 //! Compile-fail: `#[v8_state_marker(Foo)] impl Foo` — marker equals
 //! the impl receiver. The macro emits a hard error pointing the user
-//! at the no-attribute path (design `docs/proposals/macro-v8-state.md`
+//! at the no-attribute path (design `docs/archive/macro-v8-state.md`
 //! §4.7).
 #![allow(unused_imports)]
 

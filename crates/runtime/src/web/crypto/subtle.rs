@@ -1,5 +1,5 @@
 //! `SubtleCrypto` — the dispatcher class. Per
-//! `docs/proposals/webcrypto-native.md` §III.
+//! `docs/archive/webcrypto-native.md` §III.
 //!
 //! Each method synchronously executes the spec algorithm on the V8
 //! thread, wrapping the result in a Promise via

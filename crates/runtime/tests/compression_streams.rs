@@ -7,7 +7,7 @@
 //! transform / flush semantics through the readable side.
 //!
 //! Round-trip + edge-case coverage per
-//! `docs/proposals/compression-streams-native.md`'s test plan.
+//! `docs/archive/compression-streams-native.md`'s test plan.
 
 mod common;
 

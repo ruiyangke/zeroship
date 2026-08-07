@@ -1,6 +1,6 @@
 //! `ClassConfig` — the parameter object passed to every codegen helper
 //! after parse + analyse phases (design
-//! `docs/proposals/runtime-macros-refactor.md` §3.1, Appendix B).
+//! `docs/archive/runtime-macros-refactor.md` §3.1, Appendix B).
 //!
 //! Closes F4 (the 10-arg `gen_install` signature) and the cascade of
 //! `(class_ty, state_ty, ...)` repetitions across every codegen helper.

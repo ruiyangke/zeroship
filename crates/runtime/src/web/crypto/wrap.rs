@@ -1,5 +1,5 @@
 //! `wrapKey` / `unwrapKey` orchestration. Per
-//! `docs/proposals/webcrypto-native.md` §IV.4 / §14.3.10 / §14.3.11.
+//! `docs/archive/webcrypto-native.md` §IV.4 / §14.3.10 / §14.3.11.
 
 #![allow(dead_code)]
 

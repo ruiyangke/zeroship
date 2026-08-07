@@ -1,7 +1,7 @@
 //! `Cipher` / `Decipher` classes + `createCipheriv` / `createDecipheriv`
 //! factories.
 //!
-//! See `docs/proposals/node-crypto-native.md` §V.4 / §III.
+//! See `docs/archive/node-crypto-native.md` §V.4 / §III.
 //!
 //! The current implementation ships AES-{CBC,CTR,GCM} and
 //! ChaCha20-Poly1305 — the four
@@ -610,7 +610,7 @@ pub(crate) fn create_cipher_callback(
     _args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    // Deprecated path; see `docs/proposals/node-crypto-native.md` §V.4.
+    // Deprecated path; see `docs/archive/node-crypto-native.md` §V.4.
     let exc = crate::node_error::build_node_exception(
         scope,
         "ERR_CRYPTO_UNSUPPORTED_OPERATION",
