@@ -417,6 +417,20 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
     });
 }
 
+/// **Test-only**: drop everything the per-thread context holds, including
+/// the pool and any parked transaction client.
+///
+/// Those handles own live Postgres connections. A test that leaves them in
+/// the context leaves the connections open, and because releasing a
+/// connection is asynchronous they are then orphaned when the test's runtime
+/// goes away. Clearing the context first lets the connections close while
+/// there is still a runtime to close them.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn reset_context_for_tests() {
+    ctx_mut(|c| *c = context::IsolateDbContext::new());
+}
+
 /// **P5.5 PR 4 test helper**: install a `SqliteBackend` into the per-
 /// isolate context so the unmask integration suite can drive
 /// `crud::unmask::dispatch_unmask` against a freshly-constructed

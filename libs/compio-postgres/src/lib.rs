@@ -71,6 +71,7 @@ pub use crate::copy_out::CopyOutStream;
 use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
+pub use crate::live::{drain_connections, live_connections};
 pub use crate::pool::{Pool, PoolConfig, PoolMetrics, PooledClient};
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
@@ -106,6 +107,7 @@ pub mod error;
 mod generic_client;
 #[cfg(not(target_arch = "wasm32"))]
 mod keepalive;
+mod live;
 mod maybe_tls_stream;
 mod pool;
 mod portal;
