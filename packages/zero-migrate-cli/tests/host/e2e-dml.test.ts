@@ -12,6 +12,7 @@ import {
 } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { noInjectPolicy } from "./policy.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -24,9 +25,7 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
   );
 }
 
-const PG_URL =
-  process.env.ZERO_MIGRATE_TEST_PG_URL ??
-  "postgres://postgres:zero_migrate@localhost:5440/zero_migrate_test";
+const PG_URL = pgUrl();
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_complete_dml_flow";
 const MIGRATION_NAME = "complete_dml_flow";
@@ -178,15 +177,8 @@ test("the shared migration authors the complete portable data flow", async () =>
 });
 
 test("PostgreSQL: create, insert, update, delete, and backfill apply in order and rerun safely", async (t) => {
-  const pg = (await import("pg")).default;
-  const client = new pg.Client({ connectionString: PG_URL });
-  try {
-    await client.connect();
-  } catch {
-    await client.end().catch(() => {});
-    t.skip(`test Postgres unreachable at ${PG_URL} (set ZERO_MIGRATE_TEST_PG_URL)`);
-    return;
-  }
+  const client = await connectLivePg(t);
+  if (!client) return;
 
   const migration = await loadMigration();
   const projectSchema = uniqueName("e2e_dml_pg");

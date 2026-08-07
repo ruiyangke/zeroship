@@ -20,9 +20,9 @@
 //   - drift/checksum: two applies of the identical artifact fold the SAME anchor
 //     (drift-free identity), a modified artifact folds a DIFFERENT anchor (drift).
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL` (the same var the in-crate suite + `authoring.test`
-// use). Auto-skips cleanly when the test Postgres is unreachable, so DB-free CI stays
-// green. Runs under `node --import tsx --test`.
+// GATE: `connectLivePg` (see `live-db.ts`). An unset `ZERO_MIGRATE_TEST_PG_URL` with
+// no database on the compose default skips, so DB-free CI stays green; a configured
+// DSN that does not connect fails. Runs under `node --import tsx --test`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,6 +32,7 @@ import { dirname, join } from "node:path";
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { table, t } from "zero-migrate";
 import { noInjectPolicy } from "./policy.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -46,9 +47,7 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
   );
 }
 
-const PG_URL =
-  process.env.ZERO_MIGRATE_TEST_PG_URL ??
-  "postgres://postgres:zero_migrate@localhost:5440/zero_migrate_test";
+const PG_URL = pgUrl();
 const OWNER_APP = "app_gadgets";
 const DRIVER = { kind: "postgres" as const, url: PG_URL };
 
@@ -61,19 +60,6 @@ function uniqueSchema(prefix: string): string {
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */
 async function loadMigration() {
   return import("./mig/20260712000001_create_gadgets.ts");
-}
-
-/** Connect a `pg.Client`, or `null` if the test Postgres is unreachable (→ skip). */
-async function tryConnect(): Promise<import("pg").Client | null> {
-  const pg = (await import("pg")).default;
-  const c = new pg.Client({ connectionString: PG_URL });
-  try {
-    await c.connect();
-    return c;
-  } catch {
-    await c.end().catch(() => {});
-    return null;
-  }
 }
 
 /** Read the `applied` journal rows (event_seq, name, checksum), in `event_seq` order,
@@ -125,14 +111,11 @@ async function applyAndAnchors(
 
 // ---------------------------------------------------------------------------
 // The full e2e oracle: multi-op apply + journal + status/history + drift/checksum,
-// all through the REAL addon + real `pg` driver. Auto-skips if PG is unreachable.
+// all through the REAL addon + real `pg` driver, gated by `connectLivePg`.
 // ---------------------------------------------------------------------------
 test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg driver", async (tc) => {
-  const client = await tryConnect();
-  if (!client) {
-    tc.skip(`test Postgres unreachable at ${PG_URL} (set ZERO_MIGRATE_TEST_PG_URL)`);
-    return;
-  }
+  const client = await connectLivePg(tc);
+  if (!client) return;
 
   const mig = await loadMigration();
   const schema = uniqueSchema("e2e_gadgets");

@@ -12,9 +12,9 @@
 // nothing (it only moves which oid has to be poisoned). Widening such a list later
 // also READS as widening the check when it is not.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL` (the same var the rest of the host suite uses).
-// The property arms need no database; the live arms auto-skip cleanly when the test
-// Postgres is unreachable, so DB-free CI stays green.
+// GATE: `connectLivePg` (see `live-db.ts`). The property arms need no database; the
+// live arms skip when no DSN is configured and none is running on the compose
+// default, and fail when a configured DSN does not connect.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -30,6 +30,7 @@ import {
 } from "../../src/driver-pg.js";
 import { apply } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -44,27 +45,11 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
   );
 }
 
-const PG_URL =
-  process.env.ZERO_MIGRATE_TEST_PG_URL ??
-  "postgres://postgres:zero_migrate@localhost:5440/zero_migrate_test";
+const PG_URL = pgUrl();
 
 /** A fresh, unique schema so parallel runs / reruns never collide. */
 function uniqueSchema(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
-}
-
-/** Probe the test Postgres; returns the reachability failure message or null. */
-async function pgUnreachable(): Promise<string | null> {
-  const pg = (await import("pg")).default;
-  const probe = new pg.Client({ connectionString: PG_URL });
-  try {
-    await probe.connect();
-    await probe.end();
-    return null;
-  } catch (e) {
-    await probe.end().catch(() => {});
-    return (e as Error).message;
-  }
 }
 
 /** Drive one verb through the `hostDriver([request, done])` callback contract. */
@@ -255,11 +240,11 @@ test("an array literal the seam cannot represent is a loud error, not a truncati
 // connection-scoped shadow for oid 16 is what keeps `false` false.
 // ---------------------------------------------------------------------------
 test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", async (t) => {
-  const unreachable = await pgUnreachable();
-  if (unreachable !== null) {
-    t.skip(`test Postgres unreachable at ${PG_URL}: ${unreachable}`);
-    return;
-  }
+  // The gate's client is the reachability proof only: the arm drives its own
+  // connection through `openPgSession`, which is the seam under test.
+  const probe = await connectLivePg(t);
+  if (!probe) return;
+  await probe.end();
 
   const restore = await poisonEveryGlobalParser();
   let session: Awaited<ReturnType<typeof openPgSession>> | null = null;
@@ -294,11 +279,9 @@ test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", as
 // rejects. The pinned parser must produce the array itself.
 // ---------------------------------------------------------------------------
 test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw text", async (t) => {
-  const unreachable = await pgUnreachable();
-  if (unreachable !== null) {
-    t.skip(`test Postgres unreachable at ${PG_URL}: ${unreachable}`);
-    return;
-  }
+  const probe = await connectLivePg(t);
+  if (!probe) return;
+  await probe.end();
 
   const restore = await poisonEveryGlobalParser();
   let session: Awaited<ReturnType<typeof openPgSession>> | null = null;
@@ -335,19 +318,15 @@ test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw 
 // parser a host app can rewrite.
 // ---------------------------------------------------------------------------
 test("apply survives a fully poisoned global pg.types map", async (t) => {
-  const unreachable = await pgUnreachable();
-  if (unreachable !== null) {
-    t.skip(`test Postgres unreachable at ${PG_URL}: ${unreachable}`);
-    return;
-  }
+  // The gate's client doubles as the admin connection: it is opened before the
+  // poison lands, exactly as the arm's own admin client used to be.
+  const adm = await connectLivePg(t);
+  if (!adm) return;
 
-  const pg = (await import("pg")).default;
   const restore = await poisonEveryGlobalParser();
 
   const schema = uniqueSchema("poison_apply");
   const meta = `${schema}_migrations`;
-  const adm = new pg.Client({ connectionString: PG_URL });
-  await adm.connect();
 
   try {
     await adm.query(`CREATE SCHEMA "${schema}"`);

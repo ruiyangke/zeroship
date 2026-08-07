@@ -1,9 +1,11 @@
 // Differential oracle harness.
 //
-// Runs the host `apply`/`status`/`history` over `driver-pg` against the :5440 test
-// Postgres and asserts the oracles. The native recorder (the `zero-migrate-js record`
-// verb) is the authoring-parity reference: its canonical IR envelope must carry the
-// host recorder's author ops as a subset (Oracle 7).
+// Runs the host `apply`/`status`/`history` over `driver-pg` against the test
+// Postgres (`live-db.ts`: `ZERO_MIGRATE_TEST_PG_URL`, else the DSN
+// `docker-compose.test.yml` serves) and asserts the oracles. The native recorder
+// (the `zero-migrate-js record` verb) is the authoring-parity reference: its
+// canonical IR envelope must carry the host recorder's author ops as a subset
+// (Oracle 7).
 //
 // Runs under BOTH `bun run tests/host/oracle.ts` (imports the `.ts` migration) and
 // `node tests/host/oracle.ts` (imports the `bun build`-transpiled `.mjs` migration)
@@ -41,6 +43,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { noInjectPolicy } from "./policy.js";
+import { pgUrl } from "./live-db.js";
 
 // The migration module. Under Bun we import the `.ts` directly; under plain Node
 // (which can't import `.ts`) we import the `bun build`-transpiled `.mjs` sibling.
@@ -51,12 +54,9 @@ const migMod = IS_BUN
   : await import("./mig/20260711000001_create_widgets.mjs");
 
 // -- config ----------------------------------------------------------------
-const HOST = "localhost";
-const PORT = 5440;
-const USER = "postgres";
-const PASSWORD = "zero_migrate";
-const DBNAME = "zero_migrate_test";
-const PG_URL = `postgres://${USER}:${PASSWORD}@${HOST}:${PORT}/${DBNAME}`;
+// The DSN comes from the shared gate so this harness and the gated suites can never
+// disagree about which Postgres "the test Postgres" is.
+const PG_URL = pgUrl();
 const OWNER_APP = "app_widgets";
 const NATIVE_JS_BIN =
   process.env.ZERO_MIGRATE_JS_BIN ??

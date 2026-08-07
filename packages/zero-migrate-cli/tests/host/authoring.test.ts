@@ -13,7 +13,7 @@
 // (ir_version from the addon, op count, op kinds). This is the pure-JS recorder
 // proof — no DB, no V8.
 //
-// FULL arm (pg :5440, auto-skips if unreachable): apply into a fresh unique schema
+// FULL arm (gated by `connectLivePg`, see `live-db.ts`): apply into a fresh unique schema
 // and assert the journal recorded the migration AND the `widgets` table + its author
 // columns exist. This proves author -> IR -> lower(Rust checksum/fold) -> apply over
 // the real `pg` driver.
@@ -37,6 +37,7 @@ import {
   status,
 } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -104,9 +105,7 @@ test("programmatic executor verbs require explicit policy bytes", async () => {
   );
 });
 
-const PG_URL =
-  process.env.ZERO_MIGRATE_TEST_PG_URL ??
-  "postgres://postgres:zero_migrate@localhost:5440/zero_migrate_test";
+const PG_URL = pgUrl();
 
 /** Import the sample migration (`.ts`) — resolves `zero-migrate` to this
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */
@@ -177,21 +176,12 @@ test("plan authors once and validates the envelope it returns", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FULL arm — napi addon lowers + applies over the real `pg` driver (pg :5440).
-// Auto-skips if the test Postgres is unreachable.
+// FULL arm: napi addon lowers + applies over the real `pg` driver, gated by
+// `connectLivePg`.
 // ---------------------------------------------------------------------------
 test("Node-native apply: napi addon lowers + applies the authored IR over the pg driver", async (t) => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pg = (await import("pg")).default;
-
-  const probe = new pg.Client({ connectionString: PG_URL });
-  try {
-    await probe.connect();
-  } catch (e) {
-    await probe.end().catch(() => {});
-    t.skip(`test Postgres unreachable at ${PG_URL}: ${(e as Error).message}`);
-    return;
-  }
+  const probe = await connectLivePg(t);
+  if (!probe) return;
 
   const mig = await loadMigration();
   const schema = uniqueSchema("node_authoring");
@@ -258,16 +248,8 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
 });
 
 test("Node-native apply uses live PostgreSQL facts for existing-table changes", async (context) => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pg = (await import("pg")).default;
-  const probe = new pg.Client({ connectionString: PG_URL });
-  try {
-    await probe.connect();
-  } catch (e) {
-    await probe.end().catch(() => {});
-    context.skip(`test Postgres unreachable at ${PG_URL}: ${(e as Error).message}`);
-    return;
-  }
+  const probe = await connectLivePg(context);
+  if (!probe) return;
 
   const schema = uniqueSchema("node_live_lower");
   const meta = `${schema}_migrations`;
