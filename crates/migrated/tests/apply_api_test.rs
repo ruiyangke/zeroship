@@ -47,6 +47,9 @@ struct TestCaller {
 #[derive(Debug, Default)]
 struct StaticAuthenticator {
     callers: Mutex<HashMap<String, TestCaller>>,
+    /// Every `request_id` the handlers passed in, in call order, so a test can
+    /// assert the id the caller sent is the id authz was given.
+    seen_request_ids: Mutex<Vec<String>>,
 }
 
 impl StaticAuthenticator {
@@ -95,7 +98,12 @@ impl Authenticator for StaticAuthenticator {
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
+        self.seen_request_ids
+            .lock()
+            .expect("static auth lock")
+            .push(request_id.to_owned());
         let callers = self.callers.lock().expect("static auth lock");
         let caller = callers.get(token).ok_or(AuthError::Unauthorized)?;
         if !caller.actions.contains(&required_action) || !caller.owned_apps.contains(&app_id) {
@@ -1907,7 +1915,7 @@ async fn real_delegating_authenticator_accepts_apps_migrate_owner_pat() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let caller = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy)
+        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect("PAT owner with apps:migrate verifies");
     assert_eq!(caller.principal_id, owner_id);
@@ -1937,7 +1945,7 @@ async fn real_delegating_authenticator_rejects_pat_without_apps_migrate_scope() 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy)
+        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("PAT without apps:migrate must be denied");
     assert!(matches!(err, AuthError::Forbidden));
@@ -1969,7 +1977,7 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer(&token, other_app_id, Scope::AppsDeploy)
+        .verify_bearer(&token, other_app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("PAT for one owner must not authorize a different app");
     assert!(matches!(err, AuthError::Forbidden));
@@ -1986,8 +1994,57 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let issuer = Arc::new(PatIssuer::dev_insecure());
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy)
+        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("malformed bearer must be denied");
     assert!(matches!(err, AuthError::Unauthorized));
+}
+
+/// The authz audit row records the request id the caller sent, so a denial can
+/// be joined back to the request that caused it.
+///
+/// The handler used to mint a fresh uuid at the authz call, which is correlated
+/// with nothing: it appears in no gateway log, no control-plane log, and no
+/// client's records. Honouring an inbound `x-request-id` is what the control
+/// plane already does, so the two services agree on the identifier.
+#[ntex::test]
+async fn authz_receives_the_callers_request_id_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth.clone());
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrated::configure),
+    )
+    .await;
+
+    let caller_request_id = "req-from-the-caller-0001";
+    let req = test::TestRequest::put()
+        .uri(&format!("/v1/apps/{app_id}/policy"))
+        .header("authorization", "Bearer good-token")
+        .header("x-request-id", caller_request_id)
+        .set_payload(tighter_policy())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let seen = auth
+        .seen_request_ids
+        .lock()
+        .expect("static auth lock")
+        .clone();
+    assert!(
+        seen.contains(&caller_request_id.to_string()),
+        "authz was given {seen:?}, none of which is the caller's {caller_request_id:?}; \
+         an id minted at the authz call correlates with nothing"
+    );
+
+    drop(tmp);
+    cleanup_app(&conn, &app_id).await;
 }

@@ -62,7 +62,7 @@ pub async fn apply(
     let app_id = app_id.into_inner();
     let caller = match state
         .authenticator
-        .verify_action(token, app_id, Action::AppsDeploy)
+        .verify_action(token, app_id, Action::AppsDeploy, &request_id(&req))
         .await
     {
         Ok(caller) => caller,
@@ -106,7 +106,7 @@ pub async fn approve(
     let (app_id, migration_id) = path.into_inner();
     let caller = match state
         .authenticator
-        .verify_action(token, app_id, Action::AppsApproveMigration)
+        .verify_action(token, app_id, Action::AppsApproveMigration, &request_id(&req))
         .await
     {
         Ok(caller) => caller,
@@ -238,6 +238,23 @@ pub async fn stub_phase2() -> web::HttpResponse {
     }))
 }
 
+/// The correlation id for this request, stamped onto the authz audit row.
+///
+/// Honours an inbound `x-request-id` so the id in our audit matches the one the
+/// caller and the rest of the platform already know the request by; mints one
+/// only when the caller sent none. Minting unconditionally would produce an
+/// audit trail whose ids appear in no other log. Mirrors the control plane's
+/// `request_id` helper so the two services agree on the identifier.
+fn request_id(req: &web::HttpRequest) -> String {
+    req.headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
 fn bearer_token(req: &web::HttpRequest) -> Option<&str> {
     let header = req
         .headers()
@@ -257,7 +274,7 @@ async fn verify_apps_migrate(
     };
     state
         .authenticator
-        .verify_action(token, app_id, Action::AppsDeploy)
+        .verify_action(token, app_id, Action::AppsDeploy, &request_id(&req))
         .await
         .map_err(auth_error_response)
 }

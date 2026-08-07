@@ -26,11 +26,16 @@ pub enum AuthError {
 
 #[async_trait(?Send)]
 pub trait Authenticator: Send + Sync {
+    /// `request_id` is the caller-visible correlation id for this HTTP
+    /// request. It is stamped onto the authz audit row, so it must be the id
+    /// the rest of the platform knows this request by - not one minted here,
+    /// which would correlate with nothing.
     async fn verify_action(
         &self,
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        request_id: &str,
     ) -> Result<VerifiedCaller, AuthError>;
 }
 
@@ -60,8 +65,9 @@ impl ControlPlaneAuthenticator {
         token: &str,
         app_id: Uuid,
         required_scope: Scope,
+        request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
-        self.verify_action(token, app_id, required_scope.action())
+        self.verify_action(token, app_id, required_scope.action(), request_id)
             .await
     }
 
@@ -118,10 +124,11 @@ impl Authenticator for ControlPlaneAuthenticator {
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
         let verified = self
             .bearer_verifier
-            .verify_bearer(token, None, Uuid::new_v4().to_string())
+            .verify_bearer(token, None, request_id.to_owned())
             .await
             .map_err(map_bearer_error)?;
         let seed = VerifiedSeed {
