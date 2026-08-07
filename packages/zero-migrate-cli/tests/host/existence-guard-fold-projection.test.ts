@@ -8,7 +8,7 @@
 // "table already exists" and the whole plan is refused -- pre-empting the guard
 // whose entire job is to report the object as already present.
 //
-// Five arms, because "the projection honours the guard" and "the projection stopped
+// Eight arms, because "the projection honours the guard" and "the projection stopped
 // detecting duplicates" look identical from one:
 //   - adopt: live table matches the declaration EXACTLY and the incoming registry
 //     names this app as the owner -- MUST apply cleanly;
@@ -25,25 +25,45 @@
 //     detection in general;
 //   - MySQL: the guarded op MUST refuse exactly as it does today. MySQL evaluates
 //     no existence probe at apply time, so letting a SatisfiedNoop through the
-//     projection would send bare DDL to a backend that cannot check anything.
+//     projection would send bare DDL to a backend that cannot check anything;
+//   - SQLite adopt: plan and apply MUST both accept the matching live table;
+//   - SQLite divergent: plan and apply MUST both refuse, both naming the divergence;
+//   - SQLite unguarded control: plan MUST still refuse a bare duplicate create, which
+//     isolates the guard as what the SQLite plan path honours.
 //
 // Every arm drives the REAL path: authored through the public `zero-migrate` API,
 // lowered by the native addon, applied through `zero-migrate-cli`'s `apply()` over the
-// real `pg`/`mysql2` driver seams against a live database, with `priorMigrations`
-// non-empty so the folding path is the one under test, and with the pre-existing
-// table created OUT OF BAND. Seeding it through the engine would put it in the
-// migration HISTORY as well as the catalog and would measure a different question.
+// real `pg`/`mysql2`/`sqlite` driver seams against a live database, with
+// `priorMigrations` non-empty so the folding path is the one under test, and with the
+// pre-existing table created OUT OF BAND. Seeding it through the engine would put it
+// in the migration HISTORY as well as the catalog and would measure a different
+// question.
 //
-// Does NOT cover SQLite (the Node host DriverConfig has no SQLite seam), does NOT
-// cover guarded ops other than `createTable`, and does NOT cover a partially matching
-// table whose secondary index is still absent.
+// SQLite is covered by the last three arms below. It reaches the projection from a
+// DIFFERENT direction than PostgreSQL and MySQL: `apply()` routes a `sqlite` driver
+// to `applyIrSqlite`, which drives the engine's own `deploy_envelopes` and never
+// projects, while `plan`/`status` route to `statusIrSqlite`, which lowers through
+// `lower_ordered_envelopes_to_plans` and does. Those arms therefore assert plan and
+// apply AGREE, which is the property a split path can silently lose.
+//
+// Does NOT cover guarded ops other than `createTable`, and does NOT cover a partially
+// matching table whose secondary index is still absent.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
-import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
+import {
+  apply,
+  plan as authorOffline,
+  statusEnvelopes,
+  type DriverConfig,
+  type MigrationModule,
+} from "zero-migrate-cli";
 import { table, t, type ColumnDef } from "zero-migrate";
 import { noInjectPolicy } from "./policy.js";
 
@@ -407,4 +427,237 @@ test("MySQL: a guarded createTable over an existing live table is refused by the
       .catch(() => {});
     await admin.end().catch(() => {});
   }
+});
+
+// -- SQLite: plan and apply reach the guard down two different code paths --------
+//
+// `apply()` with a `sqlite` driver calls `applyIrSqlite`, which hands the envelope
+// sequence to the engine's `deploy_envelopes`. That loop re-snapshots the live
+// catalog after every envelope, so it never builds a pending-schema projection and
+// the guard is decided only by the backend's own `existence_probe::decide`.
+// `plan`/`status` with the same driver call `statusIrSqlite`, which cannot apply
+// anything and therefore SIMULATES the same sequence through
+// `lower_ordered_envelopes_to_plans` -- the function that owns the projection.
+//
+// One authored set, one database, two verbs, opposite halves of the codebase. These
+// arms exist to keep the two answers equal.
+
+const SQLITE_PROJECT = "public";
+
+/** The journal filename the CLI derives next to the app database. */
+function sqliteDriverAt(directory: string): DriverConfig {
+  return {
+    kind: "sqlite",
+    appPath: join(directory, "app.db"),
+    journalPath: join(directory, "app.migrations.db"),
+  };
+}
+
+/**
+ * Author the ordered envelopes `statusEnvelopes` reconciles.
+ *
+ * The host package exports no `authorEnvelope`, but the DB-free `plan()` pre-check
+ * returns the envelope it authored, which is the same document `apply()` builds
+ * internally. Using it keeps the plan half of these arms on the public API.
+ */
+function sqliteEnvelopes(migrations: readonly NamedMigration[]) {
+  return migrations.map(
+    (migration) =>
+      authorOffline({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: SQLITE_PROJECT,
+        dialect: "sqlite",
+        nameFallback: migration.name,
+      }).envelope,
+  );
+}
+
+/** The `plan` half: read-only reconciliation, which is what the CLI's live plan runs. */
+async function sqlitePlan(
+  driver: DriverConfig,
+  migrations: readonly NamedMigration[],
+  registry: Record<string, string>,
+) {
+  return await statusEnvelopes({
+    ownerApp: OWNER_APP,
+    projectSchema: SQLITE_PROJECT,
+    driver,
+    registry,
+    policy: [noInjectPolicy(SQLITE_PROJECT)],
+    envelopes: sqliteEnvelopes(migrations),
+    readOnly: true,
+  });
+}
+
+/** The `apply` half: the base migration, then the migration under test with the base
+ *  as a non-empty prior so both verbs see the identical authored set. */
+async function sqliteApply(
+  driver: DriverConfig,
+  migration: NamedMigration,
+  registry: Record<string, string>,
+) {
+  const base = baseMigration();
+  await apply({
+    migration: base,
+    ownerApp: OWNER_APP,
+    projectSchema: SQLITE_PROJECT,
+    driver,
+    registry,
+    policy: [noInjectPolicy(SQLITE_PROJECT)],
+    approved: true,
+    nameFallback: base.name,
+  });
+  return await apply({
+    migration,
+    priorMigrations: [base],
+    priorNameFallbacks: [base.name],
+    ownerApp: OWNER_APP,
+    projectSchema: SQLITE_PROJECT,
+    driver,
+    registry,
+    policy: [noInjectPolicy(SQLITE_PROJECT)],
+    approved: true,
+    nameFallback: migration.name,
+  });
+}
+
+/** The declared type the live SQLite catalog holds for a column. `pragma_table_info`
+ *  rows arrive null-prototyped, so the field is copied out rather than compared as a
+ *  whole row. */
+function sqliteColumnType(appPath: string, column: string): string | undefined {
+  const db = new DatabaseSync(appPath);
+  try {
+    const row = db
+      .prepare(`SELECT name, type FROM pragma_table_info('${TABLE}')`)
+      .all()
+      .find((candidate) => (candidate as { name: string }).name === column);
+    return row === undefined ? undefined : (row as { type: string }).type;
+  } finally {
+    db.close();
+  }
+}
+
+/** The versions the SQLite journal reports. Absent journal file means nothing ran. */
+function sqliteCompletedVersions(journalPath: string): string[] {
+  const db = new DatabaseSync(journalPath);
+  try {
+    const named = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+      .all();
+    if (named.length === 0) return [];
+    return db
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all()
+      .map((row) => (row as { version: string }).version);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * A fresh SQLite app database with `notes` seeded OUT OF BAND at the given column
+ * type, so the table is in the catalog and NOT in the migration history.
+ *
+ * The declaration under test is `t.string({ length: 64 })`, which SQLite renders as
+ * `TEXT`; a seed of `INTEGER` is the divergent shape.
+ */
+function withSeededSqlite(
+  bodySqlType: string,
+  body: (driver: DriverConfig) => Promise<void>,
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "zm-guard-fold-sqlite-"));
+  const driver = sqliteDriverAt(directory);
+  const db = new DatabaseSync(driver.kind === "sqlite" ? driver.appPath : "");
+  db.exec(`CREATE TABLE "${TABLE}" ("id" INTEGER PRIMARY KEY NOT NULL, "body" ${bodySqlType});`);
+  db.close();
+  return body(driver).finally(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+}
+
+/** `notes(id, body TEXT)` with the guard, matching the out-of-band seed exactly. */
+function sqliteNotes(name: string, guarded: boolean): NamedMigration {
+  return createNotes(name, { guarded, body: () => t.string({ length: 64 }) });
+}
+
+test("SQLite: plan and apply agree that a guarded createTable over a matching live table proceeds", async () => {
+  await withSeededSqlite("TEXT", async (driver) => {
+    const guarded = sqliteNotes("guard_fold_sqlite_adopt", true);
+    const registry = { [BASE_TABLE]: OWNER_APP, [TABLE]: OWNER_APP };
+
+    // Plan runs FIRST, against a database with no journal at all, which is the state
+    // a user plans from. Read-only reconciliation must not bootstrap one.
+    const planned = await sqlitePlan(driver, [baseMigration(), guarded], registry);
+    assert.equal(
+      planned.pending.length,
+      2,
+      "the projection let the guarded op through: both migrations are planned as pending",
+    );
+
+    await sqliteApply(driver, guarded, registry);
+
+    assert.equal(
+      sqliteColumnType(driver.kind === "sqlite" ? driver.appPath : "", "body"),
+      "TEXT",
+      "the live table is untouched: the guard proved equality and the CREATE was skipped",
+    );
+    assert.equal(
+      sqliteCompletedVersions(driver.kind === "sqlite" ? driver.journalPath : "").length,
+      2,
+      "apply reached the same verdict as plan and journaled both migrations",
+    );
+  });
+});
+
+test("SQLite: plan and apply agree in refusing a guarded createTable over a divergent live table", async () => {
+  await withSeededSqlite("INTEGER", async (driver) => {
+    const guarded = sqliteNotes("guard_fold_sqlite_drift", true);
+    const registry = { [BASE_TABLE]: OWNER_APP, [TABLE]: OWNER_APP };
+
+    // Requiring the divergence in BOTH messages is the point. "already exists" would
+    // also be a refusal, but it is the guard-blind one: it fires on name presence and
+    // would let a wrong-shaped table be journaled completed.
+    await assert.rejects(
+      sqlitePlan(driver, [baseMigration(), guarded], registry),
+      /existence-guard drift[\s\S]*notes\.body/,
+      "the plan path must refuse a divergent live shape and say what diverged",
+    );
+    await assert.rejects(
+      sqliteApply(driver, guarded, registry),
+      /existence-guard drift[\s\S]*notes\.body/,
+      "the apply path must refuse the same set the same way",
+    );
+
+    assert.equal(
+      sqliteColumnType(driver.kind === "sqlite" ? driver.appPath : "", "body"),
+      "INTEGER",
+      "the refusal changed nothing: the live column keeps its own type",
+    );
+    const completed = sqliteCompletedVersions(
+      driver.kind === "sqlite" ? driver.journalPath : "",
+    );
+    assert.equal(
+      completed.length,
+      1,
+      `only the base migration is journaled; the refused one left no completed row (got ${JSON.stringify(completed)})`,
+    );
+  });
+});
+
+test("SQLite control: an UNGUARDED createTable over an existing live table is still refused by plan", async () => {
+  await withSeededSqlite("TEXT", async (driver) => {
+    // The ONLY difference from the adopting arm is `ifNotExists`. Without this arm,
+    // the adopting arm alone cannot distinguish "the projection honours the guard"
+    // from "the projection stopped detecting duplicates on SQLite".
+    const bare = sqliteNotes("guard_fold_sqlite_bare", false);
+    await assert.rejects(
+      sqlitePlan(driver, [baseMigration(), bare], {
+        [BASE_TABLE]: OWNER_APP,
+        [TABLE]: OWNER_APP,
+      }),
+      /failed to project pending schema[\s\S]*already exists/,
+      "an unguarded duplicate create must still be refused by the projection",
+    );
+  });
 });
