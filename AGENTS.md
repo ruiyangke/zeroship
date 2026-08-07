@@ -115,7 +115,7 @@ crates/
 ├── core/             Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
 ├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
-├── zeroship-migrate-adapter/ Bridges the vendored zero-migrate engine (third_party/zero-migrate submodule) to compio-postgres via a SqlSession newtype. Multi-dialect apply: native compio-postgres fast path (PG) + in-process SQLite + live MySQL (mysql2 over node:net in a Trusted V8 isolate).
+├── zeroship-migrate-adapter/ Bridges the vendored zero-migrate engine (third_party/zero-migrate submodule) to compio-postgres via a SqlSession newtype. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this adapter is not, and nothing here drives its MySQL or SQLite backends.
 ├── migrated/         Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. (Engine itself: third_party/zero-migrate.)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
