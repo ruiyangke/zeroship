@@ -30,7 +30,8 @@ use zero_migrate::apply::executor::ApplyError;
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::ir::{
-    ColType, ExistenceGuard, IrColumn, MigrationIr, Op, SelectAst, SelectItem, TableRef, ViewQuery,
+    ColType, ExistenceGuard, IndexElement, IrColumn, MigrationIr, Op, SelectAst, SelectItem,
+    TableRef, ViewQuery,
 };
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
@@ -997,4 +998,100 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     }
     assert!(!view_exists(&be, "active_v").await, "view remains absent");
     assert!(journaled(&be, &v2).await, "satisfied no-op journals");
+}
+
+// --- createIndex ifNotExists vs the dialect's index-name SCOPE ---------------
+
+/// A guarded `createIndex` whose name is already taken by an index on ANOTHER
+/// table must not be satisfied by that index. SQLite scopes an index name
+/// schema-wide, so the name is unavailable and the CREATE cannot succeed: the
+/// verdict is a fail-closed drift naming the owning table, never a
+/// `SatisfiedNoop` that journals the migration complete while the declared index
+/// was never created.
+///
+/// Does NOT cover MySQL, which scopes index names per table (there the same shape
+/// is a plain absent-index `RunBare`), and does NOT cover the `ifExists` drop
+/// path, where a schema-wide name still resolves through the wider scan.
+#[compio::test]
+async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
+    let p = paths("sq_idx_name_scope");
+    let be = backend(&p);
+
+    let make_table = |name: &str| Op::CreateTable {
+        name: name.into(),
+        columns: vec![col("bucket", ColType::Int)],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let make_index = |table: &str, guard: Option<ExistenceGuard>| Op::CreateIndex {
+        table: table.into(),
+        columns: vec![IndexElement::Column {
+            name: "bucket".into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }],
+        name: Some("idx_shared".into()),
+        unique: Some(false),
+        using: None,
+        r#where: None,
+        concurrently: None,
+        include: vec![],
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+        schema: None,
+        existence_guard: guard,
+    };
+
+    // `lower` derives the migration name from the CALL SITE line, so each setup op
+    // gets its own `lower` call and therefore its own stable version.
+    for m in lower(make_table("a")) {
+        apply_one(&be, &m).await.expect("table a applies");
+    }
+    for m in lower(make_table("b")) {
+        apply_one(&be, &m).await.expect("table b applies");
+    }
+    for m in lower(make_index("a", None)) {
+        apply_one(&be, &m).await.expect("a's index applies");
+    }
+    assert!(
+        index_exists(&be, "a", "idx_shared", false).await,
+        "table a owns idx_shared before the guarded create"
+    );
+    assert!(
+        !index_exists(&be, "b", "idx_shared", false).await,
+        "table b has no idx_shared before the guarded create"
+    );
+
+    let guarded = lower(make_index("b", Some(ExistenceGuard::IfNotExists)));
+    let mut versions = Vec::new();
+    for m in &guarded {
+        versions.push(m.version.as_str().to_string());
+        let err = apply_one(&be, m)
+            .await
+            .expect_err("a name owned by another table must not be a satisfied no-op");
+        let (object, field) = expect_drift(err);
+        assert_eq!(object, "index idx_shared");
+        assert_eq!(field, "table");
+    }
+    assert!(
+        !index_exists(&be, "b", "idx_shared", false).await,
+        "the refused create left b untouched"
+    );
+    assert!(
+        index_exists(&be, "a", "idx_shared", false).await,
+        "the refused create left a's index intact"
+    );
+    for version in &versions {
+        assert!(
+            !journaled(&be, version).await,
+            "a refused guarded create journals nothing"
+        );
+    }
 }

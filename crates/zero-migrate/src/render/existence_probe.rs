@@ -40,6 +40,17 @@
 //!   naming `expression`: the live index carries a non-empty `pg_get_expr`
 //!   predicate the IR `createIndex` (a column-list AST) cannot render to a
 //!   byte-comparable form, so equivalence cannot be proven.
+//! - **Index `ifNotExists` under a name another TABLE owns** - `FailDrift` naming
+//!   `table`. The probe resolves an index by NAME, and an index name is schema-wide
+//!   on PostgreSQL and SQLite but PER TABLE on MySQL
+//!   ([`Capability::SchemaWideIndexNames`]). Where the name is schema-wide, a
+//!   same-name index on another table means the CREATE cannot succeed AND the
+//!   declared index is absent, so a `SatisfiedNoop` would journal the migration
+//!   complete over an index that was never created. Where it is per table
+//!   (MySQL) the other table's index is unrelated and the verdict is a plain
+//!   `RunBare`. This does NOT check the index's SHAPE on the other table (the name
+//!   is the collision) and does NOT cover the fold's own name bookkeeping, which
+//!   runs before lowering.
 //! - **SQLite affinity compare (F1)** — the engine's declared snapshot data_type is
 //!   ALWAYS the PG `information_schema` spelling (`field_data_type` maps via the PG
 //!   dialect, dialect-agnostically), but a REAL SQLite catalog reports the SQLite
@@ -81,6 +92,7 @@
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::plan::author::PG_MAX_IDENT_BYTES;
+use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::{renderer as schema_renderer, SqlDialect};
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
@@ -483,32 +495,47 @@ fn decide_index(
     live: &SchemaSnapshot,
     dialect: SqlDialect,
 ) -> GuardVerdict {
-    // Look up the index under the table hint first; for the presence-only
-    // `ifExists` (dropIndex) path the table hint may be absent/empty, so fall back
-    // to scanning ALL tables for the index name (indexes are unique per schema).
-    let find = |candidate: &str| {
+    // Look up the index under the probe's table first. A same-name index on a
+    // DIFFERENT table means different things per dialect, so the wider scan is
+    // gated on [`Capability::SchemaWideIndexNames`]: PostgreSQL and SQLite scope an
+    // index name schema-wide, so a hit elsewhere IS the named object; MySQL scopes
+    // it PER TABLE, where two tables in one database may each carry
+    // `idx_created_at` and a hit elsewhere is an unrelated index. Does NOT cover
+    // cross-SCHEMA name reuse (the snapshot is one schema) and does NOT cover
+    // the name-to-owner question the fold answers before lowering.
+    let schema_wide = dialect.supports(Capability::SchemaWideIndexNames);
+    let on_probe_table = |candidate: &str| {
         live.tables
             .get(table)
             .and_then(|t| t.indexes.iter().find(|i| i.name == candidate))
-            .or_else(|| {
+    };
+    let on_other_table = |candidate: &str| {
+        schema_wide
+            .then(|| {
                 live.tables
-                    .values()
-                    .flat_map(|t| &t.indexes)
+                    .iter()
+                    .filter(|(other, _)| other.as_str() != table)
+                    .flat_map(|(_, t)| &t.indexes)
                     .find(|i| i.name == candidate)
             })
+            .flatten()
     };
     if let Some(verdict) =
         truncated_identifier_backstop("index", name, direction, dialect, |candidate| {
-            find(candidate).is_some()
+            on_probe_table(candidate).is_some() || on_other_table(candidate).is_some()
         })
     {
         return verdict;
     }
-    let live_idx = find(name);
+    let live_idx = on_probe_table(name);
     match direction {
         GuardDir::IfExists => {
-            // dropIndex: presence-only on the index name.
-            if live_idx.is_some() {
+            // dropIndex: presence-only on the index name. The table hint may be
+            // absent/empty on this path (the probe carries `String::new()` when the
+            // op omitted it), so a schema-wide name still resolves through the wider
+            // scan. Does NOT cover MySQL, where the drop names its table and an
+            // index found under another table is a different object.
+            if live_idx.is_some() || on_other_table(name).is_some() {
                 GuardVerdict::RunBare
             } else {
                 GuardVerdict::SatisfiedNoop
@@ -516,6 +543,30 @@ fn decide_index(
         }
         GuardDir::IfNotExists => {
             let Some(live_idx) = live_idx else {
+                // The declared index is absent from ITS table. Where index names are
+                // schema-wide, a same-name index on another table means the CREATE
+                // cannot succeed and the declared index does not exist: fail closed
+                // naming the owner rather than no-op over it, which would journal the
+                // migration complete while the index was never created. Does NOT
+                // rename or relocate anything: the remedy is the author's.
+                let owner = schema_wide
+                    .then(|| {
+                        live.tables
+                            .iter()
+                            .find(|(other, t)| {
+                                other.as_str() != table && t.indexes.iter().any(|i| i.name == name)
+                            })
+                            .map(|(other, _)| other.as_str())
+                    })
+                    .flatten();
+                if let Some(owner) = owner {
+                    return drift(
+                        &format!("index {name}"),
+                        "table",
+                        table,
+                        &format!("{owner} (the name is already taken schema-wide)"),
+                    );
+                }
                 return GuardVerdict::RunBare; // absent → create it.
             };
             // Present: prove (unique, columns) equality. An expression / partial

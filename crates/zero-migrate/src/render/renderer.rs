@@ -38,6 +38,7 @@ pub(crate) enum Capability {
     Sequence,
     ExclusionConstraint,
     CommentOn,
+    SchemaWideIndexNames,
 }
 
 pub(crate) trait DialectSupports {
@@ -72,6 +73,7 @@ impl DialectSupports for SqlDialect {
                 Capability::Sequence => true,
                 Capability::ExclusionConstraint => true,
                 Capability::CommentOn => true,
+                Capability::SchemaWideIndexNames => true,
             },
             SqlDialect::Sqlite => match cap {
                 Capability::NonPkIdentity => false,
@@ -98,6 +100,7 @@ impl DialectSupports for SqlDialect {
                 Capability::Sequence => false,
                 Capability::ExclusionConstraint => false,
                 Capability::CommentOn => false,
+                Capability::SchemaWideIndexNames => true,
             },
             SqlDialect::Mysql => match cap {
                 Capability::NonPkIdentity => false,
@@ -124,6 +127,7 @@ impl DialectSupports for SqlDialect {
                 Capability::Sequence => false,
                 Capability::ExclusionConstraint => false,
                 Capability::CommentOn => false,
+                Capability::SchemaWideIndexNames => false,
             },
         }
     }
