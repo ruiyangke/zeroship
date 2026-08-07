@@ -129,5 +129,10 @@ test("no tracked file contains a NUL byte", (t) => {
   // nobody investigates: the green run. These two counts are what separate a real
   // pass from a pass produced by scanning nothing, and a reader should not have to
   // break the plumbing on purpose to see them.
+  //
+  // Survives the default and `spec` reporters; `--test-reporter=dot` swallows this
+  // line and every other channel, so adding one to tidy CI output silently removes
+  // the only evidence a green run offers. The assertions above still fail loudly
+  // under any reporter - what is lost is the reader's view of a PASS.
   t.diagnostic(`scanned ${scanned} of ${files.length} tracked files, 0 carry a NUL byte`);
 });
