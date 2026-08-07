@@ -15,9 +15,9 @@ jobs:
       # The lint policy lives in the root Cargo.toml `[workspace.lints]` table:
       # `clippy::all` is deny, `pedantic` and `nursery` are warn. Passing
       # `-D warnings` here would flatten that grading and promote every pedantic
-      # and nursery warning to a hard error, which the workspace does not satisfy
-      # (compio-postgres alone reports over a thousand). Let the declared levels
-      # decide: deny-level lints still fail the build.
+      # and nursery warning to a hard error, which the workspace does not satisfy.
+      # Run `cargo clippy --workspace --all-targets` to see where it currently
+      # stands. Let the declared levels decide: deny-level lints still fail here.
       - run: cargo clippy --workspace --all-targets
 
   # The billing & metering money-path integration suite talks to a real
