@@ -15,14 +15,18 @@ the full stance.
 ## Repository layout
 
 - `crates/` - the Rust workspace: platform services and the runtime kernel
-  (`gateway`, `runtime`, `control`, `worker`, `auth`/`authn`/`authz`,
-  `plugin-{db,kv,storage}`, `metering`, `stream`, `bundle`, `core`, `mailer`, `cli`,
-  and the migration crates `migrated`/`zeroship-migrate-adapter`/`zeroship-schema`).
+  (`gateway`, `runtime`, `runtime-macros`, `control`, `worker`, `auth`/`authn`/`authz`,
+  `plugin-{db,kv,storage,workflow}`, `workflow-scheduler`, `metering`, `stream`,
+  `bundle`, `core`, `mailer`, `cli`, and the migration crates
+  `migrated`/`zeroship-migrate-adapter`/`zeroship-schema`). Run `ls crates/` rather
+  than trusting this list; a prose inventory has nothing that fails when it rots.
 - `libs/` - standalone, zeroship-independent driver libraries: `compio-postgres`,
   `compio-redis`, `compio-s3`. Publishable on their own.
 - `sdks/` - the `@zeroship/*` npm packages (a pnpm workspace): `db`, `kv`, `storage`,
-  `auth`, `rpc`, `ui`, `vite-plugin`, `control`, `payments`, `react`, `migrate`, and
-  the framework-internal `bootstrap`.
+  `auth`, `rpc`, `ui`, `vite-plugin`, `control`, `payments`, `react`, `migrate`,
+  `workflows`, `server`, `types`, `mcp`, `eslint-config`, `eslint-plugin-workflow`,
+  `create-zeroship-app`, `zeroship-stub`, and the framework-internal `bootstrap`.
+  Same caveat as `crates/`: `ls sdks/` is the source of truth.
 - `db/` - the platform's own database schema, authored as `@zeroship/migrate`
   migrations in `db/migrations-ts/` (the sole platform migration source - no SQL/Flyway).
 - `deploy/` - everything about running/shipping: `Dockerfile`, `compose/`, `ops/`,
