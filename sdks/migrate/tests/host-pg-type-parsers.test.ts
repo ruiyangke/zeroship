@@ -45,29 +45,43 @@ test("bool parsing survives a poisoned global type parser", () => {
   assert.equal(typeof parseBool("f"), "boolean", "the scoped parser must yield a boolean");
 });
 
-test("name[] borrows the text[] parser so catalog column lists decode", () => {
+test("name[] decodes without consulting the global parser map", () => {
   // pg-types registers array parsers for 1000, 1009, 1015 and 1016, but not for
   // 1003. Catalog introspection returns name[] from array_agg(attname), so
-  // without a shadow the raw literal crosses and the seam's Vec<String> decode
+  // without a parser the raw literal crosses and the seam's Vec<String> decode
   // fails. Verified against pg-types/lib/textParsers.js rather than assumed.
+  //
+  // The module here poisons EVERY oid, including text[]. Borrowing the text[]
+  // parser would be a live read of this same map, so a shadow written that way
+  // would fail here - which is the point.
   const OID_NAME_ARRAY = 1003;
-  const OID_TEXT_ARRAY = 1009;
-  const module = {
+  const poisoned = {
     types: {
-      getTypeParser(oid: number): (value: string) => unknown {
-        // Only text[] has a real array parser here, exactly as pg-types leaves it.
-        if (oid === OID_TEXT_ARRAY) return (value: string) => value.slice(1, -1).split(",");
+      getTypeParser(): (value: string) => unknown {
         return (value: string) => value;
       },
     },
   };
 
-  const scoped = __testing.connectionScopedTypes(module as never);
+  const scoped = __testing.connectionScopedTypes(poisoned as never);
   assert.deepEqual(
     scoped.getTypeParser(OID_NAME_ARRAY)("{a,b}"),
     ["a", "b"],
-    "name[] must decode as an array, not as the raw literal",
+    "name[] must decode as an array even when every global parser is poisoned",
   );
+});
+
+test("the array parser handles quoting, escapes, nulls and the empty array", () => {
+  const parse = __testing.parsePgTextArray;
+
+  assert.deepEqual(parse("{}"), [], "empty array");
+  assert.deepEqual(parse("{a,b}"), ["a", "b"], "plain elements");
+  assert.deepEqual(parse('{"a,b",c}'), ["a,b", "c"], "a quoted comma is not a separator");
+  assert.deepEqual(parse('{"say \\"hi\\""}'), ['say "hi"'], "escaped quotes inside an element");
+  assert.deepEqual(parse("{a,NULL,b}"), ["a", null, "b"], "unquoted NULL is a null element");
+  assert.deepEqual(parse('{"NULL"}'), ["NULL"], "quoted NULL is the literal string");
+  assert.deepEqual(parse('{"a\\\\b"}'), ["a\\b"], "escaped backslash");
+  assert.throws(() => parse("a,b"), /malformed/, "a literal without braces is rejected");
 });
 
 test("exact-integer pinning still holds and other oids still delegate", () => {
