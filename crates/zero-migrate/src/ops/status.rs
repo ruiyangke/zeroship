@@ -1648,6 +1648,7 @@ mod plan_status_tests {
             checksum: step.checksum.as_str().to_string(),
             phase,
             kind: None,
+            event_seq: 0,
         }
     }
 
@@ -1705,6 +1706,7 @@ mod plan_status_tests {
             checksum: checksum(resolution.as_str()).as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
         }
     }
 
@@ -1723,6 +1725,7 @@ mod plan_status_tests {
                 checksum: checksum(&format!("abort {ordinal}")).as_str().to_string(),
                 phase: Phase::Completed,
                 kind: Some(crate::apply::journal::JournaledKind::Apply),
+                event_seq: 0,
             })
             .collect()
     }
@@ -1875,6 +1878,7 @@ mod plan_status_tests {
                 checksum: checksum("edited atomic contract").as_str().to_string(),
                 phase: Phase::Completed,
                 kind: None,
+                event_seq: 0,
             },
         ];
 
@@ -2050,6 +2054,7 @@ mod plan_status_tests {
                 checksum: checksum("edited contract").as_str().to_string(),
                 phase: Phase::Completed,
                 kind: None,
+                event_seq: 0,
             },
         ];
 
@@ -2081,6 +2086,7 @@ mod plan_status_tests {
             checksum: checksum("edited").as_str().to_string(),
             phase: Phase::Completed,
             kind: None,
+            event_seq: 0,
         }];
         let status = reconcile_applied_plans(std::slice::from_ref(&plan), &entries, &[])
             .expect("drift status");
@@ -2099,6 +2105,7 @@ mod plan_status_tests {
             checksum: recorded.as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(crate::apply::journal::JournaledKind::Repeatable),
+            event_seq: 0,
         }];
 
         let status = reconcile_applied_plans(std::slice::from_ref(&plan), &entries, &[])
@@ -2128,12 +2135,14 @@ mod plan_status_tests {
             checksum: anchor.as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
         }];
         let once_as_repeatable = vec![AppliedEntry {
             version: once_only.steps[0].version.as_str().to_string(),
             checksum: anchor.as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(crate::apply::journal::JournaledKind::Repeatable),
+            event_seq: 0,
         }];
 
         let repeatable_status =
@@ -2275,12 +2284,14 @@ mod plan_status_tests {
             checksum: checksum("unexpected completed").as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
         };
         let inflight = AppliedEntry {
             version: id("unexpected_inflight").as_str().to_string(),
             checksum: checksum("unexpected inflight").as_str().to_string(),
             phase: Phase::Started,
             kind: None,
+            event_seq: 0,
         };
         let rolled_back = id("rolled_back").as_str().to_string();
 

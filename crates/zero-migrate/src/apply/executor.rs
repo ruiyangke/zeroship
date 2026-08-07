@@ -2086,12 +2086,14 @@ mod order_tests {
                 checksum: "checksum-a".into(),
                 phase: Phase::Completed,
                 kind: None,
+                event_seq: 0,
             },
             AppliedEntry {
                 version: unrelated.as_str().to_string(),
                 checksum: "checksum-unrelated".into(),
                 phase: Phase::Completed,
                 kind: None,
+                event_seq: 0,
             },
         ];
         let completed = HashMap::from([
@@ -2194,6 +2196,7 @@ mod order_tests {
             checksum: String::new(),
             phase: Phase::Completed,
             kind: Some(journal::JournaledKind::Apply),
+            event_seq: 0,
         };
         let mut completed: HashMap<&str, &AppliedEntry> = HashMap::new();
         completed.insert(done.as_str(), &entry);

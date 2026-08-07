@@ -1813,6 +1813,7 @@ scope = "all"
                 checksum: migration.checksum.as_str().to_string(),
                 phase: zero_migrate::Phase::Completed,
                 kind: Some(JournaledKind::Apply),
+                event_seq: 0,
             })
             .collect();
         let terminal = ResolvedPendingContract {
@@ -2033,6 +2034,7 @@ scope = "all"
                 checksum: migration.checksum.as_str().to_string(),
                 phase: zero_migrate::Phase::Completed,
                 kind: Some(JournaledKind::Apply),
+                event_seq: 0,
             })
             .collect();
         let terminal = ResolvedPendingContract {
@@ -2473,6 +2475,7 @@ scope = "all"
                 checksum: step.checksum.as_str().to_string(),
                 phase: Phase::Completed,
                 kind: None,
+                event_seq: 0,
             })
             .collect::<Vec<_>>();
         let declaration_ir: MigrationIr =
@@ -2538,6 +2541,7 @@ scope = "all"
             checksum: manifest.steps[0].checksum.as_str().to_string(),
             phase: Phase::Started,
             kind: None,
+            event_seq: 0,
         };
         let journal_entries = vec![started];
 
@@ -2589,6 +2593,7 @@ scope = "all"
             checksum: manifest.steps[0].checksum.as_str().to_string(),
             phase: Phase::Started,
             kind: None,
+            event_seq: 0,
         };
         let journal_entries = vec![started];
 
@@ -2670,6 +2675,7 @@ scope = "all"
                 } else {
                     JournaledKind::Apply
                 }),
+                event_seq: 0,
             })
             .collect::<Vec<_>>();
 
@@ -2768,6 +2774,7 @@ scope = "all"
                 } else {
                     JournaledKind::Apply
                 }),
+                event_seq: 0,
             })
             .collect::<Vec<_>>();
 
@@ -2831,6 +2838,7 @@ scope = "all"
                 checksum: step.checksum.as_str().to_string(),
                 phase,
                 kind: None,
+                event_seq: 0,
             })
             .collect()
     }
@@ -2882,6 +2890,7 @@ scope = "all"
             checksum: "1".repeat(64),
             phase: Phase::Completed,
             kind: None,
+            event_seq: 0,
         });
         let pending_current = reconcile_applied_plans(&manifests, &prior_only, &[])
             .expect("incomplete history reconciles");

@@ -352,6 +352,19 @@ pub struct AppliedEntry {
     /// The drift/tamper guard anchors the repeatable exemption on THIS value, not
     /// on the supplied `flags.repeatable`.
     pub kind: Option<JournaledKind>,
+    /// The journal's monotonic sequence number for the event this entry folds to.
+    ///
+    /// This is the ONLY sound apply order. Version order is not: `MigrationId::
+    /// derive` stamps the high 48 bits with an `0xFF` marker and fills the rest from
+    /// a SHA-256, so every IR-authored step id sorts above every `UUIDv7` file id and
+    /// derived ids sort among themselves in hash order.
+    ///
+    /// It rides on the entry rather than being re-derived from `history()` because
+    /// "net applied" is a non-trivial fold (latest event per version, keep only
+    /// `applied`, union the lone `started` markers) that already has exactly one
+    /// implementation. A caller that needed ordering and re-folded `history()` would
+    /// be writing a second one.
+    pub event_seq: i64,
 }
 
 /// Error from a journal operation.
@@ -785,26 +798,33 @@ pub async fn applied<D: SqlSession>(
     let rows = conn
         .query(
             &format!(
+                // `event_seq` rides through for the net-applied branch: it is the
+                // journal's monotonic apply order, which rollback selection needs and
+                // which version order does not give (derived IR ids sort above every
+                // file id). An inflight marker lives in a separate table with no
+                // event_seq and is never net-applied, so it carries 0.
                 "WITH latest AS (
-                     SELECT DISTINCT ON (version) version, checksum, event_kind, kind AS mig_kind
+                     SELECT DISTINCT ON (version)
+                            version, checksum, event_kind, kind AS mig_kind, event_seq
                        FROM {meta}.schema_migrations
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied AS (
-                     SELECT version, checksum, mig_kind
+                     SELECT version, checksum, mig_kind, event_seq
                        FROM latest WHERE event_kind = '{applied}'
                  ),
                  union_all AS (
-                     SELECT version, checksum, mig_kind, 'completed' AS phase
+                     SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase
                        FROM net_applied
                      UNION ALL
-                     SELECT version, checksum, NULL AS mig_kind, 'started' AS phase
+                     SELECT version, checksum, NULL AS mig_kind, 0::bigint AS event_seq,
+                            'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
                  )
-                 SELECT version, checksum, mig_kind, phase FROM union_all
+                 SELECT version, checksum, mig_kind, event_seq, phase FROM union_all
                  ORDER BY version COLLATE \"C\"",
                 applied = EventKind::Applied.as_str()
             ),
@@ -825,11 +845,13 @@ pub async fn applied<D: SqlSession>(
             Ok(Some(s)) => Some(JournaledKind::parse(&s).ok_or(JournalError::BadKind(s))?),
             _ => None,
         };
+        let event_seq: i64 = row.try_get("event_seq")?;
         out.push(AppliedEntry {
             version,
             checksum,
             phase,
             kind,
+            event_seq,
         });
     }
     Ok(out)

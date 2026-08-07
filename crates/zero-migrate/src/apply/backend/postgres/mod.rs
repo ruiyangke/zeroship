@@ -755,7 +755,7 @@ mod recording_session_genericity {
         /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
         /// read (`journal::applied`, recognisable by its `union_all` CTE + the
         /// `schema_migrations_inflight` UNION leg — a shape no other query has) gets
-        /// the canned (version, checksum, mig_kind, phase) journal rows; every other
+        /// the canned (version, checksum, mig_kind, event_seq, phase) journal rows; every other
         /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
         /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
         /// which yields an empty-but-valid decode — enough to drive every path
@@ -829,7 +829,7 @@ mod recording_session_genericity {
     }
 
     /// A single completed journal event, shaped like the `applied()` CTE output:
-    /// (version, checksum, mig_kind, phase) — exactly what a host `pg` driver would
+    /// (version, checksum, mig_kind, event_seq, phase) — exactly what a host `pg` driver would
     /// return for that read.
     fn canned_journal_row(version: &str, checksum: &str) -> Row {
         Row::new(
@@ -837,12 +837,14 @@ mod recording_session_genericity {
                 "version".to_string(),
                 "checksum".to_string(),
                 "mig_kind".to_string(),
+                "event_seq".to_string(),
                 "phase".to_string(),
             ],
             vec![
                 Value::Text(version.to_string()),
                 Value::Text(checksum.to_string()),
                 Value::Text("apply".to_string()),
+                Value::Int(1),
                 Value::Text("completed".to_string()),
             ],
         )

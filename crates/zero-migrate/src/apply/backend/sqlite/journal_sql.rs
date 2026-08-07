@@ -631,18 +631,22 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     // territory; a SELECT-only read does not write, but reading `_mig` should not
     // be gated by the creator deny on `_mig`).
     actor.set_mode(Mode::EngineJournal).await?;
+    // An inflight marker has no sequence of its own, so it reports 0. That can
+    // never be mistaken for a real one: `event_seq` is `INTEGER PRIMARY KEY
+    // AUTOINCREMENT` and starts at 1. Callers that consult apply order drop
+    // started entries first, so the sentinel is never ordered against.
     let sql = format!(
         "\
         WITH ranked AS ( \
-            SELECT version, checksum, event_kind, kind AS mig_kind, \
+            SELECT version, checksum, event_kind, kind AS mig_kind, event_seq, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
               FROM \"_mig\".schema_migrations \
         ), \
-        latest AS (SELECT version, checksum, event_kind, mig_kind FROM ranked WHERE rn = 1), \
-        net_applied AS (SELECT version, checksum, mig_kind FROM latest WHERE event_kind = '{applied}') \
-        SELECT version, checksum, mig_kind, 'completed' AS phase FROM net_applied \
+        latest AS (SELECT version, checksum, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1), \
+        net_applied AS (SELECT version, checksum, mig_kind, event_seq FROM latest WHERE event_kind = '{applied}') \
+        SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase FROM net_applied \
         UNION ALL \
-        SELECT i.version, i.checksum, NULL AS mig_kind, 'started' AS phase \
+        SELECT i.version, i.checksum, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase \
           FROM \"_mig\".schema_migrations_inflight i \
          WHERE NOT EXISTS (SELECT 1 FROM net_applied n WHERE n.version = i.version) \
         ORDER BY version",
@@ -654,7 +658,11 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
         let version = cell(&r, 0)?;
         let checksum = cell(&r, 1)?;
         let mig_kind = r.get(2).and_then(|c| c.clone());
-        let phase_s = cell(&r, 3)?;
+        let event_seq_s = cell(&r, 3)?;
+        let event_seq: i64 = event_seq_s.parse().map_err(|_| {
+            SqliteActorError::Exec(format!("bad journal event_seq '{event_seq_s}'"))
+        })?;
+        let phase_s = cell(&r, 4)?;
         let phase = Phase::parse(&phase_s)
             .ok_or_else(|| SqliteActorError::Exec(format!("bad journal phase '{phase_s}'")))?;
         let kind = match mig_kind {
@@ -669,6 +677,7 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
             checksum,
             phase,
             kind,
+            event_seq,
         });
     }
     Ok(out)

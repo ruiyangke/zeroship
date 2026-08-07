@@ -982,6 +982,7 @@ mod tests {
                             "version".into(),
                             "checksum".into(),
                             "mig_kind".into(),
+                            "event_seq".into(),
                             "phase".into(),
                         ],
                         vec![
@@ -992,6 +993,7 @@ mod tests {
                             } else {
                                 Value::Null
                             },
+                            Value::Int(1),
                             Value::Text(entry.2.as_str().into()),
                         ],
                     )]

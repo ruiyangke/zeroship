@@ -373,32 +373,36 @@ pub(crate) async fn applied<D: SqlSession>(
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
     let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    // An inflight marker has no sequence of its own, so it reports 0. That can
+    // never be mistaken for a real one: `event_seq` is `BIGINT NOT NULL
+    // AUTO_INCREMENT` and starts at 1. Callers that consult apply order drop
+    // started entries first, so the sentinel is never ordered against.
     let rows = conn
         .query(
             &format!(
                 "WITH ranked AS (
-                     SELECT version, checksum, event_kind, kind AS mig_kind,
+                     SELECT version, checksum, event_kind, kind AS mig_kind, event_seq,
                             ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn
                        FROM {meta}.schema_migrations
                  ),
                  latest AS (
-                     SELECT version, checksum, event_kind, mig_kind FROM ranked WHERE rn = 1
+                     SELECT version, checksum, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1
                  ),
                  net_applied AS (
-                     SELECT version, checksum, mig_kind
+                     SELECT version, checksum, mig_kind, event_seq
                        FROM latest WHERE event_kind = '{applied}'
                  ),
                  union_all AS (
-                     SELECT version, checksum, mig_kind, 'completed' AS phase
+                     SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase
                        FROM net_applied
                      UNION ALL
-                     SELECT i.version, i.checksum, NULL AS mig_kind, 'started' AS phase
+                     SELECT i.version, i.checksum, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
                  )
-                 SELECT version, checksum, mig_kind, phase FROM union_all
+                 SELECT version, checksum, mig_kind, event_seq, phase FROM union_all
                  ORDER BY version COLLATE utf8mb4_bin",
                 applied = EventKind::Applied.as_str()
             ),
@@ -415,11 +419,13 @@ pub(crate) async fn applied<D: SqlSession>(
             Ok(Some(s)) => Some(JournaledKind::parse(&s).ok_or(JournalError::BadKind(s))?),
             _ => None,
         };
+        let event_seq: i64 = row.try_get("event_seq")?;
         out.push(AppliedEntry {
             version,
             checksum,
             phase,
             kind,
+            event_seq,
         });
     }
     Ok(out)

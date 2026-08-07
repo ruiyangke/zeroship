@@ -131,22 +131,25 @@ impl VerbDispatch for MockDispatch {
     }
 }
 
-/// A single completed journal event row (unused here — the journal read returns
-/// empty so the migration is pending — but kept to document the canned shape a
-/// host `pg` driver would return for that read).
+/// A single completed journal event row (unused here, since the journal read
+/// returns empty so the migration is pending, but kept to document the canned
+/// shape a host `pg` driver would return for that read). `event_seq` arrives as
+/// an int cell because the column is `BIGINT GENERATED ALWAYS AS IDENTITY`.
 #[allow(dead_code)]
-fn canned_journal_row(version: &str, checksum: &str) -> JsRow {
+fn canned_journal_row(version: &str, checksum: &str, event_seq: i64) -> JsRow {
     JsRow {
         columns: vec![
             "version".into(),
             "checksum".into(),
             "mig_kind".into(),
+            "event_seq".into(),
             "phase".into(),
         ],
         cells: vec![
             text_cell(version),
             text_cell(checksum),
             text_cell("apply"),
+            int_cell(event_seq),
             text_cell("completed"),
         ],
     }

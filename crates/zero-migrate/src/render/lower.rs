@@ -14432,6 +14432,7 @@ columns = [
             checksum: applied.checksum.as_str().to_string(),
             phase: crate::apply::journal::Phase::Completed,
             kind: None,
+            event_seq: 0,
         }];
         let status = crate::ops::status::reconcile_applied_plans(&[manifest], &journal, &[])
             .expect("edited empty plan reconciles");
@@ -14501,6 +14502,7 @@ columns = [
                 checksum: first_anchor.checksum.as_str().to_string(),
                 phase: crate::apply::journal::Phase::Completed,
                 kind: None,
+                event_seq: 0,
             }];
             let status = crate::ops::status::reconcile_applied_plans(&[manifest], &journal, &[])
                 .expect("repeated anchor reconciles");

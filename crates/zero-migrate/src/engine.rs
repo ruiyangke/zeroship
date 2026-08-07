@@ -3616,6 +3616,7 @@ mod tests {
             checksum: expected.as_str().to_string(),
             phase: Phase::Completed,
             kind: Some(JournaledKind::Apply),
+            event_seq: 0,
         }];
         let progress = vec![BackfillProgressEntry {
             version: version.as_str().to_string(),

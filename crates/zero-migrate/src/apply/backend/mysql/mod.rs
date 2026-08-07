@@ -1336,12 +1336,14 @@ mod render_tests {
                                 "version".into(),
                                 "checksum".into(),
                                 "mig_kind".into(),
+                                "event_seq".into(),
                                 "phase".into(),
                             ],
                             vec![
                                 Value::Text(version.clone()),
                                 Value::Text(checksum.clone()),
                                 Value::Text("apply".into()),
+                                Value::Int(1),
                                 Value::Text("completed".into()),
                             ],
                         )]
