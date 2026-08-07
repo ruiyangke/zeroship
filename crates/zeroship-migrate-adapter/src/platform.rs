@@ -221,7 +221,11 @@ fn discover_ts_files(dir: &Path) -> Result<Vec<PathBuf>, PlatformMigrateError> {
             files.push(path);
         }
     }
-    files.sort();
+    // Sort on the FILE NAME. The ordering that matters is the leading version in
+    // each migration's filename; sorting the full path happens to agree only
+    // while every entry shares one parent directory, which is a fact about the
+    // current layout rather than about the ordering itself.
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     Ok(files)
 }
 
