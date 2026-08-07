@@ -317,8 +317,23 @@ pub fn get_runtime(app_id: &Uuid) -> Option<Runtime> {
     })
 }
 
+/// Read an app's runtime limits WITHOUT marking it recently used.
+///
+/// This is metadata, not a dispatch. Reconciliation calls it for every locally
+/// cached app on every cycle, so routing it through `get_runtime` stamped
+/// `last_used` on the whole cache each pass, in whatever order the map iterated.
+/// Recency then reflected the last sweep rather than real traffic, and eviction
+/// could take a hot app while keeping an idle one.
 pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
-    get_runtime(app_id).map(|runtime| runtime.limits())
+    CACHE.with(|c| {
+        let cache = c.borrow();
+        limits_without_touching_recency(cache.as_ref()?, app_id)
+    })
+}
+
+/// The read above, over a borrowed cache so the no-touch property is testable.
+fn limits_without_touching_recency(cache: &AppCache, app_id: &Uuid) -> Option<RuntimeLimits> {
+    cache.isolates.get(app_id).map(|entry| entry.runtime.limits())
 }
 
 pub fn get_workflow_runtime(app_id: &Uuid, deploy_hash: &str) -> Option<Runtime> {
@@ -1218,6 +1233,63 @@ mod tests {
         })
         .join()
         .expect("first-load corrupt descriptor test thread panicked");
+    }
+
+    #[test]
+    fn reading_limits_does_not_refresh_recency() {
+        std::thread::spawn(|| {
+            let Ok(runtime) = compio::runtime::Runtime::new() else {
+                eprintln!("skipping reading_limits_does_not_refresh_recency (no compio runtime)");
+                return;
+            };
+            runtime.block_on(async {
+                let app_id = Uuid::new_v4();
+                init_cache(
+                    4,
+                    4,
+                    KernelConfig {
+                        control_url: "http://127.0.0.1:1".to_string(),
+                        control_key: String::new(),
+                        db_url: None,
+                        kv_url: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                    },
+                );
+                load_app(
+                    app_id,
+                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    AppRuntimeLimits::default(),
+                    AppNetPolicy::default(),
+                    None,
+                    None,
+                    &EnvSnapshot::empty(),
+                )
+                .expect("app loads");
+
+                // Backdate the entry so a stamp would be unmistakable.
+                let stamped = Instant::now() - Duration::from_secs(600);
+                CACHE.with(|c| {
+                    let mut cache = c.borrow_mut();
+                    cache.as_mut().unwrap().isolates.get_mut(&app_id).unwrap().last_used = stamped;
+                });
+
+                assert!(get_limits(&app_id).is_some(), "the limits read must find the app");
+
+                let after = CACHE.with(|c| {
+                    let cache = c.borrow();
+                    cache.as_ref().unwrap().isolates.get(&app_id).unwrap().last_used
+                });
+                assert_eq!(
+                    after, stamped,
+                    "reading limits is metadata, not traffic. Reconciliation reads every \
+                     cached app each cycle, so stamping recency here makes the whole cache \
+                     look freshly used and eviction stops tracking real use"
+                );
+            });
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
