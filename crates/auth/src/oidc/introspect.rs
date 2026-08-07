@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::config::AuthConfig;
 use crate::oidc::authorization_code::{load_client, OAuthClient, OAuthError};
 use crate::oidc::refresh::{
-    authenticate_for_refresh, authenticated_client_id, client_auth_from_request,
+    authenticate_client, authenticated_client_id, client_auth_from_request,
     introspect_refresh_token, ClientAuthMethod, RefreshTokenKeys,
 };
 use crate::oidc::{AccessTokenClaims, Issuer};
@@ -43,8 +43,7 @@ pub async fn introspect_post(
             .header("cache-control", "no-store")
             .header("pragma", "no-cache")
             .json(&body),
-        Err(err) if err.error == "invalid_client" => invalid_client_response(err),
-        Err(err) => super::authorization_code::oauth_error_response(err),
+        Err(err) => super::authorization_code::client_auth_error_response(err),
     }
 }
 
@@ -63,7 +62,7 @@ async fn introspect_inner(
     }
     let client_id = authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await?;
     let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(issuer, &client, &client_auth).await?;
+    authenticate_client(issuer, &client, &client_auth)?;
     let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
         return Err(OAuthError::invalid_request("token is required"));
     };
@@ -167,12 +166,3 @@ fn access_response(claims: AccessTokenClaims) -> Value {
     })
 }
 
-fn invalid_client_response(err: OAuthError) -> HttpResponse {
-    HttpResponse::Unauthorized()
-        .header("cache-control", "no-store")
-        .header("pragma", "no-cache")
-        .json(&json!({
-            "error": err.error,
-            "error_description": err.description,
-        }))
-}

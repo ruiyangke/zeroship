@@ -1225,11 +1225,16 @@ async fn token_request(
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("code_verifier", verifier)
         .finish();
+    // This fixture's client is registered `client_secret_basic` with a stored
+    // hash, so it authenticates on the authorization_code grant exactly as it
+    // does on refresh and introspect.
     cyper::Client::new()
         .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
         .body(body)
         .send()
         .await

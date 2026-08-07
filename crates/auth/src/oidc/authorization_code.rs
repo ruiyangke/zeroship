@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, GenericClient};
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION};
+use ntex::http::header::{HeaderValue, COOKIE, LOCATION, WWW_AUTHENTICATE};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
@@ -527,7 +527,7 @@ pub async fn token_post(
     .await
     {
         Ok(resp) => token_json_response(resp),
-        Err(err) => oauth_error_response(err),
+        Err(err) => client_auth_error_response(err),
     }
 }
 
@@ -547,7 +547,11 @@ async fn token_inner(
             let code = required_param(params.code.as_deref(), "code")?;
             let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
             let client = load_client(db, client_id).await?;
-            authenticate_authorization_code_client(issuer, &client, client_auth)?;
+            // A code plus its verifier is not a credential: both travel through
+            // the user agent and can leak (Referer, proxy logs). A client that
+            // was issued a secret authenticates here exactly as it does on
+            // refresh; public clients stay PKCE-only.
+            refresh::authenticate_client(issuer, &client, client_auth)?;
             let pool = refresh_pool
                 .checkout_pool("token authorization_code")
                 .await
@@ -909,9 +913,30 @@ pub(super) async fn load_client(
         tracing::error!(error = %err, client_id = %client_id, "brokered flag decode failed");
         OAuthError::server_error("client registry unavailable")
     })?;
+    // Both of the next two reads decide whether this client must present a
+    // secret, so neither may fall back on a decode error: a swallowed failure
+    // would silently reclassify a confidential client as public and skip
+    // authentication altogether. Fail closed to server_error instead.
     let token_endpoint_auth_method = row
-        .try_get("token_endpoint_auth_method")
-        .unwrap_or_else(|_| "none".to_string());
+        .try_get::<_, String>("token_endpoint_auth_method")
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id = %client_id,
+                "token_endpoint_auth_method decode failed"
+            );
+            OAuthError::server_error("client registry unavailable")
+        })?;
+    let client_secret_hash = row
+        .try_get::<_, Option<String>>("client_secret_hash")
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id = %client_id,
+                "client_secret_hash decode failed"
+            );
+            OAuthError::server_error("client registry unavailable")
+        })?;
     // A2(ii): the load_client backstop of the "brokered ⇒ confidential auth"
     // invariant (the DB CHECK is A2(i)). A brokered client that is somehow not
     // client_secret_basic would let an app exchange a code without the broker
@@ -930,7 +955,7 @@ pub(super) async fn load_client(
         scopes: sort_dedup(row.get("scopes")),
         app_id: row.try_get("app_id").ok().flatten(),
         sector_identifier,
-        client_secret_hash: row.try_get("client_secret_hash").ok().flatten(),
+        client_secret_hash,
         refresh_allowed: row.try_get("refresh_allowed").unwrap_or(false),
         token_endpoint_auth_method,
         backchannel_logout_uri: row.try_get("backchannel_logout_uri").ok().flatten(),
@@ -1232,6 +1257,33 @@ pub(super) fn token_json_response(body: TokenResponse) -> HttpResponse {
         .json(&body)
 }
 
+/// Error responder for the client-authenticating endpoints (`/oauth2/token`,
+/// `/oauth2/revoke`, `/oauth2/introspect`).
+///
+/// RFC 6749 5.2 answers `invalid_client` with 401 and a challenge matching the
+/// scheme the client used; the same error class must not read as 400 on one
+/// endpoint and 401 on another. HTTP Basic is the only scheme this OP accepts
+/// in the `Authorization` header, so it is the challenge, emitted even when
+/// the request carried no credentials, since a bare 401 is not a well-formed
+/// response and "authenticate with Basic" is exactly what that caller needs.
+/// Every other error class keeps its own status.
+pub(super) fn client_auth_error_response(err: OAuthError) -> HttpResponse {
+    if err.error != "invalid_client" {
+        return oauth_error_response(err);
+    }
+    HttpResponse::build(StatusCode::UNAUTHORIZED)
+        .header("cache-control", "no-store")
+        .header("pragma", "no-cache")
+        .header(
+            WWW_AUTHENTICATE,
+            "Basic realm=\"oauth2\", error=\"invalid_client\"",
+        )
+        .json(&json!({
+            "error": err.error,
+            "error_description": err.description,
+        }))
+}
+
 pub(super) fn oauth_error_response(err: OAuthError) -> HttpResponse {
     HttpResponse::build(err.status)
         .header("cache-control", "no-store")
@@ -1255,21 +1307,8 @@ fn auth_request_oauth_error(err: AuthRequestError) -> OAuthError {
     }
 }
 
-fn authenticate_authorization_code_client(
-    issuer: &Issuer,
-    client: &OAuthClient,
-    client_auth: &ClientAuth,
-) -> Result<(), OAuthError> {
-    // The authorization_code grant authenticates ONLY brokered clients (public
-    // `oac_` clients are PKCE-only). Non-brokered → no secret check here.
-    if !client.brokered {
-        return Ok(());
-    }
-    authenticate_brokered_client(issuer, client, client_auth)
-}
-
 /// Confidential broker-secret authentication for a brokered client, shared by
-/// the authorization_code grant AND the refresh grant (`authenticate_for_refresh`).
+/// the authorization_code grant AND the refresh grant (`authenticate_client`).
 /// A brokered client MUST present the per-app broker secret (HKDF-derived from
 /// the platform master, verified by derive-and-compare); this is the control
 /// that keeps the global-subject id_token out of app-controlled code.
