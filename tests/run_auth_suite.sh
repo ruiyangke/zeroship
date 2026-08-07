@@ -96,7 +96,25 @@ echo "------------------------------------------------------------------"
 #
 # `oidc_rp_e2e` is deliberately absent: it also wants CONTROL_TEST_DB, which
 # this script does not provision, so it would skip and fail the check below.
-# tests/run_billing_suite.sh owns the CONTROL_TEST_DB half.
+# tests/run_billing_suite.sh was named here as owning the CONTROL_TEST_DB half -
+# it does not. That script invokes zeroship-control and zeroship-migrated and
+# never touches the gateway crate, so oidc_rp_e2e is covered by nothing.
+#
+# TWO BINARIES IN THE LIST BELOW ARE NOT ACTUALLY COVERED EITHER, and the skip
+# check further down cannot see it. `auth_token_anchors_test` gates on
+# GATEWAY_ANCHORS_DB_URL, which is set nowhere in this repo - not here, not in
+# ci.yml, not in deploy/. Measured on a full gate run: 13 lines reading
+# "[anchors] skip <name> (no GATEWAY_ANCHORS_DB_URL)" sat in this script's own
+# log while it reported "0 skipped", because the check greps for "skipping" and
+# those say "skip". `browser_auth_test` gates on the same unset variable.
+#
+# Exporting it is not the fix and that is measured too: with the variable
+# pointed at this script's database the suite runs 23 tests and 11 FAIL, the
+# first on "initial login must succeed, left: 400". So the coverage was never
+# merely switched off - the tests need work, and turning them on turns this gate
+# red. Whether to fix them or delete them is an operator decision, filed rather
+# than taken here. What is fixed now is the claim: this comment no longer says
+# these binaries are covered when they are not.
 echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
 for spec in \
   "zeroship-authz:" \
