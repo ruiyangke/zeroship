@@ -3032,12 +3032,17 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 ))
                 .to_request();
             let resp = test::call_service(&app, req).await;
-            assert_eq!(
-                resp.status(),
-                StatusCode::OK,
-                "full-kernel dispatch must succeed; a missing env.* namespace 500s"
-            );
+            // Read the body BEFORE asserting the status. A bare status assertion
+            // here reports "expected 200, got 500" and discards the one thing that
+            // says which namespace failed and why.
+            let status = resp.status();
             let body = test::read_body(resp).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "full-kernel dispatch must succeed; a missing env.* namespace 500s. body: {}",
+                String::from_utf8_lossy(&body)
+            );
             let v: serde_json::Value =
                 serde_json::from_slice(&body).expect("handler returned JSON");
 
