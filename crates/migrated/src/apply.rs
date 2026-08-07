@@ -25,7 +25,7 @@ use crate::policy::{
     ManagedPolicyError, SealVerifier,
 };
 use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
-use crate::provisioning::{provision_migrator, ProvisionRoleError};
+use crate::provisioning::{exec_retry, provision_migrator, ProvisionRoleError};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
@@ -1494,7 +1494,7 @@ async fn provision_runtime_app_role(
     let template_q = quote_ident(APP_ROLE_TEMPLATE);
     let migrator_q = quote_ident(migrator_role);
 
-    conn.batch_execute(&format!(
+    exec_retry(conn, &format!(
         "DO $runtime_app_role$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{template_lit}') THEN
                 EXECUTE 'CREATE ROLE {template_q} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT';
@@ -1508,7 +1508,7 @@ async fn provision_runtime_app_role(
     ))
     .await?;
 
-    conn.batch_execute(&format!(
+    exec_retry(conn, &format!(
         // USAGE only — the runtime role does DML, never DDL. Object creation
         // (tables, sequences) is the migrator role's job; plugin-db's
         // register_model is a no-op on Postgres. Granting CREATE here would let

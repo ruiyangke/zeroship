@@ -58,7 +58,7 @@ fn quote_lit(value: &str) -> String {
 /// Retry a batch statement over the brief `tuple concurrently updated` catalog
 /// contention that concurrent role/grant DDL can produce (matches the in-tree
 /// `exec_retry`).
-async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Error> {
+pub(crate) async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Error> {
     const MAX_ATTEMPTS: u32 = 8;
     let mut attempt = 0;
     loop {
