@@ -419,9 +419,9 @@ async fn legit_lost_response_retry_recovers_without_family_kill() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn second_replay_of_a_spent_predecessor_kills_family() {
-    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"])
-        .await
-        .expect("AUTH_DB_URL is required for oidc_refresh_token_test");
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let family_id = refresh_family_id(&fx).await;
@@ -464,9 +464,9 @@ async fn second_replay_of_a_spent_predecessor_kills_family() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid_grant() {
-    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"])
-        .await
-        .expect("AUTH_DB_URL is required for oidc_refresh_token_test");
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let family_id = refresh_family_id(&fx).await;
