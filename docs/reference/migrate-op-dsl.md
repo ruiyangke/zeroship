@@ -40,7 +40,7 @@ canonical IR shape is the frozen contract.
 
 ```ts
 // migrations/0007_split_name.ts
-import { table, t, now, genRandomUuid, concatWs } from "@zeroship/migrate";
+import { table, t, now, uuidV4, concatWs } from "@zeroship/migrate";
 
 export default {
   name: "split_name_column", // optional; defaults to the filename label
@@ -129,7 +129,7 @@ The portable authoring surface is reached through direct named exports from
 `@zeroship/migrate`. There is no flat op vocabulary and no `op.` prefix.
 
 ```ts
-import { table, view, enumType, comment, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, view, enumType, comment, t, now, uuidV4 } from "@zeroship/migrate";
 ```
 
 The complete exported vocabulary (`sdks/migrate/src/index.ts`):
@@ -302,13 +302,13 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | Modifier | Effect |
 | --- | --- |
 | `.notNull()` | mark `NOT NULL` |
-| `.default(value)` | a typed scalar literal, `now()` / `genRandomUuid()`, **or** a function-expression callback for composed defaults — never raw SQL |
+| `.default(value)` | a typed scalar literal, `now()` / `uuidV4()`, **or** a function-expression callback for composed defaults — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -360,7 +360,7 @@ on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 | vector `metric` | `cosine \| l2 \| innerProduct` | engine default |
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -751,7 +751,7 @@ The check runs **at drain, not eagerly**, so a selector held in a variable and
 terminated on a later line is fine:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -773,7 +773,7 @@ Both authoring styles are first-class — pick per readability. Every terminal
 across statements with `{ schema }` set a single time:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -801,7 +801,7 @@ Because the `t.*` chain is **immutable** (every modifier returns a fresh
 `ColumnDef`), a hoisted type var is safe to reuse across columns:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -821,7 +821,7 @@ setDefault | noAction`, and they are **actually rendered** (`ON DELETE CASCADE`,
 …). An action-free FK records byte-identically to before:
 
 ```ts
-import { table, now, genRandomUuid } from "@zeroship/migrate";
+import { table, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -841,7 +841,7 @@ has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added col
 records the column **plus** a follow-on constraint (it is not silently dropped):
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   up() {
@@ -894,13 +894,13 @@ interpolated):
 
 **Top-level value constructors**:
 
-- `now()`, `genRandomUuid()` — DB-evaluated apply-time scalars
+- `now()`, `uuidV4()`, `uuidV7()` — DB-evaluated apply-time values
   (render to `now()` / `gen_random_uuid()` per dialect). Use these instead of
   baking a build-time `Date.now()` / UUID literal into the artifact. As an
   ergonomic shorthand, the **bare native symbol** (no parens) `Date.now`,
   `Math.random`, or `crypto.randomUUID` used as an op value records as the
-  identical fnSynth scalar — `Date.now` ⇒ `now()`, `Math.random` /
-  `crypto.randomUUID` ⇒ `genRandomUuid()` — so the DB evaluates it at apply
+  identical DB-evaluated node — `Date.now` ⇒ `now()`, `Math.random` /
+  `crypto.randomUUID` ⇒ `uuidV4()` — so the DB evaluates it at apply
   time. Calling it (`Date.now()`, with parens) just evaluates to a frozen
   build-time value instead (see Determinism below).
 
@@ -918,8 +918,8 @@ recording (almost never what you want). The recorder handles this by translation
 not by a gate:
 
 - The **bare native symbol** (no parens) — `Date.now`, `Math.random`,
-  `crypto.randomUUID` — records as the DB-evaluated fnSynth scalar (identical IR
-  to `now()` / `genRandomUuid()`). This is the recommended way to get
+  `crypto.randomUUID` — records as the DB-evaluated node (identical IR
+  to `now()` / `uuidV4()`). This is the recommended way to get
   an apply-time value.
 - A **call** (`Date.now()`) just evaluates and the resulting scalar is recorded
   verbatim; `lintDeterminism(source)` emits an advisory **warning** steering you
