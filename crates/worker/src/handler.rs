@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures::{pin_mut, FutureExt};
+use ntex::http::body::{BodySize, MessageBody};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
 use serde_json::Value;
@@ -243,6 +244,10 @@ pub async fn dispatch(
     // `cache::record_request` below.
     let wall_start = std::time::Instant::now();
 
+    // ingress_bytes = the end-user request body bytes the worker received
+    // (the inner envelope body, not the JSON envelope wrapper overhead).
+    let ingress_bytes = request_body.len() as u64;
+
     // env comes from the process-wide SharedEnvs (Arc<RwLock>), populated
     // by the reconcile loop or load-on-demand path. Read = brief read
     // lock + Arc clone; never held across await.
@@ -259,16 +264,20 @@ pub async fn dispatch(
         Some(entry) => entry.snapshot.clone(),
         None => {
             metrics::inc(&metrics::ENV_UNAVAILABLE_TOTAL);
-            return HttpResponse::ServiceUnavailable()
+            let response = HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "env unavailable"}));
+            cache::record_request(
+                &app_id,
+                0,
+                wall_start.elapsed().as_micros() as u64,
+                buffered_response_body_len(&response),
+                ingress_bytes,
+            );
+            return response;
         }
     };
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
-
-    // ingress_bytes = the end-user request body bytes the worker received
-    // (the inner envelope body, not the JSON envelope wrapper overhead).
-    let ingress_bytes = request_body.len() as u64;
 
     // Enter isolate, dispatch through the unified fetch handler. Sample the
     // V8 thread's CPU clock (CLOCK_THREAD_CPUTIME_ID — the same clock the
@@ -320,8 +329,10 @@ pub async fn dispatch(
         FetchOutcome::WebSocketUpgrade { .. } => {
             // WS upgrades over the HTTP dispatch endpoint aren't supported —
             // the gateway uses a separate WS proxy path for websocket traffic.
-            record(0);
-            make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch")
+            let response =
+                make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch");
+            record(buffered_response_body_len(&response));
+            response
         }
         FetchOutcome::Pending { rx, cancel: cf } => {
             match recv_with_timeout(&rx, wall_limit(&runtime), &cf, &runtime).await {
@@ -347,16 +358,20 @@ pub async fn dispatch(
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { logs: request_logs, .. })) => {
                     crate::logs::append(&logs, app_id, request_logs);
-                    record(0);
-                    make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch")
+                    let response =
+                        make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch");
+                    record(buffered_response_body_len(&response));
+                    response
                 }
                 Some(Err(e)) => {
-                    record(0);
-                    make_error(&e)
+                    let response = make_error(&e);
+                    record(buffered_response_body_len(&response));
+                    response
                 }
                 None => {
-                    record(0);
-                    make_error_msg(504, "request timed out")
+                    let response = make_error_msg(504, "request timed out");
+                    record(buffered_response_body_len(&response));
+                    response
                 }
             }
         }
@@ -1220,6 +1235,14 @@ fn stream_response(
     builder.streaming(rx)
 }
 
+fn buffered_response_body_len(response: &HttpResponse) -> u64 {
+    match response.body().size() {
+        BodySize::Sized(len) => len,
+        BodySize::None | BodySize::Empty => 0,
+        BodySize::Stream => unreachable!("buffered response has a streaming body"),
+    }
+}
+
 fn make_error(err: &DispatchError) -> HttpResponse {
     // Wire: `{"message","name"}` body. Status comes from DispatchError so
     // JS-thrown errors with `err.status` (e.g. 400 for bad input) reach
@@ -2068,6 +2091,258 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .iter()
             .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
+    }
+
+    struct MeteredDispatchResult {
+        app_id: Uuid,
+        status: StatusCode,
+        body: Vec<u8>,
+        events: Vec<zeroship_core::usage_event::UsageEvent>,
+    }
+
+    fn run_metered_dispatch(
+        source: &[u8],
+        limits: AppRuntimeLimits,
+        request_body: &[u8],
+        insert_env: bool,
+    ) -> Option<MeteredDispatchResult> {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return None;
+        };
+
+        Some(runtime.block_on(async {
+            init_runtime();
+
+            let app_id = Uuid::new_v4();
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            crate::cache::init_cache(
+                10,
+                4,
+                crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: meter.clone(),
+                },
+            );
+            crate::cache::load_app(
+                app_id,
+                source,
+                limits,
+                zeroship_core::types::AppNetPolicy::default(),
+                None,
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            if insert_env {
+                crate::sync::put_env_from_json(
+                    &envs,
+                    app_id,
+                    r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                    0,
+                )
+                .expect("insert env");
+            }
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("generated-error-meter");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
+            let config = Arc::new(crate::WorkerConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
+                workflow_advance_unsigned: false,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(dispatch_frame(
+                    "POST",
+                    "http://example.test/generated-error",
+                    request_body,
+                ))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let body = test::read_body(resp).await.to_vec();
+            let events = meter.drain();
+
+            let _ = std::fs::remove_dir_all(blob_root);
+            MeteredDispatchResult { app_id, status, body, events }
+        }))
+    }
+
+    fn assert_generated_error_metering(result: MeteredDispatchResult, status: StatusCode) {
+        assert_eq!(result.status, status);
+        assert!(!result.body.is_empty(), "generated error body must be non-empty");
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "requests"),
+            Some(1),
+            "generated error must count exactly one request"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "egress_bytes"),
+            Some(result.body.len() as u64),
+            "generated error egress must equal the response body length"
+        );
+    }
+
+    #[test]
+    fn dispatch_meters_unsupported_upgrade_error_body() {
+        let source = br#"
+            export default {
+              fetch() {
+                const pair = new WebSocketPair();
+                const [client, server] = Object.values(pair);
+                server.accept();
+                return new Response(null, { status: 101, webSocket: client });
+              }
+            };
+        "#;
+        let Some(result) =
+            run_metered_dispatch(source, AppRuntimeLimits::default(), b"sync-upgrade", true)
+        else {
+            return;
+        };
+
+        assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn dispatch_meters_settled_unsupported_upgrade_error_body() {
+        let source = br#"
+            export default {
+              async fetch() {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const pair = new WebSocketPair();
+                const [client, server] = Object.values(pair);
+                server.accept();
+                return new Response(null, { status: 101, webSocket: client });
+              }
+            };
+        "#;
+        let Some(result) =
+            run_metered_dispatch(source, AppRuntimeLimits::default(), b"settled-upgrade", true)
+        else {
+            return;
+        };
+
+        assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn dispatch_meters_pending_dispatch_error_body() {
+        let source = br#"
+            export default {
+              async fetch() {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                return null;
+              }
+            };
+        "#;
+        let Some(result) =
+            run_metered_dispatch(source, AppRuntimeLimits::default(), b"pending-error", true)
+        else {
+            return;
+        };
+
+        assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn dispatch_meters_timeout_error_body() {
+        let source = br#"
+            export default {
+              fetch() {
+                return new Promise(() => {});
+              }
+            };
+        "#;
+        let limits = AppRuntimeLimits {
+            wall_timeout_ms: Some(10),
+            ..AppRuntimeLimits::default()
+        };
+        let Some(result) = run_metered_dispatch(source, limits, b"timeout", true) else {
+            return;
+        };
+
+        assert_generated_error_metering(result, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn dispatch_cached_runtime_missing_env_records_all_five_platform_counters() {
+        let source = br#"
+            export default {
+              fetch() {
+                return new Response("unreachable");
+              }
+            };
+        "#;
+        let request_body = b"missing-env-request-body";
+        let Some(result) = run_metered_dispatch(
+            source,
+            AppRuntimeLimits::default(),
+            request_body,
+            false,
+        ) else {
+            return;
+        };
+
+        assert_eq!(result.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!result.body.is_empty(), "503 body must be non-empty");
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "requests"),
+            Some(1),
+            "missing env must count exactly one request"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            Some(request_body.len() as u64),
+            "missing env ingress must equal the request body length"
+        );
+        assert!(
+            usage_value(&result.events, result.app_id, "wall_us").unwrap_or(0) > 0,
+            "missing env wall time must be recorded"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0),
+            0,
+            "missing env does not enter V8 and must record zero V8 CPU time"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "egress_bytes"),
+            Some(result.body.len() as u64),
+            "missing env egress must equal the 503 body length"
+        );
     }
 
     // Regression: the `unlimited`/`enterprise` plan reports `wall_timeout =
