@@ -1809,3 +1809,166 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
     // ... and the multiplexed clean-shutdown path returned Ok.
     run_result.expect("clean shutdown should resolve Ok(())");
 }
+
+// ---------------------------------------------------------------------------
+// 32. cancelled_prepare_does_not_leak_a_server_statement
+//
+// `prepare` picks a name, queues `Parse + Describe + Sync`, then awaits the
+// response. The name only becomes a `Statement` - the thing whose `Drop` sends
+// `Close S` - once the whole exchange succeeds. Drop the future in between and
+// the server keeps a prepared statement no client handle names any more, for
+// the life of the session.
+//
+// The test counts `pg_prepared_statements` around a prepare that is polled a
+// fixed number of times and then dropped wherever it got to. It sweeps the
+// cut point across every suspension point the exchange has - one poll queues
+// the Parse and cannot yet have seen ParseComplete (the driver task has had no
+// chance to run), and each further poll, with a yield to the runtime in
+// between, advances one response. The last cut lets the prepare finish, where
+// the `Statement` is expected to close its own name; that arm is the control
+// which shows the counting itself does not manufacture a difference.
+//
+// `simple_query` afterwards is a barrier: requests reach the server in FIFO
+// order, so its completion proves the server has executed the Parse.
+//
+// The probe statement returns a builtin type, so `prepare` runs no nested
+// typeinfo lookups. A composite or enum column would prepare a typeinfo
+// statement that the client legitimately caches for its lifetime, and that
+// cached statement would read as a leak here.
+//
+// Both counts are taken by a query that is itself a named prepared statement,
+// so each sees exactly one statement of its own; the difference is what
+// matters. The count query's own `Close` is queued before it returns (the
+// `Statement` dies with the rows), and Close travels the same FIFO, so the
+// second count cannot be inflated by the first.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn cancelled_prepare_does_not_leak_a_server_statement() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    async fn count(client: &Client) -> i64 {
+        client
+            .query_one_scalar("SELECT count(*) FROM pg_prepared_statements", &[])
+            .await
+            .unwrap()
+    }
+
+    /// Polls `fut` at most `polls` times, sleeping between polls so the driver
+    /// task can deliver the next response, then drops it. Returns whether it
+    /// ran to completion. A no-op waker is fine because the re-polling is on
+    /// this loop's schedule, not the future's.
+    async fn poll_then_drop<F: Future>(fut: F, polls: usize) -> bool {
+        let mut fut = pin!(fut);
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..polls {
+            if fut.as_mut().poll(&mut cx).is_ready() {
+                return true;
+            }
+            compio::time::sleep(Duration::from_millis(2)).await;
+        }
+        false
+    }
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    // One cut per suspension point: ParseComplete, ParameterDescription,
+    // RowDescription, plus a run to completion.
+    let mut ever_cancelled = false;
+    for polls in 1..=5 {
+        let before = count(&client).await;
+
+        let finished = poll_then_drop(client.prepare("SELECT 1 AS cancel_probe"), polls).await;
+        ever_cancelled |= !finished;
+        assert!(
+            polls > 1 || !finished,
+            "one poll resolved a prepare - the driver task cannot have run, so \
+             the test is no longer measuring what it claims"
+        );
+
+        // Barrier: FIFO ordering means the server has executed the Parse by
+        // the time this returns.
+        client.simple_query("").await.unwrap();
+
+        let after = count(&client).await;
+        assert_eq!(
+            after,
+            before,
+            "a prepare cut after {polls} poll(s) ({}) left {} statement(s) on \
+             the server that no client handle can close",
+            if finished { "completed" } else { "dropped in flight" },
+            after - before
+        );
+    }
+
+    assert!(
+        ever_cancelled,
+        "no cut landed mid-flight - the test stopped exercising cancellation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 33. frontend_encode_failure_is_not_blamed_on_the_server
+//
+// A query string with an interior NUL cannot be encoded as the C string the
+// Parse message carries, so the request never reaches the server. Reporting
+// that as `Kind::Parse` ("error parsing response from server") points the
+// reader at a response that was never received; the failure is ours, in the
+// frontend encoder, which is what `Kind::Encode` says. `prepare` already
+// classifies the same call correctly - this pins the extended-query entry
+// points to the same answer.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn frontend_encode_failure_is_not_blamed_on_the_server() {
+    use compio_postgres::types::Type;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let bad_sql = "SELECT $1::text -- \u{0} interior nul";
+
+    let cases: Vec<(&str, Error)> = vec![
+        (
+            "query_typed",
+            client
+                .query_typed(bad_sql, &[(&"x", Type::TEXT)])
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "execute_typed",
+            client
+                .execute_typed(bad_sql, &[(&"x", Type::TEXT)])
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "query_text_params",
+            client.query_text_params(bad_sql, &["x"]).await.unwrap_err(),
+        ),
+        (
+            "execute_text_params",
+            client
+                .execute_text_params(bad_sql, &[Some("x".to_string())])
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "prepare",
+            client.prepare(bad_sql).await.unwrap_err(),
+        ),
+    ];
+
+    for (api, err) in cases {
+        assert_eq!(
+            err.to_string(),
+            "error encoding message to server",
+            "{api} blamed the server for a frontend encoding failure: {err:?}"
+        );
+    }
+}

@@ -14,6 +14,32 @@ struct StatementInner {
     columns: Vec<Column>,
 }
 
+/// Queues `Close S` + `Sync` for a server-side prepared statement.
+///
+/// Fire-and-forget: the response stream is dropped straight away, so the
+/// DEALLOCATE lands on the connection task's own schedule. Closing a name the
+/// server does not hold is a no-op there, which is what lets a caller fire this
+/// for a statement whose `Parse` may never have succeeded.
+pub(crate) fn close_statement(client: &InnerClient, name: &str) {
+    let buf = client.with_buf(|buf| {
+        if let Err(e) = frontend::close(b'S', name, buf) {
+            // The name cannot be encoded (interior NUL, or a length overflow),
+            // so there is nothing to send and the statement stays on the server
+            // until the session ends. Report that rather than drop the cause:
+            // silence here is indistinguishable from a successful DEALLOCATE.
+            log::error!(
+                "compio-postgres: cannot encode Close for prepared statement {name}: {e}"
+            );
+            return None;
+        }
+        frontend::sync(buf);
+        Some(buf.split().freeze())
+    });
+    if let Some(buf) = buf {
+        let _ = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+    }
+}
+
 impl Drop for StatementInner {
     fn drop(&mut self) {
         if self.name.is_empty() {
@@ -21,17 +47,7 @@ impl Drop for StatementInner {
             return;
         }
         if let Some(client) = self.client.upgrade() {
-            let buf = client.with_buf(|buf| {
-                if frontend::close(b'S', &self.name, buf).is_err() {
-                    // can't encode name (NUL or overflow); silently give up DEALLOCATE
-                    return None;
-                }
-                frontend::sync(buf);
-                Some(buf.split().freeze())
-            });
-            if let Some(buf) = buf {
-                let _ = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)));
-            }
+            close_statement(&client, &self.name);
         }
     }
 }
