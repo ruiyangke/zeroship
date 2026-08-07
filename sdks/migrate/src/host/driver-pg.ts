@@ -16,8 +16,9 @@
 //     `pg.types.setTypeParser` is GLOBAL and MUTABLE — a host app that overrode the
 //     int8 parser to `Number` would silently truncate large bigints below the seam
 //     with NO error. So we construct the Client with its OWN `types` object whose
-//     `getTypeParser` forces oid 20/1700/1016 → `String`, independent of any global
-//     override. The §D.2 poison oracle proves these win.
+//     `getTypeParser` forces oid 20/1700/1016 → `String` and pins oid 16 (bool)
+//     to its own 't'/'f' decode, independent of any global override. The §D.2
+//     poison oracle proves these win.
 //
 //  2. `executeTextParams` is a DISTINCT path (§B.2/§D.2): it receives a
 //     `(string | null)[]` and calls `client.query(sql, values)` with NO explicit
@@ -94,6 +95,17 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
         // Exact integer / decimal: cross as the verbatim string. NEVER Number(x)
         // (which truncates > 2^53). This wins over any global override.
         return identityString;
+      }
+      if (oid === OID_BOOL) {
+        // Pin bool too. It looked safe to fall through because node-pg's default
+        // already yields a boolean, but the fallthrough below reads the MUTABLE
+        // global map, so a `setTypeParser(16, ...)` anywhere in the process -
+        // including from a transitive dependency at import time - hands us a
+        // string instead. `valueToCell` then takes its `oid === OID_BOOL` branch
+        // and `Boolean("f")` is true, so every false silently becomes true. That
+        // reaches precondition guards on destructive migrations and the
+        // catalog-drift comparison, neither of which raises anything when wrong.
+        return (value: string): boolean => value === "t";
       }
       if (oid === OID_INT8_ARRAY) {
         // int8[]: the ARRAY parser composed over a string element parser, so each
@@ -280,3 +292,8 @@ function toJsError(err: unknown): JsError {
   }
   return { message: String(err) };
 }
+
+/** Internals reached by this package's own tests. Not part of the published
+ *  surface: the driver's contract is `openPgSession` and `HostDriver`, and
+ *  anything here may change without notice. */
+export const __testing = { connectionScopedTypes, valueToCell };
