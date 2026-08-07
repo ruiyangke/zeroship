@@ -66,6 +66,7 @@ test("no tracked file contains a NUL byte", () => {
   );
 
   const offenders: string[] = [];
+  let scanned = 0;
   for (const relative of files) {
     const absolute = join(repoRoot, relative);
     // A tracked path can be absent from the working tree (a submodule gitlink, or
@@ -83,8 +84,22 @@ test("no tracked file contains a NUL byte", () => {
     if (size === 0) continue;
 
     const index = readFileSync(absolute).indexOf(0);
+    scanned += 1;
     if (index !== -1) offenders.push(`${relative} (first NUL at byte ${index})`);
   }
+
+  // The count above proves git ENUMERATED files; this proves we READ them. Without
+  // it a wrong `repoRoot` makes every statSync throw, the catch skips every file,
+  // and the gate reports a clean tree having opened nothing - green for a reason
+  // unrelated to the property it asserts. Verified by pointing repoRoot at a
+  // non-existent directory: the gate passed before this assertion existed.
+  assert.ok(
+    scanned >= MIN_TRACKED_FILES,
+    `only ${scanned} of ${files.length} tracked files were actually opened and read. ` +
+      "The per-file skip is meant for a submodule gitlink or a sparse checkout, not " +
+      "for a repository root that does not resolve; a scan that reads nothing must " +
+      "not report a clean tree.",
+  );
 
   assert.deepEqual(
     offenders,
