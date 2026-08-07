@@ -187,13 +187,16 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     assert.ok(ciIdx >= 0, `journal records create_index step (got ${JSON.stringify(stepNames)})`);
     // Declared authoring order is preserved: createTable < addColumn < createIndex.
     assert.ok(ctIdx < acIdx && acIdx < ciIdx, "author steps journaled in declared order");
-    // event_seq is a strictly increasing exact int8 sequence (connection-scoped exact
-    // integer parsers → no float rounding; positional monotonicity).
-    const seqs = journal.map((r) => {
-      const s = String(r.event_seq);
-      assert.ok(/^\d+$/.test(s), `event_seq ${s} is an exact integer string`);
-      return BigInt(s);
-    });
+    // event_seq is strictly increasing. This proves ORDERING only, and the earlier
+    // claim that it proved exactness was false three times over: the read goes
+    // through this test's own client rather than the driver, so the oid-20 pin is
+    // not in the path; a digits-only check cannot see precision loss, because
+    // Number("9007199254740993") stringifies to "9007199254740992", which is all
+    // digits; and a guard against exponential notation defended a range no int8
+    // reaches, since toString only goes exponential above 1e21. Exactness is proven
+    // where it is actually exercised: driver-pg.test.ts pins the oids, and the
+    // history() arm below asserts typeof eventSeq === "bigint".
+    const seqs = journal.map((r) => BigInt(String(r.event_seq)));
     for (let i = 1; i < seqs.length; i++) {
       assert.ok(seqs[i] > seqs[i - 1], "event_seq strictly increasing");
     }
