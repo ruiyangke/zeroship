@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "../../../crates/zeroship-migrate/op-ir.schema.json");
+const schemaPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 
 /** The `const` tokens of a `oneOf` string-enum def. */
