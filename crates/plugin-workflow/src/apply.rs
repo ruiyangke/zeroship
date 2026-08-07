@@ -609,6 +609,9 @@ mod tests {
                     deploy_id: state.deploy_id.clone(),
                     claimed_by: Some(state.owner_id.clone()),
                     state: state.state.clone(),
+                    // No pending wake: this fake returns rows already claimed,
+                    // which is the state a sleeping run has left.
+                    wake_at: None,
                     dispatch_nonce: Some(state.dispatch_nonce.clone()),
                     lease_expires: None,
                     cancel_requested: state.cancel_requested,
