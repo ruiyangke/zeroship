@@ -99,9 +99,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 pub async fn device_auth(
+    req: web::HttpRequest,
     state: State<Arc<AppState>>,
     body: Json<DeviceAuthRequest>,
 ) -> web::HttpResponse {
+    // Unauthenticated, and every call mints durable device-flow state, so an
+    // unbounded caller can fill the table without ever holding a credential.
+    // Shares the admin bucket so a caller cannot get a fresh allowance by
+    // moving between control surfaces.
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     if let Err(resp) = ensure_platform_device_provider(&state) {
         return resp;
     }
@@ -163,6 +171,9 @@ pub async fn device_approve(
     req: web::HttpRequest,
     body: Json<DeviceApproveRequest>,
 ) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
     // Approval uses an explicit non-ambient bearer and does not depend on
     // browser cookies.
     let verified = match verified_device_approval_bearer(&state, &req).await {
@@ -268,6 +279,12 @@ pub async fn device_approve(
     web::HttpResponse::NoContent().finish()
 }
 
+/// NOT rate limited through the admin bucket, deliberately. The device polls
+/// this endpoint on a fixed interval until the user approves - that is the
+/// protocol, not abuse - so a 30-per-minute allowance would reject legitimate
+/// flows, and several devices behind one NAT share a source address. Bounding
+/// it needs a quota sized to the OAuth polling interval and a `slow_down`
+/// response rather than a 429, which is a configuration decision.
 pub async fn device_token(
     state: State<Arc<AppState>>,
     body: Json<DeviceTokenRequest>,
