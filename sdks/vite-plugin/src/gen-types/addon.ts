@@ -22,35 +22,34 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
+// The addon's own generated declarations, not a copy of them.
+//
+// These used to be hand-mirrored here, and that turned every REQUIRED field the
+// engine adds into a runtime failure at a creator's build instead of a red
+// build in CI: our TypeScript never touched the engine's types, so a source we
+// no longer satisfied still compiled and napi rejected it with "Missing field
+// `<name>`". That has happened - `charterLayers` became required, this file
+// still passed `policyCeilingToml`, and every gen-types call failed at run time.
+// The engine exports these (`types: index.d.ts`, and the file is in `files`), so
+// the mirror was a choice rather than a constraint.
+import type {
+  CollectionDescriptorDto,
+  FieldDescriptorDto,
+  GenArtifactsReply as AddonGenArtifactsReply,
+  GenArtifactsSource,
+  IndexDescriptorDto,
+  RuntimeOptionsDto,
+} from "zero-migrate-node";
 
-/**
- * The napi `genArtifacts` surface the orchestrator consumes. Kept to exactly the
- * two verbs gen-types needs so the addon's larger apply-side surface is not
- * accidentally reached here.
- */
-export interface GenArtifactsSource {
-  /** The GENERATED source: IR envelopes `{ ir_version, name, ops }`, version-ordered. */
-  envelopes?: unknown[];
-  /** The MANUAL source: declared `CollectionDescriptorDto`s. */
-  descriptors?: CollectionDescriptorDto[];
-  /** The project schema FK definitions thread; defaults to `"public"`. */
-  projectSchema?: string;
-  /**
-   * The ordered charter layers (TOML documents) that drive the confined
-   * system-shape injection. The engine bakes in NO confined preset: the caller
-   * supplies the injection shape, and the engine composes the layers into one
-   * effective policy in the order given.
-   *
-   * gen-types passes exactly one layer, the bundled
-   * {@link ../confined-ceiling.CONFINED_SCHEMA_EMIT_CEILING_TOML}, since it has an
-   * operator ceiling and no creator draft to narrow it. Applied identically on the
-   * envelope and descriptor sides so the two stay byte-identical.
-   *
-   * Required, not optional: the engine rejects a source without it.
-   */
-  charterLayers: string[];
-}
+export type {
+  CollectionDescriptorDto,
+  FieldDescriptorDto,
+  GenArtifactsSource,
+  IndexDescriptorDto,
+  RuntimeOptionsDto,
+};
+
+const require = createRequire(import.meta.url);
 
 /**
  * The reply gen-types consumes (or a soft error).
@@ -61,61 +60,10 @@ export interface GenArtifactsSource {
  * resolvable nor type-bearing in a creator app. gen-types renders the typed
  * `env.db` surface itself from `runtimeJson` (see `render-env-db.ts`).
  */
-export interface GenArtifactsReply {
-  ok: boolean;
-  runtimeJson?: string;
-  error?: string;
-}
+export type GenArtifactsReply = Pick<AddonGenArtifactsReply, "ok" | "runtimeJson" | "error">;
 
-/** One declared collection — the MANUAL-source `CollectionDescriptor` mirror. */
-export interface CollectionDescriptorDto {
-  name: string;
-  ownerApp: string;
-  fields: FieldDescriptorDto[];
-  indexes?: IndexDescriptorDto[];
-  runtimeOptions?: RuntimeOptionsDto;
-}
-
-/** One declared field — the MANUAL-source `FieldDescriptor` mirror. */
-export interface FieldDescriptorDto {
-  name: string;
-  type: string;
-  required?: boolean;
-  unique?: boolean;
-  references?: string;
-  onDelete?: string;
-  onUpdate?: string;
-  deferrable?: boolean;
-  default?: unknown;
-  min?: number;
-  max?: number;
-  enum?: unknown[];
-  idPrefix?: string;
-  vectorDims?: number;
-  vectorMetric?: string;
-  caseSensitive?: boolean;
-  encrypted?: unknown;
-  mask?: unknown;
-  fts?: boolean;
-  ftsLanguage?: string;
-  generated?: unknown;
-  identity?: unknown;
-}
-
-/** One declared named index. */
-export interface IndexDescriptorDto {
-  name: string;
-  columns: string[];
-  unique?: boolean;
-}
-
-/** Per-collection runtime options. */
-export interface RuntimeOptionsDto {
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: string;
-}
-
+/** The two verbs gen-types needs, so the addon's larger apply-side surface is
+ *  not reachable from here. */
 interface MigrateAddon {
   genArtifacts(source: GenArtifactsSource): GenArtifactsReply;
   irVersion(): number;
