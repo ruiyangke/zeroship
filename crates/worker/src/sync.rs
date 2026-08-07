@@ -217,10 +217,10 @@ pub fn needs_reload(
     local_limits: Option<RuntimeLimits>,
     info: &AppVersionInfo,
 ) -> bool {
-    let hash_changed = match loaded.and_then(|m| m.deploy_hash.as_deref()) {
-        Some(lh) => info.deploy_hash.as_deref().is_some_and(|rh| lh != rh),
-        None => info.deploy_hash.is_some(),
-    };
+    // Compare the two hashes directly. Asking only whether a PRESENT remote hash
+    // differs would treat a remote `None` as "unchanged", so an app that lost its
+    // live deploy would keep serving the code it had cached.
+    let hash_changed = loaded.and_then(|m| m.deploy_hash.as_deref()) != info.deploy_hash.as_deref();
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
     let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
@@ -618,6 +618,23 @@ mod tests {
             needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
             "SEC-7: env-only version bump (hash + limits unchanged) must \
              reload the isolate so secret rotation actually applies"
+        );
+    }
+
+    /// A cached app whose deploy GOES AWAY must reload, which is how the stale
+    /// code stops being served. The comparison only asked whether a remote hash
+    /// differed from the loaded one, and `None` differs from nothing, so losing
+    /// the deploy read as "unchanged". With limits, env version and net policy
+    /// all steady, the isolate then kept serving an app that no longer has a
+    /// live deploy, until LRU eviction happened to reclaim it.
+    #[test]
+    fn needs_reload_true_when_the_deploy_goes_away() {
+        let info = version_info(None, 7, AppRuntimeLimits::default());
+        let loaded = loaded_meta(Some("h1"), 7);
+        assert!(
+            needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+            "an app that lost its live deploy must reload rather than keep \
+             serving the code it had cached"
         );
     }
 
