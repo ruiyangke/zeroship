@@ -293,3 +293,50 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     await client.end().catch(() => {});
   }
 });
+
+// ---------------------------------------------------------------------------
+// The cold-database read: `status()` against a schema that has never been applied
+// to, so there is no journal at all.
+//
+// This is the first call a new user makes, and it runs before the journal objects
+// exist: `status` must bootstrap them and report "nothing applied" rather than
+// erroring on the absent meta schema or inventing a current version. The applied
+// case is covered by the oracle above; only this one proves the empty read.
+// ---------------------------------------------------------------------------
+test("e2e-pg: status() on a schema with no journal reports nothing applied", async (tc) => {
+  const client = await connectLivePg(tc);
+  if (!client) return;
+
+  const schema = uniqueSchema("e2e_cold_status");
+  const meta = `${schema}_migrations`;
+
+  try {
+    // A schema that exists but was never migrated: no `<schema>_migrations` meta
+    // schema, no journal table, no rows.
+    await client.query(`CREATE SCHEMA "${schema}"`);
+
+    const st = await status({
+      ownerApp: OWNER_APP,
+      projectSchema: schema,
+      driver: DRIVER,
+      policy: [noInjectPolicy(schema)],
+    });
+
+    // Typed reply: `currentVersion` is camelCase and nullish when nothing is applied.
+    assert.ok(
+      st.currentVersion === null || st.currentVersion === undefined,
+      `currentVersion is nullish on an empty journal (got ${JSON.stringify(st.currentVersion)})`,
+    );
+    assert.ok(Array.isArray(st.applied), "status.applied is an array");
+    assert.equal(
+      st.applied.length,
+      0,
+      `nothing applied on an empty journal (got ${JSON.stringify(st.applied)})`,
+    );
+  } finally {
+    await client
+      .query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${meta}" CASCADE`)
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
