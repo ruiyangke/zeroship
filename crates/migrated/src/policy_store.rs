@@ -159,11 +159,13 @@ impl AppPolicyStore {
     /// Open a connection for one store operation.
     ///
     /// This is per-operation on purpose, and it is NOT an oversight to be fixed
-    /// by reusing the long-lived control client the service already holds.
+    /// by holding one client in `MigrationServiceState` and sharing it - which
+    /// is the shape the control plane uses for its autocommit traffic.
     /// `insert_version` runs `BEGIN`, takes a transaction-scoped advisory lock,
     /// and `COMMIT`s; sharing one client across concurrent requests would
     /// interleave those statements and put two callers in one transaction,
-    /// which defeats the lock it depends on.
+    /// which defeats the lock it depends on. A transaction needs an owned
+    /// session, and this is how it gets one.
     ///
     /// A connection pool would be the usual answer and is not available here:
     /// `compio_postgres::Pool` is single-threaded (`Cell`-based, not `Send`),
