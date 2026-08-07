@@ -86,13 +86,22 @@ impl RouteCache {
             }
             // Validate first; on Err, fall back to passthrough for parity
             // with the rest of the platform's "always have a manifest"
-            // invariant. Log so deploys with bad manifests are visible.
+            // invariant.
+            //
+            // This fallback FAILS OPEN, and the log level says so. `passthrough()`
+            // installs one `*` resource with `auth: Anon, publicly_accessible:
+            // true`, so an app whose stored manifest stops validating serves every
+            // route to anonymous callers instead of refusing to serve. The deploy
+            // handler validates on ingest, so this should not fire from a normal
+            // deploy - it needs post-ingest divergence, such as a schema change
+            // that invalidates a stored manifest or an out-of-band row edit.
             let manifest = if let Err(e) = entry.manifest.validate() {
-                tracing::warn!(
+                tracing::error!(
                     app_id = %id,
                     app_name = %entry.name,
                     error = %e,
-                    "gateway-sync: manifest validation failed — falling back to passthrough"
+                    "gateway-sync: manifest validation failed — falling back to passthrough, \
+                     which serves EVERY route as anon-public"
                 );
                 Manifest::passthrough()
             } else {

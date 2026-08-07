@@ -682,12 +682,28 @@ impl Registry {
                     Ok(m) => match m.validate() {
                         Ok(()) => Some(m),
                         Err(e) => {
-                            tracing::warn!(app_id = %id, error = %e, "registry: invalid manifest — using passthrough");
+                            // `error`, not `warn`: the passthrough fallback below
+                            // installs a single `*` resource with `auth: Anon,
+                            // publicly_accessible: true`, so an app that was
+                            // auth-gated is now serving everything to anonymous
+                            // callers. That is a security downgrade, not a
+                            // degraded-service notice.
+                            tracing::error!(
+                                app_id = %id,
+                                error = %e,
+                                "registry: invalid manifest — falling back to passthrough, \
+                                 which serves EVERY route as anon-public"
+                            );
                             None
                         }
                     },
                     Err(e) => {
-                        tracing::warn!(app_id = %id, error = %e, "registry: manifest parse failure — using passthrough");
+                        tracing::error!(
+                            app_id = %id,
+                            error = %e,
+                            "registry: manifest parse failure — falling back to passthrough, \
+                             which serves EVERY route as anon-public"
+                        );
                         None
                     }
                 })
