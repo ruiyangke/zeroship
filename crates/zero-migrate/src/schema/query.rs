@@ -2489,8 +2489,8 @@ fn field_to_column_for_dialect(
     // FLOA/REAL/DOUB substring match), which still accepts BLOB values
     // — same column shape both engines see byte-identical inserts.
     // Sentinel-on-DDL is the same regex-on-DDL pattern used for
-    // vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path,
-    // not yet built.
+    // vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade
+    // path and does not exist.
     let enc_comment_owned;
     let enc_comment: &str = if let Some(body) = encryption_sentinel_for_field(def) {
         enc_comment_owned = format!(" {body}");

@@ -14,9 +14,9 @@
 //!   fired by a Rust-supplied `done` callback — NO `#[napi] async fn`, NO
 //!   `Promise::await`, NO `tokio_rt`.
 //!
-//! `dry_run` is **not** surfaced in v1: on the `host-pg` build `backend.shadow()`
-//! is `None`, so a shadow dry-run would return `DryRunError::ShadowUnsupported`. The
-//! host-side shadow harness is a deferred follow-up.
+//! `dry_run` is **not** surfaced here: on the `host-pg` build `backend.shadow()`
+//! is `None`, so a shadow dry-run would return `DryRunError::ShadowUnsupported`.
+//! There is no host-side shadow harness.
 
 // The workspace pins `unsafe_code = "deny"` (correct for the pure-Rust engine
 // crates). This addon is the ONE workspace member that MUST use `unsafe`: the napi

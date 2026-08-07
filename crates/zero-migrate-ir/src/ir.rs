@@ -645,8 +645,8 @@ pub enum EmptyContainerKind {
 ///
 /// Objects use [`BTreeMap`] so direct serde output is deterministic before the
 /// wider IR checksum canonicalizer sees it. Numeric values are deliberately
-/// integers only in v1; floats/decimals are rejected until the cross-language
-/// canonical spelling is specified.
+/// integers; floats and decimals are rejected because no cross-language
+/// canonical spelling for them is specified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrJsonValue {
     /// JSON `null`.

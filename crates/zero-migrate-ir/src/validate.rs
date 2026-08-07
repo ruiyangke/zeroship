@@ -975,8 +975,8 @@ impl Ctx<'_> {
     ///    SQLite/MySQL.
     ///
     /// RATCHET: each leg is one of the four ratcheted budget
-    /// counters. The budget mechanism is a later phase (not yet built); the
-    /// per-leg count is wired in when it lands. Deferred — not gated here.
+    /// counters. The budget mechanism does not exist, so the per-leg count has
+    /// nothing to feed and this is not gated here.
     fn check_dialectal(
         &self,
         default: &Option<Box<Expr>>,

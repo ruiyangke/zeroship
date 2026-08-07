@@ -2010,7 +2010,7 @@ pub enum RollbackError {
     /// add/drop, or any `ALTER` SQLite cannot perform natively). Only
     /// the ADDITIVE reversals SQLite ≥ 3.35 supports natively are implemented —
     /// `DROP TABLE` / `DROP COLUMN` / `DROP INDEX` / `RENAME`. A rebuild-needing
-    /// `down` is REFUSED here (not half-rebuilt): the rebuild path is not yet built.
+    /// `down` is REFUSED here (not half-rebuilt): the rebuild path is not built.
     /// Nothing was rolled back.
     #[error(
         "migration {version} has a SQLite `down` requiring the 12-step table rebuild ({reason}); \

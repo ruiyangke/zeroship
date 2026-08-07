@@ -23,7 +23,7 @@
 //! Any `down` that would REQUIRE the 12-step rebuild — a column TYPE-change
 //! reversal, a constraint add/drop, a `CHECK`/`DEFAULT`/nullability flip — is
 //! REFUSED up-front with [`RollbackError::SqliteRebuildRequired`] (the rebuild path
-//! is not yet built). We do NOT half-implement a rebuild here. The classifier
+//! is not built). We do NOT half-implement a rebuild here. The classifier
 //! ([`down_needs_rebuild`]) is a lightweight SQLite-aware scan: the libpg_query
 //! parser the PG path uses (`crate::classify`) is a POSTGRES parser and would
 //! mis-parse SQLite DDL, so it cannot be reused here.
@@ -81,7 +81,7 @@ pub(crate) async fn rollback_one_transactional(
         })?;
 
     // GATE: refuse a rebuild-needing `down` UP FRONT (before BEGIN), so nothing
-    // is half-done. This is the additive-only boundary; the rebuild is not yet built.
+    // is half-done. This is the additive-only boundary; the rebuild is not built.
     if let Some(reason) = down_needs_rebuild(down) {
         return Err(RollbackError::SqliteRebuildRequired {
             version: m.version.as_str().to_string(),

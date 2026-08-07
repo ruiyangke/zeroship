@@ -173,7 +173,7 @@ impl SqliteBackend {
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
     /// [`RollbackError::SqliteRebuildRequired`](crate::apply::executor::RollbackError::SqliteRebuildRequired);
-    /// the rebuild is not yet built.
+    /// the rebuild is not built.
     ///
     /// # Errors
     /// [`RollbackError`] on a rebuild-needing `down`, a confinement denial, a failed
@@ -576,7 +576,7 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<(), RollbackError> {
         // ADDITIVE rollback: reverse the `down` (DROP TABLE/COLUMN/INDEX,
         // RENAME) transactionally + append a `rolled_back` event. A rebuild-needing
-        // `down` is refused with `SqliteRebuildRequired` (the rebuild is not yet built).
+        // `down` is refused with `SqliteRebuildRequired` (the rebuild is not built).
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
 
