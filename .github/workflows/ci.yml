@@ -29,6 +29,36 @@ jobs:
       # removing one needs a deliberate edit here. That asymmetry is the point -
       # losing coverage should cost a reviewed change, gaining it should be free.
       # It catches disappearance, not substitution.
+      # A comment that cites a design doc is often the only pointer to where a
+      # contract or a decision is written down. When the doc moves or is never
+      # committed, the citation keeps its form and loses its value: it still
+      # reads as "justified elsewhere", so it stops the reader looking, and
+      # nothing anywhere notices. One sweep found 23 such citations at once.
+      #
+      # Excluded by directory, not by matched text: `wpt` is upstream WPT,
+      # fetched on demand and kept pristine, whose doc paths are relative to
+      # that project rather than ours; `dist`, `node_modules` and `target` hold
+      # generated output, where a stale citation is a stale build, not a
+      # mistake anyone can fix in place. Filtering the matched path instead of
+      # the containing file silently lets all four through, since none of those
+      # directory names appear in the cited path.
+      - name: Doc citations resolve
+        run: |
+          missing=0
+          for p in $(grep -rhoE '(\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
+              --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
+              --include='*.toml' --include='*.sh' \
+              --exclude-dir=wpt --exclude-dir=dist \
+              --exclude-dir=node_modules --exclude-dir=target \
+              crates/ sdks/ libs/ tests/ db/ examples/ 2>/dev/null \
+            | sed 's|^\(\.\./\)*||' | sort -u); do
+            if [ ! -f "$p" ]; then
+              echo "::error::comment cites $p, which does not exist"
+              missing=$((missing + 1))
+            fi
+          done
+          echo "unresolvable doc citations: $missing"
+          [ "$missing" -eq 0 ]
       - name: Test-target enumeration floor
         run: |
           count=$(cargo test --workspace --no-run --message-format=json 2>/dev/null \
