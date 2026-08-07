@@ -1,31 +1,47 @@
 /**
- * `installSchema` — the framework-internal helper that the synthetic
- * SSR entry and dev-bootstrap call to register schemas declared via
- * the old declared-schema entry path. This test pins the behaviours that
- * matter independently of the surrounding wiring:
+ * `installSchema` — the framework-internal helper the synthetic SSR entry
+ * and dev-bootstrap call to install a schema onto the native handle. This
+ * test pins the install *mechanics*, independently of the surrounding
+ * wiring:
  *
- * 1. The supplied `env` (the native handle) is unconditionally
- *    mutated with typed SDK Collection wrappers plus `transaction` /
- *    `live` extension methods. `Object.defineProperty` is the
- *    mechanism (`configurable: true`), so a second `installSchema`
- *    call with overlapping names re-installs without throwing.
+ * 1. The supplied `env` (the native handle) is unconditionally mutated with
+ *    typed SDK Collection wrappers plus `transaction` / `live` extension
+ *    methods. `Object.defineProperty` is the mechanism (`configurable:
+ *    true`), so a second `installSchema` call with overlapping names
+ *    re-installs without throwing.
  *
- * 2. A schema name colliding with the native v8_class method surface
- *    (e.g. `collection`, `beginTransaction`, ...) throws — silently
- *    shadowing the native `env.db.collection` mint would be worse
- *    than a clear boot-time error.
+ * 2. A schema name colliding with the native v8_class method surface (e.g.
+ *    `collection`, `registerModel`, ...) throws — silently shadowing the
+ *    native `env.db.collection` mint would be worse than a clear boot-time
+ *    error.
  *
- * 3. The returned `ready` promise resolves once the chained
- *    registerModel DDL has settled. A synchronous install failure
- *    (reserved-name collision) does NOT reject `ready` directly —
- *    the throw propagates to the caller — but the module-local
- *    prev-chain is updated so subsequent installs serialise behind it;
- *    failures are surfaced by the synchronous throw.
+ * 3. The returned `ready` promise resolves once the chained registerModel
+ *    DDL has settled. A synchronous install failure (reserved-name
+ *    collision) does NOT reject `ready` directly — the throw propagates to
+ *    the caller — but the module-local prev-chain is updated so subsequent
+ *    installs serialise behind it.
+ *
+ * Every case needs a runtime schema descriptor. Collections come from the
+ * descriptor alone, so an install with none has nothing to apply these
+ * mechanics to: the collision never fires, `ready` resolves trivially, and
+ * the assertions below pass while testing nothing.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchema } from "@zeroship/bootstrap/install-schema";
 import { t } from "@zeroship/db";
+import { descriptorFor } from "./_install-helper.js";
+import type { ZeroshipDb } from "../src/native.js";
+
+/**
+ * Install `schemas` the way the toolchain would: derive the descriptor from
+ * the declaration, then hand both to the installer.
+ */
+function install(schemas: Record<string, unknown>, native: ZeroshipDb) {
+  return installSchema(schemas as never, native, {
+    descriptor: descriptorFor(schemas),
+  } as never);
+}
 
 /**
  * Build a permissive mock `native` whose `registerModel` resolves
@@ -37,7 +53,7 @@ function makeMockNative() {
     async registerModel(_name: string, _schema: unknown, _indexes?: unknown): Promise<void> {
       // no-op
     },
-    // P9 PR 3: native `transaction(callback)` orchestrator stub.
+    // Native `transaction(callback)` orchestrator stub.
     async transaction(cb: (raw: unknown) => unknown) {
       return cb(undefined);
     },
@@ -54,7 +70,7 @@ function makeMockNative() {
 describe("installSchema", () => {
   test("plants typed Collection wrappers on the supplied env handle", () => {
     const native = makeMockNative();
-    const { collections } = installSchema(
+    const { collections } = install(
       {
         users: { name: t.string().required() },
         todos: { title: t.string().required() },
@@ -70,16 +86,13 @@ describe("installSchema", () => {
     assert.equal(typeof (handle.todos as { update?: unknown }).update, "function");
     // The returned `collections` is the same identity as what got
     // planted on env (single source of truth).
-    assert.equal(collections.users, handle.users);
-    assert.equal(collections.todos, handle.todos);
+    assert.equal((collections as Record<string, unknown>).users, handle.users);
+    assert.equal((collections as Record<string, unknown>).todos, handle.todos);
   });
 
   test("plants the `transaction` and `live` extension methods on env", () => {
     const native = makeMockNative();
-    installSchema(
-      { items: { name: t.string().required() } },
-      native,
-    );
+    install({ items: { name: t.string().required() } }, native);
     const handle = native as unknown as Record<string, unknown>;
     assert.equal(typeof handle.transaction, "function", "transaction is planted");
     assert.equal(typeof handle.live, "function", "live is planted");
@@ -87,26 +100,17 @@ describe("installSchema", () => {
 
   test("re-entrant: a second call redefines the same name without throwing", () => {
     const native = makeMockNative();
-    installSchema(
-      { users: { name: t.string().required() } },
-      native,
-    );
+    install({ users: { name: t.string().required() } }, native);
     const first = (native as unknown as { users: unknown }).users;
     // Second call with the same name — must not throw on the
     // `Object.defineProperty` because the descriptor is `configurable: true`.
-    installSchema(
-      { users: { name: t.string().required(), email: t.string() } },
-      native,
-    );
+    install({ users: { name: t.string().required(), email: t.string() } }, native);
     const second = (native as unknown as { users: unknown }).users;
     assert.notEqual(first, second, "second install replaced the wrapper");
   });
 
   test("throws when a schema name collides with a native v8_class method", () => {
     const native = makeMockNative();
-    // P9 PR 3: `beginTransaction` is no longer reserved — the native
-    // primitive was deleted; the creator-facing `transaction` (native
-    // method as of PR 3) stays reserved.
     for (const reserved of [
       "collection",
       "registerModel",
@@ -118,40 +122,38 @@ describe("installSchema", () => {
       "live",
     ]) {
       assert.throws(
-        () => installSchema(
-          { [reserved]: { name: t.string().required() } },
-          native,
-        ),
+        () => install({ [reserved]: { name: t.string().required() } }, native),
         /collides with a native env.db method/,
         `reserved name "${reserved}" must throw`,
       );
     }
   });
 
-  test("beginTransaction is no longer a reserved env.db name (P9 PR 3)", () => {
+  test("beginTransaction is not a reserved env.db name", () => {
     // The native `beginTransaction` primitive was deleted entirely, so a
     // collection named `beginTransaction` no longer collides. (A creator
     // would be unwise to name a collection this, but the platform no
     // longer forbids it.)
     const native = makeMockNative();
     assert.doesNotThrow(
-      () => installSchema(
-        { beginTransaction: { name: t.string().required() } },
-        native,
-      ),
-      "beginTransaction must not be a reserved name after P9 PR 3",
+      () => install({ beginTransaction: { name: t.string().required() } }, native),
+      "beginTransaction must not be a reserved name",
+    );
+    assert.ok(
+      (native as unknown as Record<string, unknown>).beginTransaction,
+      "and it installs as an ordinary collection",
     );
   });
 
   test("returned `ready` resolves once registerModel has settled", async () => {
     const native = makeMockNative();
-    const { ready } = installSchema(
-      { items: { name: t.string().required() } },
-      native,
-    );
+    const registered: string[] = [];
+    (native as unknown as { registerModel: unknown }).registerModel =
+      async (name: string) => { registered.push(name); };
+    const { ready } = install({ items: { name: t.string().required() } }, native);
     assert.ok(ready instanceof Promise, "ready must be a Promise");
-    // Resolves cleanly — the mock's registerModel is a no-op.
     await ready;
+    assert.deepEqual(registered, ["items"], "ready settles after registerModel ran");
   });
 
   test("returned `ready` propagates DDL failures", async () => {
@@ -164,14 +166,10 @@ describe("installSchema", () => {
       async registerModel(_name: string): Promise<void> {
         throw Object.assign(new Error("DDL bombed"), { code: "DDL_FAILED" });
       },
-      // P9 PR 3: native `transaction(callback)` orchestrator stub.
       async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
       collection(_name: string) { return { async find() { return []; } }; },
     } as unknown as ZeroshipDb;
-    const { ready } = installSchema(
-      { items: { name: t.string().required() } },
-      native,
-    );
+    const { ready } = install({ items: { name: t.string().required() } }, native);
     let caught: unknown = null;
     try { await ready; } catch (e) { caught = e; }
     assert.ok(caught instanceof Error, "ready must reject on DDL failure");
@@ -186,52 +184,50 @@ describe("installSchema", () => {
     // install's `ready` resolves on its own success.
     const native = makeMockNative();
     assert.throws(
-      () => installSchema(
-        { collection: { name: t.string().required() } },
-        native,
-      ),
+      () => install({ collection: { name: t.string().required() } }, native),
       /collides with a native env.db method/,
     );
     // The next install on a fresh env handle must resolve cleanly —
     // the prior install's rejection is swallowed in the chain.
     const fresh = makeMockNative();
-    const { ready } = installSchema(
-      { items: { name: t.string().required() } },
-      fresh,
-    );
+    const { ready } = install({ items: { name: t.string().required() } }, fresh);
     await ready;
   });
 
   test("re-entrant install throws install_in_flight", () => {
-    // The install path is synchronous, so the guard only fires on
-    // true re-entry within one stack frame — e.g. a getter on the
-    // schema map that recursively calls back into `installSchema`.
+    // The install path is synchronous, so the guard only fires on true
+    // re-entry within one stack frame — e.g. a getter on the descriptor's
+    // collection map that recursively calls back into `installSchema`.
     // HMR storms in practice are serialised by the dev-bootstrap's
-    // `schemaRegistered` latch; this guard exists for the case where
-    // that latch is bypassed.
+    // `schemaRegistered` latch; this guard exists for the case where that
+    // latch is bypassed.
+    //
+    // The getter has to sit on the DESCRIPTOR rather than the declared
+    // schema: the installer reads its collections from there, so that is
+    // the only map it enumerates while an install is in flight.
     const innerNative = makeMockNative();
     let caught: unknown = null;
-    // A schema map whose first key is read via a getter that
-    // synchronously re-enters `installSchema`. The outer install
-    // begins, reads `Object.entries(schemas)` (which fires the
-    // getter), and the inner call must throw `INSTALL_IN_FLIGHT`.
-    const reentrantSchema = {
-      get first(): { name: ReturnType<typeof t.string> } {
-        try {
-          installSchema(
-            { other: { name: t.string().required() } },
-            innerNative,
-          );
-        } catch (e) {
-          caught = e;
-        }
-        return { name: t.string().required() };
+    const collection = {
+      fields: { name: { type: "string", required: true } },
+      options: { softDelete: false, versioning: false },
+      indexes: [],
+    };
+    const reentrantDescriptor = {
+      version: 1,
+      collections: {
+        get first() {
+          try {
+            install({ other: { name: t.string().required() } }, innerNative);
+          } catch (e) {
+            caught = e;
+          }
+          return collection;
+        },
       },
-    } as { first: { name: ReturnType<typeof t.string> } };
-    installSchema(
-      reentrantSchema,
-      makeMockNative(),
-    );
+    };
+    installSchema({} as never, makeMockNative(), {
+      descriptor: reentrantDescriptor,
+    } as never);
     assert.ok(caught instanceof Error, "re-entrant call must throw");
     assert.equal((caught as { code?: string }).code, "INSTALL_IN_FLIGHT");
   });
