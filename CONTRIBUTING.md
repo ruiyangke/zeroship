@@ -37,9 +37,14 @@ the full stance.
 
 ## Development
 
-Prerequisites: a stable Rust toolchain, Node.js >= 20, and pnpm 9. The live database
-tests expect PostgreSQL 16 (the dev stack exposes it on `127.0.0.1:5440`). Some e2e
+Prerequisites: a stable Rust toolchain, plus Node.js and pnpm at the versions
+`package.json` declares in `engines` and `packageManager` (currently Node >= 20 and
+pnpm 9). The live database tests expect the PostgreSQL that
+`deploy/compose/docker-compose.yml` pins, exposed on `127.0.0.1:5440`. Some e2e
 suites need Docker.
+
+Those files are the authority; the versions named here are a convenience copy and
+can drift from them.
 
 **First, initialize the submodule** - the workspace won't resolve without it:
 
