@@ -110,8 +110,27 @@ jobs:
           [ "$missing" -eq 0 ]
       - name: Test-target enumeration floor
         run: |
-          count=$(cargo test --workspace --no-run --message-format=json 2>/dev/null \
-            | grep -o '"executable":"[^"]*"' \
+          # Keep stderr and check it, rather than discarding it. This step counts
+          # what got BUILT, so anything that stops the build - a compile error, a
+          # full disk, a killed rustc - removes executables and shrinks the
+          # count. Discarding stderr made those indistinguishable from coverage
+          # loss, and the failure message then blames the wrong thing.
+          #
+          # Measured, not hypothetical: running this locally on a disk that had
+          # just hit 100 percent reported 213 against a floor of 245. Nothing had
+          # been deleted; rustc could not write. The number was real and meant
+          # nothing.
+          #
+          # `--keep-going` so one broken package cannot mask the targets of every
+          # package after it, which would shrink the count for a second reason.
+          set -o pipefail
+          if ! cargo test --workspace --no-run --keep-going --message-format=json \
+              >"$RUNNER_TEMP/targets.json" 2>"$RUNNER_TEMP/targets.err"; then
+            echo "::error::the test build failed, so the target count below would measure the build and not the coverage"
+            grep -E '^error' "$RUNNER_TEMP/targets.err" | sort -u | head -20
+            exit 1
+          fi
+          count=$(grep -o '"executable":"[^"]*"' "$RUNNER_TEMP/targets.json" \
             | grep -v '"executable":null' \
             | sort -u | wc -l)
           # Floor set below the local measurement (261) because the count is
