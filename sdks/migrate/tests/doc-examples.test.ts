@@ -44,7 +44,7 @@ const VOCAB_PREAMBLE = `import {
   enumType,
   comment,
   t, fromDb, lintDeterminism,
-  now, genRandomUuid, currentSetting, currentUser, interval, concatWs,
+  now, uuidV4, currentSetting, currentUser, interval, concatWs,
   dialect,
 } from "@zeroship/migrate";
 import { t as dbT } from "@zeroship/db";

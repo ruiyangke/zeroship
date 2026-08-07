@@ -96,9 +96,8 @@ const TS = {
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
-  // `genRandomUuid` is a SOURCE ALIAS ONLY and no longer survives as an IR
-  // token: the engine replaced it with the dedicated `uuidV4`/`uuidV7` Expr
-  // nodes, so it is absent from the schema's closed `SynthFn` set.
+  // There is no UUID `SynthFn` token: UUID generation is carried by the dedicated
+  // `uuidV4`/`uuidV7` Expr nodes, so it is absent from this closed set.
   SynthFn: ["concatWs", "splitPart", "now"].sort(),
   CastTarget: ["text", "int", "real", "boolean", "bytes", "uuid"].sort(),
   ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),

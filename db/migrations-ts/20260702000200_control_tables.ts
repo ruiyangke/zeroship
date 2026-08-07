@@ -1,11 +1,11 @@
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export const name = "control_tables";
 
 export function up() {
   table("app_audit", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       app_id: t.uuid(),
       creator_id: t.uuid(),
       actor_user_id: t.uuid(),
@@ -105,7 +105,7 @@ export function up() {
   });
   table("apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       name: t.text().notNull(),
       plan_id: t.text().notNull().default("free"),
       deploy_hash: t.text(),
@@ -124,7 +124,7 @@ export function up() {
   });
   table("creator_account_history", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       creator_id: t.uuid().notNull(),
       stripe_account_id: t.text().notNull(),
       linked_at: t.timestamp().notNull().default(now()),
@@ -162,7 +162,7 @@ export function up() {
   table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_version_check").add({ expr: (col) => col("version").gt(0) });
   table("migrated_migration_audit", { schema: "zeroship" }).create({
     columns: {
-      audit_id: t.uuid().notNull().default(genRandomUuid()),
+      audit_id: t.uuid().notNull().default(uuidV4()),
       app_id: t.uuid().notNull(),
       migration_id: t.uuid().notNull(),
       migration_versions: t.json().notNull().default([]),
@@ -216,7 +216,7 @@ export function up() {
   });
   table("payouts", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       creator_id: t.uuid().notNull(),
       event_id: t.text().notNull(),
       event_type: t.text().notNull(),

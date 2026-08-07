@@ -17,9 +17,8 @@ const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
 ///
 /// This is the ENGINE's recorder (vendored in the submodule), NOT the monorepo's
 /// `sdks/migrate` copy: only the engine's recorder is guaranteed in lockstep with
-/// the engine's IR model (e.g. it lowers the `genRandomUuid()` source alias to the
-/// `Expr::UuidV4` IR the engine accepts, whereas the monorepo bundle emitted a raw
-/// `genRandomUuid` synth token the engine now rejects). It is also fully
+/// the engine's IR model, so a lexicon the monorepo bundle has not yet followed
+/// cannot produce IR the engine rejects at parse time. It is also fully
 /// self-contained (no `@zeroship/db`/`zeroship` external imports), so the authoring
 /// module graph needs no extra stubs.
 const STANDALONE_RECORDER_JS: &str =
