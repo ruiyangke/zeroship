@@ -848,6 +848,9 @@ async fn totp_login_preserves_native_return_to() {
         &fx.db,
         fx.user_id,
         &totp::encrypt_secret(&key, fx.user_id, &secret).expect("encrypt totp"),
+        // First enrollment for a freshly created fixture user: nothing confirmed
+        // to replace.
+        false,
     )
     .await
     .expect("enroll totp");

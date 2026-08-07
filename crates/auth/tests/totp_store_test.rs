@@ -60,7 +60,7 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
 
     let secret = totp::generate_secret();
     let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct).await.expect("enroll");
+    totp_store::enroll(&db, user.id, &ct, false).await.expect("enroll");
 
     // Pending: row exists but confirmed_at is NULL, so it does NOT gate login.
     let cred = totp_store::find(&db, user.id).await.unwrap().expect("row exists");
@@ -101,7 +101,7 @@ async fn confirm_activates_and_issues_backup_codes() {
 
     let secret = totp::generate_secret();
     let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct).await.unwrap();
+    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
 
     let (plain, hashes) = totp::generate_backup_codes().unwrap();
     let confirmed = totp_store::confirm(&db, user.id, &hashes).await.expect("confirm");
@@ -154,7 +154,7 @@ async fn current_code_verifies_against_stored_secret() {
 
     let secret = totp::generate_secret();
     let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct).await.unwrap();
+    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
 
     // Round-trip the stored ciphertext, then verify a fresh current code.
     let cred = totp_store::find(&db, user.id).await.unwrap().unwrap();
@@ -182,7 +182,7 @@ async fn backup_code_works_once_then_is_rejected() {
 
     let secret = totp::generate_secret();
     let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct).await.unwrap();
+    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
     let (plain, hashes) = totp::generate_backup_codes().unwrap();
     totp_store::confirm(&db, user.id, &hashes).await.unwrap();
 
@@ -224,7 +224,7 @@ async fn disable_removes_credential_and_codes() {
 
     let secret = totp::generate_secret();
     let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct).await.unwrap();
+    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();
     totp_store::confirm(&db, user.id, &hashes).await.unwrap();
     assert!(totp_store::is_enabled(&db, user.id).await.unwrap());
@@ -253,20 +253,41 @@ async fn re_enroll_resets_to_pending() {
         .unwrap();
 
     let s1 = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s1).unwrap())
+    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s1).unwrap(), false)
         .await
         .unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();
     totp_store::confirm(&db, user.id, &hashes).await.unwrap();
     assert!(totp_store::is_enabled(&db, user.id).await.unwrap());
 
-    // Re-enroll with a new secret resets to PENDING (login no longer gated until
-    // a fresh confirm) and changes the stored secret.
+    // An UNAUTHORISED re-enroll over the confirmed credential is refused: it
+    // would reset confirmed_at to NULL, which is 2FA turned off. The store fails
+    // closed so a caller that skipped its re-auth check cannot disarm the
+    // account by accident.
     let s2 = totp::generate_secret();
     assert_ne!(s1, s2);
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s2).unwrap())
+    let refused = totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s2).unwrap(), false)
         .await
         .unwrap();
+    assert!(!refused, "re-enroll over a confirmed credential is refused without replace_confirmed");
+    assert!(
+        totp_store::is_enabled(&db, user.id).await.unwrap(),
+        "a refused re-enroll leaves the credential confirmed"
+    );
+    let cred = totp_store::find(&db, user.id).await.unwrap().unwrap();
+    assert_eq!(
+        totp::decrypt_secret(&key(), user.id, &cred.encrypted_secret).unwrap(),
+        s1,
+        "a refused re-enroll leaves the original secret in place"
+    );
+
+    // With replace_confirmed (the caller attesting it re-authenticated the user)
+    // the re-enroll lands: new secret, reset to PENDING, login no longer gated
+    // until a fresh confirm.
+    let written = totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s2).unwrap(), true)
+        .await
+        .unwrap();
+    assert!(written, "an authorised re-enroll is written");
     assert!(
         !totp_store::is_enabled(&db, user.id).await.unwrap(),
         "re-enroll resets to pending (unconfirmed)"
@@ -287,7 +308,7 @@ async fn credential_cascades_on_user_delete() {
         .await
         .unwrap();
     let secret = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap())
+    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap(), false)
         .await
         .unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();

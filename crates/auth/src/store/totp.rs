@@ -7,8 +7,9 @@
 //! Lifecycle:
 //!
 //!   - [`enroll`] upserts a PENDING credential (`confirmed_at = NULL`) with the
-//!     encrypted secret. A re-enroll overwrites the pending (or even a
-//!     confirmed) row's secret and resets it to pending.
+//!     encrypted secret. A re-enroll overwrites a pending row freely; clobbering
+//!     a CONFIRMED row disarms 2FA and is refused unless the caller passes
+//!     `replace_confirmed` to attest it re-authenticated the user.
 //!   - [`confirm`] flips `confirmed_at` to NOW() and inserts the backup-code
 //!     hashes — in ONE transaction so a half-confirmed state can't exist.
 //!   - [`find`] / [`find_confirmed`] read the credential at login time.
@@ -46,9 +47,21 @@ fn row_to_credential(row: &compio_postgres::Row) -> TotpCredential {
 }
 
 /// Upsert a PENDING credential for `user_id` with the (already-encrypted)
-/// `encrypted_secret`. Resets `confirmed_at` to NULL — a fresh enrollment is
-/// never active until [`confirm`] verifies the first code. Idempotent on
-/// re-enroll (overwrites the secret).
+/// `encrypted_secret`, resetting `confirmed_at` to NULL - a fresh enrollment is
+/// never active until [`confirm`] verifies the first code.
+///
+/// `replace_confirmed` is the caller's assertion that it has re-authenticated
+/// the user. Overwriting a CONFIRMED credential disarms the account's second
+/// factor ([`is_enabled`] goes false and `/login` stops challenging), which is
+/// the same end state as [`disable`] and therefore needs the same proof. With
+/// `replace_confirmed = false` this refuses to touch a confirmed row and
+/// returns `Ok(false)`, so a caller that forgets the check fails closed instead
+/// of silently disarming 2FA. The guard lives in the `ON CONFLICT` predicate
+/// rather than a preceding SELECT so a concurrent [`confirm`] landing between
+/// the caller's check and this write cannot slip through.
+///
+/// Returns `true` when the credential was written, `false` when the write was
+/// refused because a confirmed credential exists.
 ///
 /// # Errors
 ///
@@ -57,20 +70,23 @@ pub async fn enroll(
     conn: &Client,
     user_id: uuid::Uuid,
     encrypted_secret: &[u8],
-) -> Result<()> {
+    replace_confirmed: bool,
+) -> Result<bool> {
     let blob = encrypted_secret.to_vec();
-    conn.execute(
-        "INSERT INTO zeroship.totp_credentials (user_id, encrypted_secret, confirmed_at) \
-         VALUES ($1, $2, NULL) \
-         ON CONFLICT (user_id) DO UPDATE \
-            SET encrypted_secret = EXCLUDED.encrypted_secret, \
-                confirmed_at = NULL, \
-                created_at = NOW()",
-        &[&user_id, &blob],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("totp enroll: {e}")))?;
-    Ok(())
+    let n = conn
+        .execute(
+            "INSERT INTO zeroship.totp_credentials (user_id, encrypted_secret, confirmed_at) \
+             VALUES ($1, $2, NULL) \
+             ON CONFLICT (user_id) DO UPDATE \
+                SET encrypted_secret = EXCLUDED.encrypted_secret, \
+                    confirmed_at = NULL, \
+                    created_at = NOW() \
+              WHERE $3::bool OR totp_credentials.confirmed_at IS NULL",
+            &[&user_id, &blob, &replace_confirmed],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("totp enroll: {e}")))?;
+    Ok(n > 0)
 }
 
 /// Read the credential row for `user_id` (confirmed or pending), or `None`.

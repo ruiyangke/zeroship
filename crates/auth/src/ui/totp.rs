@@ -1,4 +1,4 @@
-//! `/me/2fa/*` — authenticated TOTP enrollment / confirm / disable (ISS-11).
+//! `/me/2fa/*` — authenticated TOTP enrollment / confirm / disable.
 //!
 //! These are the self-service 2FA-management endpoints, gated by the same
 //! `__Host-zsidp_session` cookie + double-submit CSRF as the rest of `/me`
@@ -6,7 +6,9 @@
 //!
 //!   - `POST /me/2fa/enroll`  → generate a secret, store it ENCRYPTED + PENDING
 //!     (`confirmed_at = NULL`), return the `otpauth://` provisioning URI + the
-//!     base32 secret for manual entry. NOT yet active.
+//!     base32 secret for manual entry. NOT yet active. Replacing an already
+//!     CONFIRMED credential resets it to pending, which turns 2FA off, so that
+//!     case requires the same re-auth proof as `disable`.
 //!   - `POST /me/2fa/confirm` → verify a code against the pending secret; on
 //!     success flip to confirmed (2FA now gates login) and return one-time
 //!     backup codes (only their hashes are stored).
@@ -40,20 +42,19 @@ use crate::store::{sessions, totp as totp_store, users};
 const TOTP_ISSUER: &str = "zeroship";
 
 #[derive(Debug, Deserialize)]
-pub struct CsrfForm {
-    pub csrf: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ConfirmForm {
     pub csrf: String,
     pub code: String,
 }
 
-/// Disable accepts EITHER a current TOTP code OR the account password as the
-/// re-auth proof. At least one must be supplied (and valid).
+/// The re-auth proof `enroll` and `disable` share: EITHER a current TOTP code OR
+/// the account password. Both routes can end with the account holding no working
+/// second factor, so both take the same shape. Neither field is required at the
+/// parse layer - `enroll` only demands a proof when there is a confirmed
+/// credential to protect - but the handler rejects the request when the proof it
+/// does require is absent or wrong.
 #[derive(Debug, Deserialize)]
-pub struct DisableForm {
+pub struct ReauthForm {
     pub csrf: String,
     #[serde(default)]
     pub code: Option<String>,
@@ -64,13 +65,22 @@ pub struct DisableForm {
 // ─── POST /me/2fa/enroll ───────────────────────────────────────────────────
 
 /// Begin enrollment: mint a fresh secret, store it encrypted + PENDING, and
-/// return the provisioning material. Re-enrolling overwrites any pending (or
-/// confirmed) credential and resets it to pending (login is no longer gated
-/// until a fresh confirm).
+/// return the provisioning material.
+///
+/// Re-enrolling resets the credential to pending, so for a CONFIRMED credential
+/// this is a way to turn 2FA off: `is_enabled` goes false and `/login` stops
+/// challenging. That is the same end state `disable` produces, so it demands the
+/// same proof - a current TOTP code or the account password. Without it a stolen
+/// session cookie would be enough to disarm the second factor and then re-arm it
+/// against the thief's own authenticator.
+///
+/// A first enrollment, or one replacing a still-PENDING credential, protects
+/// nothing yet (neither gates login) and needs no re-auth - requiring one there
+/// would make 2FA impossible to turn on.
 #[allow(clippy::future_not_send)]
 pub async fn enroll(
     req: HttpRequest,
-    form: web::types::Form<CsrfForm>,
+    form: web::types::Form<ReauthForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -80,6 +90,39 @@ pub async fn enroll(
     let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
+
+    let active = match totp_store::find_confirmed(db.as_ref(), user.id).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "totp find_confirmed failed");
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+        }
+    };
+    if let Some(cred) = active.as_ref() {
+        // Same bucket as confirm/disable: this arm verifies a code, so it is
+        // brute-forceable and belongs behind the verify throttle. The
+        // no-credential and pending arms below never touch it, keeping first
+        // enrollment free of throttle state.
+        if rate_limited(db.as_ref(), user.id).await {
+            return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
+        }
+        if !verify_reauth(&cfg, &user, cred, form.code.as_deref(), form.password.as_deref()).await {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "totp_enroll_refused",
+                    outcome: "failure",
+                    user_id: Some(&user.id),
+                    auth_method: Some("totp"),
+                    detail: json!({ "reason": "reauth_failed" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
+        }
+    }
+
     let key = match totp::key_from_config(&cfg.totp_enc_key) {
         Ok(k) => k,
         Err(e) => {
@@ -103,9 +146,31 @@ pub async fn enroll(
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
         }
     };
-    if let Err(e) = totp_store::enroll(db.as_ref(), user.id, &ciphertext).await {
-        tracing::error!(error = %e, user_id = %user.id, "totp enroll store failed");
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+    // `active.is_some()` here means the re-auth above passed. The store re-checks
+    // under the write, so a confirm that landed since then loses the race and the
+    // enrollment is refused rather than disarming a credential nobody proved
+    // ownership of.
+    match totp_store::enroll(db.as_ref(), user.id, &ciphertext, active.is_some()).await {
+        Ok(true) => {}
+        Ok(false) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "totp_enroll_refused",
+                    outcome: "failure",
+                    user_id: Some(&user.id),
+                    auth_method: Some("totp"),
+                    detail: json!({ "reason": "confirmed_credential_exists" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user.id, "totp enroll store failed");
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+        }
     }
 
     audit::emit(
@@ -238,7 +303,7 @@ pub async fn confirm(
 #[allow(clippy::future_not_send)]
 pub async fn disable(
     req: HttpRequest,
-    form: web::types::Form<DisableForm>,
+    form: web::types::Form<ReauthForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -264,7 +329,14 @@ pub async fn disable(
     };
 
     // Re-auth: a valid current TOTP code OR the account password.
-    let reauthed = verify_reauth(&cfg, &user, &cred, &form).await;
+    let reauthed = verify_reauth(
+        &cfg,
+        &user,
+        &cred,
+        form.code.as_deref(),
+        form.password.as_deref(),
+    )
+    .await;
     if !reauthed {
         audit::emit(
             db.as_ref(),
@@ -304,18 +376,21 @@ pub async fn disable(
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-/// Verify the disable re-auth proof: a valid current TOTP code (decrypt the
-/// stored secret and check) OR the correct account password (Argon2, on
-/// `spawn_blocking`). Returns `true` if EITHER supplied proof validates.
+/// Verify a re-auth proof: a valid current TOTP code (decrypt the stored secret
+/// and check) OR the correct account password (Argon2, on `spawn_blocking`).
+/// Returns `true` if EITHER supplied proof validates. Shared by `enroll` and
+/// `disable` - both can leave the account without a working second factor, so
+/// both accept exactly these two proofs.
 #[allow(clippy::future_not_send)]
 async fn verify_reauth(
     cfg: &AuthConfig,
     user: &UserRow,
     cred: &totp_store::TotpCredential,
-    form: &DisableForm,
+    code: Option<&str>,
+    submitted_password: Option<&str>,
 ) -> bool {
     // TOTP-code proof.
-    if let Some(code) = form.code.as_deref().filter(|c| !c.trim().is_empty()) {
+    if let Some(code) = code.filter(|c| !c.trim().is_empty()) {
         if let Ok(key) = totp::key_from_config(&cfg.totp_enc_key) {
             if let Ok(secret) = totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
                 if totp::verify_code(&secret, code) {
@@ -326,7 +401,7 @@ async fn verify_reauth(
     }
     // Password proof (only meaningful for accounts that have a password).
     if let (Some(pw), Some(phc)) = (
-        form.password.as_deref().filter(|p| !p.is_empty()),
+        submitted_password.filter(|p| !p.is_empty()),
         user.password_hash.clone(),
     ) {
         let pw = pw.to_string();
