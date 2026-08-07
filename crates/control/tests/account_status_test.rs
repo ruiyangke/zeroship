@@ -123,6 +123,14 @@ async fn payment_failed_moves_to_past_due() {
         .expect("read history");
     assert_eq!(hist.len(), 1, "exactly one transition recorded");
     assert_eq!(hist[0].get::<_, String>("to_state"), "past_due");
+
+    // Teardown: `store` and `f` (its registry + a raw side connection) each
+    // hold a connection, and locals are dropped only after the body returns -
+    // by which point the runtime is gone and the sockets can no longer be
+    // closed. Drop them explicitly, then wait for the close to land.
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -181,6 +189,10 @@ async fn repeated_failure_is_idempotent() {
         .unwrap()[0]
         .get("n");
     assert_eq!(n, 1, "no extra history row for an idempotent repeat");
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -236,6 +248,10 @@ async fn dunning_exhaustion_suspends() {
         .unwrap()[0]
         .get("suspended_at");
     assert!(suspended_at.is_some(), "suspended_at is stamped on suspension");
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -293,6 +309,10 @@ async fn payment_success_reactivates() {
         .await
         .expect("idempotent recover");
     assert!(again.is_none(), "recovery of an already-active creator is a no-op");
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 /// MAJOR #5 regression — `registry.get_routes` must be DETERMINISTIC under an
@@ -374,6 +394,10 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
              never un-suspend via last-write-wins"
         );
     }
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 /// CRITICAL #1 regression — an out-of-order/redelivered `payment_failed` whose
@@ -460,6 +484,10 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
         .expect("active→past_due on a genuine post-recovery failure");
     assert_eq!(re.to, AccountState::PastDue);
     assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,4 +530,8 @@ async fn payment_failed_creates_creator_billing_parent_first() {
         .await
         .unwrap();
     assert_eq!(parent.len(), 1, "record_payment_failed created the creator_billing FK parent");
+
+    drop(store);
+    drop(f);
+    common::drain_pg().await;
 }

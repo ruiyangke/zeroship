@@ -562,28 +562,42 @@ async fn invoice_history_is_creator_scoped_operator_sees_any() {
     assert_eq!(invoices[0]["status"], "finalized");
 
     // (c) Cross-creator: creator A reading app B → 403 (not their app).
-    let resp = test::call_service(
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(
         &svc,
         get(pat_a.bearer(), format!("/api/apps/{app_b}/invoices")),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "creator A must NOT read creator B's app invoices",
     );
 
     // Operator reads BOTH apps' invoices.
     for app in [app_a, app_b] {
-        let resp = test::call_service(
+        let status = test::call_service(
             &svc,
             get(pat_op.bearer(), format!("/api/apps/{app}/invoices")),
         )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK, "operator reads any app's invoices");
+        .await
+        .status();
+        assert_eq!(status, StatusCode::OK, "operator reads any app's invoices");
     }
 
     cleanup(&pg, &[creator_a, creator_b, op_user], &[app_a, app_b], &[&pat_a, &pat_b, &pat_op]).await;
+
+    // Teardown: the ntex test service holds a cloned Arc<AppState>, and the
+    // fixture holds the fixture's own Postgres connection; both locals are
+    // dropped only after the body returns - by which point the runtime is gone
+    // and the sockets can no longer be closed. Drop them explicitly, then wait
+    // for the close to land.
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -620,16 +634,21 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
         format!("/api/apps/{app}/projected-charge"),
         format!("/api/apps/{app}/billing-status"),
     ] {
-        let resp = test::call_service(&svc, get(uri.clone())).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
+        let status = test::call_service(&svc, get(uri.clone())).await.status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
     }
     // Creator-keyed reads → 403 (the caller has no billing capability anywhere).
     for uri in ["/api/billing/credit-balance", "/api/billing/payment-method"] {
-        let resp = test::call_service(&svc, get(uri.to_string())).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
+        let status = test::call_service(&svc, get(uri.to_string())).await.status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
     }
 
     cleanup(&pg, &[creator, stranger], &[app], &[&pat_none]).await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -722,6 +741,11 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
     );
 
     cleanup(&pg, &[creator], &[app], &[&pat]).await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -780,6 +804,11 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     assert_eq!(body1["as_of"], body2["as_of"], "as_of is the original compute instant");
 
     cleanup(&pg, &[creator], &[app], &[&pat]).await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -919,16 +948,19 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(bal_op["balance_cents"], 3000, "operator reads A's balance via ?creator_id");
 
     // A non-operator passing ANOTHER creator's id is 403 (no cross-creator read).
-    let resp = test::call_service(
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(
         &svc,
         get(
             pat_b.bearer(),
             format!("/api/billing/credit-balance?creator_id={creator_a}"),
         ),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "creator B must NOT read creator A's balance via ?creator_id",
     );
@@ -963,12 +995,13 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(bs_a["account_state"], "active", "no dunning row ⇒ active");
     assert_eq!(bs_a["spend_state"], "allow", "no spend-state row ⇒ allow");
     // Cross-creator: A cannot read B's billing-status.
-    let resp = test::call_service(
+    let status = test::call_service(
         &svc,
         get(pat_a.bearer(), format!("/api/apps/{app_b}/billing-status")),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "A cannot read B's billing-status");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "A cannot read B's billing-status");
 
     cleanup(
         &pg,
@@ -977,6 +1010,11 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
         &[&pat_a, &pat_b, &pat_op],
     )
     .await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1029,20 +1067,23 @@ async fn invoice_detail_denies_a_different_creator() {
     };
 
     // Owner A reads their own invoice detail → 200.
-    let resp = test::call_service(&svc, get(pat_a.bearer(), format!("/api/invoices/{inv_a}"))).await;
-    assert_eq!(resp.status(), StatusCode::OK, "owner reads own invoice detail");
+    // Status only: retaining a `WebResponse` binding across these three rebinds
+    // would keep the app state - and its Postgres client - alive past the
+    // teardown below, so every call reads only `.status()`.
+    let status = test::call_service(&svc, get(pat_a.bearer(), format!("/api/invoices/{inv_a}"))).await.status();
+    assert_eq!(status, StatusCode::OK, "owner reads own invoice detail");
 
     // Creator B (owns only app B) reading A's invoice → 403.
-    let resp = test::call_service(&svc, get(pat_b.bearer(), format!("/api/invoices/{inv_a}"))).await;
+    let status = test::call_service(&svc, get(pat_b.bearer(), format!("/api/invoices/{inv_a}"))).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "a different creator must NOT read A's invoice line detail",
     );
 
     // Operator reads any invoice detail → 200.
-    let resp = test::call_service(&svc, get(pat_op.bearer(), format!("/api/invoices/{inv_a}"))).await;
-    assert_eq!(resp.status(), StatusCode::OK, "operator reads any invoice detail");
+    let status = test::call_service(&svc, get(pat_op.bearer(), format!("/api/invoices/{inv_a}"))).await.status();
+    assert_eq!(status, StatusCode::OK, "operator reads any invoice detail");
 
     cleanup(
         &pg,
@@ -1051,6 +1092,11 @@ async fn invoice_detail_denies_a_different_creator() {
         &[&pat_a, &pat_b, &pat_op],
     )
     .await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1113,9 +1159,9 @@ async fn invoice_read_denied_via_shared_app_membership() {
     };
 
     // A requests C's invoice. Pre-fix this was 200 (leak); the fix denies it.
-    let resp = test::call_service(&svc, get(pat_a.bearer(), format!("/api/invoices/{inv_c}"))).await;
+    let status = test::call_service(&svc, get(pat_a.bearer(), format!("/api/invoices/{inv_c}"))).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "attacker who shares an app with the victim must NOT read the victim's invoice",
     );
@@ -1127,6 +1173,11 @@ async fn invoice_read_denied_via_shared_app_membership() {
         &[&pat_a],
     )
     .await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1202,37 +1253,43 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     // First prove the per-app gate is actually CLEARED by the viewer (so the 403
     // below is the OWNER-grain check firing, not merely the capability gate): the
     // viewer reads the app's billing-STATUS (app-scoped, BillingRead) → 200.
-    let resp = test::call_service(
+    // Status only across these rebinds: retaining a `WebResponse` binding would
+    // keep the app state - and its Postgres client - alive past the teardown
+    // below.
+    let status = test::call_service(
         &svc,
         get(pat_viewer.bearer(), format!("/api/apps/{app_o}/billing-status")),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::OK,
         "sanity: viewer DOES hold BillingRead on app O (clears the per-app gate)",
     );
 
     // Non-owner viewer V (BillingRead on app O) → 403 on the OWNER's invoice
     // history. Pre-fix this was 200 and leaked the owner's whole history.
-    let resp = test::call_service(
+    let status = test::call_service(
         &svc,
         get(pat_viewer.bearer(), format!("/api/apps/{app_o}/invoices")),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "a non-owner member must NOT read the owner's invoice history",
     );
 
     // Operator reads the owner's history → 200 (no regression).
-    let resp = test::call_service(
+    let status = test::call_service(
         &svc,
         get(pat_op.bearer(), format!("/api/apps/{app_o}/invoices")),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "operator reads any app's invoice history");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::OK, "operator reads any app's invoice history");
 
     cleanup(
         &pg,
@@ -1241,4 +1298,9 @@ async fn app_invoice_history_denied_to_non_owner_member() {
         &[&pat_owner, &pat_viewer, &pat_op],
     )
     .await;
+
+    drop(svc);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }

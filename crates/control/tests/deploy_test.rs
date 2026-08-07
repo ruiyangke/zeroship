@@ -23,6 +23,9 @@ use zeroship_bundle::{
 };
 use zeroship_control::deploy::{self, IngestError};
 
+#[allow(dead_code)]
+mod common;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -259,6 +262,14 @@ async fn deploy_round_trip() {
     registry.delete_app(&app_id2).await.ok();
 
     let _ = std::fs::remove_dir_all(&root);
+
+    // Teardown: `registry` and the raw owner-seed `pg` client each hold a
+    // connection, and locals are dropped only after the body returns - by
+    // which point the runtime is gone and the sockets can no longer be
+    // closed. Drop them explicitly, then wait for the close to land.
+    drop(pg);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------

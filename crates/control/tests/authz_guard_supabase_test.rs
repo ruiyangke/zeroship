@@ -366,6 +366,14 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
     assert_eq!(body["principal_id"], principal_id.to_string());
 
     fx.cleanup().await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -380,10 +388,16 @@ async fn gotrue_unlinked_subject_is_unauthorized() {
         .uri(&format!("/raw-app/{}/deploy-check", Uuid::new_v4()))
         .header("authorization", bearer(&token))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -400,10 +414,14 @@ async fn gotrue_non_authenticated_role_is_unauthorized() {
         .uri(&format!("/raw-app/{}/deploy-check", Uuid::new_v4()))
         .header("authorization", bearer(&token))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -421,10 +439,14 @@ async fn gotrue_principal_without_deploy_grant_is_forbidden() {
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
         .header("authorization", bearer(&token))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -454,9 +476,13 @@ async fn gotrue_expired_or_wrong_issuer_token_is_unauthorized() {
             .uri(&format!("/raw-app/{}/deploy-check", Uuid::new_v4()))
             .header("authorization", bearer(&token))
             .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let status = test::call_service(&app, req).await.status();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

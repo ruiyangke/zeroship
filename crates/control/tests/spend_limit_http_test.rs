@@ -187,4 +187,13 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
     pat.cleanup(&state).await;
     let _ = std::fs::remove_dir_all(&blob_root);
     let _ = std::fs::remove_dir_all(&deploy_tmp_dir);
+
+    // Teardown: the spend engine, the service, and the app state all hold (or
+    // share) a Postgres connection, and locals are dropped only after the body
+    // returns - by which point the runtime is gone and the sockets can no
+    // longer be closed. Drop them explicitly, then wait for the close to land.
+    drop(engine);
+    drop(svc);
+    drop(state);
+    common::drain_pg().await;
 }

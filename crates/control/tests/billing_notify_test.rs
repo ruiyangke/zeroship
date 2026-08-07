@@ -472,6 +472,13 @@ async fn each_kind_produces_exactly_one_notification() {
             "no pending rows remain for creator {c} after settle"
         );
     }
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -546,6 +553,10 @@ async fn concurrent_ticks_send_each_event_once() {
     // The PK guarantees exactly ONE ledger row for the transition, now `sent`.
     assert_eq!(ledger_count(&fx.pg, creator, "sent").await, 1);
     assert_eq!(ledger_count(&fx.pg, creator, "pending").await, 0);
+
+    drop(side);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -636,6 +647,9 @@ async fn crash_before_flip_redrives_idempotent() {
     );
     // The row is now `sent` (the re-drive flipped it).
     assert_eq!(ledger_count(&fx.pg, creator, "sent").await, 1);
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// The cbh_ surrogate id of the single history row for a creator.
@@ -682,6 +696,9 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
             assert_ne!(a, b, "notification source prefixes must be pairwise-disjoint");
         }
     }
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -924,6 +941,9 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
     // are keyed by the she_ transition id, one per band).
     let _ = app_name; // (name is asserted via the rendered body in notify.rs unit tests)
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1024,6 +1044,9 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
         0,
         "no pending spend notification rows for a recovery walk"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1092,6 +1115,9 @@ async fn aged_transition_past_scan_window_is_not_notified() {
         0,
         "the aged past_due remains un-notified even after the sweep delivered a fresh row",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1156,6 +1182,10 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
         Some("suspended"),
         "the exhausted creator is suspended once the lock is free",
     );
+
+    drop(side);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Read the persisted account state for a creator (None ⇒ no row).

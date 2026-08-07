@@ -214,6 +214,13 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     assert_eq!(v["to"], "block", "records the to-state");
     assert_eq!(v["spend_cents"], 100, "audit detail carries spend_cents (#8)");
     assert_eq!(v["limit_cents"], 100, "audit detail carries limit_cents (#8)");
+
+    // Teardown: the fixture holds the only handle to this test's Postgres
+    // connection, and locals are dropped only after the body returns - by which
+    // point the runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #2: the advisory lock is single-flight. While one connection holds
@@ -277,6 +284,10 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         .expect("unlock");
     let n2 = spend_reconcile::tick(&fx.state).await.expect("tick runs");
     assert!(n2 >= 1, "after release, the sweep runs and transitions our app");
+
+    drop(holder);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #12 (spend band walk): drive a single app through Allow→Warn→Degrade→Block AND a
@@ -366,4 +377,7 @@ async fn reconcile_walks_spend_bands_and_holds_deadband() {
     assert_eq!(hist_into(app, "warn").await, 1, "exactly one →warn transition");
     assert_eq!(hist_into(app, "degrade").await, 1, "exactly one →degrade transition");
     assert_eq!(hist_into(app, "block").await, 1, "exactly one →block transition");
+
+    drop(fx);
+    common::drain_pg().await;
 }

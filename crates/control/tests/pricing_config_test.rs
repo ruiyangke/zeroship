@@ -323,8 +323,10 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": new_fx }))
         .to_request();
-    let resp = test::call_service(&svc, put).await;
-    assert_eq!(resp.status(), StatusCode::OK, "operator PUT should succeed");
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, put).await.status();
+    assert_eq!(status, StatusCode::OK, "operator PUT should succeed");
 
     // The stored value changed.
     assert_eq!(current_fx(&fx.state).await, new_fx, "DB reflects the new FX");
@@ -369,6 +371,14 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
 
     restore_seed_fx(&fx.state, seed).await;
     cleanup(&fx.state, &[&op_pat]).await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// PUT as a creator (app-scoped principal, NOT Resource::Any) → 403, and the
@@ -398,9 +408,9 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
         .header("authorization", creator_pat.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": seed + 999 }))
         .to_request();
-    let resp = test::call_service(&svc, put).await;
+    let put_status = test::call_service(&svc, put).await.status();
     assert_eq!(
-        resp.status(),
+        put_status,
         StatusCode::FORBIDDEN,
         "creator (app-scoped, not Resource::Any) must be denied — operator-only"
     );
@@ -413,14 +423,18 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
         .uri("/api/pricing-config")
         .header("authorization", creator_pat.bearer())
         .to_request();
-    let resp = test::call_service(&svc, get).await;
+    let get_status = test::call_service(&svc, get).await.status();
     assert_eq!(
-        resp.status(),
+        get_status,
         StatusCode::FORBIDDEN,
         "creator GET must be denied — operator-only read"
     );
 
     cleanup(&fx.state, &[&creator_pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// PUT a below-floor value → 400, and the stored value is unchanged (fail
@@ -452,9 +466,9 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": below }))
         .to_request();
-    let resp = test::call_service(&svc, put).await;
+    let below_status = test::call_service(&svc, put).await.status();
     assert_eq!(
-        resp.status(),
+        below_status,
         StatusCode::BAD_REQUEST,
         "below-floor FX must be rejected with 400 (fail closed)"
     );
@@ -478,10 +492,14 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": FLOOR }))
         .to_request();
-    let resp = test::call_service(&svc, put_floor).await;
-    assert_eq!(resp.status(), StatusCode::OK, "the exact floor is accepted");
+    let floor_status = test::call_service(&svc, put_floor).await.status();
+    assert_eq!(floor_status, StatusCode::OK, "the exact floor is accepted");
     assert_eq!(current_fx(&fx.state).await, FLOOR, "floor value stored");
 
     restore_seed_fx(&fx.state, seed).await;
     cleanup(&fx.state, &[&op_pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }

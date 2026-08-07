@@ -1789,6 +1789,13 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     .await
     .expect("claim lapsed inflight");
     assert_eq!(lapsed.len(), 1);
+
+    // Teardown: the fixture (and any dispatcher/service built from its state)
+    // holds a Postgres connection, and locals are dropped only after the body
+    // returns - by which point the runtime is gone and the socket can no
+    // longer be closed. Drop them explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1856,6 +1863,10 @@ async fn claim_journal_preserves_same_name_child_occurrences() {
         let _ = release.send(());
     }
     wait_for_completed(&fx, &[run_id]).await;
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2084,6 +2095,9 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         parent_step.get::<_, Option<serde_json::Value>>("output"),
         Some(serde_json::json!({"child": "ok"}))
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2311,6 +2325,10 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
             ),
         ]
     );
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2437,6 +2455,9 @@ async fn claim_compensation_drain_registers_parent_wake() {
         .expect("load parent scheduler timer")
         .expect("claim drain should register parent timer");
     assert_eq!(timer.run_id, parent);
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2477,8 +2498,10 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
         app_id,
     )
     .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     let child_after_cancel = fx
         .pg
         .query_one(
@@ -2532,6 +2555,10 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
     assert!(!cancel_requested);
     assert_eq!(claimed_by, None);
     assert_eq!(dispatch_nonce, None);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2653,6 +2680,9 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
         inflight.is_none(),
         "child inflight row should clear after apply cancel"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2784,6 +2814,9 @@ async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations()
         assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
         assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
     }
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2917,6 +2950,13 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
                 }
                 assert!(scheduler_cleared, "child scheduler rows should clear after cancel ack");
             }
+            // Teardown: this is an early return out of the polling loop, and
+            // locals are dropped only after the body returns - by which point
+            // the runtime is gone and the sockets can no longer be closed.
+            // Drop them explicitly, then wait for the close to land.
+            drop(dispatcher);
+            drop(fx);
+            common::drain_pg().await;
             return;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
@@ -3011,6 +3051,9 @@ async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
         .await
         .expect("child count after cap");
     assert_eq!(child_count.get::<_, i64>("n"), 0);
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3106,6 +3149,9 @@ async fn blob_output_step_refcount_co_commits_with_journal_row() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3240,6 +3286,9 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3315,6 +3364,9 @@ async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3431,6 +3483,9 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
         .expect("load broadcast state")
         .get("fanout_state");
     assert_eq!(state, "completed");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3696,6 +3751,9 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3832,6 +3890,9 @@ async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -3937,6 +3998,9 @@ async fn deploy_retention_counts_are_per_app() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4057,6 +4121,9 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
     })
     .await
     .expect("test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4150,6 +4217,9 @@ async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent
     })
     .await
     .expect("schedule overlap policy test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4212,6 +4282,9 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
     })
     .await
     .expect("schedule catch-up policy test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4260,6 +4333,9 @@ async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
     })
     .await
     .expect("schedule normal cadence test timeout");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4471,6 +4547,9 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
     })
     .await
     .expect("batch apply regression timed out");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4530,6 +4609,10 @@ async fn caught_step_failure_continues_run_to_completion() {
             (1, "after-catch".to_string(), "run".to_string(), "completed".to_string()),
         ]
     );
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4609,6 +4692,10 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     .expect("terminal tick");
     assert_eq!(terminal_tick, 0, "terminal failed run must not re-dispatch");
     assert_eq!(dispatcher.requests().len(), 2);
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4685,6 +4772,10 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
     .expect("terminal stalled tick");
     assert_eq!(terminal_tick, 0, "stalled is terminal and fail-closed");
     assert_eq!(dispatcher.requests().len(), 2);
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4729,6 +4820,10 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
         let _ = release.send(());
     }
     wait_for_completed(&fx, &[run_id]).await;
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4775,6 +4870,11 @@ async fn concurrent_ticks_claim_disjoint_rows() {
         let _ = release.send(());
     }
     wait_for_completed(&fx, &claimed_run_ids).await;
+
+    drop(d1);
+    drop(d2);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4827,6 +4927,10 @@ async fn stale_lease_is_taken_over_after_ttl() {
         let _ = release.send(());
     }
     wait_for_completed(&fx, &[run_id]).await;
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4915,6 +5019,9 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
         steps[0].get::<_, Option<serde_json::Value>>("output"),
         Some(serde_json::json!({"ok": true}))
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -4964,6 +5071,10 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
         let _ = release.send(());
     }
     wait_for_completed(&fx, &[run_id]).await;
+
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5036,6 +5147,9 @@ async fn apply_outcome_checkpoints_idempotently() {
     assert_eq!(rows[0].get::<_, i64>("n"), 1);
 
     assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row().await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row() {
@@ -5309,6 +5423,10 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     .await
     .expect("tick resumed");
     wait_for_completed(&fx, &due_runs).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5357,7 +5475,10 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     )
     .await;
 
-    let resp = test::call_service(
+    // Status only for these calls: no read_body follows, so a retained
+    // `WebResponse` would keep the app state's Postgres client alive past
+    // the teardown at the end of this test.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
@@ -5365,8 +5486,9 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     let paused = fx
         .pg
         .query_one(
@@ -5380,7 +5502,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
     assert!(timer.is_none() && inflight.is_none(), "pause should de-register");
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -5390,8 +5512,9 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::ACCEPTED);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::ACCEPTED);
     let paused_after_signal = fx
         .pg
         .query_one(
@@ -5407,7 +5530,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         "signal during pause must buffer without re-arming the paused row"
     );
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
@@ -5415,8 +5538,9 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     let resumed = fx
         .pg
         .query_one(
@@ -5444,6 +5568,10 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     .await
     .expect("drive resumed signal");
     wait_for_completed(&fx, &[run_id]).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5536,7 +5664,9 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
             .configure(workflow_instance_api::configure),
     )
     .await;
-    let resp = test::call_service(
+    // Status only: no read_body follows, so a retained `WebResponse` would
+    // keep the app state's Postgres client alive past the teardown below.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -5546,8 +5676,9 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::ACCEPTED);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::ACCEPTED);
     let timer = fx
         .scheduler_store
         .timer(&run_id)
@@ -5565,6 +5696,11 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
         .await
         .expect("load signaled inflight");
     assert!(inflight.is_none(), "signal registration should not recreate inflight");
+
+    drop(app);
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5608,7 +5744,10 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     assert_eq!(claimed, 1);
     wait_for_gated_requests(&dispatcher, 1).await;
 
-    let resp = test::call_service(
+    // Status only for both calls below: no read_body follows either one, so a
+    // retained `WebResponse` would keep the app state's Postgres client alive
+    // past the teardown at the end of this test.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
@@ -5616,8 +5755,9 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     let row = fx
         .pg
         .query_one(
@@ -5692,7 +5832,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         "paused run should already be retired from the scheduler store after checkpoint"
     );
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
@@ -5700,8 +5840,9 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     assert_scheduler_presence(&fx, &run_id, "resume after paused checkpoint").await;
     workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -5726,6 +5867,11 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<_, String>("name"), "a");
     assert_eq!(rows[1].get::<_, String>("name"), "b");
+
+    drop(app);
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5770,7 +5916,9 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     assert_eq!(claimed, 1);
     wait_for_gated_requests(&dispatcher, 1).await;
 
-    let resp = test::call_service(
+    // Status only: no read_body follows, so a retained `WebResponse` would
+    // keep the app state's Postgres client alive past the teardown below.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/cancel")),
@@ -5778,8 +5926,9 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
     let _ = release.send(());
     wait_for_cancelled_without_steps(&fx, &run_id).await;
     let claimed = workflow_engine::fire_once(
@@ -5794,6 +5943,11 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
         claimed, 0,
         "cancelled run should already be retired from the scheduler store"
     );
+
+    drop(app);
+    drop(dispatcher);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5863,7 +6017,10 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     );
     let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
     assert_eq!(body["error"], "RestartError");
-    let resp = test::call_service(
+    // Status only: no read_body follows, so a retained `WebResponse` would
+    // keep the app state's Postgres client alive past the teardown at the
+    // end of this test.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -5873,9 +6030,10 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
         )
         .to_request(),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         ntex::http::StatusCode::OK,
         "full restart is allowed even after completed compensation"
     );
@@ -5992,6 +6150,10 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<_, String>("name"), "a");
     assert_eq!(rows[1].get::<_, String>("name"), "b");
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -6051,6 +6213,13 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
             .await
             .expect("count completed");
         if rows[0].get::<_, i64>("n") == i64::try_from(run_ids.len()).unwrap() {
+            // Teardown: this is an early return out of the polling loop, and
+            // locals are dropped only after the body returns - by which
+            // point the runtime is gone and the sockets can no longer be
+            // closed. Drop them explicitly, then wait for the close to land.
+            drop(dispatcher);
+            drop(fx);
+            common::drain_pg().await;
             return;
         }
         compio::time::sleep(Duration::from_millis(10)).await;
@@ -6128,6 +6297,13 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
                 0,
                 "backpressure must park without inserting an attempt/no-reply step"
             );
+            // Teardown: this is an early return out of the polling loop, and
+            // locals are dropped only after the body returns - by which
+            // point the runtime is gone and the socket can no longer be
+            // closed. Drop the fixture explicitly, then wait for the close
+            // to land.
+            drop(fx);
+            common::drain_pg().await;
             return;
         }
         compio::time::sleep(Duration::from_millis(20)).await;

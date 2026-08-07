@@ -339,7 +339,10 @@ async fn create_conflicts_status_and_cross_app_isolation() {
     let status: Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
     assert_eq!(status["state"], "queued");
 
-    let resp = test::call_service(
+    // Status only for these three: each `resp` below is shadowed by the next
+    // `let resp = ...` before ever being consumed, so a retained `WebResponse`
+    // would keep the app state's Postgres client alive past teardown.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::get().uri(&format!("/internal/workflows/runs/{first_run}")),
@@ -347,10 +350,11 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "app B cannot read app A run");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::NOT_FOUND, "app B cannot read app A run");
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -360,10 +364,11 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "app B cannot signal app A run");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::NOT_FOUND, "app B cannot signal app A run");
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -372,8 +377,9 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "app B cannot cancel app A run");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::NOT_FOUND, "app B cannot cancel app A run");
 
     let resp = test::call_service(
         &app,
@@ -496,7 +502,10 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         Some("order:2")
     );
 
-    let resp = test::call_service(
+    // Status only: both calls below are the last uses of `resp` in this test,
+    // and a retained `WebResponse` keeps the app state - and its Postgres
+    // client - alive past the teardown at the end of this test.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -506,10 +515,11 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    .await
+    .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let resp = test::call_service(
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -519,8 +529,17 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         )
         .to_request(),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    .await
+    .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -632,7 +651,9 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     .await;
     let (create_cap_app, _) =
         seed_app_on_plan(&fx, "create-cap", &["Checkout"], &create_cap_plan).await;
-    let resp = test::call_service(
+    // Status only: no read_body follows, so a retained `WebResponse` would
+    // keep the app state - and its Postgres client - alive past teardown.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -642,9 +663,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         )
         .to_request(),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::TOO_MANY_REQUESTS,
         "per-app aggregate journal cap should 429 create"
     );
@@ -691,7 +713,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .as_str()
         .expect("capped create response id")
         .to_string();
-    let resp = test::call_service(
+    // Status only: this is the last use of `resp` in this test, and a
+    // retained `WebResponse` would keep the app state's Postgres client
+    // alive past the teardown below.
+    let status = test::call_service(
         &app,
         authed(
             test::TestRequest::post()
@@ -701,9 +726,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         )
         .to_request(),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::TOO_MANY_REQUESTS,
         "per-app aggregate journal cap should 429 signal"
     );
@@ -719,6 +745,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .await
         .expect("count capped signal rows");
     assert_eq!(rows[0].get::<_, i64>("n"), 0);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -882,4 +912,8 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     assert_eq!(row.get::<_, Option<DateTime<Utc>>>("wake_at"), None);
     assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
     assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

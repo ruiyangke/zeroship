@@ -323,9 +323,19 @@ async fn unauthenticated_request_returns_401() {
         .uri("/admin/oauth-clients")
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -341,10 +351,16 @@ async fn non_admin_request_returns_403() {
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::FORBIDDEN);
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -414,6 +430,10 @@ async fn admin_can_register_oauth_client_in_native_store() {
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -430,13 +450,19 @@ async fn skip_consent_is_derived_from_whitelist_not_body() {
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED);
     assert!(persisted_skip_consent(&fx.state, &client_id).await);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -453,13 +479,19 @@ async fn arbitrary_client_gets_skip_consent_false() {
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED);
     assert!(!persisted_skip_consent(&fx.state, &client_id).await);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -477,11 +509,17 @@ async fn invalid_scope_returns_400() {
         .header("authorization", pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(count_client(&fx.state, &client_id).await, 0);
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -505,10 +543,12 @@ async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http
             .header("authorization", pat.bearer())
             .set_json(&body)
             .to_request();
-        let resp = test::call_service(&app, req).await;
+        // Status only: a retained `WebResponse` keeps the app state - and its
+        // Postgres client - alive past the teardown below.
+        let status = test::call_service(&app, req).await.status();
 
         assert_eq!(
-            resp.status(),
+            status,
             StatusCode::BAD_REQUEST,
             "{label} redirect_uri must be rejected"
         );
@@ -528,9 +568,11 @@ async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http
         .header("authorization", pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED);
     let row = oauth_client_row(&fx.state, &client_id).await;
     assert_eq!(
         row.get::<_, Vec<String>>("redirect_uris"),
@@ -543,6 +585,10 @@ async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -558,21 +604,27 @@ async fn duplicate_client_id_returns_409() {
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::CREATED);
 
     let req = test::TestRequest::post()
         .uri("/admin/oauth-clients")
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(count_client(&fx.state, &client_id).await, 1);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -617,6 +669,10 @@ async fn list_returns_registered_clients() {
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -632,8 +688,10 @@ async fn delete_removes_from_native_store() {
         .header("authorization", pat.bearer())
         .set_json(&client_body(&client_id))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         audit_event_count(&fx.state, pat.user_id, "oauth_client_create", &client_id).await,
         1
@@ -643,9 +701,9 @@ async fn delete_removes_from_native_store() {
         .uri(&format!("/admin/oauth-clients/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(count_client(&fx.state, &client_id).await, 0);
     assert_eq!(
         audit_event_count(&fx.state, pat.user_id, "oauth_client_delete", &client_id).await,
@@ -653,4 +711,8 @@ async fn delete_removes_from_native_store() {
     );
 
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

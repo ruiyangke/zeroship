@@ -27,6 +27,8 @@ use zeroship_control::Registry;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .ok()
@@ -235,4 +237,13 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     );
 
     let _ = std::fs::remove_dir_all(&wal_dir);
+
+    // Teardown: `client` holds this test's Postgres connection (the `registry`
+    // connection was already consumed into the `SpendEngine` temporary above,
+    // which drops - and asks its connection to close - at the end of that
+    // statement), and locals are dropped only after the body returns - by which
+    // point the runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(client);
+    common::drain_pg().await;
 }

@@ -506,10 +506,20 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
         .uri("/api/apps")
         .header("authorization", bearer_for(&unknown_issuer))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -538,8 +548,8 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
         .header("authorization", bearer_for(&token))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.state
         .control_pg
@@ -550,6 +560,10 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .await
         .expect("cleanup platform token revocation marker");
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -643,6 +657,11 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
         )
         .await;
     fx.cleanup().await;
+
+    // No `app`/ntex test service in this test - it drives `bearer_verifier()`
+    // directly. Only the fixture's Postgres client needs to be dropped.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -659,8 +678,8 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         .header("authorization", bearer_for_scope(user_id, "apps:read apps:deploy"))
         .header("x-request-id", request_id.as_str())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK);
     let rows = fx
         .state
         .control_pg
@@ -683,6 +702,10 @@ async fn oauth_token_with_apps_read_can_list_apps() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -706,10 +729,14 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
             ),
         )
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// F3 regression — drives the REAL self-service path end to end with NO
@@ -815,6 +842,10 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&other_owner])
         .await;
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// 7.0 regression — a platform `billing` staffer holds fleet-wide `apps:read`
@@ -900,6 +931,10 @@ async fn billing_platform_role_lists_apps_fleet_wide() {
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&other_owner])
         .await;
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -916,10 +951,14 @@ async fn oauth_token_without_required_scope_returns_403() {
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -943,6 +982,10 @@ async fn invalid_oauth_token_returns_401() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -964,10 +1007,14 @@ async fn oauth_token_wrong_audience_returns_401() {
         .uri("/api/apps")
         .header("authorization", bearer_for(&token))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -982,10 +1029,14 @@ async fn invalid_oauth_sub_returns_401() {
         .uri("/api/apps")
         .header("authorization", bearer_for_subject("not-a-uuid", "apps:read"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1000,10 +1051,14 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
         .uri("/api/apps")
         .header("authorization", bearer_for_scope(user_id, "apps:read bogus:scope"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1018,10 +1073,14 @@ async fn invalid_app_resource_id_returns_400_before_cedar() {
         .uri("/raw-app/app%22%3B%20permit%20%28principal%2C%20action%2C%20resource%29%3B")
         .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1038,17 +1097,21 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
         .uri("/api/apps")
         .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK);
 
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
         .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1069,8 +1132,8 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
         .uri(&format!("/api/apps/{app_id}"))
         .header("authorization", bearer_for_scope(user_id, "apps:delete"))
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
     let _ = fx
@@ -1078,6 +1141,10 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
         .control_pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner_id])
         .await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 fn unix_now_secs() -> u64 {

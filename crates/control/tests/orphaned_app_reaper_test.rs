@@ -24,6 +24,8 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -233,6 +235,13 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
         ),
         "owner-less app manifests must be deleted from the blob store"
     );
+
+    // Teardown: the fixture holds the only handle to this test's Postgres
+    // connection, and locals are dropped only after the body returns - by which
+    // point the runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +277,9 @@ async fn reaper_leaves_owned_app_untouched() {
         .control_pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner])
         .await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +308,9 @@ async fn reaper_never_touches_system_app() {
 
     // cleanup
     let _ = state.registry.delete_app(&app_id).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +337,9 @@ async fn reaper_respects_grace_window() {
 
     // cleanup
     let _ = state.registry.delete_app(&app_id).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,4 +376,7 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
         ),
         "purge_app must delete the app's manifests"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }

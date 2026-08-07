@@ -527,6 +527,14 @@ async fn onboard_returns_real_account_link() {
     );
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    // Teardown: `svc` holds a cloned `Arc<AppState>` and `fx.state` holds the
+    // original, and both are dropped only after the body returns - by which
+    // point the runtime is gone and the sockets can no longer be closed. Drop
+    // them explicitly, then wait for the close to land.
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -551,8 +559,13 @@ async fn callback_rejects_acct_not_owned_by_creator() {
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&svc, onboard).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Status only: a shadowed `resp` binding would NOT drop the earlier
+    // `WebResponse` (Rust drops locals in reverse declaration order only once
+    // the scope ends), so both calls here keep the app state - and its
+    // Postgres client - alive past the teardown at the end of this test unless
+    // each is reduced to just its status.
+    let onboard_status = test::call_service(&svc, onboard).await.status();
+    assert_eq!(onboard_status, StatusCode::OK);
 
     // Pre-seed a FOREIGN account in the mock that belongs to the ATTACKER, with
     // a real acct_… shape. The creator forges a callback claiming this acct_….
@@ -569,14 +582,18 @@ async fn callback_rejects_acct_not_owned_by_creator() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({ "stripe_account_id": foreign_acct }))
         .to_request();
-    let resp = test::call_service(&svc, forge).await;
+    let forge_status = test::call_service(&svc, forge).await.status();
     assert_eq!(
-        resp.status(),
+        forge_status,
         StatusCode::FORBIDDEN,
         "a forged/foreign acct_… that doesn't match the creator's onboarded account MUST be rejected (ISS-30)"
     );
 
     cleanup(&fx.state, &[creator, attacker], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -630,6 +647,10 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     assert!(row.get::<_, bool>("details_submitted"));
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -705,6 +726,10 @@ async fn checkout_stamps_server_fee_not_client_value() {
     );
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -765,6 +790,10 @@ async fn checkout_honors_operator_set_fee_policy() {
     assert_eq!(body["application_fee_cents"], serde_json::json!(4000), "25% capped at 4000");
 
     cleanup(&fx.state, &[creator, op], &[&creator_pat, &op_pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M1 (RED→GREEN): a creator who ran `onboard` but whose Stripe account is NOT
@@ -817,9 +846,11 @@ async fn checkout_rejected_when_charges_not_enabled() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }))
         .to_request();
-    let resp = test::call_service(&svc, checkout).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, checkout).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "checkout must be rejected when the connected account is not charges_enabled (M1)"
     );
@@ -836,6 +867,10 @@ async fn checkout_rejected_when_charges_not_enabled() {
     );
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M2 (RED→GREEN): an empty `cart_id` must be rejected (it would otherwise
@@ -879,9 +914,11 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd" }))
         .to_request();
-    let r1 = test::call_service(&svc, c1).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = test::call_service(&svc, c1).await.status();
     assert_eq!(
-        r1.status(),
+        status1,
         StatusCode::BAD_REQUEST,
         "an absent/empty cart_id must be rejected (M2 — would otherwise replay a stale charge)"
     );
@@ -892,8 +929,8 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd" }))
         .to_request();
-    let r2 = test::call_service(&svc, c2).await;
-    assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+    let status2 = test::call_service(&svc, c2).await.status();
+    assert_eq!(status2, StatusCode::BAD_REQUEST);
 
     // Neither created a PaymentIntent → no stale replay is even possible.
     let pis = fx
@@ -933,6 +970,10 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     );
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// m2 (RED→GREEN): an operator cannot set floor_cents > cap_cents (it would pin
@@ -960,9 +1001,11 @@ async fn fee_policy_rejects_floor_above_cap() {
             "kind": "percent", "percent_bps": 1500, "floor_cents": 1000, "cap_cents": 100
         }))
         .to_request();
-    let resp = test::call_service(&svc, set).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, set).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "floor_cents > cap_cents must be rejected (m2)"
     );
@@ -976,6 +1019,10 @@ async fn fee_policy_rejects_floor_above_cap() {
     assert_eq!(n, 0, "the rejected floor>cap policy must not persist");
 
     cleanup(&fx.state, &[creator, op], &[&op_pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
@@ -1015,14 +1062,20 @@ async fn checkout_rejects_bad_currency() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "US Dollars", "cart_id": "cart-z" }))
         .to_request();
-    let resp = test::call_service(&svc, checkout).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, checkout).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "a non ^[a-z]{{3}}$ currency must be rejected (m1)"
     );
 
     cleanup(&fx.state, &[creator], &[&pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1049,9 +1102,14 @@ async fn fee_policy_set_is_operator_only() {
         .header("authorization", creator_pat.bearer())
         .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 0 }))
         .to_request();
-    let resp = test::call_service(&svc, creator_set).await;
+    // Status only: a shadowed `resp` binding would NOT drop the earlier
+    // `WebResponse` (Rust drops locals in reverse declaration order only once
+    // the scope ends), so both calls here keep the app state - and its
+    // Postgres client - alive past the teardown at the end of this test unless
+    // each is reduced to just its status.
+    let creator_set_status = test::call_service(&svc, creator_set).await.status();
     assert_eq!(
-        resp.status(),
+        creator_set_status,
         StatusCode::FORBIDDEN,
         "a creator must NOT set/lower their own fee policy (ISS-29)"
     );
@@ -1074,8 +1132,12 @@ async fn fee_policy_set_is_operator_only() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 1000 }))
         .to_request();
-    let resp = test::call_service(&svc, op_set).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "operator may set the fee policy");
+    let op_set_status = test::call_service(&svc, op_set).await.status();
+    assert_eq!(op_set_status, StatusCode::NO_CONTENT, "operator may set the fee policy");
 
     cleanup(&fx.state, &[creator, op], &[&creator_pat, &op_pat]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }

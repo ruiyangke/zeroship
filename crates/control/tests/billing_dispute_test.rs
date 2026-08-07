@@ -441,8 +441,10 @@ async fn dispute_created_records_debit_and_is_idempotent() {
     // Redelivery under a DIFFERENT event id (so stripe_events_seen does NOT dedup it) —
     // the du_… dedup must still prevent a second debit.
     let evt2 = format!("evt_dc2_{}", Uuid::new_v4().simple());
-    let r2 = post_webhook!(app, dispute_created_body(&evt2, &du, &pi, 6000));
-    assert_eq!(r2.status(), StatusCode::OK);
+    // Status only: a retained `WebResponse` keeps the app state - and its Postgres
+    // client - alive past the teardown at the end of this test.
+    let status2 = post_webhook!(app, dispute_created_body(&evt2, &du, &pi, 6000)).status();
+    assert_eq!(status2, StatusCode::OK);
 
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(
@@ -464,6 +466,15 @@ async fn dispute_created_records_debit_and_is_idempotent() {
         .clone();
     assert_eq!(row.get::<_, Option<String>>("reason").as_deref(), Some("fraudulent"));
     assert!(row.get::<_, bool>("has_due"), "evidence_due_at captured from due_by");
+
+    // Teardown: the service, the fixture, and the side connection all hold
+    // connections, and locals are dropped only after the body returns - by which
+    // point the runtime is gone and the sockets can no longer be closed. Drop
+    // them explicitly, then wait for the close to land.
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -486,8 +497,8 @@ async fn dispute_debit_tightens_over_refund_cap() {
     // Dispute claws back $40 → cash_collected = $20.
     let du = format!("du_{}", Uuid::new_v4().simple());
     let evt = format!("evt_cap_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(app, dispute_created_body(&evt, &du, &pi, 4000));
-    assert_eq!(r.status(), StatusCode::OK);
+    let status = post_webhook!(app, dispute_created_body(&evt, &du, &pi, 4000)).status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv).await, 2000, "cap auto-tightened to $20");
 
     // A $50 cash refund WOULD have fit the pre-dispute $60 cap, but now exceeds the
@@ -527,6 +538,11 @@ async fn dispute_debit_tightens_over_refund_cap() {
     .await
     .expect("issue_refund call");
     assert!(matches!(ok, RefundOutcome::Issued { .. }), "a $20 refund still fits, got {ok:?}");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -544,11 +560,12 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     // --- WON path --- (distinct periods so both invoices fit the partial unique index)
     let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(0));
     let du_won = format!("du_won_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(
+    let status = post_webhook!(
         app,
         dispute_created_body(&format!("evt_w1_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 6000)
-    );
-    assert_eq!(r.status(), StatusCode::OK);
+    )
+    .status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv_won).await, 0, "debited to 0 on created");
 
     let rc = post_webhook!(app, dispute_closed_body(&format!("evt_w2_{}", Uuid::new_v4().simple()), &du_won, "won", &pi_won, 6000));
@@ -560,8 +577,8 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     assert_eq!(cash_collected(&conn, &inv_won).await, 6000, "won restores the budget");
 
     // Redelivered won close must NOT double-restore.
-    let rc2 = post_webhook!(app, dispute_closed_body(&format!("evt_w3_{}", Uuid::new_v4().simple()), &du_won, "won", &pi_won, 6000));
-    assert_eq!(rc2.status(), StatusCode::OK);
+    let status2 = post_webhook!(app, dispute_closed_body(&format!("evt_w3_{}", Uuid::new_v4().simple()), &du_won, "won", &pi_won, 6000)).status();
+    assert_eq!(status2, StatusCode::OK);
     assert_eq!(payment_kind_count(&conn, &inv_won, "dispute_reversal").await, 1, "no double reversal");
     assert_eq!(cash_collected(&conn, &inv_won).await, 6000);
 
@@ -573,11 +590,16 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
         dispute_created_body(&format!("evt_l1_{}", Uuid::new_v4().simple()), &du_lost, &pi_lost, 5000)
     );
     assert_eq!(cash_collected(&conn, &inv_lost).await, 0, "debited on created");
-    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_l2_{}", Uuid::new_v4().simple()), &du_lost, "lost", &pi_lost, 5000));
-    assert_eq!(rl.status(), StatusCode::OK);
+    let status3 = post_webhook!(app, dispute_closed_body(&format!("evt_l2_{}", Uuid::new_v4().simple()), &du_lost, "lost", &pi_lost, 5000)).status();
+    assert_eq!(status3, StatusCode::OK);
     assert_eq!(dispute_status(&conn, &du_lost).await.as_deref(), Some("lost"));
     assert_eq!(payment_kind_count(&conn, &inv_lost, "dispute_reversal").await, 0, "lost adds NO reversal");
     assert_eq!(cash_collected(&conn, &inv_lost).await, 0, "lost leaves the debit standing");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -594,11 +616,12 @@ async fn dispute_produces_exactly_one_disputed_notification() {
     let (_inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
 
     let du = format!("du_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(
+    let status = post_webhook!(
         app,
         dispute_created_body(&format!("evt_n1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
-    );
-    assert_eq!(r.status(), StatusCode::OK);
+    )
+    .status();
+    assert_eq!(status, StatusCode::OK);
 
     // Resolve our dsp_… id for the per-creator ledger / key-prefix assertions.
     let dsp_id: String = conn
@@ -649,6 +672,11 @@ async fn dispute_produces_exactly_one_disputed_notification() {
         fx.notifier.delivered_for_kind(BillingNotificationKind::Disputed) >= 1,
         "the disputed kind was exercised"
     );
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -698,8 +726,8 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
             "metadata": { "invoice_kind": "infra" }
         }}
     });
-    let pr = post_webhook!(app, paid_body);
-    assert_eq!(pr.status(), StatusCode::OK, "invoice.paid seed");
+    let status_paid = post_webhook!(app, paid_body).status();
+    assert_eq!(status_paid, StatusCode::OK, "invoice.paid seed");
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "cash via real handler");
 
     // Record a $2000 credit-destination refund first (a goodwill credit-back). This appends
@@ -729,11 +757,12 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     // Now a dispute claws back $6000. It is PURELY a cash-collected adjustment (a negative
     // invoice_payments row) — it must NOT touch credit_ledger or refunds.
     let du = format!("du_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(
+    let status = post_webhook!(
         app,
         dispute_created_body(&format!("evt_e1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
-    );
-    assert_eq!(r.status(), StatusCode::OK);
+    )
+    .status();
+    assert_eq!(status, StatusCode::OK);
 
     // Cash dropped, but credit balance + refund rows are UNCHANGED (no double-count / corruption).
     assert_eq!(cash_collected(&conn, &inv).await, 0, "dispute_debit lowered cash to 0");
@@ -749,6 +778,11 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     );
     // And the dispute_debit is the SOLE new payment movement.
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1);
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 async fn credit_balance(conn: &compio_postgres::Client, creator: Uuid) -> i64 {
@@ -790,21 +824,21 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
 
     let du = format!("du_wl_{}", Uuid::new_v4().simple());
     // created → open, debit to 0.
-    let r = post_webhook!(app, dispute_created_body(&format!("evt_wl1_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
-    assert_eq!(r.status(), StatusCode::OK);
+    let status = post_webhook!(app, dispute_created_body(&format!("evt_wl1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)).status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv).await, 0);
 
     // closed WON → reversal restores cash to 6000; status won.
-    let rw = post_webhook!(app, dispute_closed_body(&format!("evt_wl2_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
-    assert_eq!(rw.status(), StatusCode::OK);
+    let status_won = post_webhook!(app, dispute_closed_body(&format!("evt_wl2_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000)).status();
+    assert_eq!(status_won, StatusCode::OK);
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("won"));
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "won restored the cash");
 
     // A LATE / replayed closed LOST must NOT flip the terminal won dispute. The handler
     // still 200-acks (a no-op), but the row stays won and the cash stays restored — no
     // over-refund window opens on a now-falsely-lost dispute.
-    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_wl3_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
-    assert_eq!(rl.status(), StatusCode::OK, "the late lost is acked, not 500");
+    let status_lost = post_webhook!(app, dispute_closed_body(&format!("evt_wl3_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000)).status();
+    assert_eq!(status_lost, StatusCode::OK, "the late lost is acked, not 500");
     assert_eq!(
         dispute_status(&conn, &du).await.as_deref(),
         Some("won"),
@@ -818,6 +852,11 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
     // Exactly one reversal, zero extra debits from the late lost.
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1);
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1);
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -842,8 +881,8 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 
     // closed WON arrives FIRST (no created yet). It must seed a terminal won row applying
     // debit + reversal (net cash unchanged = 6000), resolving the invoice via the pi_….
-    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_cf1_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
-    assert_eq!(rc.status(), StatusCode::OK);
+    let status = post_webhook!(app, dispute_closed_body(&format!("evt_cf1_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000)).status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "close-before-create seeded the row");
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("won"), "seeded directly terminal won");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "debit applied");
@@ -852,8 +891,8 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 
     // The LATE created must reconcile to a no-op: it must NOT resurrect the dispute to open,
     // NOT add a second debit, NOT add a second row.
-    let rcr = post_webhook!(app, dispute_created_body(&format!("evt_cf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
-    assert_eq!(rcr.status(), StatusCode::OK);
+    let status2 = post_webhook!(app, dispute_created_body(&format!("evt_cf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000)).status();
+    assert_eq!(status2, StatusCode::OK);
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(
         dispute_status(&conn, &du).await.as_deref(),
@@ -863,6 +902,11 @@ async fn dispute_closed_won_before_created_is_order_independent() {
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1, "no second reversal");
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "end state identical to in-order delivery");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1007,15 +1051,22 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
 
     // (4) Idempotency both ways: a redelivered created (post-promotion) is a no-op; a
     // redelivered invoice.paid is a no-op. No second row, no second debit.
-    let r_redeliver_created = post_webhook!(
+    let status_redeliver = post_webhook!(
         app,
         dispute_created_body(&format!("evt_cbp2_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
-    );
-    assert_eq!(r_redeliver_created.status(), StatusCode::OK);
+    )
+    .status();
+    assert_eq!(status_redeliver, StatusCode::OK);
     drive_invoice_paid_for!(app, conn, creator, provider_invoice, pi, 6000);
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "still exactly one debit");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no re-park");
+
+    drop(app);
+    drop(rconn);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// A dispute on a charge the platform NEVER invoiced parks but NEVER resolves — it does NOT
@@ -1042,13 +1093,19 @@ async fn dispute_on_never_invoiced_charge_parks_without_poison() {
     assert_eq!(pending_dispute_count(&conn, &du).await, 1, "parked, awaiting a linkage that never comes");
 
     // A redelivery is still a clean ack (idempotent park) — no row, no poison.
-    let r2 = post_webhook!(
+    let status2 = post_webhook!(
         app,
         dispute_created_body(&format!("evt_never2_{}", Uuid::new_v4().simple()), &du, &pi, 4000)
-    );
-    assert_eq!(r2.status(), StatusCode::OK);
+    )
+    .status();
+    assert_eq!(status2, StatusCode::OK);
     assert_eq!(pending_dispute_count(&conn, &du).await, 1, "still exactly one parked row");
     assert_eq!(dispute_row_count(&conn, &du).await, 0);
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1115,6 +1172,9 @@ async fn pr8_schema_objects_present() {
         .expect("pending table")[0]
         .get("n");
     assert_eq!(pending, 1, "pending_disputes holding table must exist");
+
+    drop(conn);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1208,6 +1268,13 @@ async fn dispute_created_takes_per_creator_advisory_lock() {
         "the dispute_debit tightened the cap by the full disputed amount (9000 − 9000)",
     );
     let _ = pi;
+
+    drop(writer2);
+    drop(obs);
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1262,6 +1329,11 @@ async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
     // Nothing written: no billing_disputes row, no pending_disputes row, no payment movement.
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row parked");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1282,13 +1354,13 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
 
     let du = format!("du_lw_{}", Uuid::new_v4().simple());
     // created → open, debit to 0.
-    let r = post_webhook!(app, dispute_created_body(&format!("evt_lw1_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
-    assert_eq!(r.status(), StatusCode::OK);
+    let status = post_webhook!(app, dispute_created_body(&format!("evt_lw1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)).status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv).await, 0);
 
     // closed LOST → debit stands, cash stays 0, status lost, NO reversal.
-    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_lw2_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
-    assert_eq!(rl.status(), StatusCode::OK);
+    let status_lost = post_webhook!(app, dispute_closed_body(&format!("evt_lw2_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000)).status();
+    assert_eq!(status_lost, StatusCode::OK);
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"));
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 0, "lost adds no reversal");
     assert_eq!(cash_collected(&conn, &inv).await, 0, "lost leaves the debit standing");
@@ -1296,8 +1368,8 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
     // A LATE / replayed closed WON must NOT flip the terminal lost dispute and must NOT append
     // a spurious reversal restoring cash the chargeback clawed back. The handler 200-acks
     // (a no-op via the WHERE status='open' gate + the trigger backstop).
-    let rw = post_webhook!(app, dispute_closed_body(&format!("evt_lw3_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
-    assert_eq!(rw.status(), StatusCode::OK, "the late won is acked, not 500");
+    let status_won = post_webhook!(app, dispute_closed_body(&format!("evt_lw3_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000)).status();
+    assert_eq!(status_won, StatusCode::OK, "the late won is acked, not 500");
     assert_eq!(
         dispute_status(&conn, &du).await.as_deref(),
         Some("lost"),
@@ -1314,6 +1386,11 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
         "the clawed-back cash stays gone — a lost chargeback is final"
     );
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "exactly one debit");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1346,12 +1423,17 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
     assert_eq!(cash_collected(&conn, &inv).await, 0, "net cash clawed back (lost)");
 
     // The LATE created reconciles to a no-op: no resurrect to open, no second debit/row.
-    let rcr = post_webhook!(app, dispute_created_body(&format!("evt_clf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
-    assert_eq!(rcr.status(), StatusCode::OK);
+    let status_rcr = post_webhook!(app, dispute_created_body(&format!("evt_clf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000)).status();
+    assert_eq!(status_rcr, StatusCode::OK);
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"), "late created did NOT resurrect to open");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
     assert_eq!(cash_collected(&conn, &inv).await, 0, "end state identical to in-order delivery");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1379,6 +1461,11 @@ async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
     // Nothing written.
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row");
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1502,6 +1589,11 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
     .await
     .expect("legal open→won progression must succeed");
     assert_eq!(dispute_status(&conn, &du_open).await.as_deref(), Some("won"));
+
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1529,8 +1621,8 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
     // ---- WON path (existing open row): seed an open dispute, then close it WON under lock. ----
     let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 9000, period_offset(0));
     let du_won = format!("du_clk_won_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(app, dispute_created_body(&format!("evt_clk_w0_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 9000));
-    assert_eq!(r.status(), StatusCode::OK);
+    let status = post_webhook!(app, dispute_created_body(&format!("evt_clk_w0_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 9000)).status();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv_won).await, 0, "debited to 0 on created");
 
     // Observer holds the per-creator key.
@@ -1642,6 +1734,15 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
     assert_eq!(payment_kind_count(&conn, &inv_cbc, "dispute_debit").await, 1, "debit applied");
     assert_eq!(cash_collected(&conn, &inv_cbc).await, 0, "cap tightened by the close-before-create debit");
     let _ = pi_cbc;
+
+    drop(writer4);
+    drop(obs2);
+    drop(writer2);
+    drop(obs);
+    drop(app);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1705,4 +1806,7 @@ async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
         .expect("resolve ch")
         .expect("an invoice resolves");
     assert_eq!(resolved_ch, inv_ch, "charge alone resolves the charge's invoice");
+
+    drop(conn);
+    common::drain_pg().await;
 }

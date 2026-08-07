@@ -7,6 +7,8 @@ use zeroship_control::identity_bridge::{
     parse_gotrue_admin_email_verified, provision_or_link,
 };
 
+mod common;
+
 const PROVIDER: &str = "supabase";
 
 fn db_url() -> String {
@@ -187,6 +189,13 @@ async fn first_login_creates_principal_link_and_default_grants() {
     );
 
     fx.cleanup().await;
+
+    // Teardown: the fixture holds the only handle to this test's Postgres
+    // connection, and locals are dropped only after the body returns - by which
+    // point the runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -218,6 +227,9 @@ async fn idempotent_relogin_returns_same_principal_without_duplicate_rows() {
     );
 
     fx.cleanup().await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -239,6 +251,9 @@ async fn verified_email_collision_merges_onto_existing_principal_without_new_gra
     assert!(grants(&fx.conn, victim).await.is_empty());
 
     fx.cleanup().await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -276,6 +291,9 @@ async fn unverified_email_collision_creates_distinct_principal_not_victim_takeov
     );
 
     fx.cleanup().await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -309,6 +327,11 @@ async fn concurrent_first_logins_for_same_subject_collapse_to_one_link() {
     );
 
     fx.cleanup().await;
+
+    drop(conn_a);
+    drop(conn_b);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[test]

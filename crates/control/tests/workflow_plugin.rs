@@ -26,6 +26,8 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
 
+mod common;
+
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -627,4 +629,12 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
         .await
         .expect("signal count");
     assert_eq!(signals.get::<_, i32>("count"), 1);
+
+    // Teardown: the control-server thread and the fixture both hold
+    // connections, and locals are dropped only after the body returns - by
+    // which point the runtime is gone and the sockets can no longer be
+    // closed. Drop them explicitly, then wait for the close to land.
+    drop(control);
+    drop(fx);
+    common::drain_pg().await;
 }

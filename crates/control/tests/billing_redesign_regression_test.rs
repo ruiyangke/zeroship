@@ -144,6 +144,13 @@ async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
         .unwrap()[0]
         .get("status");
     assert_eq!(status, "finalized");
+
+    // Teardown: `client` is the only handle to this test's Postgres connection,
+    // and locals are dropped only after the body returns - by which point the
+    // runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +253,9 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
         replayed.total_cents as i64, frozen_amount,
         "re-running charge_cents over the frozen snapshot reproduces amount_cents bit-for-bit",
     );
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +338,9 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
         .first()
         .map(|r| r.get::<_, String>("external_id"));
     assert!(none.is_none(), "a draft invoice does not resolve a finalized id");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +397,9 @@ async fn finalized_invoice_rejects_nonvoid_update() {
         .execute("UPDATE zeroship.invoices SET status = 'draft' WHERE id = $1", &[&inv])
         .await;
     assert!(res2.is_err(), "finalized→draft is rejected (only finalized→void is legal)");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -407,6 +423,9 @@ async fn finalized_to_void_is_the_only_legal_transition() {
         .unwrap()[0]
         .get("status");
     assert_eq!(status, "void");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -435,6 +454,9 @@ async fn finalized_invoice_line_amount_update_is_rejected() {
         )
         .await;
     assert!(res_del.is_err(), "DELETE of a finalized line is rejected");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -484,6 +506,9 @@ async fn finalized_invoice_rejects_line_insert() {
         )
         .await
         .expect("a draft invoice still accepts a line INSERT");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -521,4 +546,7 @@ async fn draft_invoice_lines_stay_mutable_until_finalize() {
         .unwrap()[0]
         .get("amount_cents");
     assert_eq!(amt, 200);
+
+    drop(client);
+    common::drain_pg().await;
 }

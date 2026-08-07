@@ -177,4 +177,15 @@ async fn app_logs_route_proxies_worker_lines() {
     eprintln!("[app_logs_http_test] captured logs: {lines:?}");
     assert_eq!(lines, vec![format!("b2-control-route-log {app_id}")]);
     pat.cleanup(&fixture.state).await;
+
+    // Teardown: `control` runs its app factory (holding a cloned `Arc<AppState>`)
+    // on its own dedicated system/thread, and `fixture` owns the state's real
+    // Postgres connection. Neither is released until both are dropped - and
+    // locals are dropped only after the body returns, by which point this
+    // test's compio runtime is gone and the socket can no longer be closed.
+    // Drop them explicitly, then wait for the close to land.
+    drop(control);
+    drop(worker);
+    drop(fixture);
+    common::drain_pg().await;
 }

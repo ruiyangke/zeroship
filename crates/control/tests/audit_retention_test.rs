@@ -13,6 +13,8 @@ use uuid::Uuid;
 use zeroship_control::cron::audit_retention;
 use zeroship_control::Registry;
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .ok()
@@ -100,4 +102,12 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
         remaining, 1,
         "retention sweep deletes the >12-month row, keeps the fresh one"
     );
+
+    // Teardown: `conn` and `registry` each hold a Postgres connection, and
+    // locals are dropped only after the body returns - by which point the
+    // runtime is gone and the sockets can no longer be closed. Drop them
+    // explicitly, then wait for the close to land.
+    drop(conn);
+    drop(registry);
+    common::drain_pg().await;
 }

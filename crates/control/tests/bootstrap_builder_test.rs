@@ -12,6 +12,8 @@ use zeroship_control::bootstrap_builder::{
     BUILDER_CLIENT_ID, BUILDER_CLIENT_NAME, DEFAULT_BUILDER_REDIRECT_URI,
 };
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -150,6 +152,13 @@ async fn bootstrap_inserts_builder_client_first_run() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
+
+    // Teardown: `pg` is the only handle to this test's Postgres connection, and
+    // locals are dropped only after the body returns - by which point the
+    // runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(pg);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -177,6 +186,9 @@ async fn bootstrap_is_idempotent_on_second_run() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
+
+    drop(pg);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -198,4 +210,7 @@ async fn bootstrap_disabled_does_nothing() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
+
+    drop(pg);
+    common::drain_pg().await;
 }

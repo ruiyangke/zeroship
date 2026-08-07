@@ -456,6 +456,14 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     // collect noise.
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -486,12 +494,11 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
         .header("content-type", "application/octet-stream")
         .set_payload(body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "expected 415"
-    );
+    // Read the status out and let the response go: a `WebResponse` owns the
+    // request that borrowed the app state, so holding one to end of scope keeps
+    // the state's Postgres client alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected 415");
 
     // The handler rejects on content-type BEFORE streaming. Tmp dir
     // must therefore be untouched.
@@ -500,6 +507,10 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
         "deploy_tmp_dir must be empty on 415 (body should not stream)",
     );
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -529,12 +540,10 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
         .header("content-type", "application/x-zship")
         .set_payload(body.clone())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "no bearer → 401",
-    );
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no bearer -> 401");
     assert!(
         dir_is_empty(&fx.deploy_tmp_dir),
         "no bearer must not stream body to tmp",
@@ -547,16 +556,16 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
         .header("content-type", "application/x-zship")
         .set_payload(body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "wrong bearer → 401",
-    );
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong bearer -> 401");
     assert!(
         dir_is_empty(&fx.deploy_tmp_dir),
         "wrong bearer must not stream body to tmp",
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -629,6 +638,10 @@ async fn deploy_manifest_not_first_returns_400() {
 
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Spec §5.1/§5.2 regression: a manifest declaring a scope that collides
@@ -720,6 +733,10 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
 
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Companion to the collision test: a well-formed, NON-colliding declared
@@ -784,6 +801,10 @@ async fn deploy_noncolliding_scope_returns_200() {
 
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +923,10 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -948,6 +973,10 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
 
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Deploying to an app id that does not exist must be refused BEFORE the
@@ -1003,10 +1032,12 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
         .header("content-type", "application/x-zship")
         .set_payload(body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
 
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::NOT_FOUND,
         "deploying to an app that does not exist must 404",
     );
@@ -1018,6 +1049,11 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
         "a deploy for a nonexistent app must not leave blobs behind: the app is \
          never created, so nothing will ever reference, bill, or garbage-collect them",
     );
+
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Deploy is rate limited.
@@ -1081,4 +1117,9 @@ async fn deploy_is_rate_limited() {
         dir_is_empty(&fx.deploy_tmp_dir),
         "a throttled deploy must not stream its body to tmp",
     );
+
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

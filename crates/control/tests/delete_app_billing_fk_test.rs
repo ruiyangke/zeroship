@@ -136,6 +136,14 @@ async fn delete_app_with_invoice_history_returns_typed_conflict() {
         .unwrap()[0]
         .get("n");
     assert_eq!(still_there, 1, "the billed app is preserved (anonymize-don't-delete)");
+
+    // Teardown: `client` and `registry` each hold a Postgres connection, and
+    // locals are dropped only after the body returns - by which point the
+    // runtime is gone and the sockets can no longer be closed. Drop them
+    // explicitly, then wait for the close to land.
+    drop(client);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +221,10 @@ async fn delete_app_with_custom_metric_and_aggregates_succeeds() {
         .unwrap()[0]
         .get("n");
     assert_eq!(agg_left, 0, "the aggregate rows cascaded away with the app");
+
+    drop(client);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 fn first_of_this_month() -> chrono::NaiveDate {

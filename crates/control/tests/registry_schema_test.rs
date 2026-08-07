@@ -5,6 +5,8 @@
 use compio_postgres::{connect, Client, NoTls};
 use zeroship_control::Registry;
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -68,4 +70,11 @@ async fn registry_core_tables_live_in_zeroship_schema() {
         let schema: String = rows[0].get("schema");
         assert_eq!(schema, "zeroship", "{qualified} should live in the zeroship schema");
     }
+
+    // Teardown: `pg` holds this test's Postgres connection, and locals are
+    // dropped only after the body returns - by which point the runtime is gone
+    // and the socket can no longer be closed. Drop it explicitly, then wait for
+    // the close to land.
+    drop(pg);
+    common::drain_pg().await;
 }
