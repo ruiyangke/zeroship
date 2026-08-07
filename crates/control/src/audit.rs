@@ -146,6 +146,26 @@ pub struct AuditEntry<'a> {
 /// Best-effort audit insert. We never fail the caller's operation just
 /// because we couldn't write an audit row — if the DB is partially down
 /// the user-facing op should still succeed and we log to stderr instead.
+///
+/// # The row is NOT atomic with the mutation it describes, and that is a gap
+///
+/// Callers mutate first and audit afterwards, on a separate connection and
+/// outside any transaction with the mutation. Two failure shapes follow. A
+/// failed insert leaves the stdout line below plus a `warn` - degraded but
+/// detectable. A process death between the mutation committing and this
+/// function being entered records NOTHING, not even the stdout line, because
+/// the emit happens in here.
+///
+/// This is not a trail that only operators read out of band. `recent_for_app`
+/// below backs `GET /api/apps/:id/audit`, so a caller of that endpoint is
+/// served these rows directly and can be shown a mutation-free history for a
+/// mutation that happened. Closing the window means threading a transaction
+/// through `EnvStore` so the mutation and its audit row commit together, which
+/// touches every env-mutation path.
+///
+/// The stdout emit deliberately precedes all database work, so the trail
+/// survives a database that is down entirely. That mitigates the first shape
+/// and not the second.
 pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
     log_with_detail(registry, entry, &Value::Null).await;
 }
