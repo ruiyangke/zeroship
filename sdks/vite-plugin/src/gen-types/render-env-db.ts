@@ -181,8 +181,21 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
       case "string":
         chain = "t.string()";
         break;
-      // The op.* integer tokens all collapse onto the SDK numeric builder:
-      // `@zeroship/db`'s `t` has no integer builder, only `t.number()`.
+      // Every op.* numeric token collapses onto `t.number()`, because
+      // `@zeroship/db`'s `TypeName` has no integer member at all.
+      //
+      // This WIDENS, and the widening is not free - it is recorded here rather
+      // than hidden because the renderer is where the information is lost.
+      // `t.int()` lands as INTEGER in Postgres while typing as `number`, and
+      // the SDK's `number` validation accepts any finite value, so
+      // `create({ points: 1.5 })` passes tsc, passes validation, and is
+      // assignment-cast to 2 on insert. `t.bigInt()` is worse: BIGINT exceeds
+      // the JS safe-integer range, so above 2^53 the value a creator writes and
+      // the value stored can differ with nothing anywhere objecting.
+      //
+      // Closing that needs an integer-aware type in `@zeroship/db`, which is a
+      // public SDK surface change and not this renderer's call to make. Until
+      // then, do not read `t.number()` here as "the column is a float".
       case "int":
       case "integer":
       case "bigInt":
