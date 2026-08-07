@@ -63,6 +63,7 @@ required-features = ["platform-cli"]
 
 [dev-dependencies]
 compio = { workspace = true }
+tempfile = { workspace = true }
 # The smoke test authors an IR envelope as JSON, then parses + re-serializes it
 # through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
 serde_json = { workspace = true }

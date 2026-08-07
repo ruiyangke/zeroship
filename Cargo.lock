@@ -7043,6 +7043,7 @@ dependencies = [
  "compio-postgres",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "v8",
  "zero-migrate",
