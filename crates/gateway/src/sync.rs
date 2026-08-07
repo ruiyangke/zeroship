@@ -6,7 +6,6 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use uuid::Uuid;
 
-use zeroship_bundle::Manifest;
 use zeroship_core::types::{RouteEntry, RouteMap};
 
 use zeroship_core::types::SpendState;
@@ -78,36 +77,38 @@ impl RouteCache {
         let mut name_idx = HashMap::new();
         let mut compiled: HashMap<Uuid, Arc<CompiledRoute>> = HashMap::new();
         for (id, entry) in new_routes {
+            // Validate before the app enters the table, and drop it if the
+            // manifest does not validate. The manifest IS the authorization
+            // policy, so a manifest we cannot interpret leaves us with no
+            // policy to enforce; the only safe reading of "no policy" is to
+            // stop serving the app, which makes dispatch answer 404. Falling
+            // back to a permissive default here would serve every route the
+            // manifest was meant to gate to anonymous callers.
+            //
+            // The deploy handler validates on ingest, so this does not fire on
+            // a normal deploy. It needs post-ingest divergence: a validation
+            // rule that tightened under an already-stored manifest, or an
+            // out-of-band edit of the stored row. Both are operator-visible
+            // through this log, and both are cases where refusing to serve is
+            // the outcome the operator would choose.
+            if let Err(e) = entry.manifest.validate() {
+                tracing::error!(
+                    app_id = %id,
+                    app_name = %entry.name,
+                    error = %e,
+                    "gateway-sync: manifest validation failed, removing the app from the \
+                     route table; it will 404 until a valid manifest is deployed"
+                );
+                continue;
+            }
+
             name_idx.insert(entry.name.clone(), id);
             let now_degraded = entry.spend_state == SpendState::Degrade;
             if prev_degraded.get(&id).copied().unwrap_or(false) != now_degraded {
                 rate.set_degraded(&id, now_degraded);
                 concurrency.set_degraded(&id, now_degraded);
             }
-            // Validate first; on Err, fall back to passthrough for parity
-            // with the rest of the platform's "always have a manifest"
-            // invariant.
-            //
-            // This fallback FAILS OPEN, and the log level says so. `passthrough()`
-            // installs one `*` resource with `auth: Anon, publicly_accessible:
-            // true`, so an app whose stored manifest stops validating serves every
-            // route to anonymous callers instead of refusing to serve. The deploy
-            // handler validates on ingest, so this should not fire from a normal
-            // deploy - it needs post-ingest divergence, such as a schema change
-            // that invalidates a stored manifest or an out-of-band row edit.
-            let manifest = if let Err(e) = entry.manifest.validate() {
-                tracing::error!(
-                    app_id = %id,
-                    app_name = %entry.name,
-                    error = %e,
-                    "gateway-sync: manifest validation failed — falling back to passthrough, \
-                     which serves EVERY route as anon-public"
-                );
-                Manifest::passthrough()
-            } else {
-                entry.manifest.clone()
-            };
-            let compiled_manifest = Arc::new(CompiledManifest::compile(&manifest));
+            let compiled_manifest = Arc::new(CompiledManifest::compile(&entry.manifest));
             compiled.insert(
                 id,
                 Arc::new(CompiledRoute {
@@ -242,6 +243,7 @@ async fn http_get_inner(url: &str, auth_key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_bundle::Manifest;
 
     #[test]
     fn control_timeout_defaults_to_five_seconds() {
@@ -314,6 +316,49 @@ mod tests {
             .expect("unprovisioned host resolves");
         assert_eq!(compiled.entry.oauth_client_id, None);
         assert_eq!(compiled.entry.sector_identifier, None);
+    }
+
+    #[test]
+    fn manifest_that_fails_validation_makes_the_app_unresolvable() {
+        // A stored manifest that stops validating must take the app OUT of the
+        // route table, so dispatch answers 404, rather than compiling a
+        // passthrough manifest that serves every route to anonymous callers.
+        // The deploy handler validates on ingest, so reaching this needs
+        // post-ingest divergence: a validation rule that tightened under an
+        // already-stored manifest, or an out-of-band edit of the stored row.
+        let good_id = Uuid::new_v4();
+        let broken_id = Uuid::new_v4();
+
+        let mut broken = route_entry("broken.zeroship.ai", None, None);
+        broken.manifest.version = 2;
+        assert!(
+            broken.manifest.validate().is_err(),
+            "fixture must actually fail validation, otherwise this test proves nothing"
+        );
+
+        let mut routes: RouteMap = HashMap::new();
+        routes.insert(good_id, route_entry("good.zeroship.ai", None, None));
+        routes.insert(broken_id, broken);
+
+        let cache = RouteCache::new();
+        cache.update(
+            routes,
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
+
+        assert!(
+            cache.lookup_by_name("broken.zeroship.ai").is_none(),
+            "an app whose manifest fails validation must not resolve; serving it \
+             as anon-public exposes every route the manifest was meant to gate"
+        );
+
+        // A sibling app in the same sync batch is unaffected: one bad manifest
+        // must not take down the rest of the table.
+        assert!(
+            cache.lookup_by_name("good.zeroship.ai").is_some(),
+            "a valid app in the same batch must still resolve"
+        );
     }
 
     #[test]
