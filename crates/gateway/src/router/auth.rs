@@ -1352,10 +1352,38 @@ mod tests {
     /// dial URL from the `iss` the access JWT actually carries.
     const OP_ISS: &str = "https://auth.zeroship.ai/oauth2";
 
+    /// Fixed app UUIDs the raw-OP fixtures derive their `oac_` client ids and
+    /// resource audiences from. `OP_APP_UUID` is the single-app default;
+    /// `OP_APP_A_UUID`/`OP_APP_B_UUID` are the two genuinely distinct apps the
+    /// cross-app divergence test needs.
+    const OP_APP_UUID: &str = "0192f1aa-0000-7000-8000-0000000000a1";
+    const OP_APP_A_UUID: &str = "0192f1aa-0000-7000-8000-0000000000aa";
+    const OP_APP_B_UUID: &str = "0192f1aa-0000-7000-8000-0000000000bb";
+
+    /// Mint the consistent `(client_id, resource_audience)` pair the raw-OP arm
+    /// expects for one app, from a fixed app UUID.
+    ///
+    /// The arm decodes the route's client id back to an app UUID via
+    /// `typed_id::app_id_from_oauth_client_id` (strip the `oac_` prefix, then
+    /// base62-decode the tail) and requires the token's `aud` to contain
+    /// `app:{app_uuid}`. A hand-written label such as `oac_myapp` has a tail
+    /// that does not base62-decode to a UUID, so the arm rejects it before any
+    /// binding or sector check is reached - fixtures on this path must derive
+    /// the client id from a real UUID rather than spell one out. The UUIDs are
+    /// fixed rather than random so a failure reproduces exactly.
+    fn op_app_binding(app_uuid: &str) -> (String, String) {
+        let app_id = Uuid::parse_str(app_uuid).expect("fixture app uuid parses");
+        (
+            zeroship_core::typed_id::app_oauth_client_id(&app_id),
+            format!("app:{app_id}"),
+        )
+    }
+
     /// Sign a raw OP-style access JWT (RFC 9068) with `signing`
     /// (EdDSA). `client_id`/`aud` are stamped so the Bearer arm's per-app
-    /// binding (client_id primary, aud fallback) can be exercised; pass
-    /// `client_id: None` to drop the claim and force the aud fallback.
+    /// bindings can be exercised: `client_id` is the authorized party and
+    /// `aud` must carry the route's resource audience (`app:{app_id}`). Pass
+    /// `client_id: None` to drop the claim entirely, which the arm rejects.
     /// `exp_delta` controls expiry relative to now (negative ⇒ expired).
     #[allow(clippy::too_many_arguments)]
     fn sign_op_access_jwt(
@@ -1387,6 +1415,12 @@ mod tests {
             "email_verified": true,
             "name": name,
             "scope": "openid email",
+            // RFC 9068 sec. 2.2 requires `jti` on a JWT access token, and the
+            // verifier's claim struct makes it mandatory, so a token without
+            // one is rejected before any binding check runs. The OP stamps a
+            // fresh one per token (`crates/auth/src/oidc/issuer.rs`); mint one
+            // here too, or this fixture signs a token no issuer would produce.
+            "jti": uuid::Uuid::new_v4().to_string(),
         });
         if let Some(cid) = client_id {
             body["client_id"] = serde_json::Value::String(cid.to_string());
@@ -2000,24 +2034,27 @@ mod tests {
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
         let sector = "https://myapp.zeroship.ai";
-        let aud = "myapp.zeroship.ai";
+        let host = "myapp.zeroship.ai";
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
-            Some("oac_myapp"),
-            serde_json::json!(["http://api.zeroship.localhost"]), // resource-server aud, NOT the client
+            Some(&client_id),
+            // Resource-server audiences, NOT the client. The unrelated first
+            // entry keeps this a contains-check, not an equality-check.
+            serde_json::json!(["http://api.zeroship.localhost", resource_aud]),
             "user@example.com",
             "OP User",
             3600,
         );
 
-        let req = bearer_req(&token, aud);
+        let req = bearer_req(&token, host);
         let request_id = Uuid::new_v4();
         let outcome = resolve_bearer_user_header(
             &req,
             &state,
             &request_id,
-            Some("oac_myapp"),
+            Some(&client_id),
             Some(sector),
         )
         .await;
@@ -2057,44 +2094,51 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_raw_op_aud_fallback_binds_when_client_id_absent() {
-        // RFC 9068 §3 mandates client_id, but if OP ever omits it the
-        // Bearer arm falls back to binding on `aud` CONTAINING the
-        // expected client_id (the pre-decided S1 fallback). Here the JWT
-        // has NO client_id claim but lists the client_id in `aud`.
+    async fn bearer_raw_op_absent_client_id_rejected_with_no_aud_fallback() {
+        // RFC 9068 sec. 3 mandates `client_id`, and the arm binds the authorized
+        // party on that claim ALONE: there is deliberately no fallback to
+        // binding on `aud`, because `aud` names the resource server and an ID
+        // token carries `aud == client_id` (which would let an ID token stand
+        // in for an access token). Here the JWT has NO client_id claim and
+        // lists the route's client id in `aud` - the exact shape the removed
+        // fallback would have accepted. It must be rejected.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let aud = "myapp.zeroship.ai";
+        let host = "myapp.zeroship.ai";
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let token = sign_op_access_jwt(
             &jwks_signing,
-            "usr_global_uuid",
-            None, // no client_id claim → force aud fallback
-            serde_json::json!(["http://api.zeroship.localhost", "oac_myapp"]),
+            "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002",
+            None, // no client_id claim
+            // Both the client id (what the old fallback keyed on) and the real
+            // resource audience are present, so the ONLY thing missing is the
+            // client_id claim.
+            serde_json::json!([resource_aud, client_id]),
             "user@example.com",
             "OP User",
             3600,
         );
 
-        let req = bearer_req(&token, aud);
+        let req = bearer_req(&token, host);
         let request_id = Uuid::new_v4();
-        // Provisioned route (sector present) so the pairwise projection
-        // succeeds — this test exercises the aud-fallback BINDING, not the
-        // fail-closed path.
+        // Provisioned route (sector present) so a rejection here cannot be the
+        // fail-closed no-sector path: the only reason to reject is the missing
+        // client_id claim.
         let outcome = resolve_bearer_user_header(
             &req,
             &state,
             &request_id,
-            Some("oac_myapp"),
+            Some(&client_id),
             Some("https://myapp.zeroship.ai"),
         )
         .await;
         assert!(
-            matches!(outcome, BearerOutcome::Allowed(_)),
-            "aud-fallback binding must Allow, got {outcome:?}"
+            matches!(outcome, BearerOutcome::Invalid),
+            "a token with no client_id claim must be Invalid (no aud fallback), got {outcome:?}"
         );
 
         drop(srv);
@@ -2393,17 +2437,18 @@ mod tests {
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
         let sector = "https://myapp.zeroship.ai";
-        let aud = "myapp.zeroship.ai";
+        let host = "myapp.zeroship.ai";
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
-            Some("oac_myapp"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_id),
+            serde_json::json!(["http://api.zeroship.localhost", resource_aud]),
             "user@example.com",
             "OP User",
             3600,
         );
-        let req = bearer_req(&token, aud);
+        let req = bearer_req(&token, host);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -2411,7 +2456,7 @@ mod tests {
             &state,
             &user_policy(),
             &request_id,
-            Some("oac_myapp"),
+            Some(&client_id),
             Some(sector),
         )
         .await;
@@ -2651,12 +2696,20 @@ mod tests {
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0042";
 
+        // Two genuinely distinct apps: distinct UUIDs, hence distinct client
+        // ids and distinct resource audiences. Guarded, because the whole
+        // property under test evaporates if both sides are the same app.
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
+        assert_ne!(resource_aud_a, resource_aud_b);
+
         // App A.
         let token_a = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
-            Some("oac_app_a"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_a),
+            serde_json::json!([resource_aud_a]),
             "user@example.com",
             "User",
             3600,
@@ -2667,7 +2720,7 @@ mod tests {
             &req_a,
             &state,
             &rid,
-            Some("oac_app_a"),
+            Some(&client_a),
             Some("https://app-a.zeroship.ai"),
         )
         .await
@@ -2680,8 +2733,8 @@ mod tests {
         let token_b = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
-            Some("oac_app_b"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_b),
+            serde_json::json!([resource_aud_b]),
             "user@example.com",
             "User",
             3600,
@@ -2691,7 +2744,7 @@ mod tests {
             &req_b,
             &state,
             &rid,
-            Some("oac_app_b"),
+            Some(&client_b),
             Some("https://app-b.zeroship.ai"),
         )
         .await
@@ -2728,22 +2781,23 @@ mod tests {
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
         let sector = "https://myapp.zeroship.ai";
-        let aud = "myapp.zeroship.ai";
+        let host = "myapp.zeroship.ai";
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
 
         // Raw-OP arm projection.
         let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
-            Some("oac_myapp"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_id),
+            serde_json::json!([resource_aud]),
             "user@example.com",
             "User",
             3600,
         );
-        let req = bearer_req(&token, aud);
+        let req = bearer_req(&token, host);
         let rid = Uuid::new_v4();
         let BearerOutcome::Allowed(header) =
-            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), Some(sector)).await
+            resolve_bearer_user_header(&req, &state, &rid, Some(&client_id), Some(sector)).await
         else {
             panic!("must Allow");
         };
@@ -2778,11 +2832,16 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
+        // The token binds correctly on BOTH client_id and resource audience,
+        // so the ONLY thing that can stop it is the missing sector - i.e. the
+        // request really does reach the fail-closed check rather than being
+        // turned away by an earlier binding rejection.
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
-            Some("oac_myapp"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_id),
+            serde_json::json!([resource_aud]),
             "user@example.com",
             "User",
             3600,
@@ -2791,7 +2850,7 @@ mod tests {
         let rid = Uuid::new_v4();
         // No sector → fail closed.
         let outcome =
-            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), None).await;
+            resolve_bearer_user_header(&req, &state, &rid, Some(&client_id), None).await;
         assert!(
             matches!(outcome, BearerOutcome::ClientNotProvisioned),
             "no sector_identifier must fail closed (ClientNotProvisioned), got {outcome:?}"
@@ -2803,7 +2862,7 @@ mod tests {
             &state,
             &user_policy(),
             &rid,
-            Some("oac_myapp"),
+            Some(&client_id),
             None,
         )
         .await;
