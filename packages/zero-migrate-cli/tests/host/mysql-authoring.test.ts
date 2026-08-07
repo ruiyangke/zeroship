@@ -427,6 +427,16 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
       assert.equal(value[14], "4", `version bits are 0100: ${value}`);
       assert.ok("89ab".includes(value[19]), `variant bits are 10: ${value}`);
     }
+    // Every format assertion above passes for a generator that returns one
+    // constant well-formed v4 UUID 128 times, so none of them proves the column
+    // default generates anything. This one does: 128 rows must hold 128 distinct
+    // values. It catches a constant or near-constant generator and nothing more
+    // - 128 samples cannot detect bias, low entropy, or a long repeat period.
+    assert.equal(
+      new Set(values).size,
+      values.length,
+      "128 UUIDv4 column defaults are all distinct",
+    );
   } finally {
     await admin
       .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
