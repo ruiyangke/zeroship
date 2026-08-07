@@ -41,6 +41,12 @@ real traffic is not. A reproducer needs an app with both a live and a pinned
 workflow isolate on one thread, an in-flight RPC registered in the live one, and
 eviction of the pinned one.
 
+**Finding 15 (HIGH, live deploy to no deploy leaves stale code cached): CONFIRMED
+and FIXED.** `needs_reload` compared with `is_some_and`, so a remote hash of `None`
+read as unchanged and an undeployed app kept serving cached code while its limits,
+env version and net policy held steady. A regression test was written first and
+failed on the pre-fix code. Fixed by comparing the two hashes directly.
+
 **Finding 2 (CRITICAL, unbounded streaming bridge): MECHANISM CONFIRMED, and this
 one needs no unusual configuration to reach.** The runtime accounts stream bytes
 against two caps - per-stream `DEFAULT_STREAM_BUFFER_CAP` = 4 MiB
