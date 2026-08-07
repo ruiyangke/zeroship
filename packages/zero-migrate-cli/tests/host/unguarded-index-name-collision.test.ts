@@ -1,0 +1,340 @@
+// An UNGUARDED `createIndex` naming an index another table already owns, end to end.
+//
+// The PostgreSQL and SQLite emitters write `CREATE INDEX IF NOT EXISTS` whether or
+// not the author asked for a guard, while an index name is schema-wide on both. So
+// an unguarded create of a name another table owns is skipped by the engine, the
+// migration is journaled complete, and the declared index never exists. The guarded
+// path already fails closed on this; the unguarded one is the same silent skip with
+// no decision behind it.
+//
+// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// lowered by the native addon, applied over the real pg/mysql2 driver seam, then
+// read back from the live catalog (`pg_index` / `information_schema.STATISTICS`)
+// and from the journal table rather than from an engine return value.
+//
+// Does NOT cover SQLite (the Node host DriverConfig has no SQLite seam), does NOT
+// cover a collision the same batch creates before the statement runs, and does NOT
+// cover an index name long enough for PostgreSQL to truncate it into a collision.
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
+import { table, t } from "zero-migrate";
+import { noInjectPolicy } from "./policy.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
+  const { platform, arch } = process;
+  const abi = platform === "linux" ? "-gnu" : "";
+  process.env.ZERO_MIGRATE_ADDON_PATH = join(
+    HERE,
+    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
+  );
+}
+
+const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const OWNER_APP = "app_unguarded_index";
+const SHARED_INDEX = "idx_shared";
+const FREE_INDEX = "idx_free";
+const TABLE_A = "bare_idx_a";
+const TABLE_B = "bare_idx_b";
+
+type NamedMigration = MigrationModule & { readonly name: string };
+
+function authoredMigration(name: string, up: () => void): NamedMigration {
+  return { name, default: { up } } as NamedMigration;
+}
+
+function uniqueNamespace(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+function pgIdent(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function mysqlIdent(value: string): string {
+  return `\`${value.replaceAll("`", "``")}\``;
+}
+
+function ownership(...tables: string[]): Record<string, string> {
+  return Object.fromEntries(tables.map((name) => [name, OWNER_APP]));
+}
+
+/** `bare_idx_a` owns `idx_shared`; `bare_idx_b` carries the same column and no
+ *  index of its own. The indexed column is `int` so MySQL needs no key prefix. */
+function baseMigration(): NamedMigration {
+  return authoredMigration("unguarded_index_base", () => {
+    table(TABLE_A).create({
+      columns: { id: t.int().notNull(), bucket: t.int() },
+      primaryKey: ["id"],
+      indexes: [{ name: SHARED_INDEX, on: ["bucket"] }],
+    });
+    table(TABLE_B).create({
+      columns: { id: t.int().notNull(), bucket: t.int() },
+      primaryKey: ["id"],
+    });
+  });
+}
+
+/** An UNGUARDED create on `bare_idx_b`: no `ifNotExists` anywhere. With
+ *  `SHARED_INDEX` the name is already owned by `bare_idx_a`; with `FREE_INDEX` it is
+ *  free: the only variable between the negative arm and its control. */
+function unguardedCreateOnB(migrationName: string, indexName: string): NamedMigration {
+  return authoredMigration(migrationName, () => {
+    table(TABLE_B).index(indexName).add({ on: ["bucket"] });
+  });
+}
+
+async function applyInitial(
+  migration: NamedMigration,
+  projectSchema: string,
+  driver: DriverConfig,
+) {
+  return apply({
+    migration,
+    ownerApp: OWNER_APP,
+    projectSchema,
+    driver,
+    registry: {},
+    policy: [noInjectPolicy(projectSchema)],
+    approved: true,
+    appliedBy: "unguarded-index-e2e",
+    nameFallback: migration.name,
+  });
+}
+
+async function applyAfter(
+  prior: NamedMigration,
+  migration: NamedMigration,
+  projectSchema: string,
+  driver: DriverConfig,
+) {
+  return apply({
+    migration,
+    priorMigrations: [prior],
+    priorNameFallbacks: [prior.name],
+    ownerApp: OWNER_APP,
+    projectSchema,
+    driver,
+    registry: ownership(TABLE_A, TABLE_B),
+    policy: [noInjectPolicy(projectSchema)],
+    approved: true,
+    appliedBy: "unguarded-index-e2e",
+    nameFallback: migration.name,
+  });
+}
+
+/** `(index, table)` pairs the live PostgreSQL catalog holds for one schema. */
+async function pgIndexOwners(
+  client: import("pg").Client,
+  schema: string,
+): Promise<Array<{ index: string; table: string }>> {
+  const result = await client.query(
+    `SELECT i.relname AS index, tbl.relname AS table
+       FROM pg_index x
+       JOIN pg_class i ON i.oid = x.indexrelid
+       JOIN pg_class tbl ON tbl.oid = x.indrelid
+       JOIN pg_namespace n ON n.oid = i.relnamespace
+      WHERE n.nspname = $1
+      ORDER BY 1`,
+    [schema],
+  );
+  return result.rows as Array<{ index: string; table: string }>;
+}
+
+/** What the journal itself records, read from the server: the other half of the
+ *  defect pair. A silently skipped create leaves a `completed` `applied` row. */
+async function pgJournalPhases(
+  client: import("pg").Client,
+  schema: string,
+): Promise<Array<{ name: string; event_kind: string; phase: string | null }>> {
+  const result = await client.query(
+    `SELECT name, event_kind, phase
+       FROM ${pgIdent(`${schema}_migrations`)}.schema_migrations
+      ORDER BY event_seq`,
+  );
+  return result.rows as Array<{ name: string; event_kind: string; phase: string | null }>;
+}
+
+/** The index names the live MySQL catalog reports for one table. */
+async function mysqlIndexNames(
+  admin: import("mysql2/promise").Connection,
+  database: string,
+  tableName: string,
+): Promise<string[]> {
+  const [rows] = await admin.query(
+    `SELECT DISTINCT INDEX_NAME AS name
+       FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+      ORDER BY INDEX_NAME`,
+    [database, tableName],
+  );
+  return (rows as Array<{ name: string }>).map((row) => row.name);
+}
+
+async function withPgSchema(
+  prefix: string,
+  body: (client: import("pg").Client, schema: string) => Promise<void>,
+): Promise<void> {
+  const pg = (await import("pg")).default;
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+  const schema = uniqueNamespace(prefix);
+  const meta = `${schema}_migrations`;
+  try {
+    await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
+    await body(client, schema);
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS ${pgIdent(schema)} CASCADE;
+         DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+}
+
+test("PostgreSQL: an unguarded createIndex is refused, not silently skipped, when another table owns the name", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL unguarded-index e2e skipped");
+    return;
+  }
+  await withPgSchema("bareidx_taken_pg", async (client, schema) => {
+    const base = baseMigration();
+    const driver = { kind: "postgres" as const, url: PG_URL };
+    await applyInitial(base, schema, driver);
+    assert.deepEqual(
+      (await pgIndexOwners(client, schema)).find((row) => row.index === SHARED_INDEX),
+      { index: SHARED_INDEX, table: TABLE_A },
+      `${TABLE_A} owns ${SHARED_INDEX} before the unguarded create`,
+    );
+
+    const before = await pgJournalPhases(client, schema);
+    const collide = unguardedCreateOnB("unguarded_index_collide", SHARED_INDEX);
+    const settled = await applyAfter(base, collide, schema, driver).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    const owners = await pgIndexOwners(client, schema);
+    const onB = owners.some((row) => row.table === TABLE_B && row.index === SHARED_INDEX);
+    const after = await pgJournalPhases(client, schema);
+    const landed = after
+      .slice(before.length)
+      .map((row) => `${row.name}:${row.event_kind}/${row.phase}`)
+      .join(", ");
+
+    if (settled === null) {
+      // The defect, stated as the pair the server reports: the journal grew a
+      // completed row and the index that row claims to have created is nowhere in
+      // the catalog.
+      assert.fail(
+        `apply RESOLVED and the journal grew [${landed || "<no new row>"}] while ` +
+          `${TABLE_B} carries ${SHARED_INDEX}: ${onB}. A green journal over an index that ` +
+          `was never created is the defect: PostgreSQL scopes ${SHARED_INDEX} schema-wide, ` +
+          `${TABLE_A} owns it, and the emitted IF NOT EXISTS made the create a no-op.`,
+      );
+    }
+
+    assert.match(
+      String((settled as Error).message),
+      /existence-guard drift[\s\S]*index idx_shared[\s\S]*bare_idx_a/,
+      "the refusal must name the index and the table that owns it",
+    );
+    assert.deepEqual(
+      owners.filter((row) => row.index === SHARED_INDEX),
+      [{ index: SHARED_INDEX, table: TABLE_A }],
+      `${SHARED_INDEX} still belongs to ${TABLE_A} only; the refusal changed nothing`,
+    );
+    assert.equal(
+      after.length,
+      before.length,
+      `the refused create journaled nothing (new rows: ${landed}), so the migration stays ` +
+        "pending and its index name can be corrected without touching an applied checksum",
+    );
+  });
+});
+
+test("PostgreSQL control: the same unguarded createIndex still runs when the name is free", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL unguarded-index control skipped");
+    return;
+  }
+  await withPgSchema("bareidx_free_pg", async (client, schema) => {
+    const base = baseMigration();
+    const driver = { kind: "postgres" as const, url: PG_URL };
+    await applyInitial(base, schema, driver);
+
+    // The ONLY difference from the arm above is the index name. Without this the
+    // negative arm would pass just as well against an apply path broken outright.
+    const free = unguardedCreateOnB("unguarded_index_free", FREE_INDEX);
+    await applyAfter(base, free, schema, driver);
+
+    assert.deepEqual(
+      (await pgIndexOwners(client, schema)).find((row) => row.index === FREE_INDEX),
+      { index: FREE_INDEX, table: TABLE_B },
+      `${TABLE_B} carries ${FREE_INDEX}: an unclaimed name still reaches the CREATE`,
+    );
+  });
+});
+
+test("MySQL: an unguarded createIndex lands on its own table under a name another table also uses", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL unguarded-index e2e skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueNamespace("bareidx_my");
+  const meta = `${database}_migrations`;
+  const base = baseMigration();
+  const collide = unguardedCreateOnB("unguarded_index_collide", SHARED_INDEX);
+  const driver = { kind: "mysql" as const, url: MYSQL_URL };
+
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    await applyInitial(base, database, driver);
+    assert.ok(
+      (await mysqlIndexNames(admin, database, TABLE_A)).includes(SHARED_INDEX),
+      `${TABLE_A} carries ${SHARED_INDEX} before the unguarded create`,
+    );
+    assert.ok(
+      !(await mysqlIndexNames(admin, database, TABLE_B)).includes(SHARED_INDEX),
+      `${TABLE_B} does not carry ${SHARED_INDEX} before the unguarded create`,
+    );
+
+    await applyAfter(base, collide, database, driver);
+
+    // MySQL scopes index names per table, so both tables legitimately carry one and
+    // the ownership decision must never be reached here.
+    assert.ok(
+      (await mysqlIndexNames(admin, database, TABLE_B)).includes(SHARED_INDEX),
+      `${TABLE_B} carries its own ${SHARED_INDEX}: a same-name index on ${TABLE_A} is ` +
+        "an unrelated object on MySQL and must not block the create",
+    );
+    assert.ok(
+      (await mysqlIndexNames(admin, database, TABLE_A)).includes(SHARED_INDEX),
+      `${TABLE_A} keeps its own ${SHARED_INDEX}`,
+    );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(meta)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});

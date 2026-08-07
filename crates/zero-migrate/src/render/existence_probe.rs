@@ -166,8 +166,17 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             name,
             direction,
             expect,
+            ownership_only,
             ..
-        } => decide_index(table, name, *direction, expect.as_ref(), live, dialect),
+        } => decide_index(
+            table,
+            name,
+            *direction,
+            expect.as_ref(),
+            *ownership_only,
+            live,
+            dialect,
+        ),
         GuardProbe::Constraint {
             table,
             name,
@@ -492,6 +501,7 @@ fn decide_index(
     name: &str,
     direction: GuardDir,
     expect: Option<&(bool, Vec<String>)>,
+    ownership_only: bool,
     live: &SchemaSnapshot,
     dialect: SqlDialect,
 ) -> GuardVerdict {
@@ -509,20 +519,45 @@ fn decide_index(
             .get(table)
             .and_then(|t| t.indexes.iter().find(|i| i.name == candidate))
     };
-    let on_other_table = |candidate: &str| {
+    // The name-to-owner answer, in ONE place: the table (other than the probe's)
+    // that already carries `candidate`, or `None`. Both the presence tests below and
+    // the fail-closed owner report read it, so a hit and the table it names can never
+    // disagree.
+    let other_owner = |candidate: &str| -> Option<&str> {
         schema_wide
             .then(|| {
                 live.tables
                     .iter()
-                    .filter(|(other, _)| other.as_str() != table)
-                    .flat_map(|(_, t)| &t.indexes)
-                    .find(|i| i.name == candidate)
+                    .find(|(other, t)| {
+                        other.as_str() != table && t.indexes.iter().any(|i| i.name == candidate)
+                    })
+                    .map(|(other, _)| other.as_str())
             })
             .flatten()
     };
+    // OWNERSHIP-ONLY (an unguarded create on a schema-wide-index-name dialect):
+    // decide on the name's owner and nothing else. A different owner is a create the
+    // engine's `IF NOT EXISTS` would skip while the journal recorded it done, so fail
+    // closed naming the owner; anything else runs the statement, which keeps the
+    // same-table re-run the idempotent no-op crash recovery replays. Returns before the
+    // truncation backstop on purpose: that backstop refuses EVERY over-long
+    // `IfNotExists` name, and an unguarded create carries no author request to be
+    // refused on a name PostgreSQL accepts today. Does NOT verify shape, does NOT
+    // cover truncation collisions, and does NOT cover MySQL (per-table names).
+    if ownership_only {
+        return match other_owner(name) {
+            Some(owner) => drift(
+                &format!("index {name}"),
+                "table",
+                table,
+                &format!("{owner} (the name is already taken schema-wide)"),
+            ),
+            None => GuardVerdict::RunBare,
+        };
+    }
     if let Some(verdict) =
         truncated_identifier_backstop("index", name, direction, dialect, |candidate| {
-            on_probe_table(candidate).is_some() || on_other_table(candidate).is_some()
+            on_probe_table(candidate).is_some() || other_owner(candidate).is_some()
         })
     {
         return verdict;
@@ -535,7 +570,7 @@ fn decide_index(
             // op omitted it), so a schema-wide name still resolves through the wider
             // scan. Does NOT cover MySQL, where the drop names its table and an
             // index found under another table is a different object.
-            if live_idx.is_some() || on_other_table(name).is_some() {
+            if live_idx.is_some() || other_owner(name).is_some() {
                 GuardVerdict::RunBare
             } else {
                 GuardVerdict::SatisfiedNoop
@@ -549,17 +584,7 @@ fn decide_index(
                 // naming the owner rather than no-op over it, which would journal the
                 // migration complete while the index was never created. Does NOT
                 // rename or relocate anything: the remedy is the author's.
-                let owner = schema_wide
-                    .then(|| {
-                        live.tables
-                            .iter()
-                            .find(|(other, t)| {
-                                other.as_str() != table && t.indexes.iter().any(|i| i.name == name)
-                            })
-                            .map(|(other, _)| other.as_str())
-                    })
-                    .flatten();
-                if let Some(owner) = owner {
+                if let Some(owner) = other_owner(name) {
                     return drift(
                         &format!("index {name}"),
                         "table",
@@ -1136,6 +1161,7 @@ mod tests {
             name: "users_email_idx".into(),
             direction: GuardDir::IfNotExists,
             expect: Some((true, vec!["email".into()])),
+            ownership_only: false,
         };
         let mut t = empty_table();
         t.indexes.push(IndexSnapshot::btree(
@@ -1157,6 +1183,7 @@ mod tests {
             name: "users_lower_idx".into(),
             direction: GuardDir::IfNotExists,
             expect: Some((false, vec!["email".into()])),
+            ownership_only: false,
         };
         let mut t = empty_table();
         let mut idx = IndexSnapshot::btree("users_lower_idx".to_string(), false, Vec::new());
@@ -1166,6 +1193,106 @@ mod tests {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "elements"),
             v => panic!("expected FailDrift(elements) for partial/expression index, got {v:?}"),
         }
+    }
+
+    // -- Index ownership-only (the UNGUARDED create) -----------------------
+
+    /// The ownership-only probe an unguarded `createIndex` carries. `expect` is
+    /// always `None`: there is no declared shape to verify on this path.
+    fn ownership_probe(table: &str, name: &str) -> GuardProbe {
+        GuardProbe::Index {
+            schema: "app".into(),
+            table: table.into(),
+            name: name.into(),
+            direction: GuardDir::IfNotExists,
+            expect: None,
+            ownership_only: true,
+        }
+    }
+
+    fn table_owning(index: &str) -> TableSnapshot {
+        let mut t = empty_table();
+        t.indexes.push(IndexSnapshot::btree(
+            index.to_string(),
+            false,
+            vec!["email".to_string()],
+        ));
+        t
+    }
+
+    #[test]
+    fn index_ownership_only_fails_closed_when_another_table_owns_the_name() {
+        let mut live = snapshot_with("users", table_owning("idx_shared"));
+        live.tables.insert("orders".to_string(), empty_table());
+        match decide_pg(&ownership_probe("orders", "idx_shared"), &live) {
+            GuardVerdict::FailDrift(d) => {
+                assert_eq!(d.field, "table");
+                assert_eq!(d.expected, "orders");
+                assert!(
+                    d.actual.starts_with("users"),
+                    "names the owner: {}",
+                    d.actual
+                );
+            }
+            v => panic!("expected FailDrift(table) naming the owner, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn index_ownership_only_runs_bare_when_the_probe_table_already_owns_the_name() {
+        // The same-table re-run must stay the `IF NOT EXISTS` no-op that
+        // non-transactional crash recovery replays, never a SatisfiedNoop, which
+        // would journal the version without the statement ever running.
+        let live = snapshot_with("users", table_owning("idx_shared"));
+        assert_eq!(
+            decide_pg(&ownership_probe("users", "idx_shared"), &live),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn index_ownership_only_runs_bare_on_a_free_name() {
+        let live = snapshot_with("users", table_owning("idx_other"));
+        assert_eq!(
+            decide_pg(&ownership_probe("users", "idx_shared"), &live),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn index_ownership_only_ignores_a_foreign_owner_where_names_are_per_table() {
+        // MySQL scopes index names per table, so the same name elsewhere is an
+        // unrelated object and must not block the create.
+        //
+        // Pins the DECIDER's contract, NOT an apply path: the MySQL backend reads no
+        // `existence_guard` at all (`decide` is called only from the PostgreSQL and
+        // SQLite sessions), so no end-to-end arm can reach this branch and no
+        // end-to-end arm goes red if `Capability::SchemaWideIndexNames` is flipped on
+        // for MySQL. Does NOT cover that gap; it only keeps the function honest for
+        // the day a MySQL probe path exists.
+        let mut live = snapshot_with("users", table_owning("idx_shared"));
+        live.tables.insert("orders".to_string(), empty_table());
+        assert_eq!(
+            decide(
+                &ownership_probe("orders", "idx_shared"),
+                &live,
+                SqlDialect::Mysql
+            ),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn index_ownership_only_does_not_refuse_an_over_long_name() {
+        // The truncation backstop refuses EVERY over-long `IfNotExists` name. An
+        // unguarded create carries no author request to be refused on a name
+        // PostgreSQL accepts today, so the ownership path returns before it.
+        let long = "i".repeat(PG_MAX_IDENT_BYTES + 8);
+        let live = snapshot_with("users", empty_table());
+        assert_eq!(
+            decide_pg(&ownership_probe("users", &long), &live),
+            GuardVerdict::RunBare
+        );
     }
 
     // -- Constraint ifNotExists ------------------------------

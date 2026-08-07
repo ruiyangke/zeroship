@@ -4372,6 +4372,28 @@ impl IrAuthor {
                         name: idx.name.clone(),
                         direction: g.into(),
                         expect: Some((idx.unique, idx.columns.clone())),
+                        ownership_only: false,
+                    });
+                } else if self.dialect.supports(Capability::SchemaWideIndexNames) {
+                    // UNGUARDED createIndex. The emitters render `IF NOT EXISTS`
+                    // whether or not the author asked, so where an index name is
+                    // schema-wide a create naming an index ANOTHER table owns is
+                    // skipped by the engine and journaled green with the index never
+                    // created. Stamp an ownership-only probe so that case fails closed
+                    // naming the owner. Ownership is the whole decision: no shape
+                    // verify and no satisfied no-op, so the same-table re-run stays the
+                    // `IF NOT EXISTS` no-op crash recovery replays. Does NOT cover
+                    // MySQL (index names are per-table there, and the MySQL emitter
+                    // writes no `IF NOT EXISTS`), does NOT cover a collision the batch
+                    // itself creates before this statement runs, and does NOT make an
+                    // unguarded create idempotent in any other respect.
+                    probe = Some(crate::model::probe::GuardProbe::Index {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: idx.name.clone(),
+                        direction: crate::model::probe::GuardDir::IfNotExists,
+                        expect: None,
+                        ownership_only: true,
                     });
                 }
                 vec![decl.lower_create_index(table, &idx)]
@@ -4584,6 +4606,7 @@ impl IrAuthor {
                         name: name.clone(),
                         direction: g.into(),
                         expect: None,
+                        ownership_only: false,
                     });
                 }
                 vec![decl.lower_drop_index(table.as_deref(), &idx)]
@@ -4986,6 +5009,7 @@ impl IrAuthor {
                                         name: index_name,
                                         direction: g.into(),
                                         expect: Some((false, columns.clone())),
+                                        ownership_only: false,
                                     });
                             }
                         } else {
@@ -5177,21 +5201,23 @@ impl IrAuthor {
         // leaves `probe == None` here. Do not clobber those per-unit probes with a
         // single shared one. Detect that case (guard set, no shared probe, units
         // already carry per-unit guards) and skip the generic stamp.
-        if guard.is_some() {
-            match probe {
-                Some(probe) => {
-                    for (mig, _statements) in &mut migs {
-                        mig.existence_guard = Some(probe.clone());
-                    }
+        // The stamp is keyed on the PROBE, not on the author's guard: an unguarded
+        // createIndex builds an ownership-only probe that must reach the executor the
+        // same way a guarded one does. The fail-closed arm below stays keyed on the
+        // guard, since only an author-requested guard can be silently dropped.
+        match probe {
+            Some(probe) => {
+                for (mig, _statements) in &mut migs {
+                    mig.existence_guard = Some(probe.clone());
                 }
-                // No shared probe built. This is legal ONLY for the multi-object
-                // multi-object path, which has already stamped a per-unit probe on
-                // EVERY unit. If any unit is unstamped, the guard would be silently
-                // dropped on the bare op — refuse fail-closed.
-                None => {
-                    if migs.iter().any(|(mig, _)| mig.existence_guard.is_none()) {
-                        return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
-                    }
+            }
+            // No shared probe built. This is legal ONLY for the multi-object
+            // multi-object path, which has already stamped a per-unit probe on
+            // EVERY unit. If any unit is unstamped, the guard would be silently
+            // dropped on the bare op: refuse fail-closed.
+            None => {
+                if guard.is_some() && migs.iter().any(|(mig, _)| mig.existence_guard.is_none()) {
+                    return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
                 }
             }
         }

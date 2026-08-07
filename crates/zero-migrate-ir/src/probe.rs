@@ -38,6 +38,13 @@ impl From<ExistenceGuard> for GuardDir {
     }
 }
 
+/// Keep a defaulted `false` off the serialized wire so an unset marker leaves the
+/// probe's stored bytes byte-identical to what earlier versions wrote.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 /// A render-time-resolved, dialect-neutral descriptor of WHAT to probe and WHICH
 /// shape to verify. Built in `lower_one_op` from the op and stamped onto each
 /// lowered migration.
@@ -82,6 +89,19 @@ pub enum GuardProbe {
         /// The declared `(unique, columns)` to verify (`ifNotExists`); `None` for
         /// the presence-only `ifExists` drop.
         expect: Option<(bool, Vec<String>)>,
+        /// Decide on index-name OWNERSHIP alone: fail closed when a DIFFERENT
+        /// table already owns the name, run the statement otherwise. Carried by an
+        /// UNGUARDED `createIndex` on a dialect that scopes index names schema-wide,
+        /// where the emitted `IF NOT EXISTS` would otherwise let the engine skip a
+        /// create the author never guarded and the journal record it green.
+        ///
+        /// Does NOT verify the index shape and can never resolve to a satisfied
+        /// no-op, so the same-table re-run stays an `IF NOT EXISTS` no-op that
+        /// non-transactional crash recovery depends on. Does NOT cover a name a
+        /// PostgreSQL identifier truncation would collide into, and does NOT cover
+        /// a guarded create (which keeps the full shape verify).
+        #[serde(default, skip_serializing_if = "is_false")]
+        ownership_only: bool,
     },
     /// `addConstraint ifNotExists` or `dropConstraint ifExists`.
     Constraint {

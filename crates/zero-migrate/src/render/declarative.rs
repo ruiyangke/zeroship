@@ -7643,6 +7643,7 @@ impl DeclarativeAuthor {
                     name: idx.name.clone(),
                     direction: dir,
                     expect: Some((idx.unique, idx.columns.clone())),
+                    ownership_only: false,
                 });
             }
             out.push(single_stmt(idx_mig));

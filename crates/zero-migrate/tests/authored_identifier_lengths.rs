@@ -561,6 +561,9 @@ fn index_probe(name: &str, direction: GuardDir) -> GuardProbe {
         name: name.into(),
         direction,
         expect: None,
+        // The truncation backstop under test guards an AUTHORED guard; the
+        // ownership-only marker returns before it and is covered separately.
+        ownership_only: false,
     }
 }
 

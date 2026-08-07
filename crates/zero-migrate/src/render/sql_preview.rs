@@ -516,7 +516,7 @@ fn render_plan_steps(plan: &AppliedPlan) -> Vec<Rendered> {
 fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mut Vec<Rendered>) {
     match step {
         PlanStep::Ddl(m) => {
-            if let Some(g) = guard.or_else(|| m.existence_guard.as_ref().map(|_| guard_dir(m))) {
+            if let Some(g) = guard.or_else(|| authored_probe(m).map(|_| guard_dir(m))) {
                 out.push(Rendered::label(guard_label(op, g)));
             }
             push_statement(&m.up, out);
@@ -550,7 +550,7 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
 fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
     match step {
         PlanStep::Ddl(m) => {
-            if let Some(p) = &m.existence_guard {
+            if let Some(p) = authored_probe(m) {
                 out.push(Rendered::label(format!(
                     "{RUNTIME_RESOLVED} guarded DDL ({}): catalog-probed at apply \
                      (run / satisfied-noop / fail-drift); the statement below is the bare DDL",
@@ -870,6 +870,23 @@ fn probe_kind(p: &crate::model::probe::GuardProbe) -> &str {
         GuardProbe::Sequence { .. } => "sequence",
         GuardProbe::NamedType { kind, .. } => kind,
         GuardProbe::ColumnPresence { .. } => "column-presence",
+    }
+}
+
+/// The probe a preview may describe as a guard the AUTHOR wrote. An ownership-only
+/// index probe is engine-side fail-closed wiring stamped onto an UNGUARDED create,
+/// so labeling it would announce an `ifNotExists` the migration text does not
+/// contain. Does NOT alter the statement rendered beneath the label, and does NOT
+/// hide a real guard on any op.
+fn authored_probe(
+    m: &crate::model::migration::Migration,
+) -> Option<&crate::model::probe::GuardProbe> {
+    match m.existence_guard.as_ref()? {
+        crate::model::probe::GuardProbe::Index {
+            ownership_only: true,
+            ..
+        } => None,
+        probe => Some(probe),
     }
 }
 

@@ -1095,3 +1095,117 @@ async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
         );
     }
 }
+
+/// An UNGUARDED `createIndex` naming an index another table owns must fail closed
+/// too, on the SQLite leg.
+///
+/// The SQLite emitter writes `CREATE INDEX IF NOT EXISTS` whether or not the author
+/// asked, and SQLite scopes an index name across the whole `main` schema. So the
+/// create is skipped by the engine, the migration is journaled complete, and the
+/// declared index never exists: the same silent skip the guarded path already
+/// refuses, with no author guard behind it. The control in the same test is the free
+/// name, which must still reach the CREATE.
+///
+/// Does NOT cover MySQL (per-table index names), does NOT cover a shape divergence
+/// (the unguarded decision is ownership and nothing else), and does NOT cover a
+/// collision the same batch creates before the statement runs.
+#[compio::test]
+async fn create_index_unguarded_name_owned_by_another_table_fails_closed() {
+    let p = paths("sq_idx_bare_scope");
+    let be = backend(&p);
+
+    let make_table = |name: &str| Op::CreateTable {
+        name: name.into(),
+        columns: vec![col("bucket", ColType::Int)],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let make_index = |table: &str, index: &str| Op::CreateIndex {
+        table: table.into(),
+        columns: vec![IndexElement::Column {
+            name: "bucket".into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }],
+        name: Some(index.into()),
+        unique: Some(false),
+        using: None,
+        r#where: None,
+        concurrently: None,
+        include: vec![],
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+        schema: None,
+        // No guard: the author wrote a plain `createIndex`.
+        existence_guard: None,
+    };
+
+    // `lower` derives the migration name from the CALL SITE line, so each setup op
+    // gets its own `lower` call and therefore its own stable version.
+    for m in lower(make_table("a")) {
+        apply_one(&be, &m).await.expect("table a applies");
+    }
+    for m in lower(make_table("b")) {
+        apply_one(&be, &m).await.expect("table b applies");
+    }
+    for m in lower(make_index("a", "idx_shared")) {
+        apply_one(&be, &m).await.expect("a's index applies");
+    }
+    assert!(
+        index_exists(&be, "a", "idx_shared", false).await,
+        "table a owns idx_shared before the unguarded create"
+    );
+
+    let collide = lower(make_index("b", "idx_shared"));
+    let mut versions = Vec::new();
+    for m in &collide {
+        versions.push(m.version.as_str().to_string());
+        let err = apply_one(&be, m)
+            .await
+            .expect_err("a name owned by another table must not be a silent skip");
+        let (object, field) = expect_drift(err);
+        assert_eq!(object, "index idx_shared");
+        assert_eq!(field, "table");
+    }
+    assert!(
+        !index_exists(&be, "b", "idx_shared", false).await,
+        "the refused create left b untouched"
+    );
+    for version in &versions {
+        assert!(
+            !journaled(&be, version).await,
+            "a refused unguarded create journals nothing, so its name can still be fixed"
+        );
+    }
+
+    // CONTROL: the only variable is the index name. A free name still lands on b.
+    let free = lower(make_index("b", "idx_free"));
+    for m in &free {
+        apply_one(&be, m).await.expect("a free name still creates");
+    }
+    assert!(
+        index_exists(&be, "b", "idx_free", false).await,
+        "an unclaimed name still reaches the CREATE"
+    );
+
+    // CONTROL: re-running the SAME unguarded create is the `IF NOT EXISTS` no-op
+    // that non-transactional crash recovery replays. The probe decides ownership
+    // only, so the index b already owns is b's own and the statement runs bare; a
+    // shape-verifying probe would fail closed here on the absent expectation.
+    for m in &free {
+        apply_one(&be, m)
+            .await
+            .expect("re-running an unguarded create over its own index stays a no-op");
+    }
+    assert!(
+        index_exists(&be, "b", "idx_free", false).await,
+        "the re-run left b's index in place"
+    );
+}
