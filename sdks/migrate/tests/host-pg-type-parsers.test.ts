@@ -22,18 +22,24 @@ const OID_BOOL = 16;
 const OID_INT8 = 20;
 const OID_TEXT = 25;
 
-/** A `pg.types` stand-in whose bool parser has been poisoned, as a global
- *  `setTypeParser(16, ...)` would leave it. */
+/** Marker every poisoned parser stamps onto its output. */
+const POISON = "POISONED:";
+
+/** A `pg.types` stand-in poisoned for EVERY oid, as a global `setTypeParser`
+ *  would leave the ones it touched.
+ *
+ *  Two properties matter in the shape of this. Poisoning every oid rather than a
+ *  list asserts the property the driver needs - that no parser it relies on is
+ *  reachable through `setTypeParser` - instead of a set of instances an author
+ *  happened to suspect. And the output is MARKED rather than identity, so a test
+ *  can tell "the driver pinned this" apart from "the stand-in was never reached".
+ *  An identity poison cannot: a real text parser is identity too, so an assertion
+ *  against it passes whether or not the poison is wired in at all. */
 function poisonedPgModule() {
   return {
     types: {
-      // EVERY oid, unconditionally. Listing the ones we happen to suspect would
-      // assert a set of instances; this asserts the property, that no parser the
-      // driver relies on is reachable through `setTypeParser`. A list only ever
-      // catches what its author already thought of, which is how a shadow that
-      // merely borrowed another oid's parser passed an earlier version of this.
       getTypeParser(): (value: string) => unknown {
-        return (value: string) => value;
+        return (value: string) => `${POISON}${value}`;
       },
     },
   };
@@ -58,15 +64,7 @@ test("name[] decodes without consulting the global parser map", () => {
   // parser would be a live read of this same map, so a shadow written that way
   // would fail here - which is the point.
   const OID_NAME_ARRAY = 1003;
-  const poisoned = {
-    types: {
-      getTypeParser(): (value: string) => unknown {
-        return (value: string) => value;
-      },
-    },
-  };
-
-  const scoped = __testing.connectionScopedTypes(poisoned as never);
+  const scoped = __testing.connectionScopedTypes(poisonedPgModule() as never);
   assert.deepEqual(
     scoped.getTypeParser(OID_NAME_ARRAY)("{a,b}"),
     ["a", "b"],
@@ -112,6 +110,13 @@ test("exact-integer pinning still holds and other oids still delegate", () => {
   // int8 stays a verbatim string so values above 2^53 keep their exact digits.
   assert.equal(scoped.getTypeParser(OID_INT8)("9007199254740993"), "9007199254740993");
 
-  // An oid the driver does not pin is still served by the module's own parser.
-  assert.equal(scoped.getTypeParser(OID_TEXT)("hello"), "hello");
+  // CONTROL: an oid the driver does NOT pin must reach the poisoned stand-in.
+  // Without this the whole file could pass while the stand-in was never wired in,
+  // and every "the pin survives poisoning" assertion above would be vacuous. This
+  // is the assertion that makes the others mean something.
+  assert.equal(
+    scoped.getTypeParser(OID_TEXT)("hello"),
+    `${POISON}hello`,
+    "an unpinned oid must be served by the module, proving the poison is reachable",
+  );
 });
