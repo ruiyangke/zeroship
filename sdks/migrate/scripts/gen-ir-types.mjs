@@ -1,5 +1,5 @@
 // Generate the dialect-neutral IR *enum* token types from the engine's
-// single-source-of-truth schema `crates/zeroship-migrate/op-ir.schema.json` via
+// single-source-of-truth schema `third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json` via
 // `json-schema-to-typescript`.
 //
 // SCOPE — codegen covers the CLOSED STRING-ENUM defs only (BinaryOp, UnaryOp,
@@ -85,7 +85,7 @@ const ENUM_DEFS = [
 
 const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zeroship-migrate/op-ir.schema.json (the engine's single-source-of-
+// Source: third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
