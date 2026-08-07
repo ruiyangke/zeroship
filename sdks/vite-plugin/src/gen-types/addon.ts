@@ -27,11 +27,26 @@ import { fileURLToPath } from "node:url";
 // These used to be hand-mirrored here, and that turned every REQUIRED field the
 // engine adds into a runtime failure at a creator's build instead of a red
 // build in CI: our TypeScript never touched the engine's types, so a source we
-// no longer satisfied still compiled and napi rejected it with "Missing field
-// `<name>`". That has happened - `charterLayers` became required, this file
-// still passed `policyCeilingToml`, and every gen-types call failed at run time.
-// The engine exports these (`types: index.d.ts`, and the file is in `files`), so
-// the mirror was a choice rather than a constraint.
+// no longer satisfied still compiled. That has happened - `charterLayers`
+// became required, this file still passed `policyCeilingToml`, and every
+// gen-types call failed at run time.
+//
+// The runtime error is worse than "it fails later", which is why importing
+// matters more than it looks. Measured by the engine's authors against the
+// built addon: a source missing BOTH `dialect` and `charterLayers` reports
+//
+//     Missing field `dialect`
+//
+// and stops. No function name, no argument position, and no mention of the
+// second missing field - the deserializer names the first and returns. Fix what
+// it told you, rebuild, and you meet the next one. An N-field contract change
+// becomes N builds, each looking like the last.
+//
+// tsc reports every missing property in one error instead, and does so
+// regardless of `strict` - it is ordinary assignability, not a strictness
+// feature - so a consumer who has never turned strict on still gets the whole
+// list. The engine exports these types (`types: index.d.ts`, and the file is in
+// `files`), so the mirror was a choice rather than a constraint.
 import type {
   CollectionDescriptorDto,
   FieldDescriptorDto,
