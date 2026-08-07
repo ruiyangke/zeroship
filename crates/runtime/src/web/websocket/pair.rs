@@ -128,7 +128,7 @@ fn push_peer_event(state: &SharedState, ws_id: u32, event: WsEvent) {
 /// Returns the two pair IDs (lo, hi). The pair constructor then
 /// builds two JS wrappers around fresh `WebSocketImpl` boxes seeded
 /// with these IDs.
-pub fn mint_pair(state: &SharedState) -> (u32, u32) {
+pub fn mint_pair(scope: &mut v8::PinScope, state: &SharedState) -> (u32, u32) {
     let lo = network::alloc_native_ws_id(state);
     let hi = network::alloc_native_ws_id(state);
 
@@ -141,19 +141,24 @@ pub fn mint_pair(state: &SharedState) -> (u32, u32) {
     }
 
     // Bind the upgrading connection's authenticated user to BOTH sockets.
-    // The mint runs inside the upgrading `fetch` handler, so
-    // `executing_request_id` → `per_request_user` still resolves the
-    // connection's user. A connection has one identity; bind both ends so
+    // The mint runs inside the upgrading `fetch` handler, whose invocation
+    // frame carries the connection's user. A connection has one identity;
+    // bind both ends so
     // the WS-event pump can re-establish it for every `onmessage` /
     // `onclose` turn regardless of which socket the app holds. Without
     // this, `env.auth.getUser()` inside a WS handler would read whatever
     // user last touched the pooled isolate (identity bleed) or null.
+    let invocation_user =
+        crate::core::invocation::current_context(scope).map(|context| context.user_json);
     {
         let mut s = state.borrow_mut();
-        if let Some(user) = s
-            .executing_request_id
-            .and_then(|rid| s.per_request_user.get(&rid).cloned())
-        {
+        let user = match invocation_user {
+            Some(user) => user,
+            None => s
+                .executing_request_id
+                .and_then(|rid| s.per_request_user.get(&rid).cloned()),
+        };
+        if let Some(user) = user {
             s.ws_user.insert(lo, user.clone());
             s.ws_user.insert(hi, user);
         }
@@ -190,7 +195,7 @@ pub fn websocket_pair_callback(
         }
     };
 
-    let (lo, hi) = mint_pair(&state);
+    let (lo, hi) = mint_pair(scope, &state);
 
     // Build two paired WebSocketImpl wrappers. Each wrapper is a
     // brand-new JS object whose internal field 0 holds a Box<WebSocketImpl>

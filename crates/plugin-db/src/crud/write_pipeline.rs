@@ -25,7 +25,7 @@ pub(crate) fn inspect_update(
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
-/// Validate every top-level field key of a plain write document
+/// DB-8: validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
 /// any system/encryption/mask pass adds its own (legitimately reserved) keys.
@@ -38,7 +38,7 @@ fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
     Ok(())
 }
 
-/// For an update patch, its top-level keys are either field names
+/// DB-8 (update patch): an update patch's top-level keys are either field names
 /// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
 /// operators whose nested keys are field names. Validate the field-name keys
 /// (skipping `$`-prefixed operator keys, whose own nested fields are checked).
@@ -79,7 +79,7 @@ pub(crate) async fn apply(
     payload: &mut Value,
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
-    // Validate every USER-supplied document field key BEFORE the system /
+    // DB-8: validate every USER-supplied document field key BEFORE the system /
     // encryption / mask passes below add their own (reserved-suffix / `__zsenc__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
     // they skipped the `validate_field_name` fence the read/filter path enforces,

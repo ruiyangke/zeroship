@@ -525,6 +525,8 @@ pub fn timeout_static<'s>(
     };
 
     let signal_global = v8::Global::new(scope, signal_obj);
+    let owner_request_id = crate::core::invocation::current_request_id(scope, &state);
+    let continuation_context = crate::core::invocation::capture_context(scope);
     let timer_id = {
         let mut s = state.borrow_mut();
         let id = s.next_timer_id;
@@ -549,10 +551,11 @@ pub fn timeout_static<'s>(
             id,
             TimerCallback {
                 callback: abort_fn_global,
+                continuation_context,
                 interval: None,
             },
         );
-        if let Some(req_id) = s.executing_request_id {
+        if let Some(req_id) = owner_request_id {
             s.timer_owner.insert(id, req_id);
         }
         s.spawned_timers.push(crate::state::SpawnedTimer {

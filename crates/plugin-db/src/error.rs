@@ -704,7 +704,7 @@ impl From<zeroship_schema::error::MaskSentinelError> for DbError {
 /// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
 /// the old `fmt_db_err` from `v8_bridge` so the message shape is
 /// preserved (`db: <wrapper> — caused by: <cause>`).
-/// Drop the Postgres `DETAIL` line from a constraint-violation message
+/// DB-18: drop the Postgres `DETAIL` line from a constraint-violation message
 /// before it reaches app JS. PG puts the conflicting VALUE there (e.g.
 /// `Key (email)=(alice@example.com) already exists`), turning a unique/check
 /// probe into a value-exfiltration oracle for the app's own — possibly masked —

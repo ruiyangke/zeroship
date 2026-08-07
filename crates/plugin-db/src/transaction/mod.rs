@@ -134,7 +134,7 @@ pub(crate) async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
 ) -> Result<(), crate::error::DbError> {
-    // SET LOCAL ROLE + the per-app timeout guards (statement / idle-in-tx / lock)
+    // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch — all SET LOCAL, so they revert at the tx end.
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
     // never resolves can no longer pin this dedicated connection forever and
@@ -177,7 +177,7 @@ struct TxFinalizer {
     /// `ROLLBACK TO SAVEPOINT zs_sp_N`, connection stays open for the
     /// enclosing tx).
     savepoint: Option<String>,
-    /// Owning app. The settle path (COMMIT / ROLLBACK / RELEASE /
+    /// Owning app. SEC-1: the settle path (COMMIT / ROLLBACK / RELEASE /
     /// ROLLBACK TO + pending-emit drain) operates strictly on this app's
     /// slot, so one app's transaction can never settle another's.
     app_id: String,
@@ -219,7 +219,7 @@ pub fn transaction_dispatch<'s>(
 
     // Decide BEGIN vs SAVEPOINT from the *current* tx state.
     // `has_tx_for(app_id)` is true whenever an enclosing explicit
-    // `transaction()` for THIS app holds the slot. A co-resident
+    // `transaction()` for THIS app holds the slot. SEC-1: a co-resident
     // app's parked tx reads `false`, so this app correctly opens its own
     // top-level BEGIN rather than nesting into the other app's tx. A
     // nested call therefore emits `SAVEPOINT` and reuses the open
@@ -485,7 +485,7 @@ impl Drop for TxTeardownGuard {
                         "sqlite tx teardown cancelled before completion; failed to enqueue \
                          fallback ROLLBACK, restoring tx slot for reuse"
                     );
-                    // Restore to THIS app's slot only.
+                    // SEC-1: restore to THIS app's slot only.
                     crate::context::with_mut(|c| {
                         c.put_tx_client_for(&self.app_id, TxConnection::Sqlite(handle.clone()))
                     });

@@ -41,7 +41,7 @@ use crate::query::IndexKind;
 /// free-function audit helpers (Open Q1 resolution) plus `pool_exec`
 /// for Pass-1 DDL via its [`crate::backend::SqlExecutor`] super-bound;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
-/// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
+/// by Pass 2. See `docs/archive/p0-implementation-plan.md` §"PR 2"
 /// and `docs/proposals/db-system-design.md` §7.
 /// The `EncryptedColumn` super-bound lets the
 /// `MaskBackfill` / `MaskRewrite` dispatch decrypt encrypted columns

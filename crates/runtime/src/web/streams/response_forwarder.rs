@@ -72,6 +72,8 @@ pub struct ResponseForwarderInner {
     /// `reader.read()`. `resume_read` flips this back and schedules the next
     /// read once the consumer has drained below the low-water mark.
     pub paused: bool,
+    /// Continuation context captured when the app supplied the stream.
+    pub continuation_context: Option<v8::Global<v8::Value>>,
     /// Whether this forwarder applies upload backpressure (pause/resume on
     /// the buffer high/low-water marks). ONLY the `env.storage.putStream`
     /// path (`begin_forward_stream`) enables it, because its consumer
@@ -90,6 +92,7 @@ impl Default for ResponseForwarderInner {
             direct_writer: None,
             reader: None,
             paused: false,
+            continuation_context: None,
             backpressure: false,
         }
     }
@@ -101,16 +104,23 @@ impl Default for ResponseForwarderInner {
 /// is gone, closed, not paused, or has no persisted reader.
 pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32) {
     let Some(fwd) = get(state, stream_id) else { return };
-    let reader = {
+    let (reader, continuation_context) = {
         let mut inner = fwd.borrow_mut();
         if inner.closed || !inner.paused {
             return;
         }
         let Some(reader) = inner.reader.clone() else { return };
         inner.paused = false;
-        reader
+        (reader, inner.continuation_context.clone())
     };
-    schedule_next_read(scope, reader, fwd, stream_id, state.clone());
+    match continuation_context {
+        Some(context) => crate::core::invocation::with_captured_context(
+            scope,
+            &context,
+            |scope| schedule_next_read(scope, reader, fwd, stream_id, state.clone()),
+        ),
+        None => schedule_next_read(scope, reader, fwd, stream_id, state.clone()),
+    }
 }
 
 pub type ResponseForwarder = Rc<RefCell<ResponseForwarderInner>>;
@@ -252,9 +262,11 @@ fn forward_from_readable(
     // Allocate forwarder and register. Persist the reader so a backpressure
     // pause can be resumed later by `resume_read`.
     let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+    let continuation_context = crate::core::invocation::capture_context(scope);
     {
         let mut inner = fwd.borrow_mut();
         inner.reader = Some(reader_global.clone());
+        inner.continuation_context = Some(continuation_context);
         inner.backpressure = backpressure;
     }
     register(&state, stream_id, fwd.clone());

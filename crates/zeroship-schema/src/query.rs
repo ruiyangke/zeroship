@@ -584,7 +584,7 @@ pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
 pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
 pub const MAX_SEARCH_LIMIT: usize = 500;
-/// Max documents in a single `insertMany`. Bounds the multi-row SQL
+/// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
 /// string + bound-param vector materialized in the worker (and stays well
 /// under Postgres' 65535-bind-param wall). Callers needing more must chunk.
 pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
@@ -592,7 +592,7 @@ const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
 
-/// The effective row limit for a `find` — an omitted limit defaults to
+/// DB-2: the effective row limit for a `find` — an omitted limit defaults to
 /// [`MAX_QUERY_LIMIT`] rather than emitting NO `LIMIT` clause (which would pull
 /// the entire collection into the worker). Callers paginate past one page via
 /// `offset`. Explicit limits are still bounds-checked by `validate_limit_bound`.
@@ -3432,7 +3432,7 @@ pub fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
     kind != "none"
 }
 
-/// The column SQL expression to read for `field` inside an
+/// **SEC-4** — the column SQL expression to read for `field` inside an
 /// aggregate, substituting the `<field>_masked` sibling when `field` is a
 /// masked column.
 ///
@@ -3452,7 +3452,7 @@ pub fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String 
     }
 }
 
-/// Push one `$group.by` field's SELECT projection and GROUP
+/// **SEC-4** — push one `$group.by` field's SELECT projection and GROUP
 /// BY term. A masked column projects `"<col>_masked" AS "<col>"` (so the
 /// row carries the masked string under the logical name, exactly like
 /// `build_distinct`) and groups by the masked sibling; an unmasked
@@ -4061,7 +4061,7 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
-    // Cap the batch BEFORE materializing the multi-row SQL + param vec,
+    // DB-11: cap the batch BEFORE materializing the multi-row SQL + param vec,
     // so one call can't slam a multi-MB statement at the shared DB or blow the
     // worker heap. Enforced in the builder (the single choke point) so a raw
     // `default={fetch}` deploy bypassing the SDK is bounded too.
@@ -4701,7 +4701,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        // Read the masked sibling for masked columns.
+                        // SEC-4: read the masked sibling for masked columns.
                         format!("SUM({})", aggregate_read_ident(field, schema_hint))
                     }
                     "$avg" => {
@@ -4738,7 +4738,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        // Read the masked sibling for masked columns.
+                        // SEC-4: read the masked sibling for masked columns.
                         let read_ident = aggregate_read_ident(field, schema_hint);
                         if last_sort.is_empty() {
                             format!("(array_agg({read_ident}))[1]")
@@ -4784,7 +4784,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                     last_sort.push((key.clone(), descending));
                 }
             }
-            // Aggregate $sort on a masked base column must order by
+            // SEC-4: aggregate $sort on a masked base column must order by
             // the masked sibling, not plaintext. Aggregate aliases
             // (`agg_exprs`) order by the alias name as-is.
             order_clause =
@@ -5214,7 +5214,7 @@ fn build_having_inner(
                     }
                 } else {
                     // Resolve alias → aggregate expression, or fall back to
-                    // the quoted column. A masked base column in
+                    // the quoted column. SEC-4: a masked base column in
                     // HAVING reads its masked sibling, never plaintext.
                     let col = if let Some(expr) = agg_exprs.get(key) {
                         expr.clone()
@@ -5598,7 +5598,7 @@ where
     }
 }
 
-/// ORDER BY builder for the aggregate `$sort` stage.
+/// **SEC-4** — ORDER BY builder for the aggregate `$sort` stage.
 ///
 /// Keys that name an aggregate alias (`agg_exprs`) order by the alias as
 /// a bare quoted identifier (the SELECT already projected `<expr> AS
@@ -5754,7 +5754,7 @@ fn build_order_term(field: &str, descending: bool, dialect: SqlDialect) -> Strin
     build_order_term_expr(&quote_ident(field), descending, dialect)
 }
 
-/// Like [`build_order_term`] but substitutes the masked
+/// **SEC-4** — like [`build_order_term`] but substitutes the masked
 /// sibling for masked columns, so an aggregate `$sort` (or a `$first`
 /// ORDER BY) on a mask-only column never orders by — and thereby leaks
 /// the ordering of — the plaintext column.
@@ -6298,7 +6298,7 @@ mod tests {
 
     #[test]
     fn insert_many_rejects_oversized_batch_db11() {
-        // A batch over MAX_INSERT_MANY_BATCH must be rejected by the
+        // DB-11: a batch over MAX_INSERT_MANY_BATCH must be rejected by the
         // builder BEFORE allocating the multi-row SQL + param vec. A batch at
         // the cap is accepted.
         let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
@@ -6313,7 +6313,7 @@ mod tests {
 
     #[test]
     fn effective_query_limit_defaults_to_max_when_omitted_db2() {
-        // An omitted limit must default to the ceiling, not "no LIMIT".
+        // DB-2: an omitted limit must default to the ceiling, not "no LIMIT".
         assert_eq!(effective_query_limit(None), MAX_QUERY_LIMIT);
         assert_eq!(effective_query_limit(Some(10)), 10);
         assert_eq!(effective_query_limit(Some(0)), 0);
@@ -6481,7 +6481,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The aggregation pipeline must NOT leak masked-column plaintext.
+    // SEC-4: the aggregation pipeline must NOT leak masked-column plaintext.
     //
     // For a mask-only column (`.mask({...})` without `.encrypted()`),
     // plaintext lives in `<col>` and the masked string in `<col>_masked`.

@@ -10,6 +10,7 @@ pub mod dev_auth;
 pub mod dispatch;
 pub mod dynamic_import;
 pub mod init;
+pub(crate) mod invocation;
 pub mod modules;
 pub mod native_modules;
 pub mod node_error;

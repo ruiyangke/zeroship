@@ -19,8 +19,19 @@ use std::time::{Duration, Instant};
 #[allow(missing_debug_implementations)]
 pub struct TimerCallback {
     pub callback: v8::Global<v8::Function>,
+    /// The V8 continuation context active when the timer was registered.
+    pub continuation_context: v8::Global<v8::Value>,
     /// None = setTimeout (one-shot), Some(dur) = setInterval (repeating).
     pub interval: Option<Duration>,
+}
+
+/// A `process.nextTick` callback and the continuation context captured when it
+/// was queued.
+#[allow(missing_debug_implementations)]
+pub struct NextTickCallback {
+    pub callback: v8::Global<v8::Function>,
+    pub args: Vec<v8::Global<v8::Value>>,
+    pub continuation_context: v8::Global<v8::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +418,11 @@ pub struct RuntimeState {
     /// Monotonically increasing op-id counter.
     pub next_op_id: u32,
 
+    /// Node-compatible next-tick queue. Entries carry their own V8
+    /// continuation context because a raw Function does not retain CPED.
+    pub next_tick_callbacks: VecDeque<NextTickCallback>,
+    pub next_tick_draining: bool,
+
     /// Callbacks for live timers (setTimeout / setInterval), keyed by timer-id.
     pub timer_callbacks: HashMap<u32, TimerCallback>,
     /// Monotonically increasing timer-id counter.
@@ -708,6 +724,9 @@ impl RuntimeState {
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
 
+            next_tick_callbacks: VecDeque::new(),
+            next_tick_draining: false,
+
             timer_callbacks: HashMap::new(),
             next_timer_id: 1,
             timer_owner: HashMap::new(),
@@ -777,20 +796,18 @@ impl RuntimeState {
         self.net_policy = policy;
     }
 
-    /// Register a promise passed to `ctx.waitUntil(p)`. The promise is
-    /// keyed by the currently executing request_id; returns false if no
-    /// request is active (the caller's native op should throw to JS in
-    /// that case). Promises stay alive until cleaned up when the request
+    /// Register a promise passed to `ctx.waitUntil(p)` for its owning
+    /// invocation. Promises stay alive until cleaned up when the request
     /// completes.
-    pub fn register_wait_until(&mut self, promise: v8::Global<v8::Promise>) -> bool {
-        let Some(rid) = self.executing_request_id else {
-            return false;
-        };
+    pub fn register_wait_until(
+        &mut self,
+        request_id: u64,
+        promise: v8::Global<v8::Promise>,
+    ) {
         self.wait_until_by_request
-            .entry(rid)
+            .entry(request_id)
             .or_default()
             .push(promise);
-        true
     }
 
     /// Stash the env snapshot JSON so the `__zs_env` native op and

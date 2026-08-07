@@ -1440,7 +1440,13 @@ impl RuntimeInner {
             // Load polyfills and the user's entry module. The returned global
             // is the entry module's Namespace Object; the kernel reads
             // `default.fetch` directly off it (no more `__rpc` reach-through).
-            let namespace = match load_polyfills_and_modules(scope, modules, &self.plugins) {
+            let anonymous_context = crate::core::invocation::InvocationContext::default();
+            let load_result = crate::core::invocation::with_context_preserving_ambient(
+                scope,
+                &anonymous_context,
+                |scope| load_polyfills_and_modules(scope, modules, &self.plugins),
+            );
+            let namespace = match load_result {
                 Ok(ns) => Some(ns),
                 Err(e) => {
                     self.init_error = Some(e);
@@ -1719,23 +1725,27 @@ impl RuntimeInner {
         }
 
         let wall_start = Instant::now();
+        let invocation_context =
+            crate::core::invocation::InvocationContext::request(request_id, None);
         self.arm_cpu_timer();
         let dispatch_result: Result<Result<String, DispatchError>, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
-                let workflow_fn = v8::Local::new(scope, self.workflow_fn.as_ref().unwrap());
-                match parse_workflow_envelope(scope, envelope_json) {
-                    Ok(envelope_arg) => {
-                        let ctx_arg: v8::Local<v8::Value> = {
-                            let maybe = self.state.borrow().ctx_obj.clone();
-                            match maybe {
-                                Some(g) => v8::Local::new(scope, g).into(),
-                                None => v8::Object::new(scope).into(),
-                            }
-                        };
-                        call_workflow_inner(scope, workflow_fn, envelope_arg, ctx_arg)
+                crate::core::invocation::with_context(scope, &invocation_context, |scope| {
+                    let workflow_fn = v8::Local::new(scope, self.workflow_fn.as_ref().unwrap());
+                    match parse_workflow_envelope(scope, envelope_json) {
+                        Ok(envelope_arg) => {
+                            let ctx_arg: v8::Local<v8::Value> = {
+                                let maybe = self.state.borrow().ctx_obj.clone();
+                                match maybe {
+                                    Some(g) => v8::Local::new(scope, g).into(),
+                                    None => v8::Object::new(scope).into(),
+                                }
+                            };
+                            call_workflow_inner(scope, workflow_fn, envelope_arg, ctx_arg)
+                        }
+                        Err(e) => Ok(Err(e)),
                     }
-                    Err(e) => Ok(Err(e)),
-                }
+                })
             });
         self.disarm_cpu_timer();
 
@@ -1851,6 +1861,10 @@ impl RuntimeInner {
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
+        let invocation_context = crate::core::invocation::InvocationContext::request(
+            request_id,
+            user_json.clone(),
+        );
 
         if user_json.is_some() {
             crate::auth::set_request_user(&self.state, request_id, user_json);
@@ -1913,7 +1927,8 @@ impl RuntimeInner {
         // the registry empty for async procedures.
         let mut pending_abort_guard: Option<crate::rpc::abort::AbortGuard> = None;
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
-            enter_v8!(self, |scope| 'dispatch: {
+            enter_v8!(self, |scope| {
+                crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
                 let undefined = v8::undefined(scope).into();
 
                 // ---- Tier 1: RPC fast path ----
@@ -2106,6 +2121,7 @@ impl RuntimeInner {
                         Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                     }
                 }
+                })
             });
         self.disarm_cpu_timer();
 
@@ -2426,6 +2442,11 @@ impl RuntimeInner {
     fn handle_op_result_pump(&mut self, result: OpResult, work: &mut AsyncWork) {
         match result {
             OpResult::Completed { op_id, value, request_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::from_request_id(
+                        &self.state,
+                        request_id,
+                    );
                 if let Some(rid) = request_id {
                     // Restore the owning request's cancel flag so any new fetches
                     // spawned by the V8 callback inherit the same cancellation.
@@ -2439,8 +2460,14 @@ impl RuntimeInner {
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
-                    crate::dispatch::resolve_op(scope, &self.state, op_id, &value);
-                    collect_settled_promises(scope, &mut self.pending_requests)
+                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
+                        crate::dispatch::resolve_op(scope, &self.state, op_id, &value);
+                        collect_settled_promises(
+                            scope,
+                            &mut self.pending_requests,
+                            &self.state,
+                        )
+                    })
                 });
                 self.disarm_cpu_timer();
 
@@ -2480,6 +2507,11 @@ impl RuntimeInner {
                 self.drain_new_tasks_into(work);
             }
             OpResult::Failed { op_id, error, request_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::from_request_id(
+                        &self.state,
+                        request_id,
+                    );
                 if let Some(rid) = request_id {
                     let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                     let mut s = self.state.borrow_mut();
@@ -2491,8 +2523,14 @@ impl RuntimeInner {
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
-                    crate::dispatch::reject_op(scope, &self.state, op_id, &error);
-                    collect_settled_promises(scope, &mut self.pending_requests)
+                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
+                        crate::dispatch::reject_op(scope, &self.state, op_id, &error);
+                        collect_settled_promises(
+                            scope,
+                            &mut self.pending_requests,
+                            &self.state,
+                        )
+                    })
                 });
                 self.disarm_cpu_timer();
 
@@ -2529,6 +2567,11 @@ impl RuntimeInner {
                 self.drain_new_tasks_into(work);
             }
             OpResult::JsValue { resolver, value, request_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::from_request_id(
+                        &self.state,
+                        request_id,
+                    );
                 // Class-method async result: resolve/reject the bound
                 // resolver with a real V8 value.
                 if let Some(rid) = request_id {
@@ -2542,6 +2585,7 @@ impl RuntimeInner {
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
+                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
                     let r = v8::Local::new(scope, &resolver);
                     match value {
                         ResolveValue::Undefined => {
@@ -2645,7 +2689,12 @@ impl RuntimeInner {
                         }
                     }
                     crate::core::init::perform_microtask_checkpoint(scope);
-                    collect_settled_promises(scope, &mut self.pending_requests)
+                    collect_settled_promises(
+                        scope,
+                        &mut self.pending_requests,
+                        &self.state,
+                    )
+                    })
                 });
                 self.disarm_cpu_timer();
 
@@ -2683,6 +2732,10 @@ impl RuntimeInner {
             OpResult::Cancelled => {}
             #[cfg(feature = "runtime_native_websocket")]
             OpResult::WebSocketEvent { ws_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::connection(
+                        self.state.borrow().ws_user.get(&ws_id).cloned(),
+                    );
                 // Native WebSocket events: drain the per-WS event
                 // queue and dispatch each event in FIFO order. Multiple
                 // events may have been coalesced under one OpResult
@@ -2704,6 +2757,7 @@ impl RuntimeInner {
                 // turn would otherwise win and leak the wrong identity.
                 self.dispatch_native_turn(
                     work,
+                    invocation_context,
                     |state| {
                         let mut s = state.borrow_mut();
                         s.executing_request_id = None;
@@ -2720,6 +2774,7 @@ impl RuntimeInner {
             OpResult::SocketEvent { socket_id } => {
                 self.dispatch_native_turn(
                     work,
+                    crate::core::invocation::InvocationContext::default(),
                     |state| {
                         let mut s = state.borrow_mut();
                         s.executing_request_id = None;
@@ -2742,6 +2797,7 @@ impl RuntimeInner {
     fn dispatch_native_turn<Prep, Dispatch>(
         &mut self,
         work: &mut AsyncWork,
+        invocation_context: crate::core::invocation::InvocationContext,
         prep: Prep,
         dispatch: Dispatch,
     ) where
@@ -2753,9 +2809,11 @@ impl RuntimeInner {
 
         self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
-            dispatch(scope, &state_clone);
-            crate::core::init::perform_microtask_checkpoint(scope);
-            collect_settled_promises(scope, &mut self.pending_requests)
+            crate::core::invocation::with_context(scope, &invocation_context, |scope| {
+                dispatch(scope, &state_clone);
+                crate::core::init::perform_microtask_checkpoint(scope);
+                collect_settled_promises(scope, &mut self.pending_requests, &self.state)
+            })
         });
         self.disarm_cpu_timer();
 
@@ -2800,7 +2858,7 @@ impl RuntimeInner {
         self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
             crate::dispatch::fire_timer_callback(scope, &self.state, id);
-            collect_settled_promises(scope, &mut self.pending_requests)
+            collect_settled_promises(scope, &mut self.pending_requests, &self.state)
         });
         self.disarm_cpu_timer();
 
@@ -2879,7 +2937,7 @@ impl RuntimeInner {
             self.arm_cpu_timer();
             let settled_results = enter_v8!(self, |scope| {
                 crate::dispatch::fire_timer_callback(scope, &self.state, timer_id);
-                collect_settled_promises(scope, &mut self.pending_requests)
+                collect_settled_promises(scope, &mut self.pending_requests, &self.state)
             });
             self.disarm_cpu_timer();
 
@@ -3248,6 +3306,7 @@ impl RuntimeInner {
 fn collect_settled_promises(
     scope: &mut v8::PinScope,
     pending_requests: &mut HashMap<u64, PendingRequest>,
+    state: &SharedState,
 ) -> Vec<(u64, PendingRequest, SettledResult)> {
     let settled_ids: Vec<u64> = pending_requests
         .iter()
@@ -3265,11 +3324,19 @@ fn collect_settled_promises(
         .into_iter()
         .filter_map(|id| {
             let req = pending_requests.remove(&id)?;
-            let result = match req.origin {
-                PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise, id),
-                PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
-                PendingOrigin::Workflow => settle_workflow_promise(scope, &req.promise),
-            };
+            let invocation_context =
+                crate::core::invocation::InvocationContext::from_request_id(state, Some(id));
+            let result = crate::core::invocation::with_context(
+                scope,
+                &invocation_context,
+                |scope| match req.origin {
+                    PendingOrigin::Fetch => {
+                        http::extract_settled_result(scope, &req.promise, id)
+                    }
+                    PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
+                    PendingOrigin::Workflow => settle_workflow_promise(scope, &req.promise),
+                },
+            );
             Some((id, req, result))
         })
         .collect()
@@ -3951,7 +4018,7 @@ fn call_rpc_inner<'s>(
         }
     };
     let (result_val, caught_exception) = match als_ctx_object {
-        Some(ctx_object) => crate::rpc::with_rpc_context_lazy(scope, ctx_object, invoke),
+        Some(ctx_object) => crate::rpc::with_rpc_context(scope, ctx_object, invoke),
         None => invoke(scope),
     };
 

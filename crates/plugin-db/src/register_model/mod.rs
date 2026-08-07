@@ -256,7 +256,7 @@ async fn exec_register_model(
 /// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
 /// now, so the `PooledClient<'p>` lifetime still threads through to
 /// `apply` but no concrete-type leak remains in this signature. Open
-/// Q5 resolution per `docs/proposals/p0-implementation-plan.md`
+/// Q5 resolution per `docs/archive/p0-implementation-plan.md`
 /// §"PR 3" + §3 Q5 and `docs/proposals/db-system-design.md` §7.
 #[cfg(any(test, feature = "test-helpers"))]
 pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(

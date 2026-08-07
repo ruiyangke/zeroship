@@ -3,7 +3,7 @@
 //!
 //! Renamed from the prior orchestrator-internal guard type and
 //! moved out of the old orchestration wrapper into `backend/` (see
-//! `docs/proposals/p0-implementation-plan.md` §"PR 6") — the guard is the
+//! `docs/archive/p0-implementation-plan.md` §"PR 6") — the guard is the
 //! canonical RAII return shape for the
 //! [`crate::backend::LockManager`] capability, not an
 //! orchestrator-internal detail. Construction goes through

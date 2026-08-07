@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::state::SharedState;
-use crate::state::TimerCallback;
+use crate::state::{NextTickCallback, TimerCallback};
 
 // ===========================================================================
 // V8 platform init
@@ -2490,8 +2490,8 @@ fn console_log_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
+    let req_id = crate::core::invocation::current_request_id(scope, &state);
     let mut s = state.borrow_mut();
-    let req_id = s.executing_request_id;
 
     // Operator-visible mirror via tracing. The original eprintln was gated
     // on `ZEROSHIP_LOG` (or debug builds); preserve that gate so production
@@ -2583,18 +2583,94 @@ pub(crate) fn perform_microtask_checkpoint(scope: &mut v8::PinScope) {
 }
 
 fn drain_next_ticks(scope: &mut v8::PinScope) -> bool {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "__zsDrainNextTicks").unwrap();
-    let Some(value) = global.get(scope, key.into()) else {
+    let Some(state) = scope.get_slot::<SharedState>().cloned() else {
         return false;
     };
-    let Ok(func) = v8::Local::<v8::Function>::try_from(value) else {
-        return false;
+    {
+        let mut state = state.borrow_mut();
+        if state.next_tick_draining || state.next_tick_callbacks.is_empty() {
+            return false;
+        }
+        state.next_tick_draining = true;
+    }
+
+    let mut did_work = false;
+    let mut processed = 0usize;
+    loop {
+        if processed >= 10_000 {
+            let has_more = !state.borrow().next_tick_callbacks.is_empty();
+            if has_more {
+                let message = v8::String::new(
+                    scope,
+                    "process.nextTick queue exceeded 10000 callbacks",
+                )
+                .unwrap();
+                let exception = v8::Exception::error(scope, message);
+                scope.throw_exception(exception);
+            }
+            break;
+        }
+
+        let next = state.borrow_mut().next_tick_callbacks.pop_front();
+        let Some(next) = next else {
+            break;
+        };
+        did_work = true;
+        processed += 1;
+
+        let call_succeeded = crate::core::invocation::with_captured_context(
+            scope,
+            &next.continuation_context,
+            |scope| {
+                let callback = v8::Local::new(scope, &next.callback);
+                let args: Vec<v8::Local<v8::Value>> = next
+                    .args
+                    .iter()
+                    .map(|arg| v8::Local::new(scope, arg))
+                    .collect();
+                let undefined = v8::undefined(scope).into();
+                callback.call(scope, undefined, &args).is_some()
+            },
+        );
+        if !call_succeeded {
+            break;
+        }
+    }
+
+    state.borrow_mut().next_tick_draining = false;
+    did_work
+}
+
+fn process_next_tick_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Ok(callback) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
+        let message = v8::String::new(
+            scope,
+            "process.nextTick callback must be a function",
+        )
+        .unwrap();
+        let exception = v8::Exception::type_error(scope, message);
+        scope.throw_exception(exception);
+        return;
     };
-    let undefined = v8::undefined(scope).into();
-    func.call(scope, undefined, &[])
-        .map(|v| v.boolean_value(scope))
-        .unwrap_or(false)
+
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let callback = v8::Global::new(scope, callback);
+    let callback_args = (1..args.length())
+        .map(|index| v8::Global::new(scope, args.get(index)))
+        .collect();
+    let continuation_context = crate::core::invocation::capture_context(scope);
+    state.borrow_mut().next_tick_callbacks.push_back(NextTickCallback {
+        callback,
+        args: callback_args,
+        continuation_context,
+    });
 }
 
 // ===========================================================================
@@ -2837,7 +2913,7 @@ fn zs_bind_request_ctx_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let rid_opt = state.borrow().executing_request_id;
+    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
     let Some(rid) = rid_opt else {
         // No active request — silently ignore. Bootstrap should never
         // call this outside a request, but defensive no-op is safer
@@ -2885,10 +2961,11 @@ fn zs_wait_until_callback(
     }
     let promise: v8::Local<v8::Promise> = arg.try_into().unwrap();
     let global = v8::Global::new(scope, promise);
-    let _registered = state.borrow_mut().register_wait_until(global);
-    // If register_wait_until returned false there's no active request —
-    // drop the promise silently. The JS-side wrapper is the user-facing
-    // contract for that case.
+    if let Some(request_id) = crate::core::invocation::current_request_id(scope, &state) {
+        state.borrow_mut().register_wait_until(request_id, global);
+    }
+    // With no active invocation, drop the promise silently. The JS-side
+    // wrapper is the user-facing contract for that case.
 }
 
 /// `__zs_get_request_ctx()` — return the stashed `ctx` object for the
@@ -2904,7 +2981,7 @@ fn zs_get_request_ctx_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let rid_opt = state.borrow().executing_request_id;
+    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
     let Some(rid) = rid_opt else {
         rv.set(v8::null(scope).into());
         return;
@@ -2938,7 +3015,7 @@ fn zs_get_request_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let rid_opt = state.borrow().executing_request_id;
+    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
     let Some(rid) = rid_opt else {
         rv.set(v8::null(scope).into());
         return;
@@ -3003,12 +3080,21 @@ fn set_timeout_callback(
 
     let global_cb = v8::Global::new(scope, callback);
     let delay = Duration::from_millis(u64::from(ms));
+    let owner_request_id = crate::core::invocation::current_request_id(scope, &state);
+    let continuation_context = crate::core::invocation::capture_context(scope);
 
     let mut s = state.borrow_mut();
     let id = s.next_timer_id;
     s.next_timer_id += 1;
-    s.timer_callbacks.insert(id, TimerCallback { callback: global_cb, interval: None });
-    if let Some(req_id) = s.executing_request_id {
+    s.timer_callbacks.insert(
+        id,
+        TimerCallback {
+            callback: global_cb,
+            continuation_context,
+            interval: None,
+        },
+    );
+    if let Some(req_id) = owner_request_id {
         s.timer_owner.insert(id, req_id);
     }
     if delay < Duration::from_millis(1) {
@@ -3087,11 +3173,20 @@ fn set_interval_callback(
     }
 
     let global_cb = v8::Global::new(scope, callback);
+    let owner_request_id = crate::core::invocation::current_request_id(scope, &state);
+    let continuation_context = crate::core::invocation::capture_context(scope);
     let mut s = state.borrow_mut();
     let id = s.next_timer_id;
     s.next_timer_id += 1;
-    s.timer_callbacks.insert(id, TimerCallback { callback: global_cb, interval: Some(delay) });
-    if let Some(req_id) = s.executing_request_id {
+    s.timer_callbacks.insert(
+        id,
+        TimerCallback {
+            callback: global_cb,
+            continuation_context,
+            interval: Some(delay),
+        },
+    );
+    if let Some(req_id) = owner_request_id {
         s.timer_owner.insert(id, req_id);
     }
     s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: Some(delay) });
@@ -3553,42 +3648,12 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
             install_stream(scope, process, "stderr", 2);
         }
 
-        // process.nextTick — Node-only. Keep a separate queue so the
-        // runtime can drain it before V8 Promise microtasks, matching the
-        // ordering real npm drivers expect.
+        // process.nextTick — Node-only. The runtime drains this queue before
+        // V8 Promise microtasks and restores the context captured per entry.
         {
-            let src = v8::String::new(
-                scope,
-                r#"(p, g) => {
-                  const q = [];
-                  let draining = false;
-                  p.nextTick = function(fn) {
-                    if (typeof fn !== "function") throw new TypeError("process.nextTick callback must be a function");
-                    q.push([fn, Array.prototype.slice.call(arguments, 1)]);
-                  };
-                  g.__zsDrainNextTicks = function() {
-                    if (draining || q.length === 0) return false;
-                    draining = true;
-                    let didWork = false;
-                    try {
-                      let guard = 0;
-                      while (q.length > 0) {
-                        if (++guard > 10000) throw new Error("process.nextTick queue exceeded 10000 callbacks");
-                        const item = q.shift();
-                        didWork = true;
-                        item[0].apply(undefined, item[1]);
-                      }
-                    } finally {
-                      draining = false;
-                    }
-                    return didWork;
-                  };
-                }"#,
-            ).unwrap();
-            let script = v8::Script::compile(scope, src, None).unwrap();
-            let factory: v8::Local<v8::Function> = script.run(scope).unwrap().try_into().unwrap();
-            let undef = v8::undefined(scope).into();
-            factory.call(scope, undef, &[process.into(), global.into()]);
+            let key = v8::String::new(scope, "nextTick").unwrap();
+            let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
+            process.set(scope, key.into(), next_tick.into());
         }
 
         let process_key = v8::String::new(scope, "process").unwrap();

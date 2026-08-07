@@ -55,7 +55,7 @@
 //! A sixth PG-only extension trait, [`PgSqlExecutor`], exposes
 //! `pool_handle()` so free-function audit helpers in [`crate::audit`]
 //! can reach `&compio_postgres::Pool` without naming the concrete
-//! backend (see `docs/proposals/p0-implementation-plan.md` §3 Q1).
+//! backend (see `docs/archive/p0-implementation-plan.md` §3 Q1).
 //!
 //! The 16 audit-table operations that used to live as methods on
 //! `Backend` (`ensure_audit_table`, `write_audit_row`, …) were deleted;
@@ -90,7 +90,7 @@ pub use sqlite::SqliteBackend;
 /// statement" slice of the data-store boundary.
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
-/// `docs/proposals/p0-implementation-plan.md` and the
+/// `docs/archive/p0-implementation-plan.md` and the
 /// converged design at `docs/proposals/db-system-design.md` §7).
 /// Consumer bounds narrow onto this trait (and [`LockManager`])
 /// instead of the omnibus [`Backend`] super-trait; see the
@@ -270,7 +270,7 @@ impl LockScope {
 /// on a [`SqlExecutor::Client`].
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
-/// `docs/proposals/p0-implementation-plan.md` and
+/// `docs/archive/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The `: SqlExecutor`
 /// super-bound is load-bearing — every method takes a `&Self::Client`
 /// and that associated type lives on [`SqlExecutor`].
@@ -531,7 +531,7 @@ pub trait LockManager: SqlExecutor {
 /// app's logical namespace".
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
-/// `docs/proposals/p0-implementation-plan.md` and the
+/// `docs/archive/p0-implementation-plan.md` and the
 /// converged design at `docs/proposals/db-system-design.md` §7). Carries
 /// the single `ensure_app_schema` method that used to live on
 /// [`Backend`] directly; consumer bounds in
@@ -553,7 +553,7 @@ pub trait NamespaceManager: 'static {
 /// a typed snapshot the diff engine can consume".
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
-/// `docs/proposals/p0-implementation-plan.md` and
+/// `docs/archive/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The trait owns the
 /// `LiveSchema` associated type that used to live on [`Backend`] —
 /// pinning it here means consumer bounds like
@@ -588,7 +588,7 @@ pub trait SchemaIntrospect: 'static {
 /// writers, classify SQLSTATE failures, audit retries".
 ///
 /// Carved out of the monolithic [`Backend`] trait (see
-/// `docs/proposals/p0-implementation-plan.md` and
+/// `docs/archive/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The single method —
 /// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
 /// a SQLSTATE-driven retry loop and writes structured audit rows on
@@ -876,7 +876,7 @@ pub trait DialectBuilder: 'static {
 /// that used to live as methods on [`Backend`] were deleted; the
 /// helpers stay as free functions in `crate::audit::*` taking
 /// `&Pool` / `&Client`, and generic consumers reach the pool through
-/// `backend.pool_handle()`. See `docs/proposals/p0-implementation-plan.md`
+/// `backend.pool_handle()`. See `docs/archive/p0-implementation-plan.md`
 /// §3 Q1 and `docs/proposals/db-system-design.md` §7.
 ///
 /// **Feature gating**: this trait is unconditional at HEAD. The `impl`
@@ -909,7 +909,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// session-management primitive on a different extension trait —
 /// we take the PG extension-trait path and defer cross-backend
 /// lifetime threading. See
-/// `docs/proposals/p0-implementation-plan.md` §3 Q5 and
+/// `docs/archive/p0-implementation-plan.md` §3 Q5 and
 /// `docs/proposals/db-system-design.md` §7.
 ///
 /// The `: LockManager<Client = compio_postgres::Client>` super-bound
@@ -1581,7 +1581,7 @@ impl Drop for SchemaPendingGuard {
 /// concrete impl that wires up the same set).
 ///
 /// See the "Ergonomics" step in
-/// `docs/proposals/p0-implementation-plan.md` and
+/// `docs/archive/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7.
 // The `EncryptedColumn` super-bound is required for
 // the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
@@ -1640,7 +1640,7 @@ impl<T> RegisterBackend for T where
 /// `next_schema_version`, `write_audit_row`, …) were deleted
 /// — they stay as free functions in [`crate::audit`], reached via
 /// [`PgSqlExecutor::pool_handle`] (Open Q1 resolution, see
-/// `docs/proposals/p0-implementation-plan.md` §3 Q1).
+/// `docs/archive/p0-implementation-plan.md` §3 Q1).
 ///
 /// Lifetime invariants (preserved from the pre-carving shape):
 ///
@@ -1668,7 +1668,7 @@ pub trait Backend:
 ///
 /// **Why an enum, not `Box<dyn Backend>`** (closes
 /// `docs/proposals/db-system-design.md` §5.5 and
-/// `docs/proposals/p0-implementation-plan.md`):
+/// `docs/archive/p0-implementation-plan.md`):
 ///
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
