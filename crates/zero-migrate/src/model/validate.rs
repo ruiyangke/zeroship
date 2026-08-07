@@ -4676,7 +4676,7 @@ fn validate_op_support(
         };
         let suggested_fix = match kind {
             UnsupportedKind::Expr => {
-                "remove the expression-bearing option for now, or defer this migration until the expression/default renderer lands"
+                "remove the expression-bearing option; the current engine does not render expressions for this op"
             }
             _ => {
                 "remove this unsupported shape, or target a dialect/op shape the current engine declares supported"
@@ -6027,7 +6027,7 @@ fn validate_default_for_type(
             dialect: target_dialect,
             reason: format!(
                 "{position} declares a JSON value default on type {ty:?}; \
-                 JSON value defaults are valid only on json columns in v1"
+                 JSON value defaults are valid only on json columns"
             ),
             suggested_fix: Some(
                 "use this default only on json columns, or remove the non-empty object/array default"

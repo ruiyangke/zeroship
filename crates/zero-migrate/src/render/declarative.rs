@@ -4376,15 +4376,16 @@ pub enum DeclarativeError {
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
-    /// The diff requires an op v1 does not generate: an in-place INDEX or
+    /// The diff requires an op the differ does not generate: an in-place INDEX or
     /// FOREIGN KEY redefinition (a flipped `unique` flag, a changed column set, a
-    /// re-pointed FK target — each a DROP+CREATE deferred to a later phase).
-    /// Surfaced explicitly — never silently skipped. (Type/nullability changes are
+    /// re-pointed FK target - each one a DROP+CREATE, which the differ does not
+    /// synthesize because the DROP is destructive and wants an author's decision).
+    /// Surfaced explicitly - never silently skipped. (Type/nullability changes are
     /// handled as gated/ungated ALTERs; destructive DROPs are gated
-    /// migrations — neither uses this error.)
-    #[error("unsupported in v1 (deferred to a later phase): {0}")]
+    /// migrations - neither uses this error.)
+    #[error("the declarative differ does not generate this change: {0}; author it as an explicit migration instead")]
     UnsupportedInV1(String),
-    /// A declared field used a DSL type token the v1 differ does not map. This
+    /// A declared field used a DSL type token the differ does not map. This
     /// covers both out-of-scope parameterised/extension types
     /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
     /// (`bigint`, `uuid`, `int4`, `serial`, …). It is rejected at the author
@@ -4392,8 +4393,8 @@ pub enum DeclarativeError {
     /// `text` column (the creator declared X, would have got `text`, with
     /// permanent divergence from what plugin-db materialises).
     #[error(
-        "unsupported field type '{ty}' (not mapped in v1; vector/geoPoint/encrypted \
-         are out of v1 scope). Supported: string, number, boolean, date, calendarDate, \
+        "unsupported field type '{ty}' (not mapped by the declarative differ; \
+         vector/geoPoint/encrypted are out of scope). Supported: string, number, boolean, date, calendarDate, \
          json, object, array, union, ref, bytes, actor, id, int, smallInt, bigInt, \
          float, real, inet"
     )]
@@ -5041,7 +5042,7 @@ impl DeclarativeAuthor {
     /// The type / nullability pass handles a same-name column whose attributes
     /// changed (these were `UnsupportedInV1` before it existed):
     /// - **type change** → a GATED `ALTER COLUMN … TYPE …` (`destructive` +
-    ///   `requires_approval`; no auto type-change in v1);
+    ///   `requires_approval`; no auto type-change);
     /// - **`DROP NOT NULL`** (required true→false) → an ungated additive
     ///   `ALTER COLUMN DROP NOT NULL` (relaxing a constraint is safe);
     /// - **`SET NOT NULL`** (required false→true) → a GATED `ALTER COLUMN SET NOT
@@ -5456,7 +5457,7 @@ impl DeclarativeAuthor {
                     Some(li) => {
                         // Same-name index on both sides: a flipped `unique` flag or
                         // a changed column set is an in-place redefinition
-                        // (DROP+CREATE), deferred to a later phase. Surface it
+                        // (DROP+CREATE), which the differ does not synthesize. Surface it
                         // EXPLICITLY (5-idx) — never silently skip (the old loop
                         // only checked name presence, so a uniqueness flip emitted
                         // 0 migrations and left the wrong index in place).
@@ -7161,7 +7162,7 @@ impl DeclarativeAuthor {
 
     /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (type change).
     ///
-    /// A type change is `destructive` + `requires_approval` in v1 — there is NO
+    /// A type change is `destructive` + `requires_approval`; there is NO
     /// auto type-change. It can rewrite the whole table under `ACCESS EXCLUSIVE`
     /// and can be lossy (e.g. `text` → `integer` fails / truncates), so it flows
     /// through the gate exactly like a drop. The `USING <col>::<type>` cast is

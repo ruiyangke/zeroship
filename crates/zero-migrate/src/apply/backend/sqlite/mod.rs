@@ -511,17 +511,17 @@ impl MigrationBackend for SqliteBackend {
             ));
         }
         // The additive path covers a caller-supplied CREATE TABLE up + the
-        // atomic journal write. Squash/supersession + repeatable journaling are
-        // a later surface; reject here rather than silently dropping the edges.
+        // atomic journal write. Squash/supersession + repeatable journaling are not
+        // implemented here; reject rather than silently dropping the edges.
         if !supersedes.is_empty() {
             return Err(ApplyError::Backend(
-                "sqlite backend: supersession (squash) journaling is not yet implemented"
+                "sqlite backend: supersession (squash) journaling is not supported on SQLite"
                     .to_string(),
             ));
         }
         if kind != "apply" {
             return Err(ApplyError::Backend(format!(
-                "sqlite backend: journal kind '{kind}' is not yet implemented (only 'apply')"
+                "sqlite backend: journal kind '{kind}' is not supported (only 'apply')"
             )));
         }
         // Existence-guard catalog probe (SQLite). Mirror the PG
@@ -727,7 +727,7 @@ impl MigrationBackend for SqliteBackend {
             Ok(PreconditionVerdict::AllMet)
         } else {
             Err(ApplyError::Backend(
-                "sqlite backend: precondition evaluation is a later-phase capability \
+                "sqlite backend: precondition evaluation is not supported on SQLite \
                  (descriptor migrations carry none)"
                     .to_string(),
             ))

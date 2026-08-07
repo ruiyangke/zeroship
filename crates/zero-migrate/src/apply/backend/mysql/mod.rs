@@ -822,11 +822,11 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // A GENUINE precondition (boolean-SELECT probes gated by the `pg_query`
         // parser + PG-flavoured catalog reads) has no MySQL-native evaluator yet, so
         // a MySQL migration that DECLARES preconditions is refused (fail closed)
-        // rather than silently treated as satisfied. A later cut adds the MySQL
-        // evaluator behind live-MySQL tests.
+        // rather than silently treated as satisfied. Wiring a MySQL evaluator needs
+        // live-MySQL tests for every probe shape, which is why the refusal stands
+        // rather than a partial evaluator.
         Err(ApplyError::Backend(
-            "mysql backend: precondition evaluation is not yet implemented on MySQL in v1"
-                .to_string(),
+            "mysql backend: precondition evaluation is not supported on MySQL".to_string(),
         ))
     }
 
@@ -839,13 +839,12 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     ) -> Result<(), ApplyError> {
         // The existing-DB squash path journals a `squash` event WITHOUT running its
         // `up` (baseline-style). That records-not-run primitive is not wired for
-        // MySQL in v1 (it shares the baseline machinery below). The FRESH-path
+        // MySQL (it shares the baseline machinery below). The FRESH-path
         // squash — where the squash's `up` DOES run — is handled inline by
         // `apply_two_phase` (non-empty `supersedes`), so this refusal is only the
         // existing-DB record-not-run variant.
         Err(ApplyError::Backend(
-            "mysql backend: existing-DB squash (record-not-run) is not yet implemented on \
-             MySQL in v1"
+            "mysql backend: existing-DB squash (record-not-run) is not supported on MySQL"
                 .to_string(),
         ))
     }
@@ -986,19 +985,19 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
-        // No online expand-contract harness on MySQL in v1 (the differ emits no
+        // No online expand-contract harness on MySQL (the differ emits no
         // renames for MySQL, so `renames` is empty — no online path is reached).
         None
     }
 
     fn shadow(&self) -> Option<&dyn ShadowDryRun> {
-        // No shadow dry-run harness on MySQL in v1 — `dry_run` surfaces
+        // No shadow dry-run harness on MySQL; `dry_run` surfaces
         // `DryRunError::ShadowUnsupported` (the honest gap).
         None
     }
 
     fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
-        // No cross-deploy pending-contract partition on MySQL in v1 (the online
+        // No cross-deploy pending-contract partition on MySQL (the online
         // rename that opens obligations is unsupported here). `None` ⇒ reads are
         // empty and writes are no-ops by construction.
         None
@@ -1012,10 +1011,9 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     ) -> Result<BaselineOutcome, BaselineError> {
         // Adoption baseline (record the live schema as the project baseline WITHOUT
         // running the `up`) shares the guard + advisory-lock + record-not-run
-        // machinery that is PG-specific; the MySQL baseline is a later cut.
+        // machinery that is PG-specific, none of which MySQL has an equivalent for.
         Err(BaselineError::Backend(
-            "mysql backend: schema baseline/adoption is not yet implemented on MySQL in v1"
-                .to_string(),
+            "mysql backend: schema baseline/adoption is not supported on MySQL".to_string(),
         ))
     }
 }
@@ -5511,15 +5509,15 @@ mod render_tests {
         )];
         assert!(
             backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
-            "a DECLARED precondition fails closed on MySQL v1",
+            "a DECLARED precondition fails closed on MySQL",
         );
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());
         assert!(backend.record_squash(&cfg, &m, "t", &["v1"]).await.is_err());
-        assert!(backend.online().is_none(), "no online harness in v1");
-        assert!(backend.shadow().is_none(), "no shadow harness in v1");
+        assert!(backend.online().is_none(), "no online harness on MySQL");
+        assert!(backend.shadow().is_none(), "no shadow harness on MySQL");
         assert!(
             backend.pending_contracts().is_none(),
-            "no cross-deploy pending-contract partition in v1"
+            "no cross-deploy pending-contract partition on MySQL"
         );
     }
 
