@@ -697,11 +697,7 @@ fn main() -> std::io::Result<()> {
             .state(config)
             .state(envs)
             .state(logs)
-            .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
-            .service(
-                web::resource("/workflow-advance-unsigned/{app_id}")
-                    .route(web::post().to(handler::workflow_advance_unsigned)),
-            )
+            .configure(handler::configure)
             .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)

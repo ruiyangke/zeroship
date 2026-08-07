@@ -13,6 +13,24 @@ pub const DISPATCH_FRAME_PREFIX_BYTES: usize = 4;
 /// driving an unbounded metadata parse.
 pub const MAX_DISPATCH_META_BYTES: usize = 64 * 1024;
 
+/// Cap on the decoded creator-app request body, enforced at both tiers.
+///
+/// File uploads are expected to go straight to object storage, so this only
+/// has to cover JSON APIs and form posts. It is deliberately a whole-body
+/// buffer limit, not a stream limit: both tiers read the body into memory
+/// before dispatching, so this number multiplied by in-flight concurrency is
+/// the worst-case footprint.
+pub const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Cap on the whole gateway-to-worker frame.
+///
+/// Strictly larger than [`MAX_REQUEST_BODY_BYTES`], because the frame is the
+/// body plus the length prefix plus the metadata block. A worker limit set to
+/// the body cap alone would reject a request the gateway had already accepted,
+/// and the creator would see the failure at the tier that did not impose it.
+pub const MAX_DISPATCH_FRAME_BYTES: usize =
+    MAX_REQUEST_BODY_BYTES + DISPATCH_FRAME_PREFIX_BYTES + MAX_DISPATCH_META_BYTES;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DispatchMetadata {
     pub method: String,
