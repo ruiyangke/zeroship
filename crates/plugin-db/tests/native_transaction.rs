@@ -85,7 +85,16 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     RT.with(|rt| rt.block_on(fut))
 }
 
-fn require_pg_or_skip() -> Option<String> {
+/// Connects, or fails the test.
+///
+/// Deliberately NOT a skip. This binary is already opt-in behind
+/// `required-features = ["test-helpers"]`, so reaching here means someone
+/// asked for the live-Postgres suite; answering "8 passed" without a database
+/// tells them the opposite of the truth. These four transaction tests were
+/// broken for a long time behind exactly that green, and a skipping run is
+/// indistinguishable from a passing one at a glance - only the clock differs
+/// (0.02s against nothing, ~11s against Postgres).
+fn require_pg() -> String {
     let url = pg_url();
     let url_clone = url.clone();
     let ok = block_on(async move {
@@ -102,7 +111,13 @@ fn require_pg_or_skip() -> Option<String> {
             Err(_) => false,
         }
     });
-    if ok { Some(url) } else { None }
+    assert!(
+        ok,
+        "native_transaction needs a live Postgres at {url}. Set PG_TEST_URL to \
+         override. This suite is opt-in, so it fails rather than skipping: a \
+         skipped run reports the same \"ok\" as a passing one."
+    );
+    url
 }
 
 /// plugin-db's registerModel uses env_vars.APP_ID for the schema name
@@ -314,7 +329,7 @@ setup.config = {{ kind: "action" }};
 /// persists and is visible after the transaction commits.
 #[test]
 fn transaction_commits_on_resolve() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -349,7 +364,7 @@ const _procedures = { setup, commitOne };
 /// persists, and `transaction(fn)` rejects with the thrown error.
 #[test]
 fn transaction_rolls_back_on_async_reject() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -394,7 +409,7 @@ const _procedures = { setup, insertThenThrow };
 /// orchestrator's TryCatch).
 #[test]
 fn transaction_sync_throw_in_callback_rolls_back() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -436,7 +451,7 @@ const _procedures = { setup, syncThrow };
 /// without poisoning the whole tx.
 #[test]
 fn nested_inner_reject_rolls_back_to_savepoint_outer_continues() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -489,7 +504,7 @@ const _procedures = { setup, nestedPartialFailure };
 /// COMMIT).
 #[test]
 fn nested_inner_resolve_releases_savepoint() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -531,7 +546,7 @@ const _procedures = { setup, nestedBothCommit };
 /// (8) rejects the 9th level with `savepoint_depth_exceeded`.
 #[test]
 fn savepoint_depth_cap_8_exceeded_throws() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     // Recurse `transaction()` to depth `n`. The outermost is the BEGIN
@@ -586,7 +601,7 @@ const _procedures = { setup, deepNest };
 /// `commit` / `rollback` / `collection` method.
 #[test]
 fn tx_view_has_no_lifecycle_methods() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
@@ -638,7 +653,7 @@ const _procedures = { setup, probeTxView };
 /// reading it sees `undefined`.
 #[test]
 fn begin_transaction_not_on_env_db() {
-    let Some(url) = require_pg_or_skip() else { return };
+    let url = require_pg();
     reset_schema(&url);
 
     let src = build_src(
