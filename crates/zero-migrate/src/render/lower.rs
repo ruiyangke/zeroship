@@ -4464,11 +4464,16 @@ impl IrAuthor {
                     });
                 }
                 if let Some(g) = guard {
-                    probe = Some(crate::model::probe::GuardProbe::Table {
+                    // A child partition is not a top-level table, so a `Table` probe
+                    // resolved it against a map it can never appear in. Carry the
+                    // child's own shape (declared parent + declared bounds) so the
+                    // no-op is proven, not assumed from an absent name.
+                    probe = Some(crate::model::probe::GuardProbe::Partition {
                         schema: eff_schema.clone(),
-                        table: name.clone(),
+                        name: name.clone(),
+                        of: of.clone(),
                         direction: g.into(),
-                        expect_columns: Vec::new(),
+                        expect_bounds: Some(bounds.clone()),
                     });
                 }
                 partition_state.insert_child(of, name, bounds.clone());
@@ -4527,11 +4532,18 @@ impl IrAuthor {
                     )));
                 }
                 if let Some(g) = guard {
-                    probe = Some(crate::model::probe::GuardProbe::Table {
+                    // The `Table` probe this replaces read every live child as
+                    // ABSENT (partition children are excluded from the snapshot's
+                    // table map), so the guard CANCELLED the drop instead of
+                    // weakening it: no DDL ran, the journal went green, and the
+                    // partition kept its rows. `expect_bounds` stays `None` - the
+                    // drop is decided on the child's PARENT, not its bounds.
+                    probe = Some(crate::model::probe::GuardProbe::Partition {
                         schema: eff_schema.clone(),
-                        table: name.clone(),
+                        name: name.clone(),
+                        of: parent.clone(),
                         direction: g.into(),
-                        expect_columns: Vec::new(),
+                        expect_bounds: None,
                     });
                 }
                 partition_state.remove_child(parent, name);

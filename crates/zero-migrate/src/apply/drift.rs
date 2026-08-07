@@ -1470,6 +1470,40 @@ pub async fn snapshot_schema<D: SqlSession>(
     })
 }
 
+/// Compare ONE same-name child partition declared-vs-live, as `(field, expected,
+/// actual)` triples in declaration order (`of` before `bounds`).
+///
+/// Hoisted out of [`diff_snapshots`] so the structural differ and the
+/// existence-guard partition probe ([`crate::render::existence_probe::decide`])
+/// share ONE definition of "the same partition": a second, drifting copy in the
+/// probe is exactly how a guard and a drift report come to disagree about the same
+/// catalog.
+///
+/// `bounds` equality is the derived `PartitionBounds` `PartialEq`, which is already
+/// the canonical comparison: `snapshot_schema` parses `pg_get_expr` back into the
+/// same enum, so an integer bound round-trips (PostgreSQL prints it unquoted). It
+/// does NOT canonicalize literal SPELLING across types: a timestamptz bound
+/// authored as `2026-05-01T00:00:00Z` and printed by the catalog as
+/// `2026-05-01 00:00:00+00` compares unequal, which the probe reports as drift
+/// rather than resolving.
+pub(crate) fn partition_divergences(
+    expected: &PartitionSnapshot,
+    actual: &PartitionSnapshot,
+) -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    if expected.of != actual.of {
+        out.push(("of", expected.of.clone(), actual.of.clone()));
+    }
+    if expected.bounds != actual.bounds {
+        out.push((
+            "bounds",
+            format!("{:?}", expected.bounds),
+            format!("{:?}", actual.bounds),
+        ));
+    }
+    out
+}
+
 /// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
 /// function, no I/O, no DDL.
 ///
@@ -1532,22 +1566,13 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
         let Some(act_partition) = actual.partitions.get(name) else {
             continue;
         };
-        if exp_partition.of != act_partition.of {
+        for (field, expected, actual) in partition_divergences(exp_partition, act_partition) {
             altered.push(AlteredObject {
                 table: name.clone(),
                 object: format!("partition {name}"),
-                field: "of".to_string(),
-                expected: exp_partition.of.clone(),
-                actual: act_partition.of.clone(),
-            });
-        }
-        if exp_partition.bounds != act_partition.bounds {
-            altered.push(AlteredObject {
-                table: name.clone(),
-                object: format!("partition {name}"),
-                field: "bounds".to_string(),
-                expected: format!("{:?}", exp_partition.bounds),
-                actual: format!("{:?}", act_partition.bounds),
+                field: field.to_string(),
+                expected,
+                actual,
             });
         }
     }

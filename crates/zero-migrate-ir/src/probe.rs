@@ -4,7 +4,7 @@
 //! migration model stores them. Keeping the data in `model` prevents the migration
 //! wire type from depending on render code.
 
-use crate::ir::ExistenceGuard;
+use crate::ir::{ExistenceGuard, PartitionBounds};
 
 /// One declared column's verifiable shape for a `createTable ifNotExists`
 /// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
@@ -61,6 +61,33 @@ pub enum GuardProbe {
         /// The declared columns to shape-verify (`ifNotExists`); empty for the
         /// presence-only `ifExists` drop.
         expect_columns: Vec<ExpectColumn>,
+    },
+    /// `createPartition ifNotExists` or `dropPartition ifExists`.
+    ///
+    /// A child partition is NOT a top-level table: PostgreSQL introspection routes
+    /// it to `SchemaSnapshot::partitions` and never to `::tables`, so resolving a
+    /// partition guard through [`GuardProbe::Table`] reads every live child as
+    /// ABSENT - a guarded drop then no-ops over a partition that still holds rows
+    /// and journals green. This variant carries the partition's own SHAPE (the
+    /// declared parent, plus the declared bounds on the create leg) so the verdict
+    /// is decided against `::partitions`, and a child under a DIFFERENT parent or
+    /// with DIFFERENT bounds fails closed instead of silently matching by name.
+    ///
+    /// Does NOT model a partition of a partition beyond its immediate declared
+    /// parent, and does NOT reach MySQL or `SQLite`, whose partition lowering
+    /// collapses to bounded DML with no catalog probe at all.
+    Partition {
+        /// The effective schema the partition lives in.
+        schema: String,
+        /// The CHILD partition's table name.
+        name: String,
+        /// The parent the authored op declares this child belongs to.
+        of: String,
+        /// Guard direction.
+        direction: GuardDir,
+        /// The declared bounds to verify (`ifNotExists`); `None` for the
+        /// parent-ownership-only `ifExists` drop.
+        expect_bounds: Option<PartitionBounds>,
     },
     /// `addColumn ifNotExists` or `dropColumn ifExists`.
     Column {
@@ -171,6 +198,7 @@ impl GuardProbe {
     pub fn schema(&self) -> &str {
         match self {
             Self::Table { schema, .. }
+            | Self::Partition { schema, .. }
             | Self::Column { schema, .. }
             | Self::Index { schema, .. }
             | Self::Constraint { schema, .. }

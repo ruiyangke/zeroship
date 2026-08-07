@@ -982,3 +982,87 @@ columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
         "a table outside the inject scope must not gain the injection:\n{uncovered}"
     );
 }
+
+/// The plan-time announcement for a guarded `dropPartition`.
+///
+/// The `ifExists` guard on a partition WEAKENS the drop's precondition; it never
+/// cancels the drop. Engines before the shape-aware partition probe resolved the
+/// guard against the top-level table list, which never holds a child partition, so
+/// the drop silently no-opped under a green journal. Every database that already ran
+/// such a migration keeps its orphan partition; the NEXT environment rebuilt from the
+/// same authored history now actually drops it, from text that reads as already
+/// proven. This label is the only place the plan says so.
+///
+/// Asserts the note is SCOPED: it rides the guarded `dropPartition` and nothing else,
+/// so an unguarded drop and a guarded `createPartition` (additive) stay quiet and the
+/// warning keeps its meaning.
+///
+/// Does NOT assert the note's exact wording beyond the load-bearing clause, and does
+/// NOT cover the op-less `.sql` preview path, which has no op to inspect.
+#[test]
+fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
+    // The shared `opts()` charter INJECTS a `["id"]` primary key, which PostgreSQL
+    // refuses on a table partitioned by `bucket` (a partitioned table's PK must
+    // cover every partition key column). This case needs a partitioned parent, not
+    // the injection, so it previews under a no-inject charter.
+    let policy = support::no_inject("public");
+    let preview_opts = PreviewOpts {
+        default_schema: "public".to_string(),
+        owner_app: "app_preview".to_string(),
+        effective_policy: policy.clone(),
+    };
+    let resolve = |raw: &str| {
+        let parsed: MigrationIr = serde_json::from_str(raw).expect("partition fixture IR parses");
+        let resolved = resolve_create_table_policy(&parsed, &policy, "public")
+            .expect("partition fixture IR resolves");
+        serde_json::to_string(&resolved).expect("resolved partition fixture serializes")
+    };
+    let ir = |guard: &str, op: &str| {
+        format!(
+            r#"{{"ir_version":1,"name":"part_note","ops":[
+              {{"op":"createTable","name":"events","columns":[
+                {{"name":"bucket","type":"int","nullable":false}}
+              ],"partitionBy":{{"kind":"range","columns":["bucket"]}}}},
+              {op}{guard}}}
+            ]}}"#
+        )
+    };
+    let create_op = r#"{"op":"createPartition","name":"events_0","of":"events",
+        "bounds":{"kind":"range","from":[{"kind":"int","value":0}],
+                  "to":[{"kind":"int","value":100}]}"#;
+    let drop_op = r#"{"op":"dropPartition","parent":"events","name":"events_0""#;
+    let note = "DROPS the partition and every row in it";
+
+    let guarded_drop = render_ir_envelope_sql(
+        &resolve(&ir(r#","existenceGuard":"ifExists""#, drop_op)),
+        SqlDialect::Postgres,
+        &preview_opts,
+    )
+    .expect("a guarded dropPartition previews offline");
+    assert!(
+        guarded_drop.contains(RUNTIME_RESOLVED) && guarded_drop.contains(note),
+        "a guarded dropPartition must announce that a run verdict destroys rows:\n{guarded_drop}"
+    );
+
+    let unguarded_drop = render_ir_envelope_sql(
+        &resolve(&ir("", drop_op)),
+        SqlDialect::Postgres,
+        &preview_opts,
+    )
+    .expect("an unguarded dropPartition previews offline");
+    assert!(
+        !unguarded_drop.contains(note),
+        "an unguarded drop carries no guard, so it must not carry the guard note:\n{unguarded_drop}"
+    );
+
+    let guarded_create = render_ir_envelope_sql(
+        &resolve(&ir(r#","existenceGuard":"ifNotExists""#, create_op)),
+        SqlDialect::Postgres,
+        &preview_opts,
+    )
+    .expect("a guarded createPartition previews offline");
+    assert!(
+        !guarded_create.contains(note),
+        "the create direction is additive and must stay quiet:\n{guarded_create}"
+    );
+}

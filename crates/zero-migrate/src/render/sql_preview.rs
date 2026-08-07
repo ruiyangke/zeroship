@@ -767,11 +767,12 @@ fn guard_label(op: &Op, g: ExistenceGuard, dialect: SqlDialect) -> String {
         ExistenceGuard::IfNotExists => "ifNotExists",
         ExistenceGuard::IfExists => "ifExists",
     };
+    let newly_live = newly_live_drop_note(op, g);
     match dialect {
         SqlDialect::Postgres | SqlDialect::Sqlite => format!(
             "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): catalog-probed at apply \
              (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply \
-             runs when the probe says run"
+             runs when the probe says run{newly_live}"
         ),
         SqlDialect::Mysql if mysql_guard_is_native(op) => format!(
             "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): honoured natively on MySQL by the \
@@ -783,6 +784,42 @@ fn guard_label(op: &Op, g: ExistenceGuard, dialect: SqlDialect) -> String {
              evaluates no catalog probe, so the bare DDL below runs unconditionally and a \
              re-run errors instead of no-opping"
         ),
+    }
+}
+
+/// The extra plan-time sentence a guarded `dropPartition` carries, or `""`.
+///
+/// Engines before the shape-aware partition probe resolved a partition guard against
+/// the TOP-LEVEL table list, which never holds a child partition, so a guarded
+/// `dropPartition` read its target as absent, skipped the `DROP TABLE`, and still
+/// journaled the migration completed. Every database that already ran such a
+/// migration keeps its orphan partition under a green journal, and the fix cannot
+/// repair it - but the NEXT environment rebuilt from the same authored history (a
+/// fresh staging DB, a new region, a DR restore, a per-PR database) replays the
+/// identical text and now ACTUALLY drops it. Two environments then diverge in the
+/// destructive direction from migration text that reads as already-proven.
+///
+/// The destructive-approval gate cannot warn about this: a guarded `dropPartition`
+/// already lowers `destructive + requires_approval`, byte-identically to an
+/// unguarded one, and did so throughout the period the drop was being silently
+/// cancelled - so approving it never meant "this will drop". This sentence is the
+/// only place the plan says the guard weakens the drop's PRECONDITION rather than
+/// cancelling the drop.
+///
+/// Preview text only: it changes no rendered statement and no apply verdict, and it
+/// deliberately does NOT predict WHICH verdict this apply will get - that is decided
+/// against the live catalog under the apply lock. Covers `dropPartition` only:
+/// `detachPartition` carries no existence guard, and the guarded `createPartition`
+/// leg is additive. Does NOT appear on the op-less `.sql` preview path, which has no
+/// op to inspect.
+fn newly_live_drop_note(op: &Op, g: ExistenceGuard) -> &'static str {
+    match (op, g) {
+        (Op::DropPartition { .. }, ExistenceGuard::IfExists) => {
+            "; a run verdict DROPS the partition and every row in it - this guard \
+             no-ops only when the child is genuinely absent, never merely because a \
+             partition is not a top-level table"
+        }
+        _ => "",
     }
 }
 
@@ -933,6 +970,7 @@ fn probe_kind(p: &crate::model::probe::GuardProbe) -> &str {
     use crate::model::probe::GuardProbe;
     match p {
         GuardProbe::Table { .. } => "table",
+        GuardProbe::Partition { .. } => "partition",
         GuardProbe::Column { .. } => "column",
         GuardProbe::Index { .. } => "index",
         GuardProbe::Constraint { .. } => "constraint",
@@ -967,6 +1005,7 @@ fn guard_dir(m: &crate::model::migration::Migration) -> ExistenceGuard {
     let dir = match &m.existence_guard {
         Some(
             GuardProbe::Table { direction, .. }
+            | GuardProbe::Partition { direction, .. }
             | GuardProbe::Column { direction, .. }
             | GuardProbe::Index { direction, .. }
             | GuardProbe::Constraint { direction, .. }

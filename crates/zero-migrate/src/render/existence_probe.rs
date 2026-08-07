@@ -154,6 +154,13 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             expect_columns,
             ..
         } => decide_table(table, *direction, expect_columns, live, dialect),
+        GuardProbe::Partition {
+            name,
+            of,
+            direction,
+            expect_bounds,
+            ..
+        } => decide_partition(name, of, *direction, expect_bounds.as_ref(), live),
         GuardProbe::Column {
             table,
             column,
@@ -282,6 +289,114 @@ fn decide_sequence(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> Gu
                 GuardVerdict::SatisfiedNoop
             } else {
                 GuardVerdict::RunBare
+            }
+        }
+    }
+}
+
+/// Decide a `createPartition ifNotExists` / `dropPartition ifExists` guard against
+/// the live catalog's CHILD-PARTITION map.
+///
+/// A child partition never appears in `SchemaSnapshot::tables` (PostgreSQL
+/// introspection filters `relispartition = false` so a child's inherited columns and
+/// propagated indexes are not mistaken for a table of its own). Resolving the guard
+/// through the table map therefore read EVERY live child as absent, which turned a
+/// guarded `dropPartition` into a `SatisfiedNoop` that skipped the `DROP TABLE`,
+/// journaled the migration completed, and left the partition and its rows in place.
+/// This decides against `live.partitions` instead, and verifies the partition's
+/// SHAPE rather than its bare name:
+///
+/// - **`ifExists` (drop)**: RunBare only when the child is present AND belongs to
+///   the DECLARED parent. A child under a different parent is `FailDrift` on `of`:
+///   the authored op names a partition of `events`, and dropping a same-named child
+///   of some other table is not that op. Genuinely absent is `SatisfiedNoop`, which
+///   is what `ifExists` is for. Bounds are NOT compared on the drop leg; a
+///   re-bounded child is still the child the author means to remove, and its
+///   ownership is the fact that identifies it.
+/// - **`ifNotExists` (create)**: `SatisfiedNoop` only when the child is present
+///   AND its parent AND its bounds match the declared ones, so a re-run over an
+///   already-created partition stops erroring with `relation "..." already exists`
+///   without ever accepting a differently-shaped child by name.
+///
+/// In BOTH directions a name the live catalog holds as a plain TABLE rather than a
+/// partition is `FailDrift` on `kind`: a `dropPartition` must never resolve onto a
+/// standalone table, and a `createPartition` cannot succeed under an occupied name.
+///
+/// The declared-vs-live comparison is [`crate::apply::drift::partition_divergences`],
+/// the SAME function the structural differ uses, so the guard and a drift report
+/// cannot disagree about what makes two partitions the same. The two live rules also
+/// match what the canonical fold already demands of an authored `dropPartition`
+/// (`render::fold` requires the child to BE a partition and to belong to the named
+/// parent), so guard, fold, and drift report agree; the guard's only divergence is
+/// that a genuinely ABSENT child no-ops here instead of erroring, which is the whole
+/// point of `ifExists`.
+///
+/// One consequence worth naming: a child DETACHED by an earlier op is a plain table
+/// by the time a guarded `dropPartition` probes it, so it is `FailDrift` on `kind`
+/// rather than a drop. That mirrors the fold, which already refuses `detachPartition`
+/// followed by `dropPartition` on the same child.
+///
+/// Does NOT verify the child's COLUMNS (they are inherited from the parent and the
+/// authored op declares none), does NOT model a partition of a partition beyond its
+/// immediate declared parent, does NOT canonicalize bound literal spelling across
+/// types (a timestamptz bound whose catalog rendering differs from the authored text
+/// is reported as drift, not resolved), and does NOT reach MySQL or `SQLite`, whose
+/// partition lowering emits bounded DML with no probe.
+fn decide_partition(
+    name: &str,
+    of: &str,
+    direction: GuardDir,
+    expect_bounds: Option<&crate::model::ir::PartitionBounds>,
+    live: &SchemaSnapshot,
+) -> GuardVerdict {
+    let Some(actual) = live.partitions.get(name) else {
+        // Not a live child. If the NAME is a plain table, neither direction is
+        // safe: a drop would target a standalone table the author never named, and
+        // a create cannot succeed under an occupied name.
+        if live.tables.contains_key(name) {
+            return drift(&format!("partition {name}"), "kind", "partition", "table");
+        }
+        return match direction {
+            GuardDir::IfExists => GuardVerdict::SatisfiedNoop,
+            GuardDir::IfNotExists => GuardVerdict::RunBare,
+        };
+    };
+    // Present as a child. `of` is compared in BOTH directions (ownership identifies
+    // the partition); `bounds` only on the create leg, where the declared shape is
+    // what the no-op would be claiming is already there.
+    let expected = crate::model::snapshot::PartitionSnapshot {
+        of: of.to_string(),
+        bounds: match (direction, expect_bounds) {
+            (GuardDir::IfNotExists, Some(bounds)) => bounds.clone(),
+            // Drop leg, or a create whose bounds the wire type left unset: compare
+            // ownership only by echoing the live bounds back. A create with no
+            // declared bounds cannot PROVE the live child is the declared one, so it
+            // is refused separately below.
+            _ => actual.bounds.clone(),
+        },
+    };
+    if let Some((field, expected, actual)) =
+        crate::apply::drift::partition_divergences(&expected, actual)
+            .into_iter()
+            .next()
+    {
+        return drift(&format!("partition {name}"), field, &expected, &actual);
+    }
+    match direction {
+        GuardDir::IfExists => GuardVerdict::RunBare,
+        GuardDir::IfNotExists => {
+            if expect_bounds.is_some() {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                // Never built by lowering (the create arm always carries the
+                // authored bounds), but the wire type admits it: fail closed
+                // rather than no-op over a partition whose shape we cannot prove.
+                drift(
+                    &format!("partition {name}"),
+                    "bounds",
+                    "<declared but unverifiable>",
+                    &format!("{:?}", actual.bounds),
+                )
             }
         }
     }

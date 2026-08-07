@@ -1,9 +1,16 @@
 // No tracked file may carry a NUL byte.
 //
 // A NUL turns a text file binary for most of the toolchain. The local `grep` is
-// ugrep, which SILENTLY reports no matches in such a file and exits 1 - no error,
-// no warning - so a NUL anywhere in the tree makes every subsequent search over
-// that file return a clean-looking nothing. That is how a real one got written
+// ugrep 7.5.0, and its behaviour is quieter than "reports no matches" suggests.
+// Measured on a clean file and a copy with one NUL appended:
+//
+//   grep -c needle clean.txt   ->  stdout "1", exit 0
+//   grep -c needle nul.txt     ->  stdout EMPTY, exit 1, stderr EMPTY
+//
+// It does not print a zero count. It prints NOTHING and exits 1, which is
+// byte-identical to a file that genuinely lacks the pattern unless the caller was
+// also reading the exit code. So a NUL anywhere in the tree makes every subsequent
+// search over that file return a clean-looking nothing. That is how a real one got written
 // here: `dialect-support.toml`'s generator built a composite key with a literal
 // 0x00 separator, and searches over the generator read as empty for as long as it
 // was there (fixed in 301ac74 by spelling the separator as the two-character

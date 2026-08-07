@@ -4187,3 +4187,436 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 12 - a guarded `dropPartition` must still drop the child
+// ---------------------------------------------------------------------------
+
+/// The partitioned-parent setup an authored history establishes BEFORE the drop:
+/// a `PARTITION BY RANGE (bucket)` parent, one range child, and one row that
+/// routes into that child. Returned as ops so the same list can be folded into the
+/// `LiveSchema` the LATER drop migration lowers against.
+fn partition_setup_ops() -> Vec<zero_migrate::model::ir::Op> {
+    let ir: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"partition_setup","ops":[
+          {"op":"createTable","name":"events","columns":[
+            {"name":"bucket","type":"int","nullable":false},
+            {"name":"payload","type":"text","nullable":false}
+          ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":true}},
+          {"op":"createPartition","name":"events_0","of":"events",
+           "bounds":{"kind":"range","from":[{"kind":"int","value":0}],
+                     "to":[{"kind":"int","value":100}]}},
+          {"op":"insert","table":"events","columns":["bucket","payload"],
+           "rows":[[42,"kept"]]}
+        ]}"#,
+    )
+    .expect("parse the partitioned-parent setup IR");
+    ir.ops
+}
+
+/// Lower one authored partition IR through the shipped `IrAuthor` on PostgreSQL.
+/// `live` is the folded projection of every EARLIER migration, exactly as a deploy
+/// hands the lowerer the already-applied history.
+fn lower_partition_plan(
+    cfg: &ExecutorConfig,
+    ir_name: &str,
+    ops_json: &str,
+    live: &LiveSchema,
+) -> Vec<PlanStep> {
+    let authored: MigrationIr = serde_json::from_str(&format!(
+        r#"{{"ir_version":1,"name":"{ir_name}","ops":{ops_json}}}"#
+    ))
+    .expect("parse the partition IR");
+    let resolved =
+        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
+            .expect("resolve the no-inject table policy");
+    IrAuthor::new(
+        &cfg.project_schema,
+        "app_test",
+        SqlDialect::Postgres,
+        &support::no_inject("app"),
+    )
+    .lower_steps(&resolved, live)
+    .expect("the partition IR lowers on PostgreSQL")
+}
+
+/// The `LiveSchema` a migration authored AFTER `partition_setup_ops` lowers
+/// against: the static projection of the setup ops, carrying both the parent table
+/// and the `events_0` child bound.
+fn partition_live_after_setup(cfg: &ExecutorConfig) -> LiveSchema {
+    let snap = zero_migrate::fold_ops(
+        &partition_setup_ops(),
+        SqlDialect::Postgres,
+        &cfg.project_schema,
+        &support::no_inject("app"),
+    )
+    .expect("fold the partition setup ops");
+    let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
+    live.table_snapshots = snap.tables;
+    live.partitions = snap.partitions;
+    live
+}
+
+/// Every relation the live catalog reports in the project schema, child partitions
+/// included (`relispartition` is NOT filtered - the point is to see the child).
+async fn project_relations(session: &PgDevSession, schema: &str) -> Vec<String> {
+    use zero_migrate::driver::SqlSession;
+    session
+        .query(
+            "SELECT c.relname AS name FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY c.relname",
+            &[schema.into()],
+        )
+        .await
+        .expect("read the live relation list")
+        .iter()
+        .map(|r| r.try_get::<_, String>("name").expect("decode relname"))
+        .collect()
+}
+
+/// The `bucket` values still readable through the partitioned parent.
+async fn event_buckets(session: &PgDevSession, schema: &str) -> Vec<i32> {
+    use zero_migrate::driver::SqlSession;
+    session
+        .query(
+            &format!("SELECT bucket FROM \"{schema}\".events ORDER BY bucket"),
+            &[],
+        )
+        .await
+        .expect("read the surviving event rows")
+        .iter()
+        .map(|r| r.try_get::<_, i32>("bucket").expect("decode bucket"))
+        .collect()
+}
+
+/// The DDL versions in a lowered plan, in plan order.
+fn ddl_versions(steps: &[PlanStep]) -> Vec<MigrationId> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            PlanStep::Ddl(m) => Some(m.version.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Apply the partitioned-parent setup, then a later `dropPartition` migration -
+/// with or without the authored `ifExists` guard - and report what the SERVER holds
+/// afterwards: the relation list, the surviving rows, and whether the drop's own
+/// version is net-applied in the journal.
+async fn drop_partition_outcome(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+    guarded: bool,
+) -> (Vec<String>, Vec<i32>, bool) {
+    let backend = PostgresBackend::new_generic(session);
+    backend.ensure_journal(cfg).await.expect("ensure journal");
+
+    let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
+    let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
+    MigrationEngine::new()
+        .apply_plan(
+            &setup,
+            Approval::Approved,
+            &backend,
+            cfg,
+            "partition-drop-setup",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the partitioned parent, its child, and the row apply");
+
+    let guard = if guarded {
+        r#","existenceGuard":"ifExists""#
+    } else {
+        ""
+    };
+    let drop_ops =
+        format!(r#"[{{"op":"dropPartition","parent":"events","name":"events_0"{guard}}}]"#);
+    let name = if guarded {
+        "partition_drop_guarded"
+    } else {
+        "partition_drop_unguarded"
+    };
+    let drop_plan = lower_partition_plan(cfg, name, &drop_ops, &partition_live_after_setup(cfg));
+    MigrationEngine::new()
+        .apply_plan(
+            &drop_plan,
+            Approval::Approved,
+            &backend,
+            cfg,
+            "partition-drop",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the dropPartition migration applies");
+
+    let versions = ddl_versions(&drop_plan);
+    assert_eq!(versions.len(), 1, "dropPartition lowers to one DDL unit");
+    let journaled = journal_applied(session, cfg, &versions[0]).await;
+    (
+        project_relations(session, &cfg.project_schema).await,
+        event_buckets(session, &cfg.project_schema).await,
+        journaled,
+    )
+}
+
+/// A `dropPartition({ ifExists: true })` must DROP the child partition and take its
+/// rows with it, exactly like the unguarded drop. The guard weakens the drop's
+/// precondition; it must never CANCEL the drop.
+///
+/// The failure this pins is a silent skip under a green journal: the child of a
+/// partitioned parent never enters `SchemaSnapshot::tables` (the snapshot query
+/// filters `relispartition = false`), the guard probe resolves the child as a
+/// TABLE, reads it absent, returns `SatisfiedNoop`, skips the `DROP TABLE` - and
+/// still journals the migration completed. Apply reports success and the partition
+/// AND ITS ROWS survive.
+///
+/// Asserts the PAIR from the server, because neither half alone is the defect: a
+/// surviving partition under a green journal is the bug; a surviving partition with
+/// the migration still pending would merely be a failed deploy.
+///
+/// Does NOT cover MySQL or SQLite (both collapse `dropPartition` to a bounded
+/// DELETE, a different path with no catalog probe), and does NOT cover
+/// `detachPartition`, which carries no existence guard.
+#[compio::test]
+async fn a_guarded_drop_partition_drops_the_child_and_its_rows() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let (relations, buckets, journaled) = drop_partition_outcome(&session, &cfg, true).await;
+
+    // One assertion over the whole server-observed triple: a surviving child and a
+    // green journal are the PAIR, and reporting only the first divergence would hide
+    // whichever half a future regression breaks second.
+    assert_eq!(
+        (relations.as_slice(), buckets.as_slice(), journaled),
+        (["events".to_string()].as_slice(), [].as_slice(), true),
+        "guarded dropPartition: catalog {relations:?} rows {buckets:?} journal applied {journaled}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// The control: the SAME authored history with the `ifExists` guard removed. It
+/// differs from the guarded case in exactly one flag, so a divergence between the
+/// two isolates the guard as the cause.
+#[compio::test]
+async fn an_unguarded_drop_partition_drops_the_child_and_its_rows() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let (relations, buckets, journaled) = drop_partition_outcome(&session, &cfg, false).await;
+
+    assert_eq!(
+        (relations.as_slice(), buckets.as_slice(), journaled),
+        (["events".to_string()].as_slice(), [].as_slice(), true),
+        "unguarded dropPartition: catalog {relations:?} rows {buckets:?} journal applied {journaled}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// Apply the partitioned-parent setup, then a SECOND plan whose ops are `ops_json`,
+/// lowered against the projection that PRECEDES it (`LiveSchema::default()`) - the
+/// input a deploy hands the lowerer when it replays authored history from the start.
+/// Returns the apply outcome so a caller can assert either success or the refusal.
+async fn apply_second_partition_plan(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+    ir_name: &str,
+    ops_json: &str,
+    live: &LiveSchema,
+) -> Result<(), DeclarativeApplyError> {
+    let backend = PostgresBackend::new_generic(session);
+    backend.ensure_journal(cfg).await.expect("ensure journal");
+    let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
+    let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
+    MigrationEngine::new()
+        .apply_plan(
+            &setup,
+            Approval::Approved,
+            &backend,
+            cfg,
+            "partition-setup",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the partitioned parent, its child, and the row apply");
+
+    let steps = lower_partition_plan(cfg, ir_name, ops_json, live);
+    MigrationEngine::new()
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &backend,
+            cfg,
+            "partition-second-plan",
+            LockMode::Acquire,
+        )
+        .await
+        .map(|_| ())
+}
+
+/// The CREATE direction: replaying an authored history that ALREADY ran must be a
+/// clean no-op when every op carries `ifNotExists`, not a hard PostgreSQL error.
+///
+/// The failure this pins is the same partition/table confusion as the drop, seen
+/// from the other side: `createPartition ifNotExists` stamped a TABLE probe on the
+/// child, the child is never in the snapshot's table map, so the probe read it
+/// ABSENT and returned `RunBare` - and the bare `CREATE TABLE ... PARTITION OF`
+/// raised `relation "events_0" already exists` (SQLSTATE 42P07) against a catalog
+/// the guard was supposed to have recognized. The guarded `createTable` on the
+/// PARENT already no-opped correctly, which is what made the child's failure the
+/// isolated variable.
+///
+/// This is NOT the same defect as the drop and is not a data-safety bug - the
+/// replay fails loudly rather than silently. It is the create-direction half of the
+/// same missing shape.
+///
+/// Does NOT assert the probe returned `SatisfiedNoop` rather than having somehow
+/// re-created the child; the catalog assertion covers the observable outcome only.
+#[compio::test]
+async fn a_guarded_create_partition_replay_is_a_clean_noop() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let replay = r#"[
+      {"op":"createTable","name":"events","columns":[
+        {"name":"bucket","type":"int","nullable":false},
+        {"name":"payload","type":"text","nullable":false}
+      ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":true},
+       "existenceGuard":"ifNotExists"},
+      {"op":"createPartition","name":"events_0","of":"events",
+       "bounds":{"kind":"range","from":[{"kind":"int","value":0}],
+                 "to":[{"kind":"int","value":100}]},
+       "existenceGuard":"ifNotExists"}]"#;
+    let outcome = apply_second_partition_plan(
+        &session,
+        &cfg,
+        "partition_create_replay",
+        replay,
+        &LiveSchema::default(),
+    )
+    .await;
+
+    assert!(
+        outcome.is_ok(),
+        "replaying a fully guarded createTable + createPartition must no-op, got {outcome:?}"
+    );
+    assert_eq!(
+        project_relations(&session, &cfg.project_schema).await,
+        vec!["events".to_string(), "events_0".to_string()],
+        "the guarded replay leaves the parent and its child exactly as they were"
+    );
+    assert_eq!(
+        event_buckets(&session, &cfg.project_schema).await,
+        vec![42],
+        "the guarded replay does not disturb the child's rows"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// The fail-closed half of the partition probe: a same-NAME child whose SHAPE
+/// diverges from the declared one is refused, never matched by name.
+///
+/// Three divergences, each asserted to roll back with the child intact:
+///   - a `dropPartition` naming a parent the live child does not belong to
+///     (`of`) - the authored op describes a different object than the one on disk;
+///   - a `createPartition ifNotExists` whose declared bounds differ from the live
+///     child's (`bounds`) - a no-op here would journal green over a partition that
+///     routes different rows than the migration says;
+///   - a `dropPartition` naming a plain TABLE (`kind`) - the guard must never
+///     resolve a partition op onto a standalone table.
+///
+/// Does NOT cover a `dropPartition` whose bounds diverge: the drop leg compares
+/// ownership only, deliberately, because a re-bounded child is still the child the
+/// author means to remove.
+#[compio::test]
+async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+
+    let cases: [(&str, &str, &str, &str); 3] = [
+        (
+            "wrong_parent",
+            r#"[{"op":"createTable","name":"other","columns":[
+                 {"name":"bucket","type":"int","nullable":false}
+               ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":true}},
+               {"op":"dropPartition","parent":"other","name":"events_0",
+                "existenceGuard":"ifExists"}]"#,
+            "partition events_0",
+            "of",
+        ),
+        (
+            "wrong_bounds",
+            r#"[{"op":"createPartition","name":"events_0","of":"events",
+                 "bounds":{"kind":"range","from":[{"kind":"int","value":0}],
+                           "to":[{"kind":"int","value":200}]},
+                 "existenceGuard":"ifNotExists"}]"#,
+            "partition events_0",
+            "bounds",
+        ),
+        (
+            "plain_table",
+            r#"[{"op":"createTable","name":"audit","columns":[
+                 {"name":"bucket","type":"int","nullable":false}
+               ]},
+               {"op":"dropPartition","parent":"events","name":"audit",
+                "existenceGuard":"ifExists"}]"#,
+            "partition audit",
+            "kind",
+        ),
+    ];
+
+    for (label, ops, want_object, want_field) in cases {
+        let tok = token();
+        let cfg = cfg_for(&tok);
+        drop_schemas(&session, &cfg).await;
+        ensure_project_schema(&session, &cfg).await;
+
+        let outcome = apply_second_partition_plan(
+            &session,
+            &cfg,
+            &format!("partition_drift_{label}"),
+            ops,
+            &LiveSchema::default(),
+        )
+        .await;
+
+        match outcome {
+            Err(DeclarativeApplyError::Plain(EngineError::Apply(
+                ApplyError::ExistenceGuardDrift { object, field, .. },
+            ))) => {
+                assert_eq!(
+                    (object.as_str(), field.as_str()),
+                    (want_object, want_field),
+                    "{label}: wrong divergence reported"
+                );
+            }
+            other => panic!("{label}: expected ExistenceGuardDrift, got {other:?}"),
+        }
+        assert!(
+            project_relations(&session, &cfg.project_schema)
+                .await
+                .contains(&"events_0".to_string()),
+            "{label}: a refused guard rolls back with the child still in place"
+        );
+
+        drop_schemas(&session, &cfg).await;
+    }
+}
