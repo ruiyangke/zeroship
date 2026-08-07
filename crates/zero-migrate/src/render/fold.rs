@@ -3232,12 +3232,14 @@ pub fn fold_to_field_defs(
     // over an unrecognized shape is left unprojected (the column types as its base
     // scalar) — NOT an error.
     let mut checks: BTreeMap<String, Vec<RecoveredCheck>> = BTreeMap::new();
-    // Per-table recovered FK policy (`onDelete`/`onUpdate`) to lift onto the ref
-    // column at the end. The op.* model carries the FK target on the `ColType::Ref`
-    // column AND the FK POLICY on a separate `IrConstraintKind::Fk` constraint
-    // (mirroring how the lower/differ emit both); the column-only `ir_column_to_field`
-    // recovers the `ref` brand but not the policy, so we lift policy from the Fk
-    // constraint here — the "recover from the applied FK constraint" path.
+    // Per-table recovered FK policy (`onDelete`/`onUpdate`) to lift onto the
+    // referencing column at the end. A reference authored as a TABLE-LEVEL
+    // `IrConstraintKind::Fk` (a `foreignKeys` entry, or a later `addConstraint`)
+    // keeps its policy on the constraint, where `ir_column_to_field` cannot see it,
+    // so we lift it here -- the "recover from the applied FK constraint" path. A
+    // reference carried on the column itself (`ColType::Ref` plus, for the facets
+    // the brand cannot express, `IrColumn.references`) recovers through
+    // `ir_column_to_field` and needs no lift.
     let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
@@ -3874,19 +3876,18 @@ pub fn descriptors_to_create_ops(
             // encrypted column is therefore dropped here (recovered downstream); a
             // standalone/non-default mask is carried.
             let mask = standalone_mask_facet(f);
+            // A `ref` field carries its FK target on the `ColType::Ref` brand, which
+            // the shared snapshot builder ALREADY materializes into the derived
+            // `<table>_<column>_fkey` constraint. Only the reference facets the brand
+            // cannot express ride on a second carrier, so a plain `ref` keeps the
+            // brand-only column image the recorder emits and the two artifact sources
+            // stay byte-identical.
             let references = if f.ty == "ref" {
-                None
+                ref_brand_reference_facets(f)
             } else {
-                f.references.as_ref().map(|table| ColumnReference {
-                    table: table.clone(),
-                    column: f
-                        .reference_column
-                        .clone()
-                        .unwrap_or_else(|| "id".to_string()),
-                    on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
-                    on_update: f.on_update.as_deref().and_then(parse_ref_action),
-                    name: f.reference_name.clone(),
-                })
+                f.references
+                    .as_ref()
+                    .map(|table| column_reference_for_field(f, table))
             };
             columns.push(IrColumn {
                 name: f.name.clone(),
@@ -3903,35 +3904,6 @@ pub fn descriptors_to_create_ops(
                 generated: f.generated.clone(),
                 identity: f.identity,
             });
-            // A `ref` column carries the FK target on its `ColType::Ref` (the brand)
-            // AND its POLICY on a separate `Fk` constraint — the SAME split the
-            // lower/differ emit, and the shape `fold_to_field_defs` recovers policy
-            // from (`recover_fk_policy`). Emit it so onDelete/onUpdate round-trip.
-            if f.ty == "ref" {
-                if let Some(target) = &f.references {
-                    constraints.push(IrConstraint {
-                        name: Some(f.reference_name.clone().unwrap_or_else(|| {
-                            crate::render::lower::derived_fk_constraint_name(
-                                &d.name,
-                                std::slice::from_ref(&f.name),
-                            )
-                        })),
-                        kind: IrConstraintKind::Fk {
-                            columns: vec![f.name.clone()],
-                            references_table: target.clone(),
-                            references_columns: vec![f
-                                .reference_column
-                                .clone()
-                                .unwrap_or_else(|| "id".to_string())],
-                            on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
-                            on_update: f.on_update.as_deref().and_then(parse_ref_action),
-                            deferrable: None,
-                            initially_deferred: None,
-                            not_valid: None,
-                        },
-                    });
-                }
-            }
             constraints.extend(facet_check_constraints(&d.name, f)?);
         }
         // Carry the author-declared named indexes onto the produced createTable so the
@@ -3977,6 +3949,46 @@ pub fn descriptors_to_create_ops(
         );
     }
     Ok(ops)
+}
+
+/// The [`ColumnReference`] a declared reference field carries onto its produced
+/// [`IrColumn`]: the target table plus the target column (defaulting to the
+/// historical `id`), the explicit constraint name, and the referential actions.
+fn column_reference_for_field(
+    f: &crate::render::declarative::FieldDescriptor,
+    target: &str,
+) -> ColumnReference {
+    ColumnReference {
+        table: target.to_string(),
+        column: f
+            .reference_column
+            .clone()
+            .unwrap_or_else(|| "id".to_string()),
+        on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
+        on_update: f.on_update.as_deref().and_then(parse_ref_action),
+        name: f.reference_name.clone(),
+    }
+}
+
+/// The reference carrier for a `ref`-branded field, or `None` when the brand
+/// already says everything the field declares.
+///
+/// `ColType::Ref` names the target table but cannot express an explicit target
+/// column, an explicit constraint name, or `ON DELETE`/`ON UPDATE`. Those facets
+/// therefore ride on the column's [`ColumnReference`], which
+/// [`crate::render::lower::ir_column_to_field`] prefers over the brand, so the
+/// foreign key is still declared exactly ONCE. A field that declares none of them
+/// gets no second carrier, keeping the produced column byte-identical to the
+/// brand-only image the recorder emits for the same schema.
+fn ref_brand_reference_facets(
+    f: &crate::render::declarative::FieldDescriptor,
+) -> Option<ColumnReference> {
+    let target = f.references.as_ref()?;
+    let declares_facets = f.reference_column.is_some()
+        || f.reference_name.is_some()
+        || f.on_delete.is_some()
+        || f.on_update.is_some();
+    declares_facets.then(|| column_reference_for_field(f, target))
 }
 
 /// Map a declared [`IndexDescriptor`](crate::render::declarative::IndexDescriptor)
@@ -7462,8 +7474,13 @@ indexes = [
         }
     }
 
+    /// A `ref` column declares its foreign key on ONE carrier. The policy the
+    /// `ColType::Ref` brand cannot express rides on the column's
+    /// `ColumnReference`; no table-level `Fk` twin is emitted, because both
+    /// carriers derive the SAME `<table>_<column>_fkey` name and the shared
+    /// snapshot builder would then declare that constraint twice.
     #[test]
-    fn producer_emits_fk_constraint_with_policy_for_ref_columns() {
+    fn producer_emits_ref_policy_on_the_column_carrier_without_a_table_level_twin() {
         let d = descriptor(
             "teams",
             vec![FieldDescriptor {
@@ -7477,31 +7494,87 @@ indexes = [
         );
         let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
             .unwrap();
-        let Op::CreateTable { constraints, .. } = &ops[0] else {
+        let Op::CreateTable {
+            columns,
+            constraints,
+            ..
+        } = &ops[0]
+        else {
             panic!("expected a createTable")
         };
-        let fk = constraints
+        assert!(
+            !constraints
+                .iter()
+                .any(|c| matches!(c.kind, IrConstraintKind::Fk { .. })),
+            "the ref column's foreign key is carried by the column, never duplicated \
+             as a table-level constraint: {constraints:?}"
+        );
+        let owner = columns
             .iter()
-            .find_map(|c| match &c.kind {
-                IrConstraintKind::Fk {
-                    columns,
-                    on_delete,
-                    on_update,
-                    references_table,
-                    ..
-                } => Some((
-                    columns.clone(),
-                    *on_delete,
-                    *on_update,
-                    references_table.clone(),
-                )),
-                _ => None,
-            })
-            .expect("the ref column emits an Fk constraint carrying the policy");
-        assert_eq!(fk.0, vec!["owner".to_string()]);
-        assert_eq!(fk.1, Some(RefAction::Cascade));
-        assert_eq!(fk.2, Some(RefAction::Restrict));
-        assert_eq!(fk.3, "orgs");
+            .find(|column| column.name == "owner")
+            .expect("the ref column is produced");
+        assert_eq!(
+            owner.ty,
+            ColType::Ref {
+                references: "orgs".into()
+            },
+            "the FK target stays on the ref brand"
+        );
+        let reference = owner
+            .references
+            .as_ref()
+            .expect("the declared reference policy is carried on the column");
+        assert_eq!(reference.table, "orgs");
+        assert_eq!(reference.column, "id");
+        assert_eq!(reference.on_delete, Some(RefAction::Cascade));
+        assert_eq!(reference.on_update, Some(RefAction::Restrict));
+    }
+
+    /// A `ref` field that declares no reference facets keeps the brand-only column
+    /// image the recorder emits, so the manual and generated artifact sources stay
+    /// byte-identical for the same logical schema.
+    #[test]
+    fn producer_leaves_a_plain_ref_column_on_the_brand_alone() {
+        let d = descriptor(
+            "teams",
+            vec![FieldDescriptor {
+                name: "owner".into(),
+                ty: "ref".into(),
+                references: Some("orgs".into()),
+                ..Default::default()
+            }],
+        );
+        let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+            .unwrap();
+        let Op::CreateTable {
+            columns,
+            constraints,
+            ..
+        } = &ops[0]
+        else {
+            panic!("expected a createTable")
+        };
+        assert!(
+            !constraints
+                .iter()
+                .any(|c| matches!(c.kind, IrConstraintKind::Fk { .. })),
+            "a plain ref emits no table-level foreign key: {constraints:?}"
+        );
+        let owner = columns
+            .iter()
+            .find(|column| column.name == "owner")
+            .expect("the ref column is produced");
+        assert_eq!(
+            owner.ty,
+            ColType::Ref {
+                references: "orgs".into()
+            }
+        );
+        assert!(
+            owner.references.is_none(),
+            "a plain ref carries no second reference carrier: {:?}",
+            owner.references
+        );
     }
 
     #[test]

@@ -177,4 +177,90 @@ assert(
   'an empty charterLayers list preserves the layered loader error',
 );
 
-console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + soft-error arms (through the real .node)');
+// --- (5) A REFERENCE field. A `ref` descriptor field declares ONE foreign key; the
+//     producer must emit the same single-carrier IR image the recorder emits, or the
+//     artifact fold rejects the schema it just rendered
+//     (`fold: constraint `posts_authorId_fkey` already exists on `posts``). Every arm
+//     above is reference-free, which is why the whole ref path shipped untested. ---
+const refEnvelope = {
+  ir_version: addon.irVersion(),
+  name: 'create_posts',
+  ops: [
+    {
+      op: 'createTable',
+      name: 'users',
+      columns: [{ name: 'email', type: 'text', nullable: false }],
+      primaryKey: null,
+      constraints: [],
+      indexes: [],
+      runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
+    },
+    {
+      op: 'createTable',
+      name: 'posts',
+      // The recorder's image of a reference column: the FK target rides on the
+      // `ref` ColType brand, which already derives `posts_authorId_fkey`.
+      columns: [{ name: 'authorId', type: { ref: { references: 'users' } } }],
+      primaryKey: null,
+      constraints: [],
+      indexes: [],
+      runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
+    },
+  ],
+};
+
+const refDescriptors = [
+  {
+    name: 'users',
+    ownerApp: 'app_js',
+    fields: [{ name: 'email', type: 'string', required: true }],
+    runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
+  },
+  {
+    name: 'posts',
+    ownerApp: 'app_js',
+    fields: [{ name: 'authorId', type: 'ref', references: 'users' }],
+    runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
+  },
+];
+
+const refMan = addon.genArtifacts({
+  descriptors: refDescriptors,
+  charterLayers: [CONFINED_CHARTER_TOML],
+});
+assert(refMan.ok, `a descriptor set with a reference field renders: ${refMan.error}`);
+
+const refGen = addon.genArtifacts({
+  envelopes: [refEnvelope],
+  charterLayers: [CONFINED_CHARTER_TOML],
+});
+assert(refGen.ok, `an envelope with a reference column renders: ${refGen.error}`);
+
+assert(
+  refMan.runtimeJson === refGen.runtimeJson,
+  `a reference field must emit the SAME runtimeJson from either source\n--- man ---\n${refMan.runtimeJson}\n--- gen ---\n${refGen.runtimeJson}`,
+);
+assert(refMan.envDbTs === refGen.envDbTs, 'a reference field must emit the same envDbTs from either source');
+
+const refDesc = JSON.parse(refMan.runtimeJson);
+assert(refDesc.collections.posts.fields.authorId.type === 'ref', 'the reference field keeps its ref brand');
+assert(
+  refDesc.collections.posts.fields.authorId.refTarget === 'users',
+  'the reference field keeps its FK target',
+);
+
+// The foreign key is declared exactly ONCE in the rendered source: inline on the
+// column, never also as a table-level `foreignKeys` entry (a source that declared
+// both would not re-fold).
+const inlineRefs = refMan.envDbTs.split('.references(').length - 1;
+const tableLevelRefs = refMan.envDbTs.split('foreignKeys:').length - 1;
+assert(
+  inlineRefs + tableLevelRefs === 1,
+  `the rendered schema source declares the foreign key exactly once (inline=${inlineRefs}, tableLevel=${tableLevelRefs}):\n${refMan.envDbTs}`,
+);
+assert(
+  refMan.envDbTs.includes('authorId: t.text().references("users", "id"),'),
+  `the reference column renders its inline builder chain:\n${refMan.envDbTs}`,
+);
+
+console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + reference fields + soft-error arms (through the real .node)');
