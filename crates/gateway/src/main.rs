@@ -385,6 +385,12 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
+    // Capture this BEFORE the dev default is substituted below: once the
+    // fallback is in place the local is non-empty and the fact that the
+    // operator supplied nothing is no longer recoverable. The bind guard
+    // further down needs it, because a gateway running on `DEV_STASH_SIGNING_KEY`
+    // signs sessions with a constant published in this source tree.
+    let stash_key_is_dev_default = stash_signing_key.is_empty();
     let stash_signing_key = if stash_signing_key.is_empty() {
         DEV_STASH_SIGNING_KEY.to_string()
     } else {
@@ -422,6 +428,13 @@ fn main() -> std::io::Result<()> {
     {
         tracing::error!(error = %message, "gateway: refusing to start without worker key");
         std::process::exit(1);
+    }
+
+    // Recorded here because both keys are consumed before the bind guard below,
+    // which needs to know whether `--dev-insecure` actually waived anything.
+    let control_key_unset = control_key.is_empty();
+    let worker_key_unset = worker_key.is_empty();
+    {
     }
 
     // Load the gateway's session-cookie signing key. The flag is optional:
@@ -756,11 +769,39 @@ fn main() -> std::io::Result<()> {
         }
     }
     if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
-        tracing::warn!(
-            bind = %bind_addr,
-            "gateway: binding a non-loopback address under --dev-insecure on an untrusted \
-             network is unsafe"
-        );
+        // `--dev-insecure` waives the control key, worker key, stash signing key
+        // and pairwise salt. Whether that is survivable on a network depends on
+        // whether the waiver was actually USED: with real secrets supplied this
+        // is a deliberate private-network deployment (what deploy/compose does),
+        // but with the waiver taken the gateway signs sessions with constants
+        // published in this source tree, so anyone can mint a session for any
+        // user. That is not a warning-level condition, so refuse it - matching
+        // the worker, which already refuses a non-loopback bind without a key.
+        let waived: Vec<&str> = [
+            ("CONTROL_KEY", control_key_unset),
+            ("WORKER_KEY", worker_key_unset),
+            ("stash signing key", stash_key_is_dev_default),
+            ("pairwise salt", pairwise_salt.is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(name, missing)| missing.then_some(name))
+        .collect();
+
+        if waived.is_empty() {
+            tracing::warn!(
+                bind = %bind_addr,
+                "gateway: binding a non-loopback address under --dev-insecure on an untrusted \
+                 network is unsafe"
+            );
+        } else {
+            tracing::error!(
+                bind = %bind_addr,
+                unset = %waived.join(", "),
+                "gateway: refusing to bind non-loopback under --dev-insecure with dev-default \
+                 secrets - sessions would be signed with keys published in this source tree"
+            );
+            std::process::exit(1);
+        }
     }
     tracing::info!(bind = %bind_addr, "gateway listening");
 
