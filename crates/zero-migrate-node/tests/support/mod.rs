@@ -50,7 +50,7 @@ pub fn confined_charter() -> EffectivePolicy {
         .expect("explicit confined test charter composes")
 }
 
-fn no_inject_charter_toml(schema: &str) -> String {
+pub fn no_inject_charter_toml(schema: &str) -> String {
     let schema = serde_json::to_string(schema).expect("test schema serializes");
     format!(
         r#"policy_version = 1

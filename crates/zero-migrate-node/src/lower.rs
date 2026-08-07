@@ -25,9 +25,7 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::journal::{AppliedEntry, Phase};
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::migration::Migration;
-use zero_migrate::ops::status::PlanStatusManifest;
-#[cfg(any(feature = "napi", test))]
-use zero_migrate::ops::status::{AppliedPlanStatus, ReconciledPlanState};
+use zero_migrate::ops::status::{AppliedPlanStatus, PlanStatusManifest, ReconciledPlanState};
 use zero_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
@@ -49,7 +47,6 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
 /// may contribute logical column contracts to the current migration. The status
 /// fold is authoritative for net rollbacks, inflight/partial work, checksum drift,
 /// dependencies, and terminal online-contract resolutions.
-#[cfg(any(feature = "napi", test))]
 pub(crate) fn require_applied_prefix(
     manifests: &[PlanStatusManifest],
     prior_count: usize,

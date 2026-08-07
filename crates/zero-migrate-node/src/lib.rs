@@ -48,6 +48,11 @@ pub mod api;
 /// bridge entrypoints wrap them.
 pub mod lower;
 
+/// The verb bodies the N-API entrypoints delegate to: the lock-bracketed engine
+/// drivers and the engine-result to typed-reply projections. No napi type appears
+/// in a signature, so this module and its tests build with the `napi` feature off.
+pub mod verbs;
+
 /// The N-API transport: `#[napi]` entrypoints, the `ThreadsafeFunction`-backed
 /// [`session::VerbDispatch`], and the `JsDeferred` fire-and-resolve wrapper. Only
 /// compiled with the `napi` feature (needs the Node ABI); the pure-Rust core above

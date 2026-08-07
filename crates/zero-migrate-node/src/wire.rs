@@ -144,8 +144,11 @@ pub struct JsRequest {
 }
 
 // ===========================================================================
-// 2. Typed verb request/response envelopes (napi-gated — the addon produces /
-//    consumes them; they carry napi-only field types: `JsonValue`, `BigInt`).
+// 2. Typed verb request/response envelopes. A DTO is napi-gated only when it
+//    carries a napi-only field type (`JsonValue`, `BigInt`): those are the
+//    request envelopes and `HistoryEventDto`. The reply DTOs below are plain
+//    owned data, so they build without the feature and `crate::verbs` projects
+//    into them under a napi-free test.
 // ===========================================================================
 
 /// The typed request for the host-authoring `applyIr` verb.
@@ -298,8 +301,7 @@ pub struct HistoryRequest {
 /// The typed reply for `applyIr` (the projected [`ApplyOutcome`]).
 ///
 /// [`ApplyOutcome`]: zero_migrate::apply::executor::ApplyOutcome
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct ApplyReply {
     /// Versions applied this run, in apply order.
@@ -313,8 +315,7 @@ pub struct ApplyReply {
 }
 
 /// One outstanding online-rename contract returned after apply.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct ApplyPendingContractDto {
     /// Table whose old and new columns currently coexist.
@@ -328,8 +329,7 @@ pub struct ApplyPendingContractDto {
 }
 
 /// The typed reply for `status` (the projected `MigrationStatus`).
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct StatusReply {
     /// The highest net-applied version (`mig_…`), or `None` when nothing is applied.
@@ -354,8 +354,7 @@ pub struct StatusReply {
 }
 
 /// One outstanding online-contract obligation in a status reply.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct PendingContractStatusDto {
     /// Table whose deferred contract remains outstanding.
@@ -367,8 +366,7 @@ pub struct PendingContractStatusDto {
 }
 
 /// One plan blocked by an outstanding dependency contract.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct BlockedPlanDto {
     /// Logical id of the blocked plan.
@@ -380,8 +378,7 @@ pub struct BlockedPlanDto {
 }
 
 /// One journal identity absent from every supplied plan manifest.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct UnexpectedJournalEntryDto {
     /// Unexpected step identity.
@@ -395,8 +392,7 @@ pub struct UnexpectedJournalEntryDto {
 }
 
 /// One plan in a plan-aware status reply.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct PlanStatusDto {
     /// Stable logical plan id.
@@ -412,8 +408,7 @@ pub struct PlanStatusDto {
 }
 
 /// One executable step in a plan-aware status reply.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct PlanStatusStepDto {
     /// Stable step journal id.

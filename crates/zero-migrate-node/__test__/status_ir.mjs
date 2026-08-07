@@ -36,6 +36,9 @@ const recorded = [];
 
 const text = (value) => ({ kind: 'text', text: value });
 const bool = (value) => ({ kind: 'bool', bool: value });
+// The journal sequence is an int8 column, so a host driver hands it back as a
+// string cell rather than risking a float.
+const int = (value) => ({ kind: 'int', intStr: String(value) });
 const row = (columns, cells) => ({ columns, cells });
 
 function hostDriver([request, done]) {
@@ -47,12 +50,12 @@ function hostDriver([request, done]) {
   } else if (request.sql.includes('union_all')) {
     rows = [
       row(
-        ['version', 'checksum', 'mig_kind', 'phase'],
-        [text(COMPLETED), text('checksum-completed'), text('apply'), text('completed')],
+        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase'],
+        [text(COMPLETED), text('checksum-completed'), text('apply'), int(1), text('completed')],
       ),
       row(
-        ['version', 'checksum', 'mig_kind', 'phase'],
-        [text(INFLIGHT), text('checksum-inflight'), { kind: 'null' }, text('started')],
+        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase'],
+        [text(INFLIGHT), text('checksum-inflight'), { kind: 'null' }, int(2), text('started')],
       ),
     ];
   } else if (
