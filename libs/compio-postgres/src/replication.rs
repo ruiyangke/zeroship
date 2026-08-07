@@ -1264,7 +1264,21 @@ pub mod pgoutput {
             b'T' => {
                 let nrelations = read_u32(&mut cur)? as usize;
                 let options = read_u8(&mut cur)?;
-                let mut relation_ids = Vec::with_capacity(nrelations);
+                // Reserve for what the frame can actually still contain, not
+                // for what the count claims. `nrelations` is attacker- or
+                // corruption-controlled and the frame length does not bound it:
+                // a 6-byte body carrying 0xFFFFFFFF would otherwise reserve
+                // ~16 GiB before the first read fails. Each id is 4 bytes, so
+                // `cur.len() / 4` is an EXACT upper bound on how many remain -
+                // it rejects nothing and truncates no valid message.
+                //
+                // Deliberately not a constant cap. `TRUNCATE ... CASCADE` on a
+                // heavily partitioned table emits one id per partition and
+                // PostgreSQL enforces no ceiling there, so a fixed limit would
+                // refuse valid input - and because the WAL consumer propagates
+                // a decode error out of its run loop, refusing valid input
+                // kills replication permanently rather than degrading.
+                let mut relation_ids = Vec::with_capacity(nrelations.min(cur.len() / 4));
                 for _ in 0..nrelations {
                     relation_ids.push(read_u32(&mut cur)?);
                 }
@@ -1738,6 +1752,56 @@ mod tests {
             pgoutput::DecodeError::UnknownTag(b'?') => {}
             other => panic!("expected UnknownTag, got {other:?}"),
         }
+    }
+
+    /// A TRUNCATE naming more relations than any fixed cap would allow must
+    /// still decode.
+    ///
+    /// This fails if someone bounds the count with a constant that REJECTS -
+    /// verified by mutation: adding `if nrelations > 65535 { return Err(..) }`
+    /// turns it red with "a large TRUNCATE is valid input: UnexpectedEof".
+    /// A constant that only caps the RESERVATION (`nrelations.min(65535)`)
+    /// leaves it green, because the vector still grows; that mutation was tried
+    /// first and passed, so this test does not cover it.
+    ///
+    /// `TRUNCATE ... CASCADE` on a heavily partitioned table emits one id per
+    /// partition and PostgreSQL enforces no ceiling, so a rejecting limit
+    /// refuses valid input - and the WAL consumer propagates a decode error out
+    /// of its run loop, so refusing valid input stops replication permanently
+    /// instead of degrading.
+    ///
+    /// It does NOT test the reservation itself. Decoding the malformed frame
+    /// below errors identically whether the capacity is bounded by the frame
+    /// or taken from the wire count, so no assertion here can tell those apart.
+    #[test]
+    fn pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap() {
+        const N: u32 = 70_000; // above the u16 ceiling a sibling arm uses
+        let mut bytes = vec![b'T'];
+        bytes.extend_from_slice(&N.to_be_bytes());
+        bytes.push(0); // options
+        for id in 0..N {
+            bytes.extend_from_slice(&id.to_be_bytes());
+        }
+        let msg = pgoutput::decode(&bytes).expect("a large TRUNCATE is valid input");
+        match msg {
+            pgoutput::PgOutputMessage::Truncate { relation_ids, .. } => {
+                assert_eq!(relation_ids.len(), N as usize);
+                assert_eq!(relation_ids[0], 0);
+                assert_eq!(relation_ids[N as usize - 1], N - 1);
+            }
+            other => panic!("expected Truncate, got {other:?}"),
+        }
+    }
+
+    /// A TRUNCATE whose relation count exceeds what the frame can hold is
+    /// rejected, and the reservation it triggers is bounded by the frame rather
+    /// than by the claimed count.
+    #[test]
+    fn pgoutput_decode_rejects_a_truncate_count_larger_than_the_frame() {
+        // count = u32::MAX, options = 0, and no ids at all.
+        let bytes = vec![b'T', 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        let err = pgoutput::decode(&bytes).unwrap_err();
+        assert!(matches!(err, pgoutput::DecodeError::UnexpectedEof));
     }
 
     #[test]
