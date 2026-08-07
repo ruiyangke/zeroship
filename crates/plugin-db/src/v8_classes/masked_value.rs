@@ -280,7 +280,7 @@ impl MaskedValue {
         let state = runtime_state(scope);
         let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-        // App JS must not be able to claim the reserved `auto` system
+        // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
         let actor = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
@@ -387,7 +387,7 @@ impl MaskedValue {
             })
             .unwrap_or_default();
 
-        // App JS must not be able to claim the reserved `auto` system
+        // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
         let actor = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
@@ -607,7 +607,7 @@ impl RehydrateWalker {
         let sentinel_key = str_key(scope, "sentinel")?;
         if let Some(sentinel_v) = obj.get(scope, sentinel_key) {
             if sentinel_v.is_string() && sentinel_v.to_rust_string_lossy(scope) == "__zsmask__" {
-                // Only mint from a sentinel carrying the unforgeable
+                // DB-7: only mint from a sentinel carrying the unforgeable
                 // per-process signature the read pipeline stamps. A `__zsmask__`
                 // object fabricated by app JS (e.g. read back from a JSONB column
                 // it wrote) lacks it and is left untouched — it cannot be turned
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn rehydrate_refuses_forged_sentinel_db7() {
-        // A `__zsmask__` object app JS fabricated (e.g. read back from a
+        // DB-7: a `__zsmask__` object app JS fabricated (e.g. read back from a
         // JSONB column it wrote) lacks the per-process `_sig` the read pipeline
         // stamps, so the decoder must NOT mint it into a MaskedValue (which
         // could then `.unmask()` an attacker-chosen cell). A correctly-signed

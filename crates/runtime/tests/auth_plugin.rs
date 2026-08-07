@@ -16,10 +16,14 @@ mod common;
 use common::*;
 
 use std::sync::Arc;
+use std::time::Duration;
 use zeroship_runtime::auth::AuthPlugin;
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime};
+use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::state::{OpResult, SharedState};
+use zeroship_runtime::{
+    init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch,
+};
 
 /// The `WorkerUser` projection the gateway forwards as the `ZeroShip-User`
 /// header body: `{ id, email, name, avatar?, email_verified, scopes }`. The
@@ -32,6 +36,85 @@ fn build_runtime_with_auth(source: &str) -> Runtime {
     Runtime::builder()
         .modules(m(source))
         .plugins(vec![Arc::new(AuthPlugin) as Arc<dyn NativePlugin>])
+        .build()
+}
+
+struct TurnPlugin;
+
+impl NativePlugin for TurnPlugin {
+    fn namespace(&self) -> &str {
+        "turn"
+    }
+
+    fn register(&self, r: &mut NativeRegistrar) {
+        r.add("fulfill", fulfill_turn);
+        r.add("reject", reject_turn);
+    }
+}
+
+fn enqueue_turn_result(
+    scope: &mut v8::PinScope,
+    mut rv: v8::ReturnValue,
+    reject: bool,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
+    let promise = resolver.get_promise(scope);
+    let resolver = v8::Global::new(scope, resolver);
+
+    let mut state_mut = state.borrow_mut();
+    let op_id = state_mut.next_op_id;
+    state_mut.next_op_id += 1;
+    state_mut.pending_resolvers.insert(op_id, resolver);
+    let request_id = state_mut.executing_request_id;
+    state_mut.spawned_ops.push(Box::pin(async move {
+        compio::time::sleep(Duration::from_millis(1)).await;
+        if reject {
+            OpResult::Failed {
+                op_id,
+                error: "turn rejected".to_string(),
+                request_id,
+            }
+        } else {
+            OpResult::Completed {
+                op_id,
+                value: "turn fulfilled".to_string(),
+                request_id,
+            }
+        }
+    }));
+    drop(state_mut);
+
+    rv.set(promise.into());
+}
+
+fn fulfill_turn(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    enqueue_turn_result(scope, rv, false);
+}
+
+fn reject_turn(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    enqueue_turn_result(scope, rv, true);
+}
+
+fn build_runtime_with_auth_and_turn(source: &str) -> Runtime {
+    init_v8();
+    Runtime::builder()
+        .modules(m(source))
+        .plugins(vec![
+            Arc::new(AuthPlugin) as Arc<dyn NativePlugin>,
+            Arc::new(TurnPlugin) as Arc<dyn NativePlugin>,
+        ])
         .build()
 }
 
@@ -337,22 +420,7 @@ fn env_auth_namespace_is_exposed() {
     assert!(body.contains(r#""sameRef":true"#), "body: {body}");
 }
 
-/// Two concurrent dispatches in one isolate must each resolve their OWN user.
-///
-/// This currently FAILS and documents a confirmed defect: `current_user`
-/// (`src/auth.rs`) resolves through the isolate-global `executing_request_id`,
-/// while `call_rpc_inner` ends with an isolate-wide microtask checkpoint that
-/// drains every pending microtask, including continuations belonging to other
-/// requests. A continuation for request B therefore runs while the global still
-/// names request A, and `env.auth.getUser()` hands B request A's user. Since one
-/// isolate serves many concurrent end users of the same app, that is one end
-/// user receiving another's identity.
-///
-/// Ignored so the suite reflects reality without masking it: run with
-/// `cargo test -p zeroship-runtime --test auth_plugin -- --ignored` to see the
-/// failure. The fix removes this attribute; it is the acceptance gate.
 #[test]
-#[ignore = "documents a confirmed cross-request identity defect; remove with the fix"]
 fn concurrent_rpc_continuation_keeps_request_user() {
     const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
     const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
@@ -397,7 +465,7 @@ fn concurrent_rpc_continuation_keeps_request_user() {
         Some(USER_B_JSON.to_string()),
     );
     assert!(
-        matches!(b_outcome, FetchOutcome::Pending { .. }),
+        matches!(&b_outcome, FetchOutcome::Pending { .. }),
         "request B must remain pending before request A releases it"
     );
 
@@ -421,4 +489,811 @@ fn concurrent_rpc_continuation_keeps_request_user() {
         value["json"]["bObservedUser"], "user-b",
         "request B's continuation must resolve request B's user; body: {body}"
     );
+}
+
+#[test]
+fn concurrent_fetch_continuation_keeps_request_user() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        let releaseB;
+        let finishB;
+        const bFinished = new Promise((resolve) => { finishB = resolve; });
+        let bObservedUser;
+
+        export default {
+            async fetch(request, env) {
+                const path = new URL(request.url).pathname;
+                if (path === "/b") {
+                    await new Promise((resolve) => { releaseB = resolve; });
+                    bObservedUser = env.auth.getUser()?.id ?? null;
+                    finishB();
+                    return Response.json({ bObservedUser });
+                }
+
+                const aBefore = env.auth.getUser()?.id ?? null;
+                releaseB();
+                await bFinished;
+                const aAfter = env.auth.getUser()?.id ?? null;
+                return Response.json({ aBefore, bObservedUser, aAfter });
+            }
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let b_outcome = runtime.call_fetch_handler_with_user(
+        "GET",
+        "http://localhost/b",
+        &[],
+        "",
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_B_JSON.to_string()),
+    );
+    assert!(
+        matches!(&b_outcome, FetchOutcome::Pending { .. }),
+        "request B must remain pending before request A releases it"
+    );
+
+    let a_outcome = runtime.call_fetch_handler_with_user(
+        "GET",
+        "http://localhost/a",
+        &[],
+        "",
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = a_outcome else {
+        panic!("request A must settle while draining request B's continuation");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["aBefore"], "user-a", "body: {body}");
+    assert_eq!(
+        value["bObservedUser"], "user-b",
+        "request B's fetch continuation must retain request B's user; body: {body}"
+    );
+    assert_eq!(value["aAfter"], "user-a", "body: {body}");
+}
+
+#[test]
+fn next_tick_scheduled_by_foreign_rpc_continuation_keeps_owner() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseB;
+        let finishB;
+        const bFinished = new Promise((resolve) => { finishB = resolve; });
+        let bContinuationUser;
+        let bTickUser;
+
+        async function requestB() {
+            await new Promise((resolve) => { releaseB = resolve; });
+            bContinuationUser = env.auth.getUser()?.id ?? null;
+            process.nextTick(() => {
+                bTickUser = env.auth.getUser()?.id ?? null;
+                finishB();
+            });
+            await bFinished;
+            return { bContinuationUser, bTickUser };
+        }
+
+        async function requestA() {
+            const aBefore = env.auth.getUser()?.id ?? null;
+            releaseB();
+            await bFinished;
+            const aAfter = env.auth.getUser()?.id ?? null;
+            return { aBefore, aAfter, bContinuationUser, bTickUser };
+        }
+
+        export default {
+            rpc: { requestB, requestA },
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let b_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/requestB",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_B_JSON.to_string()),
+    );
+    assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+    let a_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/requestA",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = a_outcome else {
+        panic!("request A must settle after draining request B's next tick");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["json"]["aBefore"], "user-a", "body: {body}");
+    assert_eq!(value["json"]["aAfter"], "user-a", "body: {body}");
+    assert_eq!(
+        value["json"]["bContinuationUser"], "user-b",
+        "body: {body}"
+    );
+    assert_eq!(
+        value["json"]["bTickUser"], "user-b",
+        "the next-tick callback must retain request B's invocation; body: {body}"
+    );
+}
+
+#[test]
+fn module_scope_continuation_stays_anonymous() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseModule;
+        const moduleGate = new Promise((resolve) => { releaseModule = resolve; });
+        let finishModule;
+        const moduleFinished = new Promise((resolve) => { finishModule = resolve; });
+        let moduleObservedUser = "UNSET";
+
+        moduleGate.then(() => {
+            moduleObservedUser = env.auth.getUser()?.id ?? null;
+            finishModule();
+        });
+
+        async function requestA() {
+            const aBefore = env.auth.getUser()?.id ?? null;
+            releaseModule();
+            await moduleFinished;
+            const aAfter = env.auth.getUser()?.id ?? null;
+            return { aBefore, aAfter, moduleObservedUser };
+        }
+
+        export default {
+            rpc: { requestA },
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/requestA",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("request A must settle after the module continuation");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["json"]["aBefore"], "user-a", "body: {body}");
+    assert_eq!(value["json"]["aAfter"], "user-a", "body: {body}");
+    assert_eq!(
+        value["json"]["moduleObservedUser"],
+        serde_json::Value::Null,
+        "module-scoped work must not inherit the request that resolves it; body: {body}"
+    );
+}
+
+#[test]
+fn module_level_enter_with_remains_ambient_for_dispatches() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { AsyncLocalStorage } from "node:async_hooks";
+        import { env } from "zeroship";
+
+        const moduleAls = new AsyncLocalStorage();
+        moduleAls.enterWith("module-store");
+
+        async function requestA() {
+            const beforeAwait = moduleAls.getStore();
+            await Promise.resolve();
+            return {
+                beforeAwait,
+                afterAwait: moduleAls.getStore(),
+                user: env.auth.getUser()?.id ?? null,
+            };
+        }
+
+        export default {
+            rpc: { requestA },
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/requestA",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("request A must settle synchronously");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["json"]["beforeAwait"], "module-store", "body: {body}");
+    assert_eq!(value["json"]["afterAwait"], "module-store", "body: {body}");
+    assert_eq!(value["json"]["user"], "user-a", "body: {body}");
+}
+
+#[test]
+fn anonymous_rpc_frame_does_not_fall_back_to_foreign_user() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseB;
+        let finishB;
+        const bFinished = new Promise((resolve) => { finishB = resolve; });
+        let bObservation;
+
+        async function suspendB() {
+            await new Promise((resolve) => { releaseB = resolve; });
+            const getUserIsNull = env.auth.getUser() === null;
+            let requireUserCode = null;
+            try {
+                env.auth.requireUser();
+            } catch (error) {
+                requireUserCode = error?.code ?? null;
+            }
+            bObservation = { getUserIsNull, requireUserCode };
+            finishB();
+            return bObservation;
+        }
+
+        async function releaseFromA() {
+            const aObservedUser = env.auth.getUser()?.id ?? null;
+            releaseB();
+            await bFinished;
+            return { aObservedUser, bObservation };
+        }
+
+        export default {
+            rpc: { suspendB, releaseFromA },
+        };
+    "#,
+    );
+
+    let env = EnvSnapshot::empty();
+    let b_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/suspendB",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        None,
+    );
+    assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+    let a_outcome = runtime.call_fetch_handler_with_user(
+        "POST",
+        "http://localhost/__zeroship/v1/releaseFromA",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        RequestCtx::new(CancelFlag::new()),
+        Some(USER_A_JSON.to_string()),
+    );
+    let FetchOutcome::Response { status, body, .. } = a_outcome else {
+        panic!("request A must settle while draining request B's continuation");
+    };
+    let body = String::from_utf8(body).expect("response body must be UTF-8");
+    assert_eq!(status, 200, "body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(value["json"]["aObservedUser"], "user-a", "body: {body}");
+    assert_eq!(
+        value["json"]["bObservation"]["getUserIsNull"], true,
+        "body: {body}"
+    );
+    assert_eq!(
+        value["json"]["bObservation"]["requireUserCode"],
+        "unauthenticated",
+        "body: {body}"
+    );
+}
+
+fn assert_op_checkpoint_users(mode: &str, expected_rejected: bool) {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth_and_turn(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseA;
+        const bFinished = new Promise((resolve) => { releaseA = resolve; });
+        let bObservedUser;
+        let opRejected;
+
+        async function requestB(mode) {
+            try {
+                if (mode === "reject") {
+                    await env.turn.reject();
+                } else {
+                    await env.turn.fulfill();
+                }
+                opRejected = false;
+            } catch (_error) {
+                opRejected = true;
+            }
+            bObservedUser = env.auth.getUser()?.id ?? null;
+            releaseA();
+            return { bObservedUser, opRejected };
+        }
+
+        async function requestA() {
+            await bFinished;
+            return {
+                aObservedUser: env.auth.getUser()?.id ?? null,
+                bObservedUser,
+                opRejected,
+            };
+        }
+
+        export default {
+            rpc: { requestB, requestA },
+        };
+    "#,
+    );
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let env = EnvSnapshot::empty();
+        let b_body = format!(r#"{{"json":"{mode}"}}"#);
+        let b_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/requestB",
+            &[("content-type".into(), "application/json".into())],
+            &b_body,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_B_JSON.to_string()),
+        );
+        assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+        let a_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/requestA",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_A_JSON.to_string()),
+        );
+        let FetchOutcome::Pending { rx: a_rx, .. } = a_outcome else {
+            panic!("request A must wait for request B's native op");
+        };
+
+        runtime.start_pump();
+        let settled = compio::time::timeout(Duration::from_secs(5), a_rx.recv())
+            .await
+            .expect("request A timed out")
+            .expect("request A delivered DispatchError");
+        let SettledFetch::Response { status, body, .. } = settled else {
+            panic!("request A must settle to a response");
+        };
+        let body = String::from_utf8(body).expect("response body must be UTF-8");
+        assert_eq!(status, 200, "body: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(value["json"]["aObservedUser"], "user-a", "body: {body}");
+        assert_eq!(value["json"]["bObservedUser"], "user-b", "body: {body}");
+        assert_eq!(value["json"]["opRejected"], expected_rejected, "body: {body}");
+    });
+}
+
+#[test]
+fn op_resolve_checkpoint_restores_each_rpc_user() {
+    assert_op_checkpoint_users("fulfill", false);
+}
+
+#[test]
+fn op_reject_checkpoint_restores_each_rpc_user() {
+    assert_op_checkpoint_users("reject", true);
+}
+
+#[test]
+fn settled_fetch_inspection_uses_own_request_user() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth_and_turn(
+        r#"
+        let releaseA;
+        const aGate = new Promise((resolve) => { releaseA = resolve; });
+
+        export default {
+            async fetch(request, env) {
+                const path = new URL(request.url).pathname;
+                if (path === "/a") {
+                    await aGate;
+                    return {
+                        get status() {
+                            return env.auth.getUser()?.id === "user-a" ? 207 : 418;
+                        }
+                    };
+                }
+
+                await env.turn.fulfill();
+                releaseA();
+                return Response.json({ user: env.auth.getUser()?.id ?? null });
+            }
+        };
+    "#,
+    );
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let env = EnvSnapshot::empty();
+        let a_outcome = runtime.call_fetch_handler_with_user(
+            "GET",
+            "http://localhost/a",
+            &[],
+            "",
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_A_JSON.to_string()),
+        );
+        let FetchOutcome::Pending { rx: a_rx, .. } = a_outcome else {
+            panic!("request A must wait for request B");
+        };
+
+        let b_outcome = runtime.call_fetch_handler_with_user(
+            "GET",
+            "http://localhost/b",
+            &[],
+            "",
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_B_JSON.to_string()),
+        );
+        assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+        runtime.start_pump();
+        let settled = compio::time::timeout(Duration::from_secs(5), a_rx.recv())
+            .await
+            .expect("request A timed out")
+            .expect("request A delivered DispatchError");
+        let SettledFetch::Response { status, .. } = settled else {
+            panic!("request A must settle to a response");
+        };
+        assert_eq!(
+            status, 207,
+            "request A's settlement-time getter must observe request A"
+        );
+    });
+}
+
+#[test]
+fn timer_checkpoint_restores_each_rpc_user() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseA;
+        const timerFired = new Promise((resolve) => { releaseA = resolve; });
+        let timerObservedUser;
+
+        async function timerB() {
+            await new Promise((resolve) => {
+                setTimeout(() => {
+                    timerObservedUser = env.auth.getUser()?.id ?? null;
+                    releaseA();
+                    resolve();
+                }, 1);
+            });
+            return timerObservedUser;
+        }
+
+        async function waitingA() {
+            await timerFired;
+            return {
+                aObservedUser: env.auth.getUser()?.id ?? null,
+                timerObservedUser,
+            };
+        }
+
+        export default {
+            rpc: { timerB, waitingA },
+        };
+    "#,
+    );
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let env = EnvSnapshot::empty();
+        let b_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/timerB",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_B_JSON.to_string()),
+        );
+        assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+        let a_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/waitingA",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_A_JSON.to_string()),
+        );
+        let FetchOutcome::Pending { rx: a_rx, .. } = a_outcome else {
+            panic!("request A must wait for request B's timer");
+        };
+
+        runtime.start_pump();
+        let settled = compio::time::timeout(Duration::from_secs(5), a_rx.recv())
+            .await
+            .expect("request A timed out")
+            .expect("request A delivered DispatchError");
+        let SettledFetch::Response { status, body, .. } = settled else {
+            panic!("request A must settle to a response");
+        };
+        let body = String::from_utf8(body).expect("response body must be UTF-8");
+        assert_eq!(status, 200, "body: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(value["json"]["aObservedUser"], "user-a", "body: {body}");
+        assert_eq!(
+            value["json"]["timerObservedUser"], "user-b",
+            "body: {body}"
+        );
+    });
+}
+
+#[test]
+fn timer_scheduled_by_foreign_rpc_continuation_keeps_owner() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseB;
+        let finishScheduled;
+        const bScheduled = new Promise((resolve) => { finishScheduled = resolve; });
+        let finishTimer;
+        const timerFinished = new Promise((resolve) => { finishTimer = resolve; });
+        let bSchedulingUser;
+        let timerObservedUser;
+
+        async function requestB() {
+            await new Promise((resolve) => { releaseB = resolve; });
+            bSchedulingUser = env.auth.getUser()?.id ?? null;
+            setTimeout(() => {
+                timerObservedUser = env.auth.getUser()?.id ?? null;
+                finishTimer();
+            }, 1);
+            finishScheduled();
+            await timerFinished;
+            return { bSchedulingUser, timerObservedUser };
+        }
+
+        async function requestA() {
+            const aBefore = env.auth.getUser()?.id ?? null;
+            releaseB();
+            await bScheduled;
+            const aAfterScheduling = env.auth.getUser()?.id ?? null;
+            await timerFinished;
+            const aAfterTimer = env.auth.getUser()?.id ?? null;
+            return {
+                aBefore,
+                aAfterScheduling,
+                aAfterTimer,
+                bSchedulingUser,
+                timerObservedUser,
+            };
+        }
+
+        export default {
+            rpc: { requestB, requestA },
+        };
+    "#,
+    );
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let env = EnvSnapshot::empty();
+        let b_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/requestB",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_B_JSON.to_string()),
+        );
+        assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+        let a_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/requestA",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_A_JSON.to_string()),
+        );
+        let FetchOutcome::Pending { rx: a_rx, .. } = a_outcome else {
+            panic!("request A must wait for request B's timer");
+        };
+
+        {
+            let state = runtime.state();
+            let state = state.borrow();
+            let b_request_id = state
+                .per_request_user
+                .iter()
+                .find_map(|(request_id, user)| (user == USER_B_JSON).then_some(*request_id))
+                .expect("request B's user must remain registered");
+            let owners: Vec<u64> = state.timer_owner.values().copied().collect();
+            assert_eq!(
+                owners,
+                vec![b_request_id],
+                "the timer must be owned by request B, not the checkpoint caller"
+            );
+        }
+
+        runtime.start_pump();
+        let settled = compio::time::timeout(Duration::from_secs(5), a_rx.recv())
+            .await
+            .expect("request A timed out")
+            .expect("request A delivered DispatchError");
+        let SettledFetch::Response { status, body, .. } = settled else {
+            panic!("request A must settle to a response");
+        };
+        let body = String::from_utf8(body).expect("response body must be UTF-8");
+        assert_eq!(status, 200, "body: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(value["json"]["aBefore"], "user-a", "body: {body}");
+        assert_eq!(
+            value["json"]["aAfterScheduling"], "user-a",
+            "body: {body}"
+        );
+        assert_eq!(value["json"]["aAfterTimer"], "user-a", "body: {body}");
+        assert_eq!(
+            value["json"]["bSchedulingUser"], "user-b",
+            "request B must own work scheduled from its foreign continuation; body: {body}"
+        );
+        assert_eq!(
+            value["json"]["timerObservedUser"], "user-b",
+            "the timer callback must run with its scheduling invocation; body: {body}"
+        );
+    });
+}
+
+#[test]
+fn async_timer_continuation_keeps_owner() {
+    const USER_A_JSON: &str = r#"{"id":"user-a"}"#;
+    const USER_B_JSON: &str = r#"{"id":"user-b"}"#;
+
+    let runtime = build_runtime_with_auth(
+        r#"
+        import { env } from "zeroship";
+
+        let releaseTimer;
+        const timerGate = new Promise((resolve) => { releaseTimer = resolve; });
+        let finishTimer;
+        const timerFinished = new Promise((resolve) => { finishTimer = resolve; });
+        let timerInitialUser;
+        let timerAfterAwaitUser;
+
+        async function requestB() {
+            setTimeout(async () => {
+                timerInitialUser = env.auth.getUser()?.id ?? null;
+                await timerGate;
+                timerAfterAwaitUser = env.auth.getUser()?.id ?? null;
+                finishTimer();
+            }, 1);
+            await timerFinished;
+            return { timerInitialUser, timerAfterAwaitUser };
+        }
+
+        async function releaseFromA() {
+            const aBefore = env.auth.getUser()?.id ?? null;
+            releaseTimer();
+            await timerFinished;
+            const aAfter = env.auth.getUser()?.id ?? null;
+            return { aBefore, aAfter, timerInitialUser, timerAfterAwaitUser };
+        }
+
+        export default {
+            rpc: { requestB, releaseFromA },
+        };
+    "#,
+    );
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let env = EnvSnapshot::empty();
+        let b_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/requestB",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_B_JSON.to_string()),
+        );
+        assert!(matches!(&b_outcome, FetchOutcome::Pending { .. }));
+
+        let state = runtime.state();
+        assert!(
+            !state.borrow().timer_owner.is_empty(),
+            "request B must register its timer before the pump starts"
+        );
+        runtime.start_pump();
+
+        let mut timer_fired = false;
+        for _ in 0..200 {
+            if state.borrow().timer_owner.is_empty() {
+                timer_fired = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(timer_fired, "request B's timer did not fire");
+
+        let a_outcome = runtime.call_fetch_handler_with_user(
+            "POST",
+            "http://localhost/__zeroship/v1/releaseFromA",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+            Some(USER_A_JSON.to_string()),
+        );
+        let FetchOutcome::Response { status, body, .. } = a_outcome else {
+            panic!("request A must settle while releasing the timer continuation");
+        };
+        let body = String::from_utf8(body).expect("response body must be UTF-8");
+        assert_eq!(status, 200, "body: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(value["json"]["aBefore"], "user-a", "body: {body}");
+        assert_eq!(value["json"]["aAfter"], "user-a", "body: {body}");
+        assert_eq!(
+            value["json"]["timerInitialUser"], "user-b",
+            "body: {body}"
+        );
+        assert_eq!(
+            value["json"]["timerAfterAwaitUser"], "user-b",
+            "the timer continuation must retain request B after suspension; body: {body}"
+        );
+    });
 }

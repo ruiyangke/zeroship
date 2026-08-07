@@ -343,7 +343,7 @@ fn mask_date_year(plaintext: &str) -> String {
 /// becomes `?`. Same fall-back as [`mask_date_year`] for non-date
 /// inputs.
 ///
-/// **Idempotent**: the 4th year position may already be the `?`
+/// **Idempotent** (SEC-4): the 4th year position may already be the `?`
 /// sentinel from a prior masking, so re-masking the function's own
 /// output (`"198?-**-**"`) is a no-op rather than collapsing to `"***"`.
 /// `wrap_row_on_read` re-applies the mask transform defensively, and the
@@ -457,7 +457,7 @@ pub(crate) fn wrap_row_on_read(
         //  2. No sibling, but the parent slot holds a string → the SELECT
         //     aliased the sibling back to the parent name (`"<col>_masked"
         //     AS "<col>"`, the read-side flip / aggregate
-        //     substitution), OR a builder lowered a
+        //     substitution), OR - the SEC-4 hazard - a builder lowered a
         //     masked column to plaintext. We CANNOT distinguish "already
         //     masked" from "raw plaintext" by value, so we MUST NOT trust
         //     the parent slot as already-masked: re-apply the mask
@@ -497,7 +497,7 @@ pub(crate) fn wrap_row_on_read(
     for (col, masked, classification) in to_wrap {
         let repr = serde_json::json!({
             "sentinel": "__zsmask__",
-            // An unforgeable per-process signature. Only sentinels the
+            // DB-7: an unforgeable per-process signature. Only sentinels the
             // read pipeline itself produced carry it; the decoder refuses to
             // mint a MaskedValue from any sentinel lacking it, so app JS cannot
             // fabricate a `__zsmask__` object (e.g. stashed in a JSONB column it
@@ -517,7 +517,7 @@ pub(crate) fn wrap_row_on_read(
     Ok(())
 }
 
-/// Per-process secret stamped into every pipeline-minted mask sentinel
+/// DB-7: per-process secret stamped into every pipeline-minted mask sentinel
 /// (`_sig`) and verified at rehydration. App JS cannot read it — the rehydrator
 /// consumes the raw sentinel into a `MaskedValue` (whose internal fields do not
 /// expose `_sig`) before any handler sees the row, and the value is never
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn sec4_wrap_row_on_read_never_returns_parent_plaintext_when_no_sibling() {
-        // An aggregate that grouped on a masked column WITHOUT
+        // SEC-4: an aggregate that grouped on a masked column WITHOUT
         // substituting the sibling lands here with the parent slot
         // holding PLAINTEXT and no `<col>_masked` sibling present. The
         // old code wrapped the parent value verbatim — i.e. it surfaced

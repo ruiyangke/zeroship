@@ -107,7 +107,7 @@ pub(crate) async fn run_sql(
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     // Check if there's an active transaction *owned by this app*.
-    // A tx parked by a co-resident app must NOT capture this
+    // SEC-1: a tx parked by a co-resident app must NOT capture this
     // app's SQL — `has_tx_for(app_id)` reads `false` for another app's
     // slot, so we fall through to this app's own autocommit path.
     let has_tx = context::with(|c| c.has_tx_for(app_id));
@@ -221,7 +221,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
 
-    // Run the per-app role + timeout guards via `SET LOCAL`
+    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
     // inside an explicit transaction, exactly like the explicit-tx path
     // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
     // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
@@ -278,7 +278,7 @@ async fn exec_sqlite_json(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    // Only this app's parked tx routes its SQL through the tx
+    // SEC-1: only this app's parked tx routes its SQL through the tx
     // client; a co-resident app's tx is invisible here and we use the
     // shared autocommit path instead.
     let has_tx = context::with(|c| c.has_tx_for(app_id));
@@ -460,7 +460,7 @@ fn queue_or_emit(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    // Queue only while THIS app's tx is open. If a co-resident
+    // SEC-1: queue only while THIS app's tx is open. If a co-resident
     // app holds the only parked tx, this app is effectively in
     // autocommit and must emit immediately (its event would otherwise
     // sit unfired — there is no settle path for it).
@@ -491,7 +491,7 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 
 /// Drain `app_id`'s `pending_emits` queue and fire every queued event
 /// through the broker. Called by the transaction settle path on COMMIT.
-/// Scoped to the committing app so one app's COMMIT can never
+/// SEC-1: scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
 pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<crate::broker::ChangeEvent> =
@@ -511,7 +511,7 @@ pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
 /// Clear `app_id`'s `pending_emits` queue without firing any events.
 /// Called by the transaction settle path on ROLLBACK (and by
 /// `exec_begin` to drop any stale residue from an interrupted prior
-/// run). Scoped to the app so a ROLLBACK never drops a
+/// run). SEC-1: scoped to the app so a ROLLBACK never drops a
 /// co-resident app's queued events.
 pub(crate) fn clear_pending_emits(app_id: &str) {
     context::with_mut(|c| c.clear_pending_emits_for(app_id));
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Cross-tenant transaction hijack via the thread-shared slot
+    // SEC-1 — cross-tenant transaction hijack via the thread-shared slot
     // -------------------------------------------------------------------
     //
     // The worker multiplexes ~200 isolates (apps) per OS thread. When

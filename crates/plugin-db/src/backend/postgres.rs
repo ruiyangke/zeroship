@@ -130,7 +130,7 @@ impl PostgresBackend {
 // marker -- every operation lives on the sub-trait impls above.
 //
 // Audit-row operations: see free fns in `crate::audit`. Open Q1
-// resolution per `docs/proposals/p0-implementation-plan.md` §3; consumers
+// resolution per `docs/archive/p0-implementation-plan.md` §3; consumers
 // reach `&compio_postgres::Pool` through
 // [`PgSqlExecutor::pool_handle`].
 // ---------------------------------------------------------------------------
@@ -596,7 +596,7 @@ impl FullTextIndex for PostgresBackend {
             });
         }
 
-        // Validate every FTS source column with the identifier fence
+        // DB-9: validate every FTS source column with the identifier fence
         // BEFORE it is spliced UNQUOTED into the `tsvector_update_trigger` arg
         // list below. That arg list requires bare column names, so quoting is
         // not an option — validation is the only guard. Today CreateTable
@@ -1879,7 +1879,7 @@ mod backup_pg {
     }
 }
 
-/// Validate FTS source column names with the shared identifier fence
+/// DB-9: validate FTS source column names with the shared identifier fence
 /// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
 #[cfg(any(test, feature = "test-helpers"))]
 fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {

@@ -10,7 +10,7 @@
 //! window, `verify_signature` accepts either key; that's enough for
 //! any in-flight tokens (TTL = 5 min) to drain.
 //!
-//! ## What's shipped here (Stage 4 — partial)
+//! ## What's shipped here
 //!
 //! - [`rotate_session_keys`]: idempotent rotation primitive that calls
 //!   the SECURITY DEFINER function installed by `bootstrap.rs`.

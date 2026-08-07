@@ -75,7 +75,7 @@ pub(crate) struct TxClientSlotGuard {
 
 impl TxClientSlotGuard {
     /// Drain `app_id`'s transaction client out of the per-isolate slot.
-    /// The guard restores it to the *same* app's slot on drop, so
+    /// SEC-1: the guard restores it to the *same* app's slot on drop, so
     /// a cancellation mid-await can never re-park one app's client under
     /// another's key.
     pub(crate) fn take(app_id: &str) -> Result<Self, DbError> {
@@ -126,7 +126,7 @@ pub struct IsolateDbContext {
 
     /// Active transaction clients, **keyed by owning `app_id`**.
     ///
-    /// A worker OS thread multiplexes up to ~200 isolates (one
+    /// SEC-1: a worker OS thread multiplexes up to ~200 isolates (one
     /// per app), and a creator's `env.db.transaction(async () => await
     /// fetch(slow))` parks its tx client here across the `await`. If
     /// this were a single per-thread slot, a co-resident app B's plain
@@ -147,7 +147,7 @@ pub struct IsolateDbContext {
 
     /// Number of nested `SAVEPOINT`s open within each
     /// app's active explicit transaction, **keyed by owning `app_id`**
-    /// (a shared counter would let one app's savepoint
+    /// (SEC-1: a shared counter would let one app's savepoint
     /// bookkeeping corrupt another's `zs_sp_<N>` naming). A missing
     /// entry (or `0`) means either no transaction is active for that
     /// app, or the only open transaction is the outermost one (the
@@ -177,7 +177,7 @@ pub struct IsolateDbContext {
     /// `find()` rows that don't yet exist on disk (or that a ROLLBACK is
     /// about to undo).
     ///
-    /// Keying by `app_id` keeps app B's COMMIT from firing app
+    /// SEC-1: keying by `app_id` keeps app B's COMMIT from firing app
     /// A's pre-commit events early (and B's ROLLBACK from silently
     /// dropping A's). A missing entry means no events are queued for
     /// that app.
@@ -257,7 +257,7 @@ pub struct IsolateDbContext {
 
     /// Backend handle wrapping the pool, as the typed
     /// [`BackendHandle`] enum (see `docs/proposals/db-system-design.md`
-    /// §5.5 and `docs/proposals/p0-implementation-plan.md`).
+    /// §5.5 and `docs/archive/p0-implementation-plan.md`).
     /// Created alongside the pool by [`Self::set_pool`] so consumers
     /// can call `ctx.backend()` to get a [`BackendHandle`] without
     /// naming `compio_postgres::Pool` directly.
@@ -630,7 +630,7 @@ impl IsolateDbContext {
     /// because callers wrap the await in those two calls and the slot is
     /// conceptually still "active".
     ///
-    /// A parked tx owned by another app reads as `false` here, so
+    /// SEC-1: a parked tx owned by another app reads as `false` here, so
     /// a co-resident app falls through to its own autocommit path under
     /// its own role rather than executing inside the owner's tx.
     pub(crate) fn has_tx_for(&self, app_id: &str) -> bool {
@@ -640,7 +640,7 @@ impl IsolateDbContext {
     /// Park a connection in `app_id`'s transaction slot. Returns the
     /// previous occupant for that app, if any (callers should ensure
     /// this is `None` — every begin path checks [`Self::has_tx_for`]
-    /// first). A different app's parked tx is never disturbed.
+    /// first). A different app's parked tx is never disturbed (SEC-1).
     pub(crate) fn install_tx_client(
         &mut self,
         app_id: &str,
@@ -654,7 +654,7 @@ impl IsolateDbContext {
     /// await is short and the slot should remain "in transaction") or
     /// drop the client (when settling the tx). Returns `None` when no tx
     /// is parked for `app_id` — including when another app owns the only
-    /// parked tx (app B cannot drain app A's client).
+    /// parked tx (SEC-1: app B cannot drain app A's client).
     pub(crate) fn take_tx_client_for(&mut self, app_id: &str) -> Option<TxConnection> {
         self.tx_conns.remove(app_id)
     }
@@ -701,7 +701,7 @@ impl IsolateDbContext {
     /// fresh transaction for that app starts from a clean slate even if
     /// an inner savepoint settle was skipped (e.g. the whole tx is being
     /// torn down by a top-level rollback). A different app's depth is
-    /// untouched.
+    /// untouched (SEC-1).
     pub(crate) fn reset_savepoint_depth_for(&mut self, app_id: &str) {
         self.savepoint_depths.remove(app_id);
     }
@@ -720,7 +720,7 @@ impl IsolateDbContext {
 
     /// Drain `app_id`'s pending-emits queue (returns `Vec::new()` if the
     /// app has none queued). Called by the transaction settle path on
-    /// COMMIT. Only the committing app's events are returned, so
+    /// COMMIT. SEC-1: only the committing app's events are returned, so
     /// one app's COMMIT cannot fire another's pre-commit events.
     pub(crate) fn drain_pending_emits_for(&mut self, app_id: &str) -> Vec<ChangeEvent> {
         self.pending_emits.remove(app_id).unwrap_or_default()
@@ -729,7 +729,7 @@ impl IsolateDbContext {
     /// Clear `app_id`'s pending-emits queue without firing any events.
     /// Called by the transaction settle path on ROLLBACK and by
     /// `exec_begin` to drop any stale residue from an interrupted prior
-    /// run. A different app's queue is untouched.
+    /// run. A different app's queue is untouched (SEC-1).
     pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
         self.pending_emits.remove(app_id);
     }
@@ -1169,7 +1169,7 @@ mod tests {
         assert!(!ctx.is_consumer_running("a"));
     }
 
-    // ----- Per-app scoping of the tx / savepoint / emit slots
+    // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
 
     // A worker thread multiplexes up to ~200 isolates (one per app).
     // Every slot below used to be a single per-OS-thread cell shared by

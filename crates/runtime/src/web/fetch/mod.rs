@@ -437,7 +437,7 @@ fn fetch_callback(
     }
 
     let global_resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
+    let request_id = crate::core::invocation::current_request_id(scope, &state);
 
     // Bump in-flight counter.
     state.borrow_mut().in_flight_fetches += 1;

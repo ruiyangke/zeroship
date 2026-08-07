@@ -496,10 +496,16 @@ pub fn fire_timer_callback(
 ) {
     let cb_opt = state.borrow_mut().timer_callbacks.remove(&timer_id);
     if let Some(cb) = cb_opt {
-        let func = v8::Local::new(scope, &cb.callback);
-        let undefined = v8::undefined(scope).into();
-        func.call(scope, undefined, &[]);
-        crate::core::init::perform_microtask_checkpoint(scope);
+        crate::core::invocation::with_captured_context(
+            scope,
+            &cb.continuation_context,
+            |scope| {
+                let func = v8::Local::new(scope, &cb.callback);
+                let undefined = v8::undefined(scope).into();
+                func.call(scope, undefined, &[]);
+                crate::core::init::perform_microtask_checkpoint(scope);
+            },
+        );
 
         // setInterval: re-insert so next fire can retrieve it
         if cb.interval.is_some() {

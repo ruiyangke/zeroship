@@ -33,7 +33,7 @@ pub use capability::{
 };
 pub use ctx_holder::{mint_rpc_ctx, RpcCtx};
 pub use dispatch::{
-    install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context_lazy,
+    install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context,
 };
 pub use error::{
     build, install_global, throw, RpcError, RpcErrorBuildOptions, RpcErrorInit, ZsErrorCode,

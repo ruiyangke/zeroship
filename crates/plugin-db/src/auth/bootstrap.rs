@@ -1445,7 +1445,7 @@ pub fn reset_role_sql() -> &'static str {
     "RESET ROLE"
 }
 
-// ── Per-app connection-hold / statement-time guards ────────────────────────
+// ── DB-1: per-app connection-hold / statement-time guards ────────────────────
 //
 // Bound how long any one app connection can pin shared-Postgres resources, so a
 // single tenant cannot exhaust the shared instance — neither by parking a
@@ -1463,7 +1463,7 @@ pub const DB_IDLE_IN_TX_TIMEOUT_MS: u32 = 15_000;
 /// Max time a statement waits on a lock before erroring (avoids lock pileups).
 pub const DB_LOCK_TIMEOUT_MS: u32 = 10_000;
 
-/// Combined per-transaction client setup: `SET LOCAL ROLE` + the timeout
+/// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
 /// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,
 /// so every value (role + timeouts) auto-reverts at COMMIT/ROLLBACK and can
 /// never leak to a later checkout of the (dedicated, but defensively reset)
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn set_role_sql_doubles_embedded_quote_via_quote_ident() {
-        // The role name is the single statement enforcing per-tenant
+        // DB-15: the role name is the single statement enforcing per-tenant
         // role separation. It MUST flow through quote_ident (doubling any
         // embedded `"`), not a hand-written `"{}"` splice — even though app_id
         // is validated upstream, this boundary must not rely on that.
@@ -1721,7 +1721,7 @@ mod tests {
 
     #[test]
     fn tx_session_setup_bounds_hold_and_statement_time() {
-        // Every dedicated transaction client must SET LOCAL the timeout
+        // DB-1: every dedicated transaction client must SET LOCAL the timeout
         // guards that bound how long it can be held idle-in-transaction and how
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
@@ -1735,7 +1735,7 @@ mod tests {
 
     #[test]
     fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
-        // The pooled autocommit path is pool-bounded (8) but a
+        // P2-C1 + DB-1: the pooled autocommit path is pool-bounded (8) but a
         // slow statement still pins one of those shared connections -- bound it
         // with a statement_timeout. Crucially every value is `SET LOCAL`, run
         // inside an explicit transaction, so role + timeouts auto-revert at

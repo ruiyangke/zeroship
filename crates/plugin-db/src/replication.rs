@@ -85,7 +85,7 @@ pub fn sanitise_app_id(app_id: &str) -> Result<String, DbError> {
             "replication: app_id must not be empty",
         ));
     }
-    // REJECT uppercase rather than silently lowercasing. PG replication
+    // DB-17: REJECT uppercase rather than silently lowercasing. PG replication
     // slot/publication names must be lowercase, but schema names (quote_ident)
     // preserve case and typed_ids are case-SENSITIVE base62 — so lowercasing
     // here would map two distinct app_ids that differ only in case onto the
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn sanitise_app_id_rejects_uppercase_for_slot_injectivity_db17() {
-        // Uppercase must be REJECTED, not lowercased — otherwise two
+        // DB-17: uppercase must be REJECTED, not lowercased — otherwise two
         // case-distinct app_ids would collide onto one slot/publication while
         // keeping different (case-preserving) schemas. Lowercase passes through
         // unchanged (no lossy transform).
@@ -801,7 +801,7 @@ mod tests {
     /// failure.
     #[test]
     fn publication_sql_uses_quoted_original_case_schema() {
-        // A mixed-case app_id is now REJECTED at sanitise_app_id, so the
+        // DB-17: a mixed-case app_id is now REJECTED at sanitise_app_id, so the
         // lowercased-slot-vs-case-preserving-schema mismatch this guard
         // protects against can no longer arise (the stronger fix supersedes the
         // original lowercasing path). A lowercase (production-shape) app_id is
@@ -1035,7 +1035,7 @@ mod tests {
         assert_ne!(p, p_b);
         assert_eq!(p_b, "__zs_slot_app_b%");
 
-        // A mixed-case app_id is rejected (not lowercased), so the
+        // DB-17: a mixed-case app_id is rejected (not lowercased), so the
         // slot-name prefix stays injective over app_ids. A lowercase id passes.
         assert!(slot_name_like_prefix("MyApp").is_err());
         assert_eq!(

@@ -263,7 +263,7 @@ pub(crate) fn build_update_trigger_sql(
 /// the sign flipped. The synthetic `_rank` column the caller sees
 /// carries the engine value verbatim (caller transformations like
 /// `Math.abs` happen SDK-side, not here).
-/// Normalize a user FTS query to LITERAL terms so SQLite FTS5 treats it
+/// DB-16: normalize a user FTS query to LITERAL terms so SQLite FTS5 treats it
 /// the same way Postgres' `plainto_tsquery` does — as words to AND together,
 /// NOT as MATCH query syntax (phrase / prefix `foo*` / `NEAR`/`AND`/`OR`
 /// boolean). Two reasons: (1) dev↔prod parity — without this, `db.x.search(q)`

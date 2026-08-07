@@ -158,7 +158,7 @@ impl KeyStore {
                 match pg_admin_lookup_root(pool, key_id).await {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => env_lookup_root(key_id)?,
-                    // A GENUINE getter fault (permission denied, connection
+                    // DB-10: a GENUINE getter fault (permission denied, connection
                     // error, SQL failure) must SURFACE — not silently downgrade to
                     // whatever `ZEROSHIP_COLUMN_KEY_<id>` happens to hold, which
                     // could be a stale/test key and would produce wrong-key

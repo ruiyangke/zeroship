@@ -87,7 +87,7 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// method closes the `backend.pool().get()` escape hatch while
 /// preserving the borrow-lifetime `'p` that threads through
 /// [`LockGuard`] (Open Q5 resolution; see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
+/// `docs/archive/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
 /// `docs/proposals/db-system-design.md` §7).
 ///
 /// The lock site is classified as

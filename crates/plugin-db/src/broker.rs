@@ -145,7 +145,7 @@ impl ChangeOp {
 /// proposal's stated default. Overflow triggers a `resync` event.
 pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 
-/// Max concurrent (live) subscriptions one app may hold. Each
+/// DB-12: max concurrent (live) subscriptions one app may hold. Each
 /// subscription carries a [`DEFAULT_QUEUE_DEPTH`]-slot queue and is iterated on
 /// every matching publish, so an unbounded `for (…) db.t.subscribe(…)` loop
 /// would grow the isolate's memory and per-event fan-out cost without bound.
@@ -491,7 +491,7 @@ impl Broker {
                 ),
             });
         }
-        // Cap the app's concurrent (live) subscriptions. Count only
+        // DB-12: cap the app's concurrent (live) subscriptions. Count only
         // non-closed subs so dropped/unsubscribed ones (pruned lazily on
         // publish) don't count against the limit.
         let live = self

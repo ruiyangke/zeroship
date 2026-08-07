@@ -15,11 +15,8 @@
 //! thread-local → sees **userB**. Any `onRequest` handler that called
 //! `getUser()` after an `await` saw whichever user last touched the thread.
 //!
-//! The callbacks below look up the user via the currently-executing
-//! request id stored in `RuntimeState`. The pump sets that id every time
-//! it enters V8 to drive a specific request (see `runtime.rs`
-//! `handle_op_result_pump` / `handle_timer_pump`), so async continuations
-//! resolve to the correct identity.
+//! User-code continuations resolve through V8's continuation-preserved
+//! invocation frame. Explicit runtime bindings remain as host-turn fallbacks.
 
 use crate::plugin::{NativePlugin, NativeRegistrar};
 use crate::state::SharedState;
@@ -76,9 +73,10 @@ pub fn clear_request_user(state: &SharedState, request_id: u64) {
 
 /// Look up the currently-executing turn's user JSON.
 ///
-/// `executing_request_id` is set by the runtime immediately before every
-/// V8 turn that belongs to a specific request (dispatch, op resolve, op
-/// reject, timer fire), and resolves the user via `per_request_user`.
+/// User-code continuations carry an invocation context in V8's CPED slot, so
+/// that value wins even when a different request caused the isolate-wide
+/// microtask checkpoint. An anonymous frame is authoritative and does not
+/// fall through to another request's user.
 ///
 /// WebSocket turns (`onmessage` / `onclose`) are not attributed to a
 /// request id — they belong to a long-lived connection. For those, the
@@ -89,7 +87,11 @@ pub fn clear_request_user(state: &SharedState, request_id: u64) {
 ///
 /// If neither resolves — e.g. a module-init callback, or a stream pump
 /// with no owning request — returns `None`.
-fn current_user(state: &SharedState) -> Option<String> {
+fn current_user(scope: &mut v8::PinScope, state: &SharedState) -> Option<String> {
+    if let Some(context) = crate::core::invocation::current_context(scope) {
+        return context.user_json;
+    }
+
     let s = state.borrow();
     if let Some(rid) = s.executing_request_id {
         if let Some(u) = s.per_request_user.get(&rid) {
@@ -120,7 +122,7 @@ pub fn get_user_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    match current_user(&state) {
+    match current_user(scope, &state) {
         Some(json) => {
             let Some(json_str) = v8::String::new(scope, &json) else {
                 rv.set(v8::null(scope).into());
@@ -172,7 +174,7 @@ pub fn require_user_callback(
         scope.throw_exception(exc);
     };
 
-    match current_user(&state) {
+    match current_user(scope, &state) {
         Some(json) => {
             let Some(json_str) = v8::String::new(scope, &json) else {
                 throw_auth_required(scope);

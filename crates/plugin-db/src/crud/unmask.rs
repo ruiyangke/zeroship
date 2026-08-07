@@ -273,7 +273,7 @@ fn lookup_encryption_meta(
 /// these broad access; app JS must never be able to claim one.
 pub(crate) const RESERVED_SYSTEM_ACTOR_KINDS: &[&str] = &["auto"];
 
-/// Sanitize an actor descriptor that originated from **app JS** (the
+/// DB-3: sanitize an actor descriptor that originated from **app JS** (the
 /// `{ actor }` field of an `unmask` / `find({unmask})` call). The unmask
 /// authorization read `actor.kind` straight off this app-supplied object, and
 /// `kind: "auto"` is the privileged system default that the default-deny stub
@@ -1519,7 +1519,7 @@ fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
             ),
         });
     }
-    // App JS cannot claim the reserved `auto` system actor.
+    // DB-3: app JS cannot claim the reserved `auto` system actor.
     let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
@@ -1682,7 +1682,7 @@ fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
         }
         items.push(BulkUnmaskItem { row_pk, columns });
     }
-    // App JS cannot claim the reserved `auto` system actor.
+    // DB-3: app JS cannot claim the reserved `auto` system actor.
     let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
