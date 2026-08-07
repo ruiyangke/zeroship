@@ -653,3 +653,30 @@ pub struct LoadVerifyReply {
     /// A human-readable error when `ok == false` (the first fail-closed rejection).
     pub error: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// `buildInfo` - the addon's build identity.
+// ---------------------------------------------------------------------------
+
+/// The build identity of the loaded addon, so a host that resolved a `.node` by
+/// path can log WHICH artifact it got. Every field is derived from committed
+/// bytes at compile time, so rebuilding an unchanged tree reports the same
+/// values.
+///
+/// napi-neutral (plain scalar fields) so [`crate::api`] builds it on the
+/// napi-free test path too.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct BuildInfo {
+    /// The crate version (workspace `[workspace.package] version`). Distinguishes
+    /// releases, NOT two builds of the same unreleased version.
+    pub version: String,
+    /// The IR-format floor this addon was built against - the same number
+    /// `irVersion()` returns, repeated so one call answers the whole identity.
+    pub ir_version: u32,
+    /// Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
+    /// every `crates/*/src` file. This is what tells a pre-fix artifact from a
+    /// post-fix one when the version has not moved. It does NOT cover the JS
+    /// packages, the rustc version, the cargo profile, or the enabled features.
+    pub source_digest: String,
+}

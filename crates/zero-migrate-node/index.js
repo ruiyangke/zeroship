@@ -589,6 +589,7 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.applyIr = nativeBinding.applyIr
 module.exports.applyIrSqlite = nativeBinding.applyIrSqlite
+module.exports.buildInfo = nativeBinding.buildInfo
 module.exports.genArtifacts = nativeBinding.genArtifacts
 module.exports.history = nativeBinding.history
 module.exports.irVersion = nativeBinding.irVersion

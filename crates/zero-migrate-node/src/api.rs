@@ -26,13 +26,30 @@ use zero_migrate::{
     EffectivePolicy, SchemaScope, DEFAULT_PROJECT_SCHEMA,
 };
 
-use crate::wire::{GenArtifactsReply, LoadVerifyReply};
+use crate::wire::{BuildInfo, GenArtifactsReply, LoadVerifyReply};
 
 /// The IR-format version this addon was built against (`ir_version` fail-closed
 /// floor). Surfaced so a host can pre-check an artifact's version.
 #[must_use]
 pub const fn current_ir_version() -> u32 {
     CURRENT_IR_VERSION
+}
+
+/// The loaded addon's build identity. Answers "which artifact is this?" for a host
+/// that resolved the `.node` by path, where the filename carries no version.
+///
+/// Every field is a compile-time constant folded from committed bytes: the crate
+/// version, the IR floor, and the workspace source digest `build.rs` computes.
+/// Nothing here reads the wall clock, the environment, or git state, so the value
+/// is reproducible from the tree alone. It reports what the addon was BUILT from,
+/// not how it was built - toolchain, profile, and feature set are outside it.
+#[must_use]
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        ir_version: CURRENT_IR_VERSION,
+        source_digest: env!("ZERO_MIGRATE_SOURCE_DIGEST").to_owned(),
+    }
 }
 
 /// Map the wire dialect spelling to [`Dialect`]. Unknown → `Err`.
@@ -223,6 +240,38 @@ mod tests {
     #[test]
     fn current_ir_version_is_the_core_floor() {
         assert_eq!(current_ir_version(), CURRENT_IR_VERSION);
+    }
+
+    #[test]
+    fn build_info_reports_the_crate_version_and_the_ir_floor() {
+        let info = build_info();
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.ir_version, current_ir_version());
+    }
+
+    #[test]
+    fn build_info_source_digest_is_a_lowercase_sha256() {
+        let digest = build_info().source_digest;
+        assert_eq!(
+            digest.len(),
+            64,
+            "source_digest must be a full sha256 in hex, got {digest:?}"
+        );
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "source_digest must be lowercase hex, got {digest:?}"
+        );
+    }
+
+    #[test]
+    fn build_info_is_stable_within_a_build() {
+        // The identity must be a compile-time constant, not a per-call reading of
+        // the clock or the environment: a drift gate over generated files depends
+        // on it. This asserts constness within one process; the run-twice check in
+        // CI covers reproducibility across builds.
+        assert_eq!(build_info().source_digest, build_info().source_digest);
     }
 
     fn empty_registry() -> HashMap<String, String> {

@@ -128,6 +128,43 @@ export interface BlockedPlanDto {
   pendingVersion: string
 }
 
+/**
+ * The loaded addon's build identity: crate version, IR floor, and the workspace
+ * source digest. A host that resolves the `.node` by path can log this to prove
+ * WHICH artifact it loaded, which the filename alone cannot say. Reproducible
+ * from the committed tree; it does not report the toolchain or build profile.
+ */
+export declare function buildInfo(): BuildInfo
+
+/**
+ * The build identity of the loaded addon, so a host that resolved a `.node` by
+ * path can log WHICH artifact it got. Every field is derived from committed
+ * bytes at compile time, so rebuilding an unchanged tree reports the same
+ * values.
+ *
+ * napi-neutral (plain scalar fields) so [`crate::api`] builds it on the
+ * napi-free test path too.
+ */
+export interface BuildInfo {
+  /**
+   * The crate version (workspace `[workspace.package] version`). Distinguishes
+   * releases, NOT two builds of the same unreleased version.
+   */
+  version: string
+  /**
+   * The IR-format floor this addon was built against - the same number
+   * `irVersion()` returns, repeated so one call answers the whole identity.
+   */
+  irVersion: number
+  /**
+   * Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
+   * every `crates/*\/src` file. This is what tells a pre-fix artifact from a
+   * post-fix one when the version has not moved. It does NOT cover the JS
+   * packages, the rustc version, the cargo profile, or the enabled features.
+   */
+  sourceDigest: string
+}
+
 /** One declared collection (table) — the MANUAL-source `CollectionDescriptor` mirror. */
 export interface CollectionDescriptorDto {
   /** The collection (table) name. */
@@ -565,7 +602,7 @@ export interface RuntimeOptionsDto {
 /**
  * `status` — the generic `ops::status::status` over the host driver.
  * Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
- * typed [`StatusReply`].
+ * typed [`StatusReply`](crate::wire::StatusReply).
  */
 export declare function status(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: StatusRequest): Promise<StatusReply>
 

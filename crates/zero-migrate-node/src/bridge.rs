@@ -65,10 +65,10 @@ use crate::verbs::{
     resolve_pending_with_locked_backend, status_ir_with_locked_backend, ApplyDialect,
 };
 use crate::wire::{
-    ApplyIrSqliteRequest, ApplyReply, ApplyRequest, CollectionDescriptorDto, FieldDescriptorDto,
-    GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest,
-    LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RuntimeOptionsDto, StatusIrRequest,
-    StatusRequest,
+    ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, CollectionDescriptorDto,
+    FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
+    HistoryRequest, LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RuntimeOptionsDto,
+    StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,16 @@ use crate::wire::{
 #[must_use]
 pub const fn ir_version() -> u32 {
     api::current_ir_version()
+}
+
+/// The loaded addon's build identity: crate version, IR floor, and the workspace
+/// source digest. A host that resolves the `.node` by path can log this to prove
+/// WHICH artifact it loaded, which the filename alone cannot say. Reproducible
+/// from the committed tree; it does not report the toolchain or build profile.
+#[napi(js_name = "buildInfo")]
+#[must_use]
+pub fn build_info() -> BuildInfo {
+    api::build_info()
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate). Returns a
