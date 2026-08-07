@@ -486,12 +486,26 @@ mod platform_cli {
         // silently. A single over-long name of either spelling is truncated with
         // only a NOTICE, leaving the authored name and the catalog name disagreeing.
         //
-        // This reads the REALIZED index names rather than the authored ops because
-        // constraint-backed indexes and plain indexes share one relation namespace
-        // per schema: a truncated constraint name on one table collides with a
-        // truncated index name on another. Checking realized names is the only
-        // check that sees the whole budget. A stored name of exactly 63 bytes is
-        // already indistinguishable from a truncated one.
+        // This reads REALIZED names rather than authored ops, because the authored
+        // name is exactly what stops corresponding to reality once it truncates.
+        //
+        // The two arms below guard different failures, verified against the
+        // PostgreSQL this suite runs on:
+        //
+        //   - Index names, and the names of UNIQUE and PRIMARY KEY constraints,
+        //     share ONE per-schema relation namespace. A truncated name on one
+        //     table can therefore collide with a truncated name on another.
+        //   - CHECK and FOREIGN KEY names live only in pg_constraint and are unique
+        //     per TABLE. They cannot collide with an index, and two tables may hold
+        //     the same name happily, so for these the risk is purely that the
+        //     authored name and the catalog name diverge.
+        //
+        // Divergence alone is enough to matter: a later guarded drop probes the
+        // AUTHORED name, does not find it, concludes the object is already gone,
+        // and journals a skip as completed.
+        //
+        // A stored name of exactly 63 bytes is already indistinguishable from a
+        // truncated one.
         // Constraints are checked as well as indexes. A unique or primary-key
         // constraint is index-backed and so appears in pg_indexes, but a check or
         // foreign-key constraint has no index row while its name truncates on the
