@@ -1953,7 +1953,19 @@ pub enum RollbackError {
     },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort (mirrors apply).
-    #[error("checksum drift on {version}: journal has {recorded}, set has {expected}")]
+    ///
+    /// Deliberately NOT worded like [`ApplyError::ChecksumDrift`]. That variant
+    /// points at a possibly-stranded inflight marker, because apply can reach it
+    /// while the recorded side is a marker recording a body that half-ran.
+    /// Rollback compares only against a record it already selected as applied, so
+    /// `recorded` here is always a completed event and no marker is involved. Do
+    /// not copy the apply wording across: the marker pointer would be false here.
+    #[error(
+        "checksum drift on {version}: journal has {recorded}, set has {expected}. \
+         The applied migration and the one now in the set are not the same migration, \
+         so its `down` is not the reverse of what ran: restore the reviewed migration \
+         source unedited instead of editing it to match the journal"
+    )]
     ChecksumDrift {
         /// The drifting migration's version.
         version: String,

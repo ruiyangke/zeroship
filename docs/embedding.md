@@ -135,8 +135,13 @@ transaction tracking tables, with the `transaction` instrument and
 `events_transactions_current` consumer enabled; verification fails closed when
 that evidence is unavailable.
 
-An interrupted, auto-committing MySQL schema migration is resolved through the
-typed recovery API rather than direct journal edits:
+An interrupted, auto-committing MySQL schema migration leaves an inflight
+marker. A Rust host that embeds this crate resolves it with the typed recovery
+API. That API has no binding across the Node addon, so it is unreachable from
+the CLI and the Node SDK; operators on those surfaces resolve the same marker by
+restoring and verifying the complete pre-migration shape and then deleting that
+version's row from the mutable `schema_migrations_inflight` side-table. Neither
+route touches the append-only, trigger-guarded `schema_migrations` event table.
 
 ```rust
 use zero_migrate::apply::backend::MysqlInflightResolution;
@@ -154,7 +159,13 @@ mysql
 
 Choose `ClearForRetryAfterRollback` instead only after restoring and verifying
 the full pre-migration shape. The exact migration identity is checked and the
-decision is recorded in immutable recovery history.
+decision is recorded in immutable recovery history; that identity check and that
+audit row are what this route adds over the direct marker delete, along with
+resolving the "the DDL fully landed" case without rolling anything back. It does
+not inspect the database. Recovery records your assertion about the shape rather
+than verifying it, so verify the live shape first, outside zero-migrate. See
+[Interrupted MySQL or non-transactional work](operations.md#interrupted-mysql-or-non-transactional-work)
+for the operator-facing checklist.
 
 The public trait has five asynchronous operations:
 
