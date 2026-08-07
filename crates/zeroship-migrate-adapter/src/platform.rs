@@ -881,6 +881,15 @@ pub async fn run_platform_migrations(
                 }
                 // Rebuild authored contracts without lowering against the current
                 // catalog or submitting any work to the executor.
+                //
+                // This must stay a FULL replay of the file's ops. Narrowing it to
+                // a collector over table and column ops looks like an easy saving
+                // and is wrong: the engine maintains the candidate-key lifecycle
+                // in its create-index, drop-index, add-constraint, drop-constraint
+                // and alter-primary-key arms too. A column made referenceable by a
+                // later unique index in a skipped file would be dropped from the
+                // rebuilt contracts, and a foreign key pointing at it would then be
+                // rejected for a reason nothing in this file explains.
                 let resolved = author_and_resolve_file(&ctx, migration)?;
                 advance_authored_logical_columns(&ctx, &mut state, &file, &resolved)?;
                 report.skipped.extend(journal[index].completed_versions());
