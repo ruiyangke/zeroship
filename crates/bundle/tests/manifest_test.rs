@@ -339,3 +339,30 @@ fn validate_accepts_exact_cors_origin_with_credentials() {
         .validate()
         .expect("exact CORS origin with credentials must be accepted");
 }
+
+/// A rewrite deploys cleanly and then does nothing. The gateway resolves the
+/// action and forwards the request under its ORIGINAL path, discarding `to`
+/// (`crates/gateway/src/router/dispatch.rs`, the `ResolvedAction::Rewrite`
+/// arm). Implementing it needs re-entrant rule walking under a hop limit so a
+/// rewrite cycle cannot loop, and neither exists. Until it does, reject the
+/// action so a creator gets a deploy error instead of routing that silently
+/// ignores what they wrote.
+#[test]
+fn validate_rejects_the_unimplemented_rewrite_action() {
+    let mut m = Manifest::default();
+    m.resources.insert(
+        "/old/*".to_string(),
+        ResourceEntry {
+            rewrite: Some("/new/index.html".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let err = m
+        .validate()
+        .expect_err("an unimplemented action must not deploy cleanly");
+    assert!(
+        err.contains("not implemented"),
+        "the error must say the action is unimplemented, not merely malformed: {err}"
+    );
+}
