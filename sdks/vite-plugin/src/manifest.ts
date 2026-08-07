@@ -385,6 +385,20 @@ function validateResources(
     }
   }
 
+  // `rewrite` is accepted by the manifest shape but the gateway forwards the
+  // request under its original path, so a rewrite would build and deploy while
+  // silently ignoring the target. The control plane rejects it too; failing
+  // here means the creator sees it at build time instead of on deploy.
+  for (const [key, node] of Object.entries(flat)) {
+    if ("rewrite" in node) {
+      errors.push(
+        `resource ${JSON.stringify(key)} uses \`rewrite\`, which is not implemented — ` +
+          `the gateway would serve the original path and ignore the rewrite target. ` +
+          `Use \`redirect\` for an outward hop, or \`static\` to serve a different asset.`,
+      );
+    }
+  }
+
   // Credentialed CORS requests require an exact allowed origin.
   for (const [key, node] of Object.entries(flat)) {
     const cors = node.cors;

@@ -1539,10 +1539,12 @@ async fn execute_resource_tree(
                 .finish()
         }
         ResolvedAction::Rewrite { to } => {
-            // Rewrite forwards under the new path. Recursive rewrites
-            // are not yet supported because they would need to re-enter
-            // `lookup_resource` with hop limiting. Pass through to the
-            // worker for now.
+            // Unreachable through a validated manifest: `Manifest::validate`
+            // rejects `rewrite` because honouring it needs re-entrant rule
+            // walking under a hop limit, which does not exist. Kept as a
+            // total match arm, and it forwards under the ORIGINAL path -
+            // the rewrite target is deliberately discarded rather than
+            // half-applied.
             let _ = to;
             handle_dispatch(
                 req,

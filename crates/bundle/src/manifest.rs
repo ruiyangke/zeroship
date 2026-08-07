@@ -596,6 +596,19 @@ impl Manifest {
                     "resource {key:?}: at most one of `redirect`, `rewrite`, `static` may be set"
                 ));
             }
+            // The gateway resolves a rewrite and then forwards under the
+            // ORIGINAL path, so accepting one here would deploy routing that
+            // silently ignores what the creator wrote. Implementing it needs
+            // re-entrant rule walking under a hop limit so a rewrite cycle
+            // cannot loop; until that exists, refuse the action rather than
+            // pretend to honour it.
+            if entry.rewrite.is_some() {
+                return Err(format!(
+                    "resource {key:?}: `rewrite` is not implemented - the gateway would forward \
+                     the request under its original path and ignore the rewrite target; use \
+                     `redirect` for an outward hop, or `static` to serve a different asset"
+                ));
+            }
             // Secure-by-default.
             if entry.auth == Some(AuthLevel::Anon) && entry.publicly_accessible != Some(true) {
                 return Err(format!(

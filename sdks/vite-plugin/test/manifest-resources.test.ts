@@ -268,6 +268,40 @@ export default defineApp({
     }
   });
 
+  test("rejects the unimplemented rewrite action", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `import { defineApp } from "@zeroship/server";
+export default defineApp({
+  resources: {
+    "/old/*": {
+      rewrite: "/new/index.html",
+    },
+  },
+});
+`,
+    });
+    try {
+      await assert.rejects(
+        () =>
+          computeManifestExtras({
+            root: fix.root,
+            procedures: [],
+            mode: "production",
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(
+            error.message.includes("is not implemented"),
+            `error must say the action is unimplemented: ${error.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("rejects wildcard CORS origins when credentials are allowed", async () => {
     const fix = await makeFixture({
       "src/server/config.ts": `import { defineApp } from "@zeroship/server";

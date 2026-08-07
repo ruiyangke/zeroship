@@ -266,11 +266,10 @@ pub enum Action {
         status: u16,
     },
 
-    /// Internal URL rewrite. NOT IMPLEMENTED: `validate()` accepts this
-    /// action, and the gateway then discards `to` and forwards the request
-    /// under its ORIGINAL path (`router/dispatch.rs`, the `ResolvedAction::
-    /// Rewrite` arm, which does `let _ = to`). A manifest declaring a rewrite
-    /// therefore deploys cleanly and does nothing.
+    /// Internal URL rewrite. NOT IMPLEMENTED, and rejected by
+    /// `Manifest::validate` so it cannot deploy: the gateway would discard
+    /// `to` and forward the request under its ORIGINAL path
+    /// (`router/dispatch.rs`, the `ResolvedAction::Rewrite` arm).
     ///
     /// The intended semantics are to mutate the request path and restart rule
     /// walking from index 0, which needs re-entering `lookup_resource` under a
