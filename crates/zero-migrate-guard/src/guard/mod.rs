@@ -21,10 +21,10 @@
 
 pub mod denylist;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pg_query::protobuf::node::Node as NodeEnum;
-use pg_query::protobuf::{self, ObjectType};
+use pg_query::protobuf::{self, ConstrType, ObjectType};
 
 use pg_query::protobuf::AlterTableType;
 
@@ -50,8 +50,10 @@ use zero_migrate_policy::{
 pub mod namespace_rule {
     /// II.2.5 — a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
     /// `PARTITION OF` / `CREATE TABLE AS EXECUTE` / `INHERITS`) targets an object an
-    /// `inject` rule covers; injection cannot rewrite raw text, so only the
-    /// structured DSL may create an injected table.
+    /// `inject` rule covers and its own text does not carry the injected shape.
+    /// Injection cannot rewrite raw text, so a create that does not already declare
+    /// every injected column and exactly the pinned primary key would land a table
+    /// the inject rule was supposed to shape.
     pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
     /// II.2.6a — a create (`CREATE TABLE`, structured or classified-raw) is not
     /// covered by a `schema.create_table` grant (default-deny namespace anchor).
@@ -405,10 +407,35 @@ impl GuardConfig {
         }
     }
 
-    /// Does ANY covering `inject` rule contribute to `object`? A raw create/rename
-    /// into an inject scope is denied (injection can't rewrite raw text, II.2.5).
+    /// Does ANY covering `inject` rule contribute to `object`? A raw rename/move
+    /// into an inject scope is denied on this answer alone: unlike a create, the
+    /// moved table's shape is nowhere in the statement text, so nothing can prove
+    /// the injection was honoured (II.2.5).
     fn injects_cover(&self, object: &ObjectName) -> bool {
         !self.effective.injects_for(object).is_empty()
+    }
+
+    /// What every covering `inject` rule demands of a table created at `object`,
+    /// with each policy-authored name folded to the PostgreSQL identifier bytes it
+    /// denotes. Drives the raw-create conformance check; empty when no inject covers
+    /// `object`.
+    fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape> {
+        self.effective
+            .injects_for(object)
+            .into_iter()
+            .map(|spec| InjectedCreateShape {
+                columns: spec
+                    .columns
+                    .iter()
+                    .map(|column| fold_identifier(&column.name))
+                    .collect(),
+                primary_key: spec.primary_key.as_ref().map(|keys| {
+                    keys.iter()
+                        .map(|key| fold_identifier(key))
+                        .collect::<Vec<_>>()
+                }),
+            })
+            .collect()
     }
 
     /// Is `element` on `object` an injected shape element (II.2.6b, name-match-at-op-time)?
@@ -455,6 +482,153 @@ fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
     effective
         .grant_literal_schema_includes(&k)
         .unwrap_or_default()
+}
+
+/// What one covering `inject` rule requires a create at its scope to carry, in the
+/// PostgreSQL identifier bytes its policy-authored names denote: every contributed
+/// column name, plus the exact primary key when the rule pins one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InjectedCreateShape {
+    columns: Vec<Vec<u8>>,
+    primary_key: Option<Vec<Vec<u8>>>,
+}
+
+impl InjectedCreateShape {
+    /// Does `declared` prove this inject rule was honoured? A column is satisfied
+    /// when the create declares a column of that exact name; a pinned primary key is
+    /// satisfied only by the SAME columns in the SAME order, because
+    /// `PRIMARY KEY (id, tenant_id)` against a pinned `(id)` is a different key, not
+    /// a superset of one.
+    ///
+    /// A rule that contributes no column and pins no key demands nothing a create's
+    /// text could exhibit (`columns` is optional, so an inject carrying only
+    /// `indexes` is a legal charter). It is never satisfied: an obligation the
+    /// statement cannot carry proof of leaves the create unprovable, so it is denied
+    /// rather than admitted by a vacuously true check.
+    fn is_satisfied_by(&self, declared: &DeclaredCreateShape) -> bool {
+        if self.columns.is_empty() && self.primary_key.is_none() {
+            return false;
+        }
+        self.columns
+            .iter()
+            .all(|column| declared.columns.contains(column))
+            && self
+                .primary_key
+                .as_ref()
+                .is_none_or(|pinned| declared.primary_key.as_ref() == Some(pinned))
+    }
+}
+
+/// What a `CREATE TABLE` statement's own text DECLARES, in PostgreSQL identifier
+/// bytes: the column names it lists and the ordered primary-key column list it
+/// declares (table-level `PRIMARY KEY (...)` or a column-level marker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredCreateShape {
+    columns: BTreeSet<Vec<u8>>,
+    primary_key: Option<Vec<Vec<u8>>>,
+}
+
+impl DeclaredCreateShape {
+    /// Does this create satisfy every covering inject rule?
+    fn conforms_to(&self, injects: &[InjectedCreateShape]) -> bool {
+        injects.iter().all(|inject| inject.is_satisfied_by(self))
+    }
+}
+
+/// Read the shape a `CREATE TABLE` declares, or `None` when the parse cannot
+/// enumerate it.
+///
+/// Declared names are taken VERBATIM. `libpg_query` has already applied
+/// PostgreSQL's identifier fold when it filled `ColumnDef.colname` and a
+/// constraint's key strings, so `Created_At` arrives as `created_at` while
+/// `"Created_At"` arrives preserved; re-folding here would erase the very
+/// quoted/unquoted distinction the parser resolved and let `"Created_At"` pass for
+/// the injected `created_at`. Trimming would likewise merge the distinct columns
+/// `"id "` and `id`.
+///
+/// `None` means "unprovable, deny": a `LIKE` clause, `INHERITS`, `PARTITION OF`, or
+/// `OF <type>` draws columns from a relation the statement does not spell out, so
+/// the declared list is short by construction; an unrecognized table element is
+/// treated the same way rather than silently ignored; and two primary-key
+/// declarations are a shape Postgres itself rejects, so there is no single key to
+/// compare.
+fn declared_create_shape(create: &protobuf::CreateStmt) -> Option<DeclaredCreateShape> {
+    if !create.inh_relations.is_empty()
+        || create.partbound.is_some()
+        || create.of_typename.is_some()
+    {
+        return None;
+    }
+    let mut columns = BTreeSet::new();
+    let mut declared_keys: Vec<Vec<Vec<u8>>> = Vec::new();
+    for elt in &create.table_elts {
+        match elt.node.as_ref() {
+            Some(NodeEnum::ColumnDef(col)) => {
+                let name = col.colname.as_bytes().to_vec();
+                if col.constraints.iter().any(is_primary_key_constraint) {
+                    declared_keys.push(vec![name.clone()]);
+                }
+                columns.insert(name);
+            }
+            Some(NodeEnum::Constraint(con)) => {
+                if con.contype == ConstrType::ConstrPrimary as i32 {
+                    declared_keys.push(constraint_key_columns(con)?);
+                }
+            }
+            _ => return None,
+        }
+    }
+    let primary_key = match declared_keys.len() {
+        0 => None,
+        1 => declared_keys.pop(),
+        _ => return None,
+    };
+    Some(DeclaredCreateShape {
+        columns,
+        primary_key,
+    })
+}
+
+/// Is this node a column-level `PRIMARY KEY` marker?
+fn is_primary_key_constraint(node: &protobuf::Node) -> bool {
+    matches!(
+        node.node.as_ref(),
+        Some(NodeEnum::Constraint(con)) if con.contype == ConstrType::ConstrPrimary as i32
+    )
+}
+
+/// The ordered column list of a table-level `PRIMARY KEY (...)`, in the verbatim
+/// identifier bytes the parser resolved. `None` when a key entry is not a plain
+/// identifier: an unreadable key cannot be compared to a pinned one, so the caller
+/// denies.
+fn constraint_key_columns(con: &protobuf::Constraint) -> Option<Vec<Vec<u8>>> {
+    con.keys
+        .iter()
+        .map(|key| match key.node.as_ref() {
+            Some(NodeEnum::String(s)) => Some(s.sval.as_bytes().to_vec()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fold one POLICY-authored identifier to the PostgreSQL identifier bytes it
+/// denotes (II.2.7: an unquoted name lowercases, a quoted one stays verbatim), so a
+/// charter's `created_at` and `"Created_At"` name the columns they would name in
+/// SQL. Only the policy side is folded; a name read out of a parsed statement is
+/// already the resolved identifier.
+///
+/// A name that normalizes to two segments (it contains an unquoted dot) folds
+/// verbatim-lowercased rather than to its leading segment, so a charter column
+/// `a.b` demands a column literally named `a.b`. That diverges from the policy
+/// crate's `names_match`, which folds `a.b` to `a` and would demand a column named
+/// `a` instead. The divergence is a difference in which column the charter names,
+/// not a safety property in either direction; the two folds should be unified once
+/// the policy crate exposes its single-identifier fold.
+fn fold_identifier(name: &str) -> Vec<u8> {
+    match normalize_pg_identifier(name) {
+        Some(object) if object.table.is_none() => object.schema,
+        _ => name.to_ascii_lowercase().into_bytes(),
+    }
 }
 
 /// T8 — the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
@@ -578,6 +752,7 @@ trait GuardDecisions {
     fn pinned_schema(&self) -> Option<String>;
     fn grants_namespace_bool(&self, key: &str, object: &ObjectName) -> bool;
     fn injects_cover(&self, object: &ObjectName) -> bool;
+    fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape>;
     fn effective_destructive_ops(&self) -> DestructiveOps;
     fn grants_global_bool(&self, key: &str) -> bool;
     fn grants_drop_object(&self, remove_type: i32) -> bool;
@@ -602,6 +777,10 @@ impl GuardDecisions for GuardConfig {
 
     fn injects_cover(&self, object: &ObjectName) -> bool {
         Self::injects_cover(self, object)
+    }
+
+    fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape> {
+        Self::covering_inject_shapes(self, object)
     }
 
     fn effective_destructive_ops(&self) -> DestructiveOps {
@@ -682,6 +861,10 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
 
     fn injects_cover(&self, _object: &ObjectName) -> bool {
         false
+    }
+
+    fn covering_inject_shapes(&self, _object: &ObjectName) -> Vec<InjectedCreateShape> {
+        Vec::new()
     }
 
     fn effective_destructive_ops(&self) -> DestructiveOps {
@@ -906,9 +1089,10 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
 
         // 2c. NAMESPACE-authority structural gate (II.2.5 raw-SQL create/rename
         //     classification / II.2.6 creation-gating + injected-shape immutability):
-        //     a raw create must pass `schema.create_table` and is denied in any inject
-        //     scope; a rename/move needs `schema.rename` and is denied into an
-        //     inject scope; an alter/drop of an injected shape element is immutable.
+        //     a raw create must pass `schema.create_table` and, in an inject scope,
+        //     must declare the injected shape; a rename/move needs `schema.rename`
+        //     and is denied into an inject scope; an alter/drop of an injected shape
+        //     element is immutable.
         //     Runs AFTER cross-schema so a foreign-schema target reports `CrossSchema`.
         self.check_namespace_structural(node, raw)?;
 
@@ -967,7 +1151,10 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// - a **create** (`CreateStmt` incl. `LIKE`/`INHERITS`/`PARTITION OF`,
     ///   `CreateTableAsStmt` = CTAS / `CREATE TABLE AS EXECUTE`, `SelectStmt` with an
     ///   `into_clause` = `SELECT … INTO`) must pass `schema.create_table` at the target
-    ///   AND is denied wherever any inject rule covers it (`RawCreateInInjectScope`);
+    ///   AND, wherever an inject rule covers it, must declare every injected column and
+    ///   exactly the pinned primary key (`RawCreateInInjectScope`). A create whose
+    ///   columns the parse cannot enumerate (`LIKE`/`INHERITS`/`PARTITION OF`/`OF
+    ///   <type>`/CTAS/`SELECT INTO`) can never prove that and stays denied;
     /// - a `CreateSchemaStmt` must pass `schema.create_schema`;
     /// - a `RenameStmt`/`AlterObjectSchemaStmt` that moves a table checks
     ///   `schema.rename` and is denied into any inject scope
@@ -980,7 +1167,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // ── raw create: CREATE TABLE (incl. LIKE / INHERITS / PARTITION OF) ──
             NodeEnum::CreateStmt(c) => {
                 let target = self.resolve_relation_target(c.relation.as_ref(), raw)?;
-                self.gate_raw_create(&target, raw)?;
+                self.gate_raw_create(&target, raw, Some(c))?;
             }
             // ── CTAS / CREATE TABLE AS EXECUTE ──────────────────────────────────
             NodeEnum::CreateTableAsStmt(cta) => {
@@ -990,7 +1177,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 if cta.objtype == ObjectType::ObjectTable as i32 || cta.is_select_into {
                     let rel = cta.into.as_ref().and_then(|i| i.rel.as_ref());
                     let target = self.resolve_relation_target(rel, raw)?;
-                    self.gate_raw_create(&target, raw)?;
+                    self.gate_raw_create(&target, raw, None)?;
                 }
             }
             // ── SELECT … INTO <table> ───────────────────────────────────────────
@@ -1000,7 +1187,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             NodeEnum::SelectStmt(s) => {
                 if let Some(into) = s.into_clause.as_ref() {
                     let target = self.resolve_relation_target(into.rel.as_ref(), raw)?;
-                    self.gate_raw_create(&target, raw)?;
+                    self.gate_raw_create(&target, raw, None)?;
                 }
             }
             // ── CREATE SCHEMA ───────────────────────────────────────────────────
@@ -1088,12 +1275,41 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         })
     }
 
-    /// Gate a raw CREATE-TABLE-shaped statement: `schema.create_table` must grant the
-    /// target AND no inject rule may cover it (II.2.5/II.2.6a). The inject check comes
-    /// first — a table inside an inject scope can ONLY be created via the structured
-    /// DSL, so even a `schema.create_table` grant cannot admit a raw create there.
-    fn gate_raw_create(&self, target: &ObjectName, raw: &str) -> Result<(), GuardError> {
-        if self.cfg.injects_cover(target) {
+    /// Gate a CREATE-TABLE-shaped statement: inside an inject scope the statement
+    /// must CONFORM to every covering inject, and `schema.create_table` must grant the
+    /// target (II.2.5/II.2.6a).
+    ///
+    /// Conformance is decided from the statement text alone, because the same text is
+    /// re-guarded at apply/baseline/precondition sites that carry no op and no origin.
+    /// The property it delivers is narrower than the IR-level
+    /// `resolved_create_table_matches_inject` predicate: text proves only that the
+    /// create omits no injected column slot and contradicts no pinned primary key. It
+    /// says nothing about column types, which the parse cannot compare against the
+    /// spec.
+    ///
+    /// It also says nothing about injected INDEXES, and cannot: a `CREATE INDEX` is a
+    /// separate statement, so a `CREATE TABLE` can never carry proof of an index
+    /// obligation while the guard decides one statement at a time. An admitted raw
+    /// create may therefore drop an injected index, which is an accepted loosening
+    /// against the blanket deny this rule replaced. Injected indexes are not a reason
+    /// to deny the create: the structured resolver emits them as separate statements
+    /// right after it.
+    ///
+    /// `declared` is the parsed create when the statement has a column list at all;
+    /// `None` for CTAS / `SELECT INTO`, which declare no columns and therefore can
+    /// never prove conformance.
+    fn gate_raw_create(
+        &self,
+        target: &ObjectName,
+        raw: &str,
+        declared: Option<&protobuf::CreateStmt>,
+    ) -> Result<(), GuardError> {
+        let injects = self.cfg.covering_inject_shapes(target);
+        if !injects.is_empty()
+            && !declared
+                .and_then(declared_create_shape)
+                .is_some_and(|shape| shape.conforms_to(&injects))
+        {
             return Err(namespace_denied(
                 namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
                 raw,

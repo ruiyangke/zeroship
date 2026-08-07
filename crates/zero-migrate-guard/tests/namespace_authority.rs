@@ -100,6 +100,375 @@ fn raw_ctas_and_select_into_in_inject_scope_are_denied() {
     );
 }
 
+// ================================================================================
+// 1b. Raw CREATE TABLE that CONFORMS to the covering injects is ADMITTED
+// ================================================================================
+//
+// The rule is a conformance check, not a blanket deny: the structured resolver
+// renders the injected columns into the CREATE TABLE text it hands the guard, so a
+// create whose column list already carries every injected column and whose declared
+// PK equals the pinned one is exactly what the inject asked for.
+
+#[test]
+fn raw_create_carrying_the_full_injected_shape_is_admitted() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // Every injected column (`id`, `created_at`, `deleted_at`) is present and the
+    // declared PK is the pinned `(id)`, spelled as a column-level marker. Author
+    // columns beyond the injected set are free.
+    g.check(
+        "CREATE TABLE app.t (id text PRIMARY KEY NOT NULL, \
+         created_at timestamptz NOT NULL, deleted_at timestamptz, title text)",
+    )
+    .expect("a create carrying the full injected shape conforms and is admitted");
+}
+
+#[test]
+fn conforming_create_accepts_the_table_level_primary_key_spelling() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // `PRIMARY KEY (id)` as a table constraint is the same pinned key as the
+    // column-level marker.
+    g.check(
+        "CREATE TABLE app.t (id text NOT NULL, created_at timestamptz NOT NULL, \
+         deleted_at timestamptz, PRIMARY KEY (id))",
+    )
+    .expect("a table-level PRIMARY KEY (id) matches the pinned key");
+}
+
+#[test]
+fn conformance_folds_column_names_like_the_immutability_rules() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // Unquoted identifiers fold to lowercase, so `Created_At` is `created_at`: the
+    // same fold the injected-shape immutability check uses.
+    g.check(
+        "CREATE TABLE app.t (Id text PRIMARY KEY NOT NULL, \
+         Created_At timestamptz NOT NULL, DELETED_AT timestamptz)",
+    )
+    .expect("a case-varying but folding-equal column list conforms");
+}
+
+#[test]
+fn create_short_one_injected_column_is_denied() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // `deleted_at` is missing, so the create does not carry the injected shape, and
+    // raw text cannot be rewritten to add it.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (id text PRIMARY KEY NOT NULL, created_at timestamptz NOT NULL)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn conforming_create_outside_the_create_table_grant_is_still_denied() {
+    // Conformance does not replace the creation grant: a create that carries the
+    // whole injected shape in a schema the create grant does not cover is denied by
+    // `schema.create_table`, not waved through.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app", "staging"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["staging"] }
+columns = [ { name = "id", type = "text", nullable = false } ]
+"#;
+    let g = SqlGuard::new(GuardConfig::from_policy(
+        support::effective_policy_from_charter_toml(charter),
+        SqlDialect::Postgres,
+    ));
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE staging.t (id text NOT NULL)",
+        namespace_rule::CREATE_TABLE_NOT_GRANTED,
+    );
+}
+
+#[test]
+fn create_with_a_wrong_or_absent_primary_key_is_denied() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    let full = "id text NOT NULL, created_at timestamptz NOT NULL, deleted_at timestamptz";
+    // A different PK column: a real key-shape change, not the pinned `(id)`.
+    assert_namespace_denied(
+        &g,
+        &format!("CREATE TABLE app.t ({full}, PRIMARY KEY (created_at))"),
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // An EXTRA PK column: `(id, created_at)` is a different key than `(id)`, so
+    // containment is not enough.
+    assert_namespace_denied(
+        &g,
+        &format!("CREATE TABLE app.t ({full}, PRIMARY KEY (id, created_at))"),
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // No declared PK at all against a pinned PK.
+    assert_namespace_denied(
+        &g,
+        &format!("CREATE TABLE app.t ({full})"),
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn create_whose_columns_the_parse_cannot_enumerate_is_denied() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    let full = "id text PRIMARY KEY NOT NULL, created_at timestamptz NOT NULL, \
+                deleted_at timestamptz";
+    // `LIKE` copies columns the parse cannot see, so the column list is short by
+    // construction and conformance is unprovable.
+    assert_namespace_denied(
+        &g,
+        &format!("CREATE TABLE app.t ({full}, LIKE app.src)"),
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // `INHERITS` likewise brings in parent columns.
+    assert_namespace_denied(
+        &g,
+        &format!("CREATE TABLE app.t ({full}) INHERITS (app.base)"),
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // `PARTITION OF` takes its whole shape from the parent.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t PARTITION OF app.p FOR VALUES IN ('x')",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // `OF <type>` takes its whole shape from the composite type.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t OF app.shape",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn a_quoted_column_name_does_not_satisfy_an_unquoted_injected_column() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // The parser hands the guard the exact PostgreSQL identifier: an unquoted
+    // `Created_At` arrives already folded to `created_at`, a quoted `"Created_At"`
+    // arrives verbatim. A quoted spelling therefore names a DIFFERENT column than
+    // the injected `created_at`, and a create that omits the injected column must
+    // not be admitted just because a case-insensitive comparison collides.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (\"Id\" text PRIMARY KEY NOT NULL, \
+         \"Created_At\" timestamptz NOT NULL, \"Deleted_At\" timestamptz)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn a_trailing_space_in_a_quoted_column_name_does_not_satisfy_the_injected_column() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // `"id "` is a genuinely distinct PostgreSQL column from `id`; trimming the
+    // declared name would silently merge the two.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (\"id \" text PRIMARY KEY NOT NULL, \
+         \"created_at \" timestamptz NOT NULL, \"deleted_at \" timestamptz)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn a_quoted_primary_key_column_does_not_satisfy_the_pinned_key() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // `PRIMARY KEY ("ID")` keys the table on a column named `ID`, which the create
+    // does not even declare; it is not the pinned `(id)`.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (id text NOT NULL, created_at timestamptz NOT NULL, \
+         deleted_at timestamptz, PRIMARY KEY (\"ID\"))",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn an_inject_that_constrains_no_column_and_no_key_cannot_admit_a_raw_create() {
+    // `columns` is optional, so an `[[inject]]` carrying only `indexes` is a legal
+    // charter. It obliges the create to nothing the statement text can prove, so
+    // the create stays denied rather than being waved through by a vacuous check.
+    let indexes_only = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+mandatory = true
+indexes = [ { name = "ix_tenant", columns = ["tenant_id"] } ]
+"#;
+    assert_namespace_denied(
+        &guard_with(indexes_only),
+        "CREATE TABLE app.t (title text)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+
+    // The same holds for an inject block that carries nothing at all.
+    let empty_inject = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+mandatory = true
+"#;
+    assert_namespace_denied(
+        &guard_with(empty_inject),
+        "CREATE TABLE app.t (title text)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn a_pinned_composite_key_is_matched_in_order() {
+    // `(a, b)` and `(b, a)` are different indexes with different leading columns, so
+    // a pinned key is an ordered list, not a set.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+mandatory = true
+primary_key = ["a", "b"]
+columns = [
+  { name = "a", type = "text", nullable = false },
+  { name = "b", type = "text", nullable = false },
+]
+"#;
+    let g = guard_with(charter);
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (a text NOT NULL, b text NOT NULL, PRIMARY KEY (b, a))",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    g.check("CREATE TABLE app.t (a text NOT NULL, b text NOT NULL, PRIMARY KEY (a, b))")
+        .expect("the pinned key in the pinned order conforms");
+}
+
+#[test]
+fn two_primary_key_declarations_are_unreadable_and_denied() {
+    let g = guard_with(INJECT_APP_CHARTER);
+    // Postgres itself rejects a table with two primary keys, so there is no single
+    // declared key to compare against the pinned one.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (id text PRIMARY KEY NOT NULL, created_at timestamptz NOT NULL, \
+         deleted_at timestamptz, PRIMARY KEY (id))",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+}
+
+#[test]
+fn two_covering_injects_pinning_different_keys_admit_nothing() {
+    // Every covering inject must be satisfied, and no single create can declare two
+    // different primary keys, so a charter with contradictory pins denies outright.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+primary_key = ["a"]
+columns = [ { name = "a", type = "text", nullable = false } ]
+[[inject]]
+scope = { include = ["app"] }
+primary_key = ["b"]
+columns = [ { name = "b", type = "text", nullable = false } ]
+"#;
+    let g = guard_with(charter);
+    for pk in ["PRIMARY KEY (a)", "PRIMARY KEY (b)", "PRIMARY KEY (a, b)"] {
+        assert_namespace_denied(
+            &g,
+            &format!("CREATE TABLE app.t (a text NOT NULL, b text NOT NULL, {pk})"),
+            namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+        );
+    }
+}
+
+#[test]
+fn an_inject_without_a_pinned_key_does_not_require_one() {
+    // Conformance demands only what the inject rule states: an inject that
+    // contributes columns but pins no key leaves the primary key to the author,
+    // including having none at all.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+mandatory = true
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+"#;
+    let g = guard_with(charter);
+    g.check("CREATE TABLE app.t (title text, created_at timestamptz NOT NULL)")
+        .expect("no pinned key means no declared key is required");
+    g.check("CREATE TABLE app.t (id text PRIMARY KEY, created_at timestamptz NOT NULL)")
+        .expect("no pinned key means an author key is free");
+}
+
+// -- an injected column whose name contains a dot -------------------------------
+// A dotted name is one identifier, not a schema-qualified pair, so the create must
+// declare a column literally named `a.b` and nothing else counts.
+const INJECT_DOTTED_COLUMN_CHARTER: &str = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+[[inject]]
+scope = { include = ["app"] }
+mandatory = true
+columns = [ { name = "a.b", type = "text", nullable = false } ]
+"#;
+
+#[test]
+fn a_case_varying_quoted_dotted_column_does_not_satisfy_the_injected_column() {
+    let g = guard_with(INJECT_DOTTED_COLUMN_CHARTER);
+    // `"A.B"` is a column literally named `A.B`; the injected column is `a.b`, so
+    // the create omits it.
+    assert_namespace_denied(
+        &g,
+        "CREATE TABLE app.t (\"A.B\" text NOT NULL)",
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+    );
+    // The exact injected name still conforms, so the rule is a name match and not a
+    // blanket deny on dotted names.
+    g.check("CREATE TABLE app.t (\"a.b\" text NOT NULL)")
+        .expect("a create declaring the injected dotted column conforms");
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // 2. Structured/raw create OUTSIDE the schema.create_table grant → denied
 // ════════════════════════════════════════════════════════════════════════════════
@@ -330,11 +699,10 @@ scope = { include = ["app"] }
 #[test]
 fn dsl_path_injected_create_renders_and_passes() {
     // The DSL/structured path renders the injected columns into the CREATE TABLE
-    // fragment, so the SQL the guard sees ALREADY carries the injected shape. That
-    // fragment is still a raw create in the inject scope → the guard denies it here,
-    // which is why the structured resolver runs createTable BEFORE the guard, over a
-    // policy that GRANTS create in-scope. This ACCEPT case models the plain grant path:
-    // a create in `app` under a create grant with NO inject covering it passes.
+    // fragment, and the guard admits that fragment because it conforms (see
+    // `raw_create_carrying_the_full_injected_shape_is_admitted`). This ACCEPT case
+    // covers the neighbouring path: a create in `app` under a create grant with NO
+    // inject covering it, where conformance never comes up at all.
     let charter = r#"policy_version = 1
 [[grant]]
 key = "schema.cross_schema"

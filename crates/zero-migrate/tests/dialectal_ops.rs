@@ -7,8 +7,9 @@ use tempfile::TempDir;
 use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
 use zero_migrate::model::validate::{validate_ir, Dialect, CODE_OP_INVALID};
 use zero_migrate::{
-    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, PlanStep, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+    effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
+    SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
 };
 
 const PROJECT: &str = "prj_dialectal";
@@ -127,6 +128,74 @@ fn resolved_envelope_json(raw: &str) -> String {
     let resolved = resolve_create_table_policy(&ir, &support::confined_charter(), PROJECT)
         .expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
+}
+
+/// The confined charter re-scoped onto `schema`, so the SAME policy both shapes the
+/// table (its `[[inject]]`) and guards the rendered SQL (its `schema.*` grants).
+fn inject_charter(schema: &str) -> EffectivePolicy {
+    let charter_toml = format!(
+        r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  {{ name = "id",         type = "text",        nullable = false }},
+  {{ name = "created_at", type = "timestamptz", nullable = false }},
+  {{ name = "deleted_at", type = "timestamptz", nullable = true  }},
+]
+"#
+    );
+    effective_policy_from_charter_toml(&charter_toml).expect("inject test charter composes")
+}
+
+#[test]
+fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
+    // The engine hands the guard the same policy it hands the shape resolver. The
+    // resolver renders the injected columns into the CREATE TABLE text, so the guard
+    // must admit that text rather than refuse every create in an inject scope.
+    let policy = inject_charter(PROJECT);
+    let authored: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"authored_inject_create","ops":[
+          {"op":"createTable","name":"notes","columns":[
+            {"name":"title","type":"text","nullable":false}
+          ]}
+        ]}"#,
+    )
+    .expect("authored IR parses");
+    let resolved =
+        resolve_create_table_policy(&authored, &policy, PROJECT).expect("table shape resolves");
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Postgres, &policy);
+    let guard_cfg = GuardConfig::from_policy(policy, SqlDialect::Postgres);
+    let (steps, _fragments) = author
+        .lower_guarded(&resolved, &guard_cfg, &LiveSchema::default())
+        .expect("an authored createTable lowers under the charter that shaped it");
+    assert!(
+        !steps.is_empty(),
+        "an authored createTable should lower to at least one step"
+    );
 }
 
 #[compio::test]
