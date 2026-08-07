@@ -228,7 +228,7 @@ export type {
 } from "./generated/ir.js";
 
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
-// `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported
+// `MigrationIr`, …) — generated from the engine's `ir-envelope.schema.json`. Re-exported
 // AS ERGONOMICS so an advanced caller can name the exact serde shape; the golden
 // `.ir.json` corpus remains the source of truth.
 export type * as ir from "./generated/ir.js";

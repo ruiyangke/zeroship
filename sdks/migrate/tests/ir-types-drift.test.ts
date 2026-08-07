@@ -2,7 +2,7 @@
 // + the generated enum tokens (`src/generated/enums.ts`): every `Op` variant tag,
 // every `Expr` node tag, the `ColType` token set, and every closed string-enum
 // token in the TS types is pinned against the engine's single-source-of-truth
-// schema `crates/zeroship-migrate/op-ir.schema.json`. A schema change that adds /
+// schema `third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json`. A schema change that adds /
 // renames a variant or token FAILS here, forcing the manual transcription to be
 // updated in lockstep (so the ergonomics types cannot silently rot vs the
 // contract). The golden `.ir.json` corpus remains the authoritative contract.
@@ -373,7 +373,7 @@ test("legacy guardable Op variants do not carry the removed native ifExists fiel
 // (`gen-ir-types.mjs`) into a temp file and assert byte-equality with the committed
 // `src/generated/enums.ts`. A schema change that alters a generated enum (e.g. a new
 // `ExistenceGuard` token) without re-running the codegen FAILS here — the committed
-// generated artifact can never silently go stale vs `op-ir.schema.json`.
+// generated artifact can never silently go stale vs `ir-envelope.schema.json`.
 test("committed generated/enums.ts is up to date with the schema (regenerate + diff)", () => {
   const genScript = resolve(here, "../scripts/gen-ir-types.mjs");
   const committed = resolve(here, "../src/generated/enums.ts");
