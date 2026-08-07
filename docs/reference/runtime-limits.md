@@ -23,6 +23,29 @@ Idle GC is separate. It is a `RuntimeBuilder` knob, not part of `AppRuntimeLimit
 | `heap_limit_mb` | `AppRuntimeLimits` → `RuntimeLimits.heap_limit_bytes` | 128 MB when unset |
 | `idle_gc_after_ms(ms)` | `RuntimeBuilder` only | 30 s |
 
+## Request body size
+
+A creator app's inbound request body is capped at **4 MiB**. It is a platform
+constant, not a per-app knob: `MAX_REQUEST_BODY_BYTES` in
+[crates/core/src/dispatch_frame.rs](../../crates/core/src/dispatch_frame.rs).
+
+The gateway and the worker both enforce it, and they enforce it at two
+different sizes on purpose. The gateway applies the cap to the request body it
+receives. The worker receives that body wrapped in a dispatch frame - a length
+prefix plus a metadata block carrying method, URL and headers - so its own
+limit, `MAX_DISPATCH_FRAME_BYTES`, is the body cap plus that overhead. A worker
+limit set to the body cap alone would reject requests the gateway had already
+accepted.
+
+Both tiers buffer the whole body in memory before dispatching. The cap
+multiplied by in-flight concurrency is therefore the worst-case footprint,
+which is what keeps this number modest. Large uploads belong in `env.storage`,
+where the bytes go straight to object storage instead.
+
+Over the cap, the caller gets `413` with a JSON body. A bare `400` from the
+HTTP layer would mean the limit was applied by the framework's own default
+rather than by this one.
+
 ## CPU limit
 
 CPU enforcement is implemented in [crates/runtime/src/core/cpu_timer.rs](../../crates/runtime/src/core/cpu_timer.rs).

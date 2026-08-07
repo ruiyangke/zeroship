@@ -53,11 +53,16 @@ const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 const WORKFLOW_INLINE_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
 
-/// Cap on the decoded creator-app request body. Most apps don't need huge
-/// inbound bodies on this surface (file uploads typically go straight to object
-/// storage). 4 MiB is generous enough for JSON APIs + form posts and small
-/// enough to bound per-request memory.
-pub const MAX_DISPATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on the decoded creator-app request body.
+///
+/// Shared with the gateway so both tiers admit the same request. Enforcing it
+/// here is not enough on its own: the check below only runs once the `Bytes`
+/// extractor has accepted the frame, so the route must also carry a
+/// `PayloadConfig` of [`zeroship_core::dispatch_frame::MAX_DISPATCH_FRAME_BYTES`].
+/// Without one, ntex applies its own 256 KiB default and rejects anything
+/// larger with a bare 400 before this handler is ever entered - which is what
+/// it did until this was wired up.
+pub const MAX_DISPATCH_BODY_BYTES: usize = zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES;
 
 /// Verify the gateway-issued bearer token on /dispatch endpoints.
 /// Returns `None` if the request is authorized; otherwise a 401 response.
@@ -173,6 +178,29 @@ fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
 /// invokes the app's exported `default.fetch(req, env, ctx)`. Response may be
 /// buffered or streaming (SSE); WebSocket upgrades aren't reachable through
 /// this endpoint (the gateway uses a separate WS proxy path).
+/// Registers the dispatch surface, payload limits included.
+///
+/// The server and the tests both go through here deliberately. These caps are
+/// enforced by the route's `PayloadConfig`, not by the handler body, so a test
+/// that wires the route itself would be measuring a limit the server does not
+/// have. That is not hypothetical: the size check inside [`dispatch`] was
+/// unreachable in production for as long as this registration lived only in
+/// `main.rs`, and no test could tell, because every test wired its own route.
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/dispatch/{app_id}")
+            .state(web::types::PayloadConfig::new(
+                zeroship_core::dispatch_frame::MAX_DISPATCH_FRAME_BYTES,
+            ))
+            .route(web::post().to(dispatch)),
+    )
+    .service(
+        web::resource("/workflow-advance-unsigned/{app_id}")
+            .state(web::types::PayloadConfig::new(MAX_DISPATCH_BODY_BYTES))
+            .route(web::post().to(workflow_advance_unsigned)),
+    );
+}
+
 pub async fn dispatch(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
@@ -2207,7 +2235,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+                    .configure(configure),
             )
             .await;
 
@@ -2223,6 +2251,60 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let _ = std::fs::remove_dir_all(blob_root);
             MeteredDispatchResult { app_id, status, body, events }
         }))
+    }
+
+    /// A body over the cap is rejected by US, with our status and our shape.
+    ///
+    /// The size check in `dispatch` was unreachable in production for as long
+    /// as the route carried no `PayloadConfig`: ntex applied its own 256 KiB
+    /// default and answered a bare 400 before the handler ran. So this test is
+    /// only meaningful because it builds the app through `configure`, the same
+    /// registration the server uses. Wiring the route by hand here would put
+    /// the default back and quietly assert the opposite of production.
+    ///
+    /// 413 rather than 400 is the whole point: it proves the frame reached the
+    /// handler and was refused on the DECODED body length.
+    #[test]
+    fn oversized_request_body_is_rejected_by_the_handler_not_the_extractor() {
+        let body = vec![b'x'; MAX_DISPATCH_BODY_BYTES + 1];
+        let frame = dispatch_frame("POST", "http://app.test/", &body);
+        let Some(result) = run_pre_dispatch_reject(frame) else {
+            return;
+        };
+        assert_eq!(
+            result.status,
+            ntex::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "a body one byte over the cap must reach the handler and get our \
+             413, not the extractor's 400; body was {}",
+            String::from_utf8_lossy(&result.body),
+        );
+    }
+
+    /// The counterpart: a body at the cap is admitted past the size check.
+    ///
+    /// Without this the test above would still pass if the cap were zero, or if
+    /// the extractor limit were set below the body cap - both of which reject
+    /// everything. This pins that the accepted side of the boundary is real,
+    /// and with it that the frame allowance genuinely exceeds the body cap by
+    /// the envelope overhead.
+    #[test]
+    fn body_at_the_cap_passes_the_size_check() {
+        let body = vec![b'x'; MAX_DISPATCH_BODY_BYTES];
+        let frame = dispatch_frame("POST", "http://app.test/", &body);
+        let Some(result) = run_pre_dispatch_reject(frame) else {
+            return;
+        };
+        assert_ne!(
+            result.status,
+            ntex::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "a body exactly at the cap must not be refused for size",
+        );
+        assert_ne!(
+            result.status,
+            ntex::http::StatusCode::BAD_REQUEST,
+            "a body exactly at the cap must not be refused by the extractor; \
+             the frame allowance has to exceed the body cap by the envelope",
+        );
     }
 
     fn run_metered_dispatch(
@@ -2283,7 +2365,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+                    .configure(configure),
             )
             .await;
 
@@ -2618,7 +2700,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch)))
+                    .configure(configure)
                     .service(
                         web::resource("/logs/{app_id}")
                             .route(web::get().to(crate::logs::get_logs)),
@@ -2732,7 +2814,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+                    .configure(configure),
             )
             .await;
 
@@ -2839,7 +2921,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+                    .configure(configure),
             )
             .await;
 
@@ -2961,7 +3043,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+                    .configure(configure),
             )
             .await;
 
@@ -3158,9 +3240,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(config)
                     .state(envs)
                     .state(logs)
-                    .service(
-                        web::resource("/dispatch/{app_id}").route(web::post().to(dispatch)),
-                    ),
+                    .configure(configure),
             )
             .await;
 

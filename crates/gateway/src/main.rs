@@ -812,7 +812,15 @@ fn main() -> std::io::Result<()> {
                 // ntex's `{path:.*}` only matches a single segment;
                 // `{tail}*` is the tail-match syntax that handles
                 // nested asset paths like `assets/index-abc.js`.
+                // The creator-app body cap, shared with the worker. Without an
+                // explicit PayloadConfig ntex applies its own 256 KiB default,
+                // which would cap every creator app at a sixteenth of the
+                // documented limit and answer with a bare framework 400 that
+                // names neither the limit nor the tier that imposed it.
                 web::resource("/apps/{app_name}/{tail}*")
+                    .state(web::types::PayloadConfig::new(
+                        zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES,
+                    ))
                     .route(web::route().to(router::handle)),
             )
             .service(web::resource("/health").route(web::get().to(|| async {
@@ -878,6 +886,9 @@ fn main() -> std::io::Result<()> {
             // Subdomain catch-all — must be last (lowest priority)
             .service(
                 web::resource("/{tail}*")
+                    .state(web::types::PayloadConfig::new(
+                        zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES,
+                    ))
                     .route(web::route().to(router::handle_subdomain)),
             )
     })
