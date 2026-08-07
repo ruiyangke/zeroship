@@ -52,10 +52,43 @@ fn pg_url() -> String {
         .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 
+thread_local! {
+    /// ONE compio runtime per test thread, alive for the whole thread.
+    ///
+    /// plugin-db parks its `compio_postgres::Pool` (and the backend handle
+    /// wrapping it) in a **thread-local** `IsolateDbContext` that deliberately
+    /// outlives any single dispatch — `DbPlugin::register` only clears the pool
+    /// when the DB URL *changes*, and every dispatch here uses the same URL. A
+    /// compio runtime built per dispatch and dropped at the end of it therefore
+    /// leaves that cached pool holding sockets registered with a driver that no
+    /// longer exists: the next dispatch's first pooled query is submitted to a
+    /// dead io_uring and never completes. That is the `pending timeout` this
+    /// harness used to hit — and it is not specific to transactions at all
+    /// (a plain `env.db.collection("notes").insert(...)` in a second dispatch
+    /// hangs identically).
+    ///
+    /// Production has exactly one compio runtime per worker thread for the
+    /// process lifetime, so tying the runtime's lifetime to the thread — the
+    /// same scope the DB context already uses — is both the faithful shape and
+    /// the fix.
+    ///
+    /// V8 is still entered OUTSIDE any compio runtime: `block_on` enters the
+    /// runtime only for the duration of the future it drives, and
+    /// `call_fetch_handler` runs before that call. Do not "unify" the two by
+    /// moving the V8 entry inside `block_on`.
+    static RT: compio::runtime::Runtime =
+        compio::runtime::Runtime::new().expect("build the per-thread compio runtime");
+}
+
+/// Drive `fut` on this thread's long-lived compio runtime.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    RT.with(|rt| rt.block_on(fut))
+}
+
 fn require_pg_or_skip() -> Option<String> {
     let url = pg_url();
     let url_clone = url.clone();
-    let ok = compio::runtime::Runtime::new().unwrap().block_on(async move {
+    let ok = block_on(async move {
         match compio_postgres::connect(&url_clone, NoTls).await {
             Ok((client, connection)) => {
                 compio::runtime::spawn(async move {
@@ -107,7 +140,7 @@ async fn drain_open_connections() {
 
 fn reset_schema(url: &str) {
     let url = url.to_string();
-    compio::runtime::Runtime::new().unwrap().block_on(async move {
+    block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
@@ -143,7 +176,7 @@ fn reset_schema(url: &str) {
 
 fn count_notes(url: &str) -> i64 {
     let url = url.to_string();
-    compio::runtime::Runtime::new().unwrap().block_on(async move {
+    block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
@@ -221,7 +254,7 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
     let (status, body) = match outcome {
         FetchOutcome::Response { status, body, .. } => (status, body),
         FetchOutcome::Pending { rx, cancel: _ } => {
-            compio::runtime::Runtime::new().unwrap().block_on(async {
+            block_on(async {
                 runtime.start_pump();
                 let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
                     .await
