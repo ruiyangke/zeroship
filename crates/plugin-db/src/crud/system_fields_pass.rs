@@ -1,4 +1,4 @@
-//! **P7 PR 3** — INSERT-time auto-population pass for the seven
+//! INSERT-time auto-population pass for the seven
 //! platform-managed system fields.
 //!
 //! Sits between [`crate::crud::dispatch_insert`] (and `dispatch_insert_many`)
@@ -9,7 +9,7 @@
 //!    [`zeroship_core::typed_id::generate`] using the
 //!    [`prefix_for_collection`]-derived prefix. Creator-supplied `id`
 //!    is honoured as-is (Q-SF-B: "Allow user-supplied IF the value
-//!    passes typed_id format validation" — PR 3 ships the allow path;
+//!    passes typed_id format validation" — the allow path ships now;
 //!    format validation can layer on later without a wire-format
 //!    change).
 //! 2. **`created_by` / `updated_by`** — if absent, populated from the
@@ -19,7 +19,7 @@
 //!    initiated writes — migrations, background jobs, raw `serve` mode),
 //!    the columns are left absent so the DB's `NULL` default fires.
 //! 3. **`created_at` / `updated_at` / `version` / `deleted_at`** — NOT
-//!    injected here. The PR 2 DDL emits `DEFAULT NOW()` /
+//!    injected here. The DDL emits `DEFAULT NOW()` /
 //!    `DEFAULT CURRENT_TIMESTAMP` / `DEFAULT 1` / nullable, so a row
 //!    INSERT that omits the column lets the engine populate the
 //!    canonical value. Creator-supplied overrides for these fields
@@ -37,12 +37,12 @@ use zeroship_runtime::state::SharedState;
 use crate::error::DbError;
 use crate::query::SYSTEM_FIELD_NAMES;
 
-/// **P7 PR 4** — write-once system field names that the UPDATE pass
+/// Write-once system field names that the UPDATE pass
 /// refuses to accept on the patch side. Even though all 7 names live in
 /// [`SYSTEM_FIELD_NAMES`], only these 3 are immutable post-INSERT
 /// (`updated_at` / `updated_by` / `version` are auto-bumped each
 /// UPDATE — see `apply_system_fields_on_update`; `deleted_at` is
-/// owned by `delete()` / `restore()` — PR 5).
+/// owned by `delete()` / `restore()`).
 pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "created_by"];
 
 /// Maximum typed_id prefix length. Matches the convention used by
@@ -75,10 +75,9 @@ const RESERVED_AUTO_PREFIXES: &[&str] = &["usr"];
 /// Empty / non-ASCII / pathological collection names fall back to
 /// `"row"` so the prefix is always a valid typed_id segment.
 ///
-/// PR 1 added the `t.id(prefix)` schema declaration (carried on the
-/// field as `idPrefix`); when that's present the orchestrator-cached
-/// schema can supply it. PR 3 reads that prefix when available and
-/// falls back to this derivation otherwise — see
+/// The `t.id(prefix)` schema declaration (carried on the
+/// field as `idPrefix`) is read from the orchestrator-cached
+/// schema when present; this derivation is the fallback otherwise — see
 /// [`prefix_for_collection`].
 pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
     let stem = if collection.len() > 1 && collection.ends_with('s') {
@@ -291,7 +290,7 @@ fn inject_into_object(
 }
 
 // ---------------------------------------------------------------------------
-// **P7 PR 4** — UPDATE-time validation pass + CAS-version extraction.
+// UPDATE-time validation pass + CAS-version extraction.
 // ---------------------------------------------------------------------------
 
 /// Result of running [`apply_system_fields_on_update`] against an
@@ -324,7 +323,7 @@ pub struct UpdateAutoBumpHints {
 ///
 /// 1. **Immutable fields** — the patch must not carry `id`,
 ///    `created_at`, or `created_by`. Those are auto-populated at
-///    INSERT (PR 3) and write-once. Returns a typed
+///    INSERT and write-once. Returns a typed
 ///    `DbError::ValidationFailed { code: "immutable_system_field" }`
 ///    via `QueryError::ImmutableSystemField`.
 /// 2. **Creator-supplied overrides** — `version` / `updated_at` /
@@ -375,8 +374,8 @@ fn apply_system_fields_on_update_impl(
     if let Some(set_obj) = obj.get("$set").and_then(|v| v.as_object()) {
         check_keys_for_immutable_and_overrides(set_obj, &mut hints)?;
     }
-    // Defensive: pre-PR-4 SDK versions augmented the update with
-    // `$inc: { version: 1 }`. After PR 4 the runtime auto-bumps too —
+    // Defensive: older SDK versions augmented the update with
+    // `$inc: { version: 1 }`. The runtime now auto-bumps too —
     // a naive double-bump would advance version by 2 instead of 1.
     // Detect the legacy operator-nested version key on `$inc` / `$dec`
     // / `$mul` and suppress our own bump so the creator's explicit
@@ -529,18 +528,18 @@ fn filter_has_nested_version_predicate(filter: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// **P7 PR 5** — soft-delete dispatch helpers.
+// Soft-delete dispatch helpers.
 //
 // `delete()` is implemented as a soft-delete `UPDATE ... SET deleted_at
 // = NOW()`. `purge()` remains the explicit hard-delete escape hatch,
 // and `restore()` clears `deleted_at`.
 //
-// Two new methods land in this PR — `purge` (explicit hard-delete) and
-// `restore` (clear `deleted_at`). Both are direct verbs in the SDK and
-// reach the dispatch layer through their own helpers below.
+// `purge` (explicit hard-delete) and `restore` (clear `deleted_at`) are
+// both direct verbs in the SDK and reach the dispatch layer through
+// their own helpers below.
 // ---------------------------------------------------------------------------
 
-/// **P7 PR 5** — should this collection's SELECTs auto-append
+/// Should this collection's SELECTs auto-append
 /// `AND deleted_at IS NULL`?
 ///
 /// When `include_deleted: true` is set, the caller explicitly opts out
@@ -594,7 +593,7 @@ mod tests {
 
     #[test]
     fn derive_prefix_never_yields_reserved_usr() {
-        // **P7** — a collection literally named `usrs` would strip-s to
+        // A collection literally named `usrs` would strip-s to
         // the reserved `usr` prefix (platform user-id). The guard must
         // fall back to the un-stripped capped form (`usrs`) instead.
         let derived = derive_prefix_from_collection_name("usrs");
@@ -606,7 +605,7 @@ mod tests {
 
     #[test]
     fn prefix_for_collection_reads_declared_id_prefix() {
-        // **P7** — when the cached schema carries `id: t.id("blog")`,
+        // When the cached schema carries `id: t.id("blog")`,
         // `prefix_for_collection` returns the declared prefix instead of
         // deriving from the collection name.
         let app_id = "p7_prefix_for_collection_reads_declared";
@@ -623,7 +622,7 @@ mod tests {
 
     #[test]
     fn insert_auto_mints_id_with_declared_prefix() {
-        // **P7** — the auto-mint pass honours the declared `idPrefix`
+        // The auto-mint pass honours the declared `idPrefix`
         // from the cached schema: a `posts` collection declaring
         // `id: t.id("blog")` mints `blog_...` ids, not `post_...`.
         let app_id = "p7_insert_auto_mints_declared_prefix";
@@ -835,9 +834,9 @@ mod tests {
 
     // ---- INSERT SQL builder integration -----------------------------
 
-    /// **Brief-required**: every system field reaches the INSERT VALUES
-    /// when populated (id always; created_by / updated_by when actor
-    /// present). The DB DEFAULTs handle the rest.
+    /// Every system field reaches the INSERT VALUES when populated
+    /// (id always; created_by / updated_by when actor present). The
+    /// DB DEFAULTs handle the rest.
     #[test]
     fn insert_pass_emits_three_extra_columns_when_actor_present() {
         let mut doc = json!({ "title": "hi" });
@@ -855,9 +854,9 @@ mod tests {
         }
     }
 
-    /// **Brief-required**: when no actor is bound the INSERT VALUES
-    /// must NOT carry created_by / updated_by so the DDL's
-    /// `created_by TEXT NULL` default fires.
+    /// When no actor is bound the INSERT VALUES must NOT carry
+    /// created_by / updated_by so the DDL's `created_by TEXT NULL`
+    /// default fires.
     #[test]
     fn insert_pass_omits_actor_columns_when_no_actor() {
         let mut doc = json!({ "title": "hi" });
@@ -871,9 +870,9 @@ mod tests {
         assert!(!obj.contains_key("updated_by"));
     }
 
-    /// **Brief-required**: confirm the SQL builder integration — the
-    /// INSERT statement carries all 4 columns and uses RETURNING * so
-    /// the SDK gets every system field back (DDL DEFAULTs included).
+    /// Confirms the SQL builder integration — the INSERT statement
+    /// carries all 4 columns and uses RETURNING * so the SDK gets
+    /// every system field back (DDL DEFAULTs included).
     #[test]
     fn insert_pass_followed_by_build_insert_emits_returning_star() {
         use crate::query::build_insert;
@@ -892,7 +891,7 @@ mod tests {
         assert_eq!(built.params.len(), 4, "params: {:?}", built.params);
     }
 
-    // ---- P7 PR 4 — UPDATE pass: immutable fields, CAS extraction --
+    // ---- UPDATE pass: immutable fields, CAS extraction --
 
     #[test]
     fn update_refuses_creator_supplied_id_change() {
@@ -977,7 +976,7 @@ mod tests {
 
     #[test]
     fn update_detects_legacy_dollar_inc_version_as_creator_supplied() {
-        // Pre-PR-4 SDK shape: `{ $inc: { version: 1 } }`. The pass must
+        // Legacy SDK shape: `{ $inc: { version: 1 } }`. The pass must
         // set `creator_supplied_version` so the SQL builder skips its
         // own auto-bump (otherwise a double-bump lands version at +2).
         let patch = json!({ "$inc": { "version": 1 } });
@@ -1102,7 +1101,7 @@ mod tests {
         assert!(!filter_has_id_predicate(&json!("scalar")));
     }
 
-    // ---- P7 PR 5 — soft-delete filter gate -----
+    // ---- soft-delete filter gate -----
 
     #[test]
     fn should_filter_soft_deleted_by_default() {

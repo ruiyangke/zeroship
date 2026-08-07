@@ -1,4 +1,4 @@
-//! **P4 HALF B** — runtime data-access metadata from LIVE introspection.
+//! Runtime data-access metadata from LIVE introspection.
 //!
 //! Per the schema-authority split (`docs/proposals/2026-06-18-schema-authority-
 //! drizzle-model-design.md` §6), plugin-db learns a collection's column
@@ -19,7 +19,7 @@
 //! goodie-free collection is cached as a NEGATIVE result (`None`) so it is not
 //! re-introspected each call.
 //!
-//! **T6** — the token is the per-`app_id` value the worker injects as
+//! The token is the per-`app_id` value the worker injects as
 //! `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
 //! [`crate::context::IsolateDbContext`] when the `Db` wrapper is minted
 //! (`mint_db`). It is read here via [`crate::context::IsolateDbContext::
@@ -55,7 +55,7 @@ use crate::error::DbError;
 ///
 /// Returns `Ok(None)` when the collection has no encrypted/masked columns (the
 /// caller then skips the encrypt/mask passes — the schema-driven read coercions
-/// also run only when a schema is present, matching the pre-P4 cold-schema
+/// also run only when a schema is present, matching the original cold-schema
 /// contract). Returns `Ok(Some(schema))` with the declared-shape JSON otherwise.
 ///
 /// On a backend without a PG pool (SQLite), returns `Ok(None)` — the SQLite
@@ -71,7 +71,8 @@ pub(crate) async fn runtime_schema_for(
     // lossless instead of guessing). We preserve that EXACTLY: introspection
     // only sources a schema once the model is registered this deploy. A
     // never-registered collection (raw insert path) stays cold (`None`), so the
-    // read/write passes behave identically to before P4.
+    // read/write passes behave identically to how they did before this module
+    // existed.
     if !crate::context::with(|c| c.is_model_registered(app_id, collection)) {
         return Ok(None);
     }

@@ -36,14 +36,14 @@ use crate::query::IndexKind;
 /// upstream type. The guard is consumed by the explicit
 /// `release().await` between Pass 1 and Pass 2.
 ///
-/// **P0 PR 2**: bound narrowed to [`PgSqlExecutor`] + [`IndexBuilder`]
+/// The bound is narrowed to [`PgSqlExecutor`] + [`IndexBuilder`]
 /// (was `Backend`). `PgSqlExecutor` gives us pool access for the
 /// free-function audit helpers (Open Q1 resolution) plus `pool_exec`
 /// for Pass-1 DDL via its [`crate::backend::SqlExecutor`] super-bound;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
 /// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
 /// and `docs/proposals/db-system-design.md` §7.
-/// **P5.5 PR 6**: the `EncryptedColumn` super-bound lets the
+/// The `EncryptedColumn` super-bound lets the
 /// `MaskBackfill` / `MaskRewrite` dispatch decrypt encrypted columns
 /// before applying the mask transform. Inside `run_op` the
 /// mask-backfill arms call the helpers `dispatch_mask_backfill_op` /
@@ -108,9 +108,7 @@ pub(crate) async fn apply<
                 // F1 warn-half family: same write_audit_row secondary-
                 // failure shape as validate.rs:101 (8th F1 site across
                 // the family at HEAD: 6 audit_id-slot + 2 collection-slot
-                // — this one is collection-slot). Closes code-critique
-                // r12 MINOR-R12-1 cousin drift the prior unification
-                // (cycle-12:47 `7c6bd2ec`) missed.
+                // — this one is collection-slot).
                 tracing::warn!(
                     app_id = %app_id,
                     collection = %op.collection,
@@ -169,12 +167,12 @@ pub(crate) async fn apply<
                     })
                     .cloned();
                 if let Some(spec) = spec_owned {
-                    // **P4 PR 2** — dispatch on `IndexKind`. The default
+                    // Dispatch on `IndexKind`. The default
                     // BTree branch routes through the existing audited
                     // CIC retry loop; the Vector branch calls into the
                     // pgvector adapter, which builds its own
                     // metric-appropriate DDL and reuses the same retry
-                    // machinery internally. Fts/Spatial land in PR 3.
+                    // machinery internally.
                     match &spec.kind {
                         IndexKind::BTree => {
                             // `create_index_with_recovery` returns a typed
@@ -214,7 +212,7 @@ pub(crate) async fn apply<
                                 .await
                         }
                         IndexKind::Fts { language } => {
-                            // **P4 PR 3** — composite FTS index. The
+                            // Composite FTS index. The
                             // builder accumulated every `.fts()`-marked
                             // column in `spec.columns`; the PG impl
                             // materialises `__fts tsvector` + GIN +
@@ -229,7 +227,7 @@ pub(crate) async fn apply<
                                 .await
                         }
                         IndexKind::Spatial => {
-                            // **P4 PR 3** — spatial index over a
+                            // Spatial index over a
                             // `geography(POINT, 4326)` column. The PG
                             // impl probes PostGIS and routes through
                             // the audited CIC retry loop.
@@ -258,7 +256,7 @@ pub(crate) async fn apply<
                 Err(destructive_invariant_error(op))
             }
 
-            // ----- P5.5 PR 6a — backfill the sibling column ---------
+            // ----- Backfill the sibling column ---------
             //
             // The accompanying `ALTER ADD COLUMN <col>_masked NULL`
             // op runs earlier in pass 1 (the diff emits the ADD before
@@ -284,7 +282,7 @@ pub(crate) async fn apply<
                 .await
             }
 
-            // ----- P5.5 PR 6b — rewrite the sibling column ---------
+            // ----- Rewrite the sibling column ---------
             //
             // Touches every row under the NEW kind. No schema mutation.
             ChangeKind::MaskRewrite {
@@ -306,7 +304,7 @@ pub(crate) async fn apply<
                 .await
             }
 
-            // ----- P5.5 PR 6c — drop the sibling column -----------
+            // ----- Drop the sibling column -----------
             //
             // Only invoked under `strictness == "off"` — validate
             // refuses the op under strict + lenient. The pool_exec
@@ -361,10 +359,9 @@ pub(crate) async fn apply<
                         // F1 warn-half: the audit row stays in
                         // `Running` until the next reset sweeps it.
                         // Logging gives operators a signal to
-                        // investigate stuck rows. Field shape pinned
-                        // by code-critique r11 MINOR-R11-1 (unified
-                        // across all 8 F1 sites — 6 audit_id-slot +
-                        // 2 collection-slot variants).
+                        // investigate stuck rows. Field shape is
+                        // unified across all 8 F1 sites — 6
+                        // audit_id-slot + 2 collection-slot variants.
                         tracing::warn!(
                             app_id = %app_id,
                             audit_id = id,
@@ -423,13 +420,13 @@ pub(crate) async fn apply<
     let pass1: Result<(), DbError> = async {
         for op in &approved.ops {
             if op.class == ChangeClass::Destructive {
-                // **P5.5 PR 6c**: `MaskRemove` under
+                // `MaskRemove` under
                 // `strictness == "off"` must actually run — validate
                 // didn't refuse it (only `strict` + `lenient` do). The
                 // other destructive variants (DropColumn / DropIndex)
                 // stay on the skip path: under `off` they'd reach apply
                 // and trip `check_destructive_invariant`, which is
-                // explicitly the pre-PR-6 behaviour.
+                // explicitly the original behaviour.
                 if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
                     && strictness == "off"
                 {
@@ -477,7 +474,7 @@ pub(crate) async fn apply<
     Ok(())
 }
 
-/// **P5.5 PR 6** — dispatcher for `MaskBackfill`. Pulls encryption
+/// Dispatcher for `MaskBackfill`. Pulls encryption
 /// metadata for the field (if any) and runs the decrypt-aware mask
 /// backfill; plaintext columns take the no-decrypt branch inside
 /// `run_mask_backfill`.
@@ -560,7 +557,7 @@ fn check_destructive_invariant(op: &DiffOp) -> Result<(), DbError> {
     {
         return Err(destructive_invariant_error(op));
     }
-    // **P5.5 PR 6c**: a `MaskRemove` op tagged anything other than
+    // A `MaskRemove` op tagged anything other than
     // `Destructive` is a misclassification — the diff classifier emits
     // it with `ChangeClass::Destructive` unconditionally so we can
     // route it through the strictness gate before reaching apply. A
@@ -574,7 +571,7 @@ fn check_destructive_invariant(op: &DiffOp) -> Result<(), DbError> {
     Ok(())
 }
 
-/// **P5.5 PR 6** — pull the encryption metadata for a field out of the
+/// Pull the encryption metadata for a field out of the
 /// declared schema JSON, IFF the field is `t.encrypted(...)`-tagged.
 /// Returns `None` for plaintext columns; the mask backfill / rewrite
 /// then takes the no-decrypt branch.
@@ -658,7 +655,7 @@ mod tests {
         }
     }
 
-    /// **P5.5 PR 6c**: `MaskRemove` must reach apply ONLY tagged
+    /// `MaskRemove` must reach apply ONLY tagged
     /// `Destructive`. The validate stage classifies it that way; this
     /// gate refuses any misclassified `MaskRemove`.
     #[test]
@@ -686,7 +683,7 @@ mod tests {
         }
     }
 
-    /// **P5.5 PR 6c**: `MaskRemove` tagged `Destructive` passes the
+    /// `MaskRemove` tagged `Destructive` passes the
     /// gate — apply's strictness branch decides whether to actually run
     /// the DROP COLUMN.
     #[test]
@@ -701,7 +698,7 @@ mod tests {
         assert!(check_destructive_invariant(&op).is_ok());
     }
 
-    /// **P5.5 PR 6a / 6b**: `MaskBackfill` / `MaskRewrite` are NOT
+    /// `MaskBackfill` / `MaskRewrite` are NOT
     /// destructive — the gate must let them through with any
     /// classification (the apply match arm handles their semantics).
     #[test]
@@ -816,7 +813,7 @@ mod tests {
     // the operator-grep contract — a runbook search for
     // `change_kind=drop_column` should match this site. Pin the shape
     // so a future refactor that renames `change_kind` → `kind` (or
-    // similar) fails at unit-test time. test-coverage r11 NEW-R11-1.
+    // similar) fails at unit-test time.
     //
     // Note: this test exercises the function end-to-end (calls
     // `destructive_invariant_error` directly and asserts what came
@@ -897,12 +894,6 @@ mod tests {
     /// test in one commit. That class of drift is caught by the code
     /// review + the `transition` discriminator's literal-string match
     /// against the audit table's terminal-state grep.
-    ///
-    /// Background:
-    /// - test-coverage r11 NEW-R11-1 — establish the capture harness.
-    /// - test-coverage r12 NEW-R12-1 — pin the F1 warn shape.
-    /// - 7c6bd2ec / 18aee490 — the original drift + revert this test
-    ///   was meant to catch.
     #[test]
     fn f1_warn_shape_documentation_snapshot() {
         use crate::test_support::capture;
@@ -968,24 +959,22 @@ mod tests {
     /// cluster — 5 strict + 1 hybrid `finalise_backfill` carrying both
     /// `audit_id` and `name`/`collection`); 2 sites carry `collection`
     /// only (the `write_audit_row` insert-failure cluster:
-    /// `validate.rs:101` + `apply.rs:84` running-row insert path
-    /// added by cycle-16:17 `cbd21112`).
+    /// `validate.rs:101` + `apply.rs:84` running-row insert path).
     ///
-    /// Error-ux r12 LOW (cycle 16:17 finding): the original
-    /// `f1_warn_shape_documentation_snapshot` above pinned only the
-    /// `audit_id` variant — operator grep on `collection=audit_err=`
-    /// against the insert-failure sites wasn't backed by a test. This
-    /// test closes that gap: any rename of `collection` /
-    /// `transition` / `audit_err` on the insert-failure cluster fails
-    /// here at unit-test time.
+    /// The original `f1_warn_shape_documentation_snapshot` above
+    /// pinned only the `audit_id` variant — operator grep on
+    /// `collection=audit_err=` against the insert-failure sites
+    /// wasn't backed by a test. This test closes that gap: any
+    /// rename of `collection` / `transition` / `audit_err` on the
+    /// insert-failure cluster fails here at unit-test time.
     #[test]
     fn f1_warn_shape_collection_slot_documentation_snapshot() {
         use crate::test_support::capture;
         use tracing::Level;
 
         // The exact syntax used at apply.rs:84 (the "Running/insert_failed"
-        // arm landed at cycle-16:17 `cbd21112`). Mirrors the validate.rs:101
-        // shape (transition = "ValidationRefused/insert_failed").
+        // arm). Mirrors the validate.rs:101 shape (transition =
+        // "ValidationRefused/insert_failed").
         let app_id = "app_t";
         let collection = "messages";
         let audit_err = "duplicate key violates unique constraint";

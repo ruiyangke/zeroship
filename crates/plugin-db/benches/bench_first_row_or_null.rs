@@ -4,13 +4,12 @@
 //!
 //! ## Why this bench exists
 //!
-//! Performance r12 identified the JSON-string + V8 `JSON.parse` tail in
-//! `crud::first_row_or_null` (`crates/plugin-db/src/crud.rs:106-109`) as
-//! the next bottleneck after the [I35] index-lookup fix (commit
-//! `251d53b4`). With `bench_row_to_json` covering the row-decode half,
-//! this harness covers the composed path so deferred [C3] can graduate
-//! from "blocked on cross-crate redesign" to "actionable" if the wide-row
-//! number crosses the threshold.
+//! The JSON-string + V8 `JSON.parse` tail in `crud::first_row_or_null`
+//! (`crates/plugin-db/src/crud.rs:106-109`) is the next bottleneck after
+//! the index-lookup fix. With `bench_row_to_json` covering the row-decode
+//! half, this harness covers the composed path so a cross-crate redesign
+//! of the JSON tail can be justified if the wide-row number crosses the
+//! threshold.
 //!
 //! The measured path (via `first_row_or_null_for_bench`):
 //!

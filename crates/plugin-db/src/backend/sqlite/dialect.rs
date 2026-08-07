@@ -1,19 +1,19 @@
 //! SQLite-flavoured `DialectBuilder` impl.
 //!
-//! **P1 PR 3** fills in the six P1-essential hooks declared by
+//! Fills in the six hooks declared by
 //! [`crate::backend::DialectBuilder`] (see
 //! `docs/proposals/p1-sqlite-implementation-plan.md` §5 for the hook
 //! set rationale and §7.2 of the design doc for the engine-divergence
 //! table). The shape is a Zero-Sized Type — every hook is a pure
 //! function of its inputs, so there is no per-instance state.
 //!
-//! **No production caller yet**: PR 3 ships the trait impl alongside
+//! **No production caller yet**: this trait impl ships alongside
 //! the matching `PgDialect` impl so `query.rs`'s free-function string
 //! builders can be retargeted onto a dialect-typed entry point in a
-//! later PR without re-shaping their call sites. The
+//! later change without re-shaping their call sites. The
 //! [`crate::backend::sqlite::SqliteBackend::ensure_app_schema`] impl
-//! (PR 3) uses `quote_ident` to escape the ATTACH alias; the other
-//! hooks have no PR-3 consumer.
+//! uses `quote_ident` to escape the ATTACH alias; the other
+//! hooks have no consumer yet.
 
 use crate::backend::DialectBuilder;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -57,9 +57,9 @@ impl DialectBuilder for SqliteDialect {
     /// `NamespaceManager::ensure_app_schema` impl on `SqliteBackend`
     /// constructs the ATTACH SQL inline using this hook only to quote
     /// the alias. This builder returns a *template* string with the
-    /// alias quoted and a `:file_path` placeholder; PR 5 may decide
-    /// whether to keep this template shape or fold the helper back
-    /// into the backend impl.
+    /// alias quoted and a `:file_path` placeholder; a future change
+    /// may decide whether to keep this template shape or fold the
+    /// helper back into the backend impl.
     fn build_ensure_app_schema(&self, app_id: &str) -> String {
         // Template form — the `:file_path` placeholder is not a SQLite
         // bind parameter (ATTACH does not accept binds for path or
@@ -129,8 +129,8 @@ impl DialectBuilder for SqliteDialect {
     ///   ISO-8601 strings on the wire; staying in TEXT avoids the
     ///   floating-point Julian day surprise from `REAL`.
     /// - JSON/JSONB store as `TEXT` — SQLite ships a JSON1 extension
-    ///   that operates on TEXT columns; PR 5+ can teach the diff
-    ///   engine to recognise the affinity.
+    ///   that operates on TEXT columns; a future change can teach the
+    ///   diff engine to recognise the affinity.
     /// - Unknown types fall through to `TEXT` (the most permissive
     ///   affinity) with a debug log warning so the operator sees the
     ///   miss; production runs should hit only the typed branches.
@@ -141,7 +141,7 @@ impl DialectBuilder for SqliteDialect {
             "double" | "real" => "REAL",
             "bytes" | "blob" => "BLOB",
             "numeric" | "decimal" => "NUMERIC",
-            // **P5 PR 3** — `t.encrypted(...)`-declared columns always
+            // `t.encrypted(...)`-declared columns always
             // store the ciphertext wire blob (`[version_flag | nonce |
             // ct+tag]`) as BLOB regardless of `wraps`. The DDL emitter
             // (`crate::query::field_to_column`) inspects `def.encrypted`
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(d.map_zs_type("jsonb", &no_opts), "TEXT");
         // Unknown types fall through to TEXT with a debug log warning.
         assert_eq!(d.map_zs_type("nonsense_type", &no_opts), "TEXT");
-        // **P5 PR 3** — `encrypted` falls through to BLOB so a path
+        // `encrypted` falls through to BLOB so a path
         // that bypasses the `def.encrypted` check still emits the right
         // affinity. Mirrors the PG dialect's BYTEA override.
         assert_eq!(d.map_zs_type("encrypted", &no_opts), "BLOB");

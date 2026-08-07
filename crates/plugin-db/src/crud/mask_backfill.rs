@@ -1,9 +1,9 @@
-//! **P5.5 PR 6** — mask sibling-column backfill / rewrite / removal
+//! Mask sibling-column backfill / rewrite / removal
 //! jobs invoked from the register-model `apply` pipeline.
 //!
 //! Three entry points, one per sub-path:
 //!
-//! - [`run_mask_backfill`] — 6a: existing column gained a `.mask(...)`
+//! - [`run_mask_backfill`] — existing column gained a `.mask(...)`
 //!   declaration. The diff classifier already emitted a paired
 //!   `ALTER TABLE ADD COLUMN <col>_masked TEXT NULL` op IMMEDIATELY
 //!   before the `MaskBackfill` op (the ALTER carries `NULL` so the
@@ -14,12 +14,12 @@
 //!   `IS NULL` set has been clean for two consecutive polls (the
 //!   racing-insert fence).
 //!
-//! - [`run_mask_rewrite`] — 6b: existing masked column's `.mask(...)`
+//! - [`run_mask_rewrite`] — existing masked column's `.mask(...)`
 //!   `kind` (or `classification`) changed. The sibling already exists
 //!   + is NOT NULL, so the rewrite touches every row (no IS NULL
 //!   filter) and DOES NOT mutate the schema afterwards.
 //!
-//! - [`run_mask_remove`] — 6c: `.mask(...)` declaration removed (or
+//! - [`run_mask_remove`] — `.mask(...)` declaration removed (or
 //!   switched to `kind: "none"`). Classified `Destructive`; under
 //!   `strictness == "off"` the apply pipeline issues
 //!   `ALTER TABLE … DROP COLUMN <col>_masked`. Under `strict` and
@@ -39,7 +39,7 @@
 //! ## Why this lives outside the existing `migrations.rs` driver
 //!
 //! `crate::migrations` is a JS-driven loop (`fetchBatch` /
-//! `commitBatch` round-tripped through the SDK). PR 6's backfill must
+//! `commitBatch` round-tripped through the SDK). The mask backfill must
 //! run inside the deploy pipeline, before the V8 isolate hands
 //! control back to user code — there is no JS loop available.
 //! `mask_backfill` reuses the audit-table shape (`phase = backfill`,
@@ -52,8 +52,8 @@
 //!
 //! Default `BATCH_SIZE = 1000` — matches the per-batch cap on the
 //! JS-driven `Migration.fetchBatch`. Operators can override per
-//! deploy by passing a different `BackfillOpts` (unused in PR 6 — the
-//! constant is exposed so a future PR can lift it).
+//! deploy by passing a different `BackfillOpts` (unused today — the
+//! constant is exposed so a future caller can lift it).
 
 use compio_postgres::Pool;
 use serde_json::Value;
@@ -73,7 +73,7 @@ use crate::query::quote_ident;
 /// allocation).
 pub const BATCH_SIZE: i64 = 1_000;
 
-// **Schema-authority P1** — the mask-sentinel CODEC (build/parse the
+// The mask-sentinel CODEC (build/parse the
 // `__zsmask:…` string) was relocated into the leaf crate
 // `zeroship_schema::mask_codec`. It is a schema-shape concern (the contract
 // the schema layer writes into DDL and the data plane reads back); the
@@ -88,7 +88,7 @@ pub const BATCH_SIZE: i64 = 1_000;
 // pre-extraction parser.
 pub use zeroship_schema::mask_codec::build_mask_sentinel;
 
-/// **P5.5 PR 6** — parse a `__zsmask:kind=…,classification=…`
+/// Parse a `__zsmask:kind=…,classification=…`
 /// sentinel string back into a `(MaskKind, Classification)` pair.
 ///
 /// Thin `DbError`-shaped wrapper over the relocated leaf codec
@@ -103,7 +103,7 @@ pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), DbErro
     zeroship_schema::mask_codec::parse_mask_sentinel(s).map_err(DbError::from)
 }
 
-/// **P5.5 PR 6** — compute the masked representation for one row's
+/// Compute the masked representation for one row's
 /// parent column value, optionally decrypting `value` first when the
 /// column is `t.encrypted(...)`-declared.
 ///
@@ -184,7 +184,7 @@ fn plaintext_from_value(column: &str, value: &Value) -> Result<String, DbError> 
     }
 }
 
-/// Audit-name shape for the 6a backfill on `(collection, column)`.
+/// Audit-name shape for the mask backfill on `(collection, column)`.
 /// Matches the migrations-framework `name` convention (`mig:<tag>`)
 /// so operators querying `__zeroship_migrations.collection` see a
 /// consistent prefix across both JS-driven and native backfills.
@@ -193,7 +193,7 @@ pub fn backfill_audit_name(collection: &str, column: &str) -> String {
     format!("mask_backfill_{collection}_{column}")
 }
 
-/// Audit-name shape for the 6b rewrite on `(collection, column)`.
+/// Audit-name shape for the mask rewrite on `(collection, column)`.
 #[must_use]
 pub fn rewrite_audit_name(collection: &str, column: &str) -> String {
     format!("mask_rewrite_{collection}_{column}")
@@ -210,10 +210,10 @@ pub struct BackfillReport {
 }
 
 // ---------------------------------------------------------------------
-// 6a — mask backfill
+// Mask backfill
 // ---------------------------------------------------------------------
 
-/// **P5.5 PR 6a** — backfill the sibling column for every row where
+/// Backfill the sibling column for every row where
 /// `<col>_masked IS NULL`, then flip the sibling to NOT NULL.
 ///
 /// The diff classifier already emitted the
@@ -241,7 +241,7 @@ pub struct BackfillReport {
 ///    between the previous batch's UPDATE and the SELECT.
 /// 5. `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT NULL`.
 ///
-/// The dual-write CRUD pass (PR 2) ensures every new INSERT writes
+/// The dual-write CRUD pass ensures every new INSERT writes
 /// the sibling, so the race window between step 1's SELECT and
 /// step 5's ALTER is bounded by one batch's runtime.
 ///
@@ -304,8 +304,8 @@ where
     let report = report?;
 
     // Final ALTER — flip the sibling to NOT NULL. Sets the contract
-    // PR 2 expects: every existing row has a non-NULL sibling, every
-    // future INSERT must dual-write.
+    // the dual-write CRUD pass expects: every existing row has a
+    // non-NULL sibling, every future INSERT must dual-write.
     let alter_sql = format!(
         "ALTER TABLE {}.{} ALTER COLUMN {} SET NOT NULL",
         quote_ident(app_id),
@@ -322,10 +322,10 @@ where
 }
 
 // ---------------------------------------------------------------------
-// 6b — mask rewrite
+// Mask rewrite
 // ---------------------------------------------------------------------
 
-/// **P5.5 PR 6b** — rewrite the sibling column under a NEW mask kind
+/// Rewrite the sibling column under a NEW mask kind
 /// (or new classification) for every row. The sibling already exists +
 /// is NOT NULL, so no schema mutation runs alongside this.
 ///
@@ -390,13 +390,13 @@ where
 }
 
 // ---------------------------------------------------------------------
-// 6c — mask removal
+// Mask removal
 // ---------------------------------------------------------------------
 
-/// **P5.5 PR 6c** — drop the sibling column.
+/// Drop the sibling column.
 ///
 /// Only invoked from `apply.rs` under `strictness == "off"` — the
-/// validate stage's destructive-class filter refuses 6c under
+/// validate stage's destructive-class filter refuses removal under
 /// `strict` and `lenient`. The SQL is single-statement, idempotent
 /// via `IF EXISTS`, and no audit-loop machinery is needed (the
 /// regular apply-rail audit row for the MaskRemove op is enough).
@@ -423,23 +423,23 @@ pub async fn run_mask_remove(
 // Shared loop
 // ---------------------------------------------------------------------
 
-/// Inner batch loop shared by 6a + 6b. Returns `BackfillReport.completed
-/// = false` and `Err(DbError)` together on the propagating-error path
-/// (the caller's `?` unwinds to the apply.rs Err); on success the
-/// caller is responsible for finalising the audit row + the
-/// optional SET NOT NULL.
+/// Inner batch loop shared by the backfill and rewrite paths. Returns
+/// `BackfillReport.completed = false` and `Err(DbError)` together on
+/// the propagating-error path (the caller's `?` unwinds to the
+/// apply.rs Err); on success the caller is responsible for finalising
+/// the audit row + the optional SET NOT NULL.
 ///
 /// `select_only_null_sibling`:
-/// - `true`  → 6a: `WHERE "<sibling>" IS NULL AND "<col>" IS NOT NULL`
-/// - `false` → 6b: no filter on the sibling; only `<col> IS NOT NULL`
+/// - `true`  → backfill: `WHERE "<sibling>" IS NULL AND "<col>" IS NOT NULL`
+/// - `false` → rewrite: no filter on the sibling; only `<col> IS NOT NULL`
 ///
-/// The 6a path additionally requires TWO consecutive empty SELECTs
-/// before exiting the loop — the second poll catches a row that
-/// another worker INSERTed between the last batch's UPDATE and the
-/// SELECT. The 6b path doesn't need the fence because there's no
-/// "completion" criterion — `cursor` monotonically advances and the
-/// `LIMIT` exits the loop once every row past the cursor has been
-/// rewritten.
+/// The backfill path additionally requires TWO consecutive empty
+/// SELECTs before exiting the loop — the second poll catches a row
+/// that another worker INSERTed between the last batch's UPDATE and
+/// the SELECT. The rewrite path doesn't need the fence because
+/// there's no "completion" criterion — `cursor` monotonically
+/// advances and the `LIMIT` exits the loop once every row past the
+/// cursor has been rewritten.
 #[allow(clippy::too_many_arguments)]
 async fn backfill_loop<B>(
     backend: &B,
@@ -501,12 +501,12 @@ where
                     processed,
                 });
             }
-            // For 6a only: if no rows came back this round, try one
-            // more poll without advancing the cursor — a racing
-            // INSERT writes a row at the END of the id ordering, so
-            // we MUST reset the cursor to 0 to catch it. The
-            // `IS NULL` filter on the sibling guarantees we don't
-            // re-touch rows already backfilled. For 6b
+            // For the backfill path only: if no rows came back this
+            // round, try one more poll without advancing the cursor —
+            // a racing INSERT writes a row at the END of the id
+            // ordering, so we MUST reset the cursor to 0 to catch it.
+            // The `IS NULL` filter on the sibling guarantees we don't
+            // re-touch rows already backfilled. For the rewrite path
             // (`select_only_null_sibling = false`) the first empty
             // poll already terminates because `required_empty_polls
             // == 1`, so we never take this branch on the rewrite

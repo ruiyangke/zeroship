@@ -53,7 +53,7 @@ use crate::error::DbError;
 // Always pub:
 pub mod broker;
 pub mod error;
-// **Schema-authority P1** — the DDL builders + `QueryError` + `SqlDialect` +
+// The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
 // `zeroship-schema`. plugin-db re-exports the module wholesale so every
 // existing `crate::query::…` reference (and `use crate::query;` then
@@ -63,7 +63,7 @@ pub mod v8_classes;
 
 // `backend` is crate-private by default; under `test-helpers` it
 // becomes `pub` so the integration-test targets
-// (`tests/sqlite_integration.rs` in particular — P1 PR 2) can name
+// (`tests/sqlite_integration.rs` in particular) can name
 // `backend::SqliteBackend` + the `SqlExecutor` trait directly. The PG
 // `tests/integration.rs` target reaches PG-specific behaviour through
 // the lifted-to-pub helpers in `exec` / `migrations` /
@@ -84,7 +84,7 @@ pub(crate) mod context;
 // the production call site is one line in
 // `register_model/bootstrap.rs::bootstrap`.
 pub mod cross_app_fk;
-// **P5 PR 3.5** — `crud` is crate-private in release builds; `pub`
+// `crud` is crate-private in release builds; `pub`
 // under `test-helpers` so `tests/sqlite_integration.rs` can reach
 // `crud::encryption_pass::{encrypt_row_on_write, decrypt_row_on_read}`
 // for the end-to-end encrypted-column CRUD round-trip test. Same shape
@@ -93,7 +93,7 @@ pub mod cross_app_fk;
 pub(crate) mod crud;
 #[cfg(feature = "test-helpers")]
 pub mod crud;
-// **Schema-authority P1** — the diff classifier (`compute_diff`,
+// The diff classifier (`compute_diff`,
 // `ChangeKind`, `ChangeClass`, `DiffOp`), the live introspection
 // (`read_live_schema`, `estimate_row_count`), and the schema metadata
 // types (`MaskMeta`, `EncryptionMeta`, `MaskKind`, `Classification`,
@@ -109,16 +109,15 @@ pub use zeroship_schema::diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 
-// **P5 PR 1** — cross-backend column-encryption surface. Always
+// Cross-backend column-encryption surface. Always
 // compiled (not gated to `pg` / `sqlite`) because both backends
-// consume it. PR 1 ships only the pure-Rust crypto module + trait
-// surface; the backend impls return `Configuration { code: "p5_pr2_stub" }`
-// and the CRUD call sites land in PR 2 (PG) and PR 3 (SQLite). See
+// consume it. The pure-Rust crypto module + trait surface underpin
+// the backend impls and CRUD call sites for both PG and SQLite. See
 // `docs/proposals/p5-encryption-backup-implementation-plan.md` §9.
 //
 // Visibility: crate-private in release builds; `pub` under
 // `test-helpers` so `tests/integration.rs` can reach
-// `encryption::canonical_aad` etc. for the P5 round-trip + row-swap
+// `encryption::canonical_aad` etc. for the round-trip + row-swap
 // fences.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod encryption;
@@ -185,8 +184,7 @@ pub(crate) mod wal_consumer;
 pub mod wal_consumer;
 
 // Test-only: `tracing-subscriber` capture layer for warn/error-shape
-// contract tests (test-coverage r11 NEW-R11-1 + r12 NEW-R12-1 + r13
-// NEW-R13-*). See `test_support/mod.rs` for the module preamble.
+// contract tests. See `test_support/mod.rs` for the module preamble.
 //
 // Gate note: `cfg(test)` only (NOT `any(test, feature = "test-helpers")`)
 // because `tracing-subscriber` is a `[dev-dependencies]` entry — it
@@ -198,8 +196,7 @@ pub mod wal_consumer;
 // tests (`#[cfg(test)] mod tests { use crate::test_support; }`) but
 // not from `crates/plugin-db/tests/integration.rs`. End-to-end
 // warn-shape coverage from integration tests would need a separate
-// helper rebuilt off `tracing_subscriber` re-exposed elsewhere; not
-// in scope for NEW-R11-1.
+// helper rebuilt off `tracing_subscriber` re-exposed elsewhere.
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -220,7 +217,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     ctx_mut(|c| c.mark_model_registered(app_id, collection));
 }
 
-/// **P4 HALF B test helper** — mark a model registered on the current isolate,
+/// Test helper — mark a model registered on the current isolate,
 /// mirroring what `register_model` does at the SDK boundary. The runtime schema
 /// resolver gates on `is_model_registered` (the cold-schema contract), so a
 /// faithful e2e that drives the CRUD pipelines directly must mark the model.
@@ -230,7 +227,7 @@ pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
     mark_model_registered(app_id, collection);
 }
 
-/// **P6b test helper** — clear the registered mark so a re-register of the same
+/// Test helper — clear the registered mark so a re-register of the same
 /// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
 /// re-deploy mints a fresh isolate; tests reuse one). Used by the destructive-
 /// apply test to drive a v1→v2 schema change through the engine.
@@ -240,7 +237,7 @@ pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
     ctx_mut(|c| c.clear_model_registered(app_id, collection));
 }
 
-/// **T6** — stamp the per-`app_id` deploy/schema-version token into the
+/// Test helper — stamp the per-`app_id` deploy/schema-version token into the
 /// per-isolate context, the way `mint_db` does from the worker-injected
 /// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
 /// uses this to simulate a redeploy (bump the token) and prove the deploy-keyed
@@ -341,8 +338,8 @@ impl NativePlugin for DbPlugin {
 
 /// **Bench-only**: thin wrapper around `v8_bridge::row_to_json` so the
 /// `bench_row_to_json` Criterion harness in `benches/` can measure the
-/// [I35] index-lookup fix (commit `251d53b4`) without the bench having
-/// to live inside `v8_bridge` itself.
+/// row-to-json index-lookup path without the bench having to live
+/// inside `v8_bridge` itself.
 ///
 /// `#[doc(hidden)]` keeps this off the public docs surface; the function
 /// is still `pub` because Criterion benches link against the crate as an
@@ -367,12 +364,10 @@ pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
 /// 2. `crud::first_row_or_null` — take the first element, fall back
 ///    to `Value::Null`, and serialise once for `ResolveValue::Json`.
 ///
-/// Performance r12 identified this composed path as the next bottleneck
-/// after the [I35] index-lookup fix: at wide rows (50 columns) the JSON
-/// string + V8 `JSON.parse` tail dominates the read budget. The matching
-/// Criterion harness is `crates/plugin-db/benches/bench_first_row_or_null.rs`
-/// (perf r13 forcing function for the deferred [C3] redesign — see
-/// `docs/reviews/plugin-db-deferred.md`).
+/// This composed path is a bottleneck: at wide rows (50 columns) the
+/// JSON string + V8 `JSON.parse` tail dominates the read budget. The
+/// matching Criterion harness is
+/// `crates/plugin-db/benches/bench_first_row_or_null.rs`.
 ///
 /// Returns the raw JSON string (without going through `ResolveValue`) so
 /// the bench measures the Rust-side cost in isolation. The remaining V8
@@ -431,7 +426,7 @@ pub fn reset_context_for_tests() {
     ctx_mut(|c| *c = context::IsolateDbContext::new());
 }
 
-/// **P5.5 PR 4 test helper**: install a `SqliteBackend` into the per-
+/// Test helper: install a `SqliteBackend` into the per-
 /// isolate context so the unmask integration suite can drive
 /// `crud::unmask::dispatch_unmask` against a freshly-constructed
 /// backend without the full V8 runtime + plugin wiring.
@@ -445,7 +440,7 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
     ctx_mut(|c| c.set_sqlite_backend(backend));
 }
 
-/// **P5.5 PR 4 test helper**: cache a schema in the per-isolate
+/// Test helper: cache a schema in the per-isolate
 /// context so the unmask dispatcher's `lookup_mask_meta` /
 /// `lookup_encryption_meta` calls find the column metadata. Mirrors
 /// the cache install the production `register_model` orchestrator
@@ -455,7 +450,7 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
     ctx_mut(|c| {
         c.cache_schema(app_id, collection, schema);
-        // **P4 HALF B** — production `register_model` BOTH caches the declared
+        // Production `register_model` BOTH caches the declared
         // schema AND marks the model registered; the runtime schema resolver
         // (`crud::introspect_schema::runtime_schema_for`) gates on
         // `is_model_registered` to preserve the cold-schema contract. Mark it
@@ -466,10 +461,10 @@ pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json
     });
 }
 
-/// **H1 test helper**: drop every cached declared schema for `app_id` (and clear
+/// Test helper: drop every cached declared schema for `app_id` (and clear
 /// the model-registered marks for the given collections). Simulates a FRESH
 /// isolate booting against a WARM app file — the per-isolate sibling cache starts
-/// empty even though the file already holds the tables. The H1 warm-multi-
+/// empty even though the file already holds the tables. The warm-multi-
 /// collection drop-suppression path must survive exactly this state.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
@@ -482,7 +477,7 @@ pub fn simulate_fresh_isolate_for_tests(app_id: &str, collections: &[&str]) {
     });
 }
 
-/// **P5.5 PR 5 test helper**: clear the per-isolate mask-policy cache
+/// Test helper: clear the per-isolate mask-policy cache
 /// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
 /// guarantee a clean slate between policy-driven unmask tests — the
 /// per-isolate thread-local cache is process-wide and would otherwise
@@ -496,10 +491,10 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 
 /// **Test-only**: install a real Postgres client into the active
 /// isolate's `IsolateDbContext::tx_conn` slot (formerly the `TX_CONN`
-/// thread-local, folded into `IsolateDbContext` in Stage 8d-R4) so the
-/// Gap B integration tests can drive the deferred-broker-emit
-/// queue/drain machinery without standing up a V8 isolate. Returns
-/// the connection-task handle so the caller can detach it.
+/// thread-local, folded into `IsolateDbContext`) so the Gap B
+/// integration tests can drive the deferred-broker-emit queue/drain
+/// machinery without standing up a V8 isolate. Returns the
+/// connection-task handle so the caller can detach it.
 ///
 /// Asynchronous because it has to open a fresh Postgres connection
 /// (the same shape the production `exec_begin` does). Pair with

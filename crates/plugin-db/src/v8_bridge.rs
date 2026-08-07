@@ -401,9 +401,9 @@ pub(crate) fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
     // Enumerate by index — compio_postgres's `Row::try_get(&str)` and
     // `Row::raw_value(&str)` resolve the name via a linear scan of
-    // `row.columns()` ([I35]: that made `row_to_json` O(N²) in the
-    // column count). Threading the index directly drops the per-column
-    // lookup to O(1).
+    // `row.columns()`, which makes `row_to_json` O(N²) in the column
+    // count. Threading the index directly drops the per-column lookup
+    // to O(1).
     for (idx, col) in row.columns().iter().enumerate() {
         let key = col.name().to_string();
         let value = column_to_json(row, idx, col.type_().oid());

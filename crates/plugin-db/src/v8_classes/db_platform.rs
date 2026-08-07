@@ -1,16 +1,16 @@
 //! `DbPlatform` — the `#[v8_class]` capability handle holding the
-//! platform-internal DB callables (P9 PR 4).
+//! platform-internal DB callables.
 //!
 //! ## Why this class exists
 //!
-//! Before P9 PR 4 the platform-internal entry points — `registerModel`,
+//! The platform-internal entry points — `registerModel`,
 //! `setMaskPolicy`, `startReplicationConsumer`, and the `replication`
-//! sub-namespace — lived directly on the `Db` v8_class
-//! (`env.db`). They were therefore directly reachable from creator JS
-//! (`env.db.registerModel(...)`) and showed up in IDE hover on the
-//! published `@zeroship/types` surface.
+//! sub-namespace — do not live directly on the `Db` v8_class
+//! (`env.db`). Living there would make them directly reachable from
+//! creator JS (`env.db.registerModel(...)`) and would surface them in
+//! IDE hover on the published `@zeroship/types` surface.
 //!
-//! P9 §8 moves them behind a single `DbPlatform` handle that is set on
+//! Instead they live behind a single `DbPlatform` handle that is set on
 //! the `Db` object under a **V8 private symbol** (`ZS_PLATFORM`, minted
 //! once per isolate by the runtime — see
 //! `crates/runtime/src/core/init.rs`). A `v8::Private` is a Rust-only
@@ -35,8 +35,8 @@
 //! `app_id` is stamped at mint time (in `db.rs::mint_db`, from the live
 //! `Db`'s own `app_id`). The handle is therefore bound to exactly one
 //! tenant; there is no caller-supplied app-id override on any method
-//! (the `startReplicationConsumer` hardening from security-review r2 is
-//! preserved verbatim — see [`super::db`]'s `resolve_consumer_app_id`).
+//! (the `startReplicationConsumer` hardening is preserved verbatim —
+//! see [`super::db`]'s `resolve_consumer_app_id`).
 
 #![allow(unsafe_code)]
 
@@ -101,18 +101,18 @@ impl DbPlatform {
     }
 
     /// `__platform.registerModel(collection, schema, indexes?, declared?)` —
-    /// DDL orchestrator entry. Idempotent. Moved off `Db` in P9 PR 4; the
+    /// DDL orchestrator entry. Idempotent. Moved off `Db`; the
     /// [`register_model_dispatch`] pipeline is unchanged — only the JS
     /// carrier relocated behind the capability handle.
     ///
-    /// `declared` (H1) is the FULL set of collection names the descriptor
+    /// `declared` is the FULL set of collection names the descriptor
     /// declares — `installSchema` passes `Object.keys(schemas)` on every
     /// per-collection call. The dev SQLite drop pass uses it to tell a
     /// not-yet-registered sibling (declared, must NOT be dropped) from a
     /// genuinely-removed collection (not declared, a real drop candidate). It
     /// is inert on PG (registerModel issues no DDL there). Optional: omitted
-    /// (raw deploys / older callers) → empty set → pre-H1 per-collection
-    /// behaviour.
+    /// (raw deploys / older callers) → empty set → each collection is
+    /// evaluated independently, unaware of its declared siblings.
     #[v8_method]
     #[v8_name = "registerModel"]
     fn register_model<'s>(
@@ -158,9 +158,9 @@ impl DbPlatform {
         .into())
     }
 
-    /// `__platform.setMaskPolicy(policy)` — **P5.5 PR 5**. Persist the
+    /// `__platform.setMaskPolicy(policy)` — persist the
     /// per-app mask policy and refresh the in-process cache. Moved off
-    /// `Db` in P9 PR 4; [`dispatch_set_mask_policy_field`] is unchanged.
+    /// `Db`; [`dispatch_set_mask_policy_field`] is unchanged.
     #[v8_method]
     #[v8_name = "setMaskPolicy"]
     fn set_mask_policy<'s>(
@@ -174,7 +174,7 @@ impl DbPlatform {
 
     /// `__platform.startReplicationConsumer(opts?)` — provisions the
     /// per-app publication + slot and spawns the supervised WAL
-    /// consumer. Idempotent. Moved off `Db` in P9 PR 4.
+    /// consumer. Idempotent. Moved off `Db`.
     ///
     /// Always scoped to `self.app_id`. Any app-id-shaped `opts` value is
     /// intentionally ignored — honouring a JS-supplied app_id here would
@@ -195,7 +195,7 @@ impl DbPlatform {
 
     /// `__platform.replication` — the [`super::replication::Replication`]
     /// namespace (`setup` / `watchdog` / `dropAbandoned`) scoped to this
-    /// app. Cached on first access. Moved off `Db` in P9 PR 4.
+    /// app. Cached on first access. Moved off `Db`.
     #[v8_getter]
     fn replication<'s>(
         &self,

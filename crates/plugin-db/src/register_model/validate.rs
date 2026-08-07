@@ -86,16 +86,14 @@ pub(crate) async fn validate<B: AuditWriter>(
         .collect();
 
     if !destructive.is_empty() && ctx.strictness != "off" {
-        // F2 resolution upgrade (migration-pipeline r13): every audit
-        // row must reach a terminal status. The earlier shape wrote
-        // `Pending` then drove it to `Failed` via a second UPDATE — a
-        // two-statement transition that could leave a row stranded in
+        // Every audit row must reach a terminal status. An earlier shape
+        // wrote `Pending` then drove it to `Failed` via a second UPDATE -
+        // a two-statement transition that could leave a row stranded in
         // `pending` if the worker crashed or the UPDATE failed between
-        // the two writes (the prior commit `14d7608f` warned about
-        // this on the second-write error path).
+        // the two writes.
         //
-        // The r13 upgrade lands the row directly terminal via INSERT
-        // with `status = 'validation_refused'`. The audit table's
+        // The row instead lands directly terminal via INSERT with
+        // `status = 'validation_refused'`. The audit table's
         // status CHECK now accepts `'validation_refused'` (extended in
         // `ensure_audit_table_exists`); both strict and lenient modes
         // route through this terminal — eliminating the orphan window
@@ -114,11 +112,11 @@ pub(crate) async fn validate<B: AuditWriter>(
                 actor: crate::audit::ActorKind::Auto,
             };
             // Best-effort: a failure to write the audit row should not
-            // mask the envelope — tracing::warn so it shows in worker
+            // mask the envelope - tracing::warn so it shows in worker
             // logs but the user-facing error stays clean. Field shape
-            // matches the F1 warn-half family (`app_id` + `audit_err`)
-            // pinned at cycle 12:47 `7c6bd2ec` — closes the
-            // NEW-R14-2 drift test-coverage r14 caught.
+            // matches the warn-half family (`app_id` + `audit_err`);
+            // see `test_support` for the drift this field shape guards
+            // against.
             if let Err(audit_err) = backend.write_audit_row(&ctx.app_id, &row).await {
                 tracing::warn!(
                     app_id = %ctx.app_id,

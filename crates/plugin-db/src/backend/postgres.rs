@@ -39,7 +39,7 @@ pub struct PostgresBackend {
     /// `db.transaction(fn)` and `migrationBegin` paths that need a
     /// connection that survives across pool-return points).
     url: String,
-    /// **P5 PR 2** — per-backend column-key cache. Lazily resolves
+    /// Per-backend column-key cache. Lazily resolves
     /// `(app_id, key_id) → AeadKey` via the
     /// `__zeroship_admin.get_column_key` SECURITY DEFINER getter; falls
     /// back to `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars when the getter
@@ -47,7 +47,7 @@ pub struct PostgresBackend {
     /// (`RefCell` inside `KeyStore`) since every `PostgresBackend` is
     /// owned by a single compio thread.
     key_store: crate::encryption::KeyStore,
-    /// **P4 PR 2** — cached pgvector extension presence probe.
+    /// Cached pgvector extension presence probe.
     ///
     /// `None` before the first call to [`VectorIndex::ensure_vector_index`]
     /// or [`VectorIndex::vector_search`]; `Some(true)` / `Some(false)`
@@ -59,7 +59,7 @@ pub struct PostgresBackend {
     /// because every `PostgresBackend` is owned by a single
     /// compio thread.
     pgvector_available: RefCell<Option<bool>>,
-    /// **P4 PR 3** — cached PostGIS extension presence probe.
+    /// Cached PostGIS extension presence probe.
     ///
     /// Same shape and lifetime semantics as [`Self::pgvector_available`]:
     /// `None` until the first `SpatialIndex::ensure_spatial_index` or
@@ -81,7 +81,7 @@ impl std::fmt::Debug for PostgresBackend {
 impl PostgresBackend {
     /// Build a backend handle around an already-initialised pool.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
-        // **P5 PR 2** — wire the column-key store. We clone the `Rc<Pool>`
+        // Wire the column-key store. We clone the `Rc<Pool>`
         // into `KeySource::PgAdminTable` so the `KeyStore`'s
         // `resolve(...)` method can call the SECURITY DEFINER getter
         // without re-reaching into `PostgresBackend`. The pool clone is
@@ -114,24 +114,24 @@ impl PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Capability impls — six blocks after P0 PR 2:
+// Capability impls -- six blocks, one per sub-trait:
 //
-//   1. `impl SqlExecutor for PostgresBackend`     — PR 1 (3 methods).
-//   2. `impl LockManager for PostgresBackend`     — PR 1 (3 methods).
-//   3. `impl NamespaceManager for PostgresBackend` — PR 2 (1 method).
-//   4. `impl SchemaIntrospect for PostgresBackend` — PR 2 (2 methods +
-//      `type LiveSchema`).
-//   5. `impl IndexBuilder for PostgresBackend`     — PR 2 (1 method).
-//   6. `impl PgSqlExecutor for PostgresBackend`    — PR 2 (1 method —
+//   1. `impl SqlExecutor for PostgresBackend`     -- 3 methods.
+//   2. `impl LockManager for PostgresBackend`     -- 3 methods.
+//   3. `impl NamespaceManager for PostgresBackend` -- 1 method.
+//   4. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
+//      `type LiveSchema`.
+//   5. `impl IndexBuilder for PostgresBackend`     -- 1 method.
+//   6. `impl PgSqlExecutor for PostgresBackend`    -- 1 method --
 //      the PG-only `pool_handle()` accessor that lets free-function
-//      audit helpers reach `&Pool` without naming `PostgresBackend`).
+//      audit helpers reach `&Pool` without naming `PostgresBackend`.
 //
 // `impl Backend for PostgresBackend {}` below is a one-line composition
-// marker — every operation lives on the sub-trait impls above.
+// marker -- every operation lives on the sub-trait impls above.
 //
 // Audit-row operations: see free fns in `crate::audit`. Open Q1
-// resolution per `docs/proposals/p0-implementation-plan.md` §3 Q1 +
-// §"PR 2"; consumers reach `&compio_postgres::Pool` through
+// resolution per `docs/proposals/p0-implementation-plan.md` §3; consumers
+// reach `&compio_postgres::Pool` through
 // [`PgSqlExecutor::pool_handle`].
 // ---------------------------------------------------------------------------
 
@@ -258,17 +258,16 @@ impl LockManager for PostgresBackend {
 
 impl NamespaceManager for PostgresBackend {
     async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
-        // P1 PR 3: the create-schema SQL now flows through the
+        // The create-schema SQL flows through the
         // `DialectBuilder::build_ensure_app_schema` hook instead of
         // the free function `crate::query::build_create_schema`. The
         // SQL text is byte-identical to the previous form
         // (`CREATE SCHEMA IF NOT EXISTS "<app>"`) — the structural
-        // change is the routing seam, not the statement. Verified by
-        // grep audit (PR-3 commit message): no other callers of
-        // `query::build_create_schema` exist, so the free function
-        // could be removed in a follow-up; we keep it for now as the
-        // dialect's `build_ensure_app_schema` impl delegates to the
-        // same quoting primitive.
+        // change is the routing seam, not the statement. No other
+        // callers of `query::build_create_schema` exist, so the free
+        // function could be removed in a follow-up; we keep it for
+        // now as the dialect's `build_ensure_app_schema` impl
+        // delegates to the same quoting primitive.
         let create_schema = self.build_ensure_app_schema(app_id);
         let empty: Vec<&str> = Vec::new();
         self.pool
@@ -284,7 +283,7 @@ impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // **Schema-authority P1** — `read_live_schema` now lives in the leaf
+        // `read_live_schema` lives in the leaf
         // crate `zeroship-schema` and returns `SchemaError` (it cannot name
         // `DbError`). `From<SchemaError> for DbError` re-creates the exact
         // `coded_sql("diff: …", e)` shape, so the SQLSTATE classification +
@@ -329,10 +328,10 @@ impl PgSqlExecutor for PostgresBackend {
     }
 }
 
-// P1 PR 5: `AuditWriter` capability. The PG impl is a thin wrapper over
+// `AuditWriter` capability. The PG impl is a thin wrapper over
 // the existing `crate::audit::write_audit_row` free function — same SQL,
 // same `RETURNING id` round-trip, same error mapping. The trait method
-// discards the returned id because the only PR-5 consumer (the SQLite
+// discards the returned id because the only consumer (the SQLite
 // arm's `IndexBuilder::create_index_with_recovery`) writes its audit
 // row in terminal state and doesn't need to transition it; PG's own
 // `create_index_with_recovery_audited` continues to call the free
@@ -368,7 +367,7 @@ impl AuditWriter for PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// VectorIndex — P4 PR 2 (pgvector adapter)
+// VectorIndex — pgvector adapter
 // ---------------------------------------------------------------------------
 //
 // Two methods:
@@ -478,8 +477,8 @@ impl VectorIndex for PostgresBackend {
         // the same INVALID-on-cancel / data-violation / transient
         // classification machinery as every other CIC on the platform.
         // `deploy_id` is `'p4_vector_index'` because `ensure_vector_index`
-        // can be called outside the deploy orchestrator (PR 2 wires it
-        // via `register_model::apply`, but the trait surface must stay
+        // can be called outside the deploy orchestrator (`register_model::apply`
+        // wires it, but the trait surface must stay
         // callable from a standalone migration script too); the audit
         // schema accepts arbitrary deploy ids and the `apply.rs` Pass-2
         // caller overrides this when it routes through the trait.
@@ -532,7 +531,7 @@ impl VectorIndex for PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// FullTextIndex — P4 PR 3 (tsvector + GIN + tsvector_update_trigger)
+// FullTextIndex — tsvector + GIN + tsvector_update_trigger
 // ---------------------------------------------------------------------------
 //
 // Two methods:
@@ -597,7 +596,7 @@ impl FullTextIndex for PostgresBackend {
             });
         }
 
-        // DB-9: validate every FTS source column with the identifier fence
+        // Validate every FTS source column with the identifier fence
         // BEFORE it is spliced UNQUOTED into the `tsvector_update_trigger` arg
         // list below. That arg list requires bare column names, so quoting is
         // not an option — validation is the only guard. Today CreateTable
@@ -724,7 +723,7 @@ impl FullTextIndex for PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// SpatialIndex — P4 PR 3 (PostGIS adapter)
+// SpatialIndex — PostGIS adapter
 // ---------------------------------------------------------------------------
 //
 // Two methods:
@@ -869,10 +868,10 @@ impl PgLockManager for PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// PgDialect — the Postgres flavour of `DialectBuilder`. P1 PR 3 lands
-// the trait impl on both backends so `query.rs`'s free-function string
-// builders can be retargeted onto a dialect-typed entry point in a
-// later PR without re-shaping their call sites.
+// PgDialect — the Postgres flavour of `DialectBuilder`. The trait impl
+// lands on both backends so `query.rs`'s free-function string
+// builders can be retargeted onto a dialect-typed entry point
+// without re-shaping their call sites.
 //
 // The hooks are pure functions of their inputs (ZST has no state). We
 // `impl DialectBuilder for PostgresBackend` directly — there is no
@@ -904,7 +903,7 @@ impl DialectBuilder for PgDialect {
     }
 
     /// `CREATE SCHEMA IF NOT EXISTS "<app_id>"` — the canonical PG
-    /// shape. Byte-identical to the pre-PR-3
+    /// shape. Byte-identical to
     /// `crate::query::build_create_schema(app_id)` output, so the
     /// `NamespaceManager::ensure_app_schema` impl can swap without
     /// changing the on-wire SQL.
@@ -915,7 +914,7 @@ impl DialectBuilder for PgDialect {
     /// Return the `IndexSpec::sql` field verbatim. The spec is built
     /// by `crate::query::build_create_indexes` against the PG dialect
     /// already (`CREATE [UNIQUE] INDEX CONCURRENTLY …`); the `online`
-    /// flag has no separate consumer at PR 3. PR 5 may reshape this
+    /// flag has no separate consumer here. This may be reshaped
     /// when SQLite's `IndexBuilder` lands.
     #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(
@@ -926,7 +925,7 @@ impl DialectBuilder for PgDialect {
         spec.sql.clone()
     }
 
-    /// PG mapping for the P1 type vocabulary. Each branch is a single
+    /// PG mapping for the type vocabulary. Each branch is a single
     /// `&'static str` — matches the column-type names PG accepts in a
     /// `CREATE TABLE` DDL.
     fn map_zs_type(&self, zs_type: &str, _opts: &serde_json::Value) -> String {
@@ -1004,22 +1003,22 @@ impl DialectBuilder for PostgresBackend {
     }
 }
 
-// `Backend` is a pure composition marker after P0 PR 2 — every method
+// `Backend` is a pure composition marker -- every method
 // lives on a sub-trait impl above. Audit-row operations: see free fns
 // in `crate::audit`. Open Q1 resolution per p0-implementation-plan.md.
 #[cfg(any(test, feature = "test-helpers"))]
 impl Backend for PostgresBackend {}
 
 // ---------------------------------------------------------------------------
-// create_index_with_recovery_audited — moved from
-// register_model::apply (Stage 8e-R2).
+// create_index_with_recovery_audited -- moved from
+// register_model::apply.
 //
 // SQLSTATE-driven retry loop for `CREATE INDEX CONCURRENTLY`. Postgres
 // CIC can land an INVALID index (a partial build that has to be
 // dropped + retried) or fail outright on a UNIQUE conflict. Every
 // retry, INVALID detection, and terminal failure writes an
 // `index_retry` row to `__zeroship_migrations` so operators can see
-// what the cold-start orchestrator did (proposal A3).
+// what the cold-start orchestrator did.
 //
 // Postgres-shaped on purpose — `SqlState` matching is the cleanest
 // way to classify the recovery branches, and other backends that
@@ -1278,22 +1277,19 @@ async fn create_index_with_recovery_audited(
 }
 
 // ===========================================================================
-// P5 — EncryptedColumn (PR 2) + Backup (PR 4) impls on PostgresBackend
+// EncryptedColumn + Backup impls on PostgresBackend
 // ===========================================================================
 //
 // Both impls are unconditional on the PG arm:
-//   * `EncryptedColumn` (PR 2) — PG-prod key sourcing reads from
+//   * `EncryptedColumn` -- PG-prod key sourcing reads from
 //     `__zeroship_admin.column_keys` via a SECURITY DEFINER getter,
 //     with an env-var fallback for dev parity.
-//   * `Backup` (PR 4) — the PITR placeholder writes to
+//   * `Backup` -- the PITR placeholder writes to
 //     `__zeroship_admin.pitr_targets`. Snapshot / restore themselves don't strictly
 //     need the admin schema; `BackendHandle::as_backup_pg` matches the
 //     `as_encrypted_column_pg` shape.
-//
-// The PR-1 stub bodies (returning `Configuration { code: "p5_pr2_stub" }`)
-// have been removed now that both impls are real.
 
-// **P5 PR 2** — Real `EncryptedColumn` body. Delegates to the workspace
+// Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
 // agnostic on decrypt because the wire format carries the nonce). Key
 // resolution goes through `self.key_store` which prefers the
@@ -1344,7 +1340,7 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 }
 
 // ===========================================================================
-// P5 PR 4 — Real `Backup` impl on PostgresBackend
+// Real `Backup` impl on PostgresBackend
 // ===========================================================================
 //
 // `snapshot` → `pg_dump --schema=<app_id> --format=custom --no-owner
@@ -1418,8 +1414,8 @@ mod backup_pg {
     /// path. Returns a typed `Configuration` error for unsupported
     /// schemes (e.g. `s3://`) so the SDK can branch on `.code`.
     ///
-    /// PR 4 supports only the `file://` scheme — S3 / R2 land alongside
-    /// the production BlobStore wire-through in a later PR. The path
+    /// Only the `file://` scheme is supported -- S3 / R2 land alongside
+    /// the production BlobStore wire-through later. The path
     /// is the on-disk address of the dump artifact; SHA-256 hashing
     /// happens on write (snapshot) and re-verification on read
     /// (restore). The handle's `uri` field echoes the caller-supplied
@@ -1716,7 +1712,7 @@ mod backup_pg {
             Err(other) => return Err(other),
         };
 
-        // Resolve the on-disk path; PR 4 supports file:// only.
+        // Resolve the on-disk path; only file:// is supported.
         let src_path = match parse_dest_path(&snapshot.uri) {
             Ok(p) => p,
             Err(e) => {
@@ -1758,10 +1754,10 @@ mod backup_pg {
         }
 
         // Drop the live schema so pg_restore can rebuild it from
-        // the dump's TOC. This is the load-bearing safety step's
-        // PR-4 simplification: the full `swap_schema_atomic` SECURITY
-        // DEFINER function lands in P6a hardening. The simple
-        // sequence is destructive — if pg_restore fails after the
+        // the dump's TOC. This is a simplification of the
+        // load-bearing safety step: a full `swap_schema_atomic`
+        // SECURITY DEFINER function is the hardened replacement. The
+        // simple sequence is destructive — if pg_restore fails after the
         // DROP, the schema is gone and the operator has to re-
         // restore. The lock above keeps concurrent deploys out of
         // the window; the snapshot hash above keeps wrong dumps out.
@@ -1857,7 +1853,7 @@ mod backup_pg {
         app_id: &str,
         target: PitrTarget,
     ) -> Result<(), DbError> {
-        // PR 4 ships the API surface only. PITR replay requires
+        // This ships the API surface only. PITR replay requires
         // PG-server-level configuration (recovery.conf,
         // archive_command); the platform can't initiate WAL replay
         // from a client connection. We record the target so the
@@ -1883,7 +1879,7 @@ mod backup_pg {
     }
 }
 
-/// DB-9: validate FTS source column names with the shared identifier fence
+/// Validate FTS source column names with the shared identifier fence
 /// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
 #[cfg(any(test, feature = "test-helpers"))]
 fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {
@@ -1903,9 +1899,9 @@ mod tests {
     //! its per-capability impls (`SqlExecutor` / `LockManager` /
     //! `NamespaceManager` / `SchemaIntrospect` / `IndexBuilder`) either
     //! calls the `Rc<Pool>` directly or forwards into [`crate::audit`] /
-    //! [`crate::diff`] / [`crate::query`] free functions. After P0 PR 2
+    //! [`crate::diff`] / [`crate::query`] free functions.
     //! `impl Backend for PostgresBackend` is a one-line composition
-    //! marker — every method body lives on a sub-trait impl. The only
+    //! marker -- every method body lives on a sub-trait impl. The only
     //! non-async logic in this file is:
     //!
     //! * [`PostgresBackend::new`] — captures the `pool` + `url` fields.
@@ -1942,7 +1938,7 @@ mod tests {
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
-    /// (after P0 PR 2 — a pure composition marker over five sub-traits).
+    /// (a pure composition marker over five sub-traits).
     /// The function is never called; the bound is checked at type-check
     /// time.
     fn assert_postgres_backend_impls_backend() {
@@ -1951,7 +1947,7 @@ mod tests {
     }
 
     /// Compile-time: each carved capability trait is impl'd directly on
-    /// `PostgresBackend` after P0 PR 2 (not just visible through the
+    /// `PostgresBackend` (not just visible through the
     /// `Backend` super-bound). A regression that pulls one back onto
     /// the omnibus trait or detaches the impl block fails here at
     /// build time.
@@ -1973,14 +1969,14 @@ mod tests {
         impls_pg_lock_manager::<PostgresBackend>();
         impls_register_backend::<PostgresBackend>();
 
-        // P1 PR 3: `DialectBuilder` impl lands directly on the backend
-        // (not on the `Backend` super-trait — the trait composition
+        // `DialectBuilder` impl lands directly on the backend
+        // (not on the `Backend` super-trait -- the trait composition
         // stays unchanged). The bound here pins the impl so a future
         // refactor that detaches the impl block fails at type-check.
         fn impls_dialect_builder<T: DialectBuilder>() {}
         impls_dialect_builder::<PostgresBackend>();
 
-        // P1 PR 5: `AuditWriter` impl wraps the free-function audit
+        // `AuditWriter` impl wraps the free-function audit
         // write path. The bound pins the trait wire so a future
         // refactor that detaches the impl block fails at type-check
         // here, not at a distant `IndexBuilder` consumer site.
@@ -1989,7 +1985,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // P1 PR 3: PgDialect hook unit tests. ZST has no I/O — each test
+    // PgDialect hook unit tests. ZST has no I/O -- each test
     // is a string-compare against the expected SQL fragment.
     // ---------------------------------------------------------------------
 
@@ -2060,7 +2056,7 @@ mod tests {
     /// concrete `compio_postgres` / `crate::diff` types. Swapping
     /// either accidentally would silently change the `B::Client` /
     /// `B::LiveSchema` shape every consumer sees. `LiveSchema` is owned
-    /// by [`SchemaIntrospect`] after P0 PR 2 — the `Backend` super-bound
+    /// by [`SchemaIntrospect`] -- the `Backend` super-bound
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
     fn assert_postgres_backend_assoc_types() {

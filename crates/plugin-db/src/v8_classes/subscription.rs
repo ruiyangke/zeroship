@@ -75,7 +75,7 @@ impl Subscription {
     /// `new Subscription()` from JS rejects — real instances come from
     /// [`mint_subscription`] via `collection.openSubscription()` (the
     /// duplicate `db.openSubscription(name)` Db-level entry point was
-    /// removed in P9 PR 1), which registers the broker entry as part
+    /// removed), which registers the broker entry as part
     /// of minting.
     #[v8_constructor]
     fn new() -> Result<Subscription, OpError> {
@@ -139,7 +139,7 @@ impl Subscription {
 }
 
 // ---------------------------------------------------------------------------
-// MV-name refusal — SDK boundary gate (P2 PR 3)
+// MV-name refusal — SDK boundary gate
 // ---------------------------------------------------------------------------
 
 /// Refuse `openSubscription` on materialised-view shadow collection
@@ -151,13 +151,13 @@ impl Subscription {
 /// those writes before they reach the broker, so a subscription opened
 /// on an MV shadow name would silently never fire. We refuse at the
 /// SDK boundary so callers see a loud error rather than a permanently-
-/// empty stream — per design §13.5 and the P2 PR 3 gate
-/// `mv_subscribe_rejected_at_sdk`.
+/// empty stream — per design §13.5 and the
+/// `mv_subscribe_rejected_at_sdk` gate.
 ///
 /// Returns `Some(OpError)` for refused names and `None` for OK names.
 /// Used by `Collection::open_subscription` (path
-/// `db.collection(...).openSubscription()`). P9 PR 1 removed the
-/// duplicate `Db::open_subscription` entry point; the Collection-
+/// `db.collection(...).openSubscription()`). The duplicate
+/// `Db::open_subscription` entry point was removed; the Collection-
 /// scoped surface is the only path now. The wire `code` is
 /// `invalid_collection` — the same code
 /// `query::QueryError::InvalidCollection` flows through

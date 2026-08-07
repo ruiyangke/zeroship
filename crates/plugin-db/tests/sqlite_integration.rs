@@ -1,8 +1,7 @@
 //! SQLite-side integration tests.
 //!
-//! Behind `required-features = ["test-helpers"]`. **P1 PR 2** adds
-//! the first four behaviour tests — they exercise the
-//! `SqliteSession` actor end-to-end:
+//! Behind `required-features = ["test-helpers"]`. The first four
+//! behaviour tests exercise the `SqliteSession` actor end-to-end:
 //!
 //! - bootstrap PRAGMAs land (`journal_mode = wal`, `busy_timeout = 5000`)
 //! - `SqlExecutor::pool_exec` round-trips DDL + DML
@@ -10,10 +9,10 @@
 //!   handle returned by `acquire_dedicated_client`
 //!
 //! Each test spins up a per-test `tempfile::TempDir` and constructs a
-//! `SqliteBackend::new(db_dir)` directly — we deliberately bypass the
-//! per-isolate context plumbing (which the PR 3+ NamespaceManager
-//! work threads through) so PR 2's tests pin the actor's behaviour in
-//! isolation. PR 3-5 add the higher-level orchestrator mirror.
+//! `SqliteBackend::new(db_dir)` directly - this deliberately bypasses
+//! the per-isolate context plumbing the NamespaceManager threads
+//! through, so these tests pin the actor's behaviour in isolation.
+//! The higher-level orchestrator mirror is covered separately.
 
 use std::path::PathBuf;
 
@@ -30,7 +29,7 @@ use zeroship_plugin_db::backend::{
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec};
-// **P6b** — the hardened migration backend, used by the engine-path tests to read
+// The hardened migration backend, used by the engine-path tests to read
 // the versioned `_mig` journal and to seed a journal-less legacy file.
 use zero_migrate::SqliteBackend as MigrateBackend;
 
@@ -90,9 +89,9 @@ fn parity_matrix_sqlite_typed_projection_matches_contract() {
 /// the column name is the pragma's name (e.g. `journal_mode`,
 /// `timeout`). The session's `query` helper materialises each cell
 /// as `Option<String>` already, which is the right shape for PRAGMA
-/// inspection at this layer. PR 4's `SchemaIntrospect` impl will
-/// replace this with a proper typed surface; PR 2's tests use the
-/// session directly via the `test-helpers`-gated handle accessor.
+/// inspection at this layer. The `SchemaIntrospect` impl provides a
+/// proper typed surface; these tests use the session directly via the
+/// `test-helpers`-gated handle accessor.
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     let client = backend
         .acquire_dedicated_client()
@@ -184,7 +183,7 @@ fn client_exec_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// P1 PR 3 — NamespaceManager (ATTACH) integration tests.
+// NamespaceManager (ATTACH) integration tests.
 //
 // Each test exercises a behaviour the SqliteBackend's
 // `ensure_app_schema` impl is responsible for:
@@ -325,7 +324,7 @@ fn estimate_row_count_missing_table_returns_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// P1 PR 4 — LockManager (in-process registry) + SchemaIntrospect
+// LockManager (in-process registry) + SchemaIntrospect
 // (PRAGMA-walk) integration tests.
 //
 // The lock-side tests exercise the three legacy primitive routes
@@ -607,7 +606,7 @@ fn introspect_after_create_table_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// P1 PR 5 — IndexBuilder (CREATE INDEX) + cross-app FK parse-time check
+// IndexBuilder (CREATE INDEX) + cross-app FK parse-time check
 // integration tests.
 //
 // The IndexBuilder-side tests exercise the two terminal branches of
@@ -630,9 +629,10 @@ fn introspect_after_create_table_round_trip() {
 // ---------------------------------------------------------------------------
 
 /// Provision the per-app `__zeroship_migrations` audit table the
-/// `AuditWriter` impl writes into. P1 PR 5 ships only the INSERT path;
-/// the audit-table provisioning DDL is a later-PR concern. We create
-/// it inline here so the `unique_violation` path's best-effort audit
+/// `AuditWriter` impl writes into. Only the INSERT path is implemented
+/// at the `AuditWriter` layer; the audit-table provisioning DDL is a
+/// separate concern. We create it inline here so the `unique_violation`
+/// path's best-effort audit
 /// write actually lands during the test (the test still passes if the
 /// write fails — the SchemaRefused envelope assertion is the wire
 /// contract — but covering both halves is cheap).
@@ -831,8 +831,8 @@ fn cross_app_fk_rejected_at_parse() {
 }
 
 // ---------------------------------------------------------------------------
-// P2 PR 2 — SqliteCdcDispatcher (preupdate/commit/rollback hooks) +
-// worker→compio publisher integration tests.
+// SqliteCdcDispatcher (preupdate/commit/rollback hooks) +
+// worker->compio publisher integration tests.
 //
 // The publisher task is asynchronous: a COMMIT on the writer thread
 // ships a `CommitPacket` via flume, the publisher task wakes on
@@ -1251,11 +1251,11 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
 }
 
 // ---------------------------------------------------------------------------
-// P2 PR 3 — relation filter gates (MV/audit) + subscription fan-out under
-// load. The relation filter itself was already wired in PR 2's
+// Relation filter gates (MV/audit) + subscription fan-out under
+// load. The relation filter itself is wired in
 // `cdc.rs::preupdate_callback` (first early-return after the action
-// discriminant). PR 3 adds the integration coverage that pins the
-// filter's behaviour end-to-end + the broker primitive
+// discriminant). These tests add the integration coverage that pins
+// the filter's behaviour end-to-end + the broker primitive
 // `Broker::resume_app_with_resync` (unit-covered in `broker.rs`).
 //
 // Test budget: each test stays well under 2s on the CI workers — the
@@ -1266,7 +1266,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
 
 #[test]
 fn subscription_fanout_under_load() {
-    // Plan §8 / §9 PR 3 gate: a single COMMIT of N rows must reach every
+    // Plan §8 / §9: a single COMMIT of N rows must reach every
     // active subscriber in INSERT order. Scaled down to 10×100 per the
     // task spec ("100 subscribers × 1000 rows would saturate dev
     // hardware; scale down to 10 × 100 for CI sanity"). The default
@@ -1331,7 +1331,7 @@ fn subscription_fanout_under_load() {
                 "subscriber #{i} should observe 100 events; got {} ({msgs:?})",
                 msgs.len()
             );
-            // Buffer-index ordering invariant from PR 2: events appear
+            // Buffer-index ordering invariant: events appear
             // in the order they fired against the preupdate hook,
             // which matches statement order under SQLite's
             // single-writer execution.
@@ -1372,9 +1372,9 @@ fn subscription_fanout_under_load() {
 
 #[test]
 fn mv_refresh_does_not_emit_change_events() {
-    // Plan §6 + §9 PR 3 gate: writes to `__zeroship_mv_*` shadow tables
+    // Plan §6 + §9: writes to `__zeroship_mv_*` shadow tables
     // must be filtered upstream of the broker. The plan acknowledges
-    // (§9 PR 3) that the `db.materializedView(...).refresh()` SDK
+    // (§9) that the `db.materializedView(...).refresh()` SDK
     // primitive does not exist yet, so we exercise the filter directly
     // by writing to a shadow table whose name matches the filter
     // prefix — the dispatcher cannot distinguish a "real" MV refresh
@@ -1523,7 +1523,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
 #[test]
 fn audit_table_writes_do_not_emit_events() {
     // The `is_filtered_relation` predicate covers `__zeroship_audit_*`
-    // alongside `__zeroship_mv_*`. The PR 2 unit test in
+    // alongside `__zeroship_mv_*`. The unit test in
     // `cdc.rs::tests::is_filtered_relation_excludes_system_tables`
     // already pins the predicate; this gate exercises the filter
     // end-to-end so a regression that drops the audit-prefix arm of the
@@ -1567,10 +1567,10 @@ fn audit_table_writes_do_not_emit_events() {
 }
 
 // ---------------------------------------------------------------------------
-// P2 PR 4 — round-5 CRITICAL fences (plan §7 + §8 + §9).
+// CRITICAL fences (plan §7 + §8 + §9).
 //
-// These two tests are the round-5 design-loop fences for the
-// backfill-pause + schema-pending decoder rails. They must pass
+// These two tests are fences for the backfill-pause + schema-pending
+// decoder rails. They must pass
 // byte-for-byte: a regression that detaches `BrokerPauseGuard::drop`
 // from `wal_consumer::unsuppress_app` + `Broker::resume_app_with_resync`,
 // or that detaches `SchemaPendingGuard::drop` from
@@ -1584,7 +1584,7 @@ fn audit_table_writes_do_not_emit_events() {
 // compio task on the same thread as the test future; 100 ms is well
 // above the in-process upper bound on dev hardware. See
 // `drain_publisher()` for the existing 50 ms baseline used by the
-// PR 2/PR 3 tests.
+// earlier subscription tests.
 // ---------------------------------------------------------------------------
 
 /// Longer drain — the new fences move ~100 events through the
@@ -1598,7 +1598,7 @@ async fn drain_publisher_long() {
 
 #[test]
 fn backfill_run_pauses_broker_and_emits_one_resync() {
-    // Plan §7 + §9 PR 4 gate — backfill pause rail end-to-end:
+    // Plan §7 + §9 gate - backfill pause rail end-to-end:
     //
     // 1. ensure_app_schema + CREATE TABLE.
     // 2. Subscribe BEFORE the pause window so the subscription is
@@ -1709,7 +1709,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
 #[test]
 fn schema_pending_decoder_drops_then_resyncs() {
-    // Plan §7 + §16.7 + §9 PR 4 gate — schema-pending decoder rail
+    // Plan §7 + §16.7 + §9 gate - schema-pending decoder rail
     // end-to-end:
     //
     // 1. ensure_app_schema + CREATE TABLE.
@@ -1867,7 +1867,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
 }
 
 // ---------------------------------------------------------------------------
-// P2 tail — orchestrator-driven BrokerPauseGuard fence.
+// Orchestrator-driven BrokerPauseGuard fence.
 //
 // `backfill_run_pauses_broker_and_emits_one_resync` (above) exercises the
 // guard via `SqliteBackend::pause_broker_for_tests` — the test-helper
@@ -2003,25 +2003,22 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 }
 
 // ---------------------------------------------------------------------------
-// P3 PR 4 — SessionMinter integration tests.
+// SessionMinter integration tests.
 //
-// These pin the design §19 P3 gates against the SQLite arm of the
-// `SessionMinter` trait (see `crates/plugin-db/src/backend/sqlite/mod.rs`,
+// These pin the design §19 session-token gates against the SQLite arm
+// of the `SessionMinter` trait (see
+// `crates/plugin-db/src/backend/sqlite/mod.rs`,
 // `impl SessionMinter for SqliteBackend`). The trait + canonical
 // payload format are shared cross-backend; the PG arm exercises the
 // same gates via the `b8c_*` tests in `tests/integration.rs`.
 //
 // Every test below constructs `SqliteBackend::new_with_secrets(...)`
-// to bypass the env-var entry point — the secrets are deterministic
+// to bypass the env-var entry point - the secrets are deterministic
 // per test so a single `cargo test` invocation yields reproducible
 // HMAC signatures. The lone exception is `session_not_configured`,
 // which exercises the env-var-unset path via the plain `new(...)`
 // constructor; see the comment on that test for the isolation
 // rationale.
-//
-// Test count delta on this target: +8 (round-trip, replay, grace,
-// expired, invalid-sig, invalid-actor, nonce-too-short,
-// not-configured) plus +1 cross-backend payload-equivalence pin = +9.
 // ---------------------------------------------------------------------------
 
 use zeroship_plugin_db::backend::{SessionInit, SessionMinter};
@@ -2052,7 +2049,7 @@ fn backend_with_secrets(
 }
 
 /// Shorthand constructor for a SessionInit fixture exercising the
-/// new P3 `pid` field end-to-end.
+/// `pid` field end-to-end.
 fn fresh_init() -> SessionInit {
     SessionInit {
         app_id: "app_test".to_string(),
@@ -2074,7 +2071,7 @@ fn validation_code(err: &DbError) -> &str {
 
 #[test]
 fn session_token_round_trip() {
-    // P3 design §19 gate #1: a mint-then-init pair round-trips on the
+    // Design §19 gate #1: a mint-then-init pair round-trips on the
     // SQLite arm with a deterministic secret. The token's nonce
     // length (32), signature length (32 = HMAC-SHA256 output size),
     // and non-empty ISO timestamp are also pinned — these are the
@@ -2122,7 +2119,7 @@ fn session_token_round_trip() {
 
 #[test]
 fn session_replay_rejected() {
-    // P3 design §19 gate #2: presenting the same token twice
+    // Design §19 gate #2: presenting the same token twice
     // surfaces `session_nonce_replay`. The nonce cache is
     // `Rc<RefCell<NonceCache>>` on the backend; the second
     // `init_session` call lands on the same cache, hits the
@@ -2150,7 +2147,7 @@ fn session_replay_rejected() {
 
 #[test]
 fn session_grace_window() {
-    // P3 design §19 gate #3: a backend configured with
+    // Design §19 gate #3: a backend configured with
     // `secret = K_new, secret_prev = Some(K_old)` accepts tokens
     // signed under either key. A separate backend configured with
     // only `secret = K_new` (no prev) rejects the K_old-signed token
@@ -2324,7 +2321,7 @@ fn session_nonce_too_short() {
 
 #[test]
 fn session_not_configured() {
-    // Plan §11 Q-P3-H: a backend constructed via the env-var entry
+    // Plan §11: a backend constructed via the env-var entry
     // point (`SqliteBackend::new(...)`) without
     // `ZEROSHIP_SESSION_SECRET` set must defer the failure to first
     // mint, surfacing `DbError::Configuration { code: "not_configured" }`.
@@ -2456,10 +2453,10 @@ fn session_canonical_payload_byte_pin() {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 7 — SQLite VectorIndex (`sqlite-vec` `vec0` virtual table)
+// SQLite VectorIndex (`sqlite-vec` `vec0` virtual table)
 // integration tests.
 //
-// Supersedes the P4 PR 4 pure-Rust flat scan tests at the same point
+// Supersedes the earlier pure-Rust flat scan tests at the same point
 // in this file (see `docs/proposals/p4-search-implementation-plan.md`
 // §10 2026-05-24 reassessment). The membership-set assertions are
 // preserved byte-for-byte; only the underlying storage layer changed.
@@ -2867,24 +2864,24 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 5 — SQLite FullTextIndex (FTS5) + SpatialIndex (haversine) gates
+// SQLite FullTextIndex (FTS5) + SpatialIndex (haversine) gates
 // ---------------------------------------------------------------------------
 //
-// These tests target the new `FullTextIndex` / `SpatialIndex` impls on
+// These tests target the `FullTextIndex` / `SpatialIndex` impls on
 // `SqliteBackend`. The FTS path exercises the FTS5 vtable + AFTER
 // triggers (insert / update); the spatial path exercises the haversine
 // flat scan against `(lat, lng)` 16-byte BLOB payloads.
 //
-// Like the P4 PR 4 vector tests, we construct table DDL inline — the
+// Like the vector tests, we construct table DDL inline - the
 // orchestrator's column-DDL emitter is PG-flavoured today; a follow-up
-// PR will teach `register_model::apply` to dispatch by dialect via the
-// `sqlite_geopoint_column_ddl` / `sqlite_vector_column_ddl` helpers.
+// change will teach `register_model::apply` to dispatch by dialect via
+// the `sqlite_geopoint_column_ddl` / `sqlite_vector_column_ddl` helpers.
 
 use zeroship_plugin_db::backend::FullTextIndex;
 use zeroship_plugin_db::backend::SpatialIndex;
 use zeroship_plugin_db::backend::GeoPoint;
 
-/// **P4 PR 5 test gate** — `fts_search_matches_substring` (SQLite).
+/// **Test gate**: `fts_search_matches_substring` (SQLite).
 ///
 /// Inserts 5 rows whose `bio` column matches different keyword sets;
 /// asserts `fts_search("rust")` returns the membership set we expect
@@ -2987,7 +2984,7 @@ fn fts_search_matches_substring() {
     });
 }
 
-/// **P4 PR 5 test gate** — `fts_and_filter_compose` (SQLite).
+/// **Test gate**: `fts_and_filter_compose` (SQLite).
 ///
 /// FTS `MATCH` composed via `AND` with a regular column filter must
 /// intersect — assert the final set is exactly the rows matching both
@@ -3064,7 +3061,7 @@ fn fts_and_filter_compose() {
     });
 }
 
-/// **P4 PR 5 test gate** — `fts_trigger_keeps_index_in_sync_after_update`
+/// **Test gate**: `fts_trigger_keeps_index_in_sync_after_update`
 /// (SQLite).
 ///
 /// Insert a row, search for token "alpha" — must hit. Update the row
@@ -3190,7 +3187,7 @@ fn point_to_hex_lit(p: GeoPoint) -> String {
     hex
 }
 
-/// **P4 PR 5 test gate** — `near_returns_within_radius` (SQLite).
+/// **Test gate**: `near_returns_within_radius` (SQLite).
 ///
 /// 10 points around London at varying distances from the centre
 /// `(51.5074, -0.1278)`. `near()` with a 1km radius returns only the
@@ -3311,15 +3308,15 @@ fn near_returns_within_radius() {
 }
 
 // ===========================================================================
-// P5 PR 3 — `EncryptedColumn` impl on SqliteBackend
+// `EncryptedColumn` impl on SqliteBackend
 // ===========================================================================
 //
 // These tests exercise the full SQLite round-trip for `t.encrypted(...)`-
 // declared columns: env-var key sourcing through KeyStore, AES-GCM
-// encrypt with the right AAD shape (Camp A — row_pk in AAD for
+// encrypt with the right AAD shape (Camp A - row_pk in AAD for
 // Randomised, omitted for Deterministic), BLOB storage on disk via
-// rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite
-// at `tests/integration.rs` §"P5 PR 2 — `EncryptedColumn` impl".
+// rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite's
+// `EncryptedColumn` impl tests in `tests/integration.rs`.
 
 /// Helper: set a synthetic root key in `ZEROSHIP_COLUMN_KEY_<KEY>`
 /// for the duration of a test, restoring the previous value on drop.
@@ -3333,7 +3330,7 @@ struct EncEnv {
 impl EncEnv {
     fn set(name: &str, value: &str) -> Self {
         let prev = std::env::var(name).ok();
-        // SAFETY: each P5 SQLite test uses a uniquely-named env var
+        // SAFETY: each SQLite test uses a uniquely-named env var
         // (suffix carries the test fn name) so concurrent test runs
         // don't race on the process-global env table. The
         // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned.
@@ -4590,13 +4587,13 @@ const _procedures = { setup, seed, nestedCasUpdateMany };
     });
 }
 
-/// **P5 PR 3 — gate #1 (SQLite half)**: round-trip an encrypted string
+/// **Gate #1 (SQLite half)**: round-trip an encrypted string
 /// column under Randomised mode. Insert a row with `ssn` declared
 /// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite
 /// path, expect the plaintext to recover.
 ///
-/// Each P5 SQLite test uses a UNIQUE `keyId` so concurrent tests don't
-/// race on the process-global env table — the
+/// Each SQLite test uses a UNIQUE `keyId` so concurrent tests don't
+/// race on the process-global env table - the
 /// `ZEROSHIP_COLUMN_KEY_<KEYID>` namespace is per-key, so distinct
 /// `keyId`s give each test its own env-var slot. Same pattern as the
 /// in-crate `encryption::keys::tests` use.
@@ -4679,7 +4676,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
     });
 }
 
-/// **P5 PR 3 — gate #1 (SQLite half), deterministic variant**.
+/// **Gate #1 (SQLite half), deterministic variant**.
 #[test]
 fn encrypted_column_round_trip_sqlite_deterministic() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
@@ -4747,7 +4744,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
     });
 }
 
-/// **P5 PR 3 — gate #2 (SQLite half), CRITICAL #1 fence (SQLite half)**.
+/// **Gate #2 (SQLite half), CRITICAL #1 fence (SQLite half)**.
 ///
 /// Insert 100 rows under deterministic mode with five distinct plaintexts
 /// (so equality groups overlap), query by ciphertext equality, assert
@@ -4870,7 +4867,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
     });
 }
 
-/// **P5 PR 3 — §13 Camp A fence (SQLite half), mirror of the PG test
+/// **§13 Camp A fence (SQLite half), mirror of the PG test
 /// `encrypted_randomised_row_swap_rejected`**. Insert two Randomised
 /// rows; UPDATE swaps their ciphertexts; reading row B with row B's
 /// AAD must surface `encryption_aead_failed`. This is the load-bearing
@@ -4963,7 +4960,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
     });
 }
 
-/// **P5 PR 3 — cross-backend equivalence (SQLite ↔ SQLite via shared
+/// **Cross-backend equivalence (SQLite <-> SQLite via shared
 /// env-var key).** Encrypt plaintext on backend_a; copy the ciphertext
 /// bytes; decrypt on backend_b (different temp file) configured with
 /// the same `ZEROSHIP_COLUMN_KEY_DEFAULT`. Proves HKDF derivation is
@@ -5008,48 +5005,48 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 }
 
 // ===========================================================================
-// P5 PR 3.5 — close the SQLite CRUD-path gap
+// Close the SQLite CRUD-path gap
 // ===========================================================================
 //
-// PR 3 wired the `EncryptedColumn` trait on `SqliteBackend` and pinned
-// the trait surface with the round-trip tests above, but the
-// orchestrator's CRUD-path SQL builder still emitted PG-only
+// The `EncryptedColumn` trait is wired on `SqliteBackend` and the
+// trait surface is pinned by the round-trip tests above, but the
+// orchestrator's CRUD-path SQL builder used to emit PG-only
 // `decode($N, 'base64')::bytea` syntax for encrypted columns, so a
 // SQLite app with a `t.encrypted(...)` column on its schema surfaced
 // a typed `column_encryption_unavailable` error at the dispatch layer
-// rather than working. PR 3.5 closes that gap with a dialect-aware
-// bind: the SQL builder's encrypted-column placeholder is now
-// `decode($N, 'base64')::bytea` on PG (byte-for-byte identical to
-// PR 2) and a bare `$N` on SQLite, with the encryption pass tagging
-// the param value with `SQLITE_ENC_BLOB_PREFIX` so the SQLite session
-// actor decodes the base64 and binds raw bytes as BLOB.
+// rather than working. The gap is closed with a dialect-aware
+// bind: the SQL builder's encrypted-column placeholder is
+// `decode($N, 'base64')::bytea` on PG and a bare `$N` on SQLite, with
+// the encryption pass tagging the param value with
+// `SQLITE_ENC_BLOB_PREFIX` so the SQLite session actor decodes the
+// base64 and binds raw bytes as BLOB.
 //
 // This integration test stitches the layers end-to-end:
-//   1. `encrypt_row_on_write` (PR 2's helper) against the SQLite
-//      backend → row carries the base64 ciphertext + `__zsenc__<col>`
-//      marker.
-//   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` → SQL with
+//   1. `encrypt_row_on_write` (the encryption-pass helper) against the
+//      SQLite backend -> row carries the base64 ciphertext +
+//      `__zsenc__<col>` marker.
+//   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` -> SQL with
 //      bare `$N` placeholder + sentinel-tagged param.
-//   3. `backend.pool_exec(sql, &params)` → SQLite session strips the
+//   3. `backend.pool_exec(sql, &params)` -> SQLite session strips the
 //      sentinel, base64-decodes, binds BLOB.
-//   4. `client.query_typed("SELECT ssn FROM ...")` → raw bytes back.
+//   4. `client.query_typed("SELECT ssn FROM ...")` -> raw bytes back.
 //   5. Render the typed BLOB as `\xHHHH` hex (PG text-protocol shape),
-//      wrap in `Value::String`, dispatch to `decrypt_row_on_read` —
+//      wrap in `Value::String`, dispatch to `decrypt_row_on_read` -
 //      plaintext recovers.
 //
-// The "via the orchestrator's CRUD path" framing in the PR 3.5 plan is
-// what this test pins — the orchestrator's CRUD entry today routes
-// through `exec.rs::run_sql` which is PG-only, so we exercise the
-// underlying helpers in the same shape `dispatch_insert` /
+// This test pins the encrypted-column round-trip via the
+// orchestrator's CRUD path - the orchestrator's CRUD entry today
+// routes through `exec.rs::run_sql` which is PG-only, so we exercise
+// the underlying helpers in the same shape `dispatch_insert` /
 // `dispatch_find` will once the SQLite CRUD route lands. The
 // dialect-aware builder + sentinel-tagged bind is the load-bearing
 // piece this test proves correct.
 
-/// **P5 PR 3.5 — gate**: full encrypted-column round-trip through the
-/// SQLite CRUD pipeline (encryption pass → SQL builder w/ SQLite
-/// dialect → SQLite session bind → typed row decode → decrypt pass).
-/// This is the test that proves the end-to-end SDK works on SQLite for
-/// `t.encrypted(...)` columns.
+/// Full encrypted-column round-trip through the SQLite CRUD pipeline
+/// (encryption pass -> SQL builder w/ SQLite dialect -> SQLite session
+/// bind -> typed row decode -> decrypt pass). This is the test that
+/// proves the end-to-end SDK works on SQLite for `t.encrypted(...)`
+/// columns.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     use zeroship_plugin_db::backend::SqlExecutor as _;
@@ -5157,8 +5154,8 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         // Step 4 — pull the BLOB back typed. The session's `query`
         // surface stringifies BLOBs as `<N bytes blob>` placeholders, so
-        // we reach for the typed surface (PR 4's `query_typed` lane)
-        // via the session handle's `query_typed` helper.
+        // we reach for the typed surface via the session handle's
+        // `query_typed` helper.
         let typed = client
             .query_typed(
                 "SELECT id, ssn FROM \"app_demo\".\"users\" WHERE id = ?",
@@ -5221,7 +5218,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 }
 
 // ===========================================================================
-// P5.5 PR 2 — Path B sibling-column dual-write integration
+// Path B sibling-column dual-write integration
 // ===========================================================================
 //
 // Tests the end-to-end Path B contract on the SQLite arm:
@@ -5230,7 +5227,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 // (c) The masked sibling contains the pre-computed mask string while the
 //     parent stores the ciphertext / plaintext as before.
 
-/// **P5.5 PR 2 — DDL shape on SQLite**: `build_create_table_with_fks`
+/// **DDL shape on SQLite**: `build_create_table_with_fks`
 /// emits both the parent and a sibling `<col>_masked TEXT` column for
 /// every masked field. The SQLite arm receives the SQL
 /// byte-identical to PG; the sibling clause itself is standard SQL
@@ -5262,7 +5259,7 @@ fn sibling_column_emitted_for_masked_field_sqlite() {
     );
 }
 
-/// **P5.5 PR 2 — atomic dual-write on SQLite**: when a row carries
+/// **Atomic dual-write on SQLite**: when a row carries
 /// both the parent + sibling (mask pass already ran), the
 /// SQLite-flavoured `build_insert_with_dialect` INSERT statement
 /// includes both columns atomically. Then we execute the INSERT
@@ -5282,9 +5279,8 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // Hand-rolled SQLite-flavoured CREATE TABLE — the SQLite
         // CREATE TABLE dialect doesn't speak PG's SERIAL /
         // TIMESTAMPTZ; the orchestrator emits SQLite-flavoured DDL
-        // elsewhere. PR 2's responsibility is the sibling-column
-        // CLAUSE, which is standard SQL; we exercise it inside a
-        // SQLite-valid table here.
+        // elsewhere. The sibling-column CLAUSE emission is standard
+        // SQL; we exercise it inside a SQLite-valid table here.
         backend
             .pool_exec(
                 "CREATE TABLE \"app_demo\".\"users\" (\
@@ -5336,11 +5332,11 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
     });
 }
 
-/// **P5.5 PR 3 — aliased SELECT serves the masked sibling**: a default
+/// **Aliased SELECT serves the masked sibling**: a default
 /// read against a masked-column DDL must emit
 /// `"<col>_masked" AS "<col>"` in the SELECT clause and never include
 /// the parent (ciphertext / plaintext) column. End-to-end gate: drive a
-/// dual-write through the dialect-aware INSERT builder (PR 2), then
+/// dual-write through the dialect-aware INSERT builder, then
 /// build a `find` SQL via `build_find_with_schema` with the cached
 /// schema, run it through the SQLite session, and assert the engine
 /// returns the masked string under the parent key.
@@ -5370,9 +5366,9 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             .expect("CREATE TABLE ok");
 
         // Dual-write a row: parent stores plaintext (no encryption pass
-        // in this fixture — masking + encryption are orthogonal in
+        // in this fixture - masking + encryption are orthogonal in
         // `apply_mask_on_write` design), sibling stores the masked
-        // string. This is the row PR 2's dual-write produced.
+        // string. This is the row a dual-write produces.
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -5401,8 +5397,8 @@ fn aliased_select_serves_masked_sibling_sqlite() {
         // Build a default read with schema awareness: the SELECT must
         // alias the sibling under the parent name AND must NOT include
         // the parent column (`ssn`) directly. Verify the SQL shape
-        // BEFORE running the query — this is the load-bearing
-        // assertion PR 3 ships.
+        // BEFORE running the query - this is the load-bearing
+        // assertion this test pins.
         let bq = build_find_with_schema(
             "app_demo",
             "users",
@@ -5467,7 +5463,7 @@ fn aliased_select_serves_masked_sibling_sqlite() {
     });
 }
 
-/// **P5.5 PR 3 — kind: none preserves the P5 decrypt-on-read path**:
+/// **`kind: none` preserves the encryption decrypt-on-read path**:
 /// when a column declares `mask: { kind: "none" }`, the SELECT clause
 /// must emit the parent column directly (no AS-rewrite), and the row
 /// must surface the parent's value (the ciphertext / plaintext under
@@ -5516,11 +5512,11 @@ fn aliased_select_skips_kind_none_sqlite() {
     );
 }
 
-/// **P5.5 PR 2 — NOT NULL contract on the sibling**: omitting the
+/// **NOT NULL contract on the sibling**: omitting the
 /// sibling from an INSERT against a masked-column DDL must fail at the
 /// engine level (the sibling is `TEXT NOT NULL`). This is the
 /// load-bearing assertion that mask-pass must run before the SQL
-/// builder — skip it and the engine rejects with a NOT NULL violation.
+/// builder - skip it and the engine rejects with a NOT NULL violation.
 #[test]
 fn missing_sibling_fails_not_null_constraint_sqlite() {
     run(async {
@@ -5555,7 +5551,7 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
 }
 
 // ===========================================================================
-// P5 PR 5 — SQLite `Backup` impl (VACUUM INTO snapshot + atomic
+// SQLite `Backup` impl (VACUUM INTO snapshot + atomic
 // file-swap restore + `pitr_pg_only` refusal). Five tests covering the
 // gates in plan §11 + the CRITICAL #3 fence (concurrent writer):
 //
@@ -5576,13 +5572,13 @@ use zeroship_plugin_db::backend::{
     Backup as _, BusyPolicy as BackupBusyPolicy, PitrTarget, SnapshotOpts,
 };
 
-/// **P5 PR 5 — gate #4**: round-trip snapshot+restore on SQLite.
+/// **Gate #4**: round-trip snapshot+restore on SQLite.
 /// Insert N rows into a per-app collection; snapshot to a temp dir;
 /// raw `DROP TABLE` to clear rows; restore; assert the rows recovered.
 ///
-/// The dest URI uses the `file://` scheme (the only one PR 5 supports).
+/// The dest URI uses the `file://` scheme (the only one supported).
 /// We pick a destination INSIDE the backend's `db_dir` so the restore's
-/// `std::fs::copy → rename` swap lands on the same filesystem as the
+/// `std::fs::copy -> rename` swap lands on the same filesystem as the
 /// live per-app file (POSIX rename atomic-same-FS contract).
 #[test]
 fn snapshot_restore_round_trip_sqlite() {
@@ -5679,7 +5675,7 @@ fn snapshot_restore_round_trip_sqlite() {
     });
 }
 
-/// **P5 PR 5 — gate #5 / CRITICAL #3 fence**: VACUUM INTO under a
+/// **Gate #5 / CRITICAL #3 fence**: VACUUM INTO under a
 /// concurrent writer must be snapshot-isolated (the dest matches the
 /// commit point visible when VACUUM INTO began; writes appended
 /// during the copy do NOT land in the snapshot). We assert:
@@ -5839,7 +5835,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
     });
 }
 
-/// **P5 PR 5 — gate #6**: `pitr_replay` on SQLite returns the typed
+/// **Gate #6**: `pitr_replay` on SQLite returns the typed
 /// `Configuration { code: "pitr_pg_only" }` for both `Lsn` and
 /// `TimeMillis` targets. SQLite has no WAL-archive PITR substrate;
 /// the API surface must refuse cleanly so the SDK can branch.
@@ -5876,7 +5872,7 @@ fn pitr_pg_only_returns_configuration_on_sqlite() {
     });
 }
 
-/// **P5 PR 5**: when the per-app `register_model` advisory lock is
+/// When the per-app `register_model` advisory lock is
 /// already held in this process, `snapshot()` surfaces the typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
 /// indefinitely. Mirrors the PG arm's `snapshot_during_migration_returns_typed_error`
@@ -5952,7 +5948,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
     });
 }
 
-/// **P5 PR 5**: a `restore()` whose on-disk file has drifted from the
+/// A `restore()` whose on-disk file has drifted from the
 /// `SnapshotHandle`'s recorded SHA-256 must refuse with
 /// `Coded { code: "snapshot_hash_mismatch" }` BEFORE touching the
 /// live per-app DB. Pins the integrity-verify gate the restore path
@@ -6046,7 +6042,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P5.5 PR 1 — reserved-name validator (Path B sibling-column suffix +
+// The reserved-name validator (Path B sibling-column suffix +
 // classification taxonomy) refuses creator-declared collisions at the
 // DDL builder level on the SQLite arm. Two tests pin the same surface
 // the PG integration suite exercises so both backends agree on the
@@ -6090,7 +6086,7 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 }
 
 // ===========================================================================
-// P5.5 PR 4 — unmask RPC + audit table (SQLite arm)
+// Unmask RPC + audit table (SQLite arm)
 // ===========================================================================
 //
 // These tests exercise `crud::unmask::dispatch_unmask` end-to-end on the
@@ -6161,7 +6157,7 @@ async fn read_audit_rows(
         .collect()
 }
 
-/// **P5.5 PR 4 — gate #1**: an `auto` actor unmasking an encrypted +
+/// **Gate #1**: an `auto` actor unmasking an encrypted +
 /// masked column recovers plaintext, and a `granted` audit row is
 /// emitted with the right classification.
 #[test]
@@ -6252,7 +6248,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
     });
 }
 
-/// **P5.5 PR 4 — gate #2**: a `user`-kind actor is denied by the PR 4
+/// **Gate #2**: a `user`-kind actor is denied by the
 /// default-policy stub; a `denied` audit row is emitted; the typed
 /// error `unmask_not_permitted` reaches the caller.
 #[test]
@@ -6319,7 +6315,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     });
 }
 
-/// **P5.5 PR 4 — gate #3**: unmask of a column that has no mask
+/// **Gate #3**: unmask of a column that has no mask
 /// declaration on the cached schema returns the typed
 /// `unmask_column_not_masked` error. Pins the contract that the
 /// dispatcher refuses to leak plaintext through a "forged" RPC for
@@ -6355,7 +6351,7 @@ fn unmask_column_not_masked_returns_typed_error() {
     });
 }
 
-/// **P5.5 PR 4 — gate #4**: classification flows through to the audit
+/// **Gate #4**: classification flows through to the audit
 /// row regardless of outcome. We register a column with `classification:
 /// "phi"`, force the denied path (user actor), and assert the audit
 /// row's classification text matches.
@@ -6399,19 +6395,19 @@ fn unmask_writes_audit_row_with_correct_classification() {
 }
 
 // ===========================================================================
-// P5.5 PR 5 — defineMaskPolicy + per-app policy storage + real authorization
+// defineMaskPolicy + per-app policy storage + real authorization
 // ===========================================================================
 //
 // These tests exercise the policy-driven authorization path that replaces
-// PR 4's default-deny stub:
+// the default-deny stub:
 //
 //   - `setMaskPolicy` persists to `<db_dir>/mask_policies.json` (atomic
 //     write through `mask_policies.json.tmp + rename`).
 //   - The per-isolate cache picks the policy up write-through.
 //   - A subsequent `unmask` honours the policy: listed roles get their
 //     listed classifications; unlisted roles are denied.
-//   - When no policy is declared, PR 4's default-deny stub still applies
-//     (`auto` allowed; everyone else denied) — regression guard.
+//   - When no policy is declared, the default-deny stub still applies
+//     (`auto` allowed; everyone else denied) - regression guard.
 //   - Invalid classifications surface as
 //     `invalid_mask_classification` at the Rust validator (belt-and-
 //     braces with the SDK validator).
@@ -6434,7 +6430,7 @@ async fn policy_setup(
     (backend, dir)
 }
 
-/// **P5.5 PR 5 — gate #1**: a policy granting `user` access to `pii`
+/// **Gate #1**: a policy granting `user` access to `pii`
 /// allows a user-role actor to unmask a pii-classified column.
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
@@ -6523,7 +6519,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
     });
 }
 
-/// **P5.5 PR 5 — gate #2**: a policy granting `user` only `public` denies
+/// **Gate #2**: a policy granting `user` only `public` denies
 /// a user-role attempt to unmask a `pii`-classified column. The denied
 /// path emits an audit row.
 #[test]
@@ -6574,8 +6570,8 @@ fn unmask_with_user_role_not_in_policy_denied() {
     });
 }
 
-/// **P5.5 PR 5 — gate #3**: regression guard for the no-policy case.
-/// The default-deny stub from PR 4 still applies — `auto` allowed,
+/// **Gate #3**: regression guard for the no-policy case.
+/// The default-deny stub still applies: `auto` allowed,
 /// everyone else denied. Closes the "did we accidentally start
 /// allowing everything when no policy is declared" hole.
 #[test]
@@ -6617,7 +6613,7 @@ fn unmask_default_deny_when_no_policy() {
     });
 }
 
-/// **P5.5 PR 5 — gate #4**: invalid classification at the Rust validator.
+/// **Gate #4**: invalid classification at the Rust validator.
 /// The SDK's `defineMaskPolicy()` rejects at declare-time; the Rust
 /// validator catches anything that bypasses the SDK (forged RPC,
 /// untrusted client, future SDK drift). Both layers refuse with
@@ -6646,7 +6642,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
     });
 }
 
-/// **P5.5 PR 5 — gate #5**: a `setMaskPolicy` at runtime propagates to
+/// **Gate #5**: a `setMaskPolicy` at runtime propagates to
 /// the in-process cache; a subsequent `unmask` honours the new policy.
 /// Pins the write-through semantics.
 #[test]
@@ -6735,14 +6731,14 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 }
 
 // ===========================================================================
-// P5.5 PR 6 — mask backfill + rewrite + removal end-to-end on SQLite
+// Mask backfill + rewrite + removal end-to-end on SQLite
 // ===========================================================================
 //
 // These tests build a SQLite-shaped table by hand, INSERT rows, then
 // exercise the diff classifier + mask sentinel parse round-trip.
 // We can't drive the orchestrator's `register_model::apply` on SQLite
-// (PG-only today); the production-side equivalent for SQLite ships in
-// a later PR. The integration-level coverage these tests provide:
+// (PG-only today); the production-side equivalent for SQLite ships
+// separately. The integration-level coverage these tests provide:
 //
 // 1. The DDL emitter (`build_create_table_with_fks`) attaches the
 //    `/* __zsmask:... */` sentinel to the sibling column.
@@ -6751,8 +6747,8 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 // 3. The diff classifier sees the recovered metadata and emits no
 //    spurious ops on a stable-shape redeploy.
 
-/// **PR 6 — sentinel round-trip on SQLite**: emit a CREATE TABLE with
-/// a masked column → execute it → re-read via `introspect_schema` →
+/// **Sentinel round-trip on SQLite**: emit a CREATE TABLE with
+/// a masked column -> execute it -> re-read via `introspect_schema` ->
 /// the parent column carries `mask = Some({last4, spi})`.
 #[test]
 fn mask_addition_backfills_existing_rows_end_to_end() {
@@ -6799,8 +6795,8 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        // PR 6 only exercises the diff layer here — production
-        // backfill on SQLite ships in a later PR. We assert the diff
+        // This only exercises the diff layer here - production
+        // backfill on SQLite ships separately. We assert the diff
         // classifier emits the right shape AGAINST the live snapshot
         // we just produced.
         let live = backend.introspect_schema("app_demo").await.expect("introspect");
@@ -6912,9 +6908,9 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
     });
 }
 
-/// **PR 6b — kind change detected end-to-end on SQLite**: an existing
+/// **Kind change detected end-to-end on SQLite**: an existing
 /// masked column with `kind = full` rolls forward to `kind = last4`;
-/// the diff classifier emits a `MaskRewrite` op (no AddColumn — the
+/// the diff classifier emits a `MaskRewrite` op (no AddColumn - the
 /// sibling already exists).
 #[test]
 fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
@@ -6997,8 +6993,8 @@ fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
     });
 }
 
-/// **PR 6c — mask removal classified Destructive on SQLite**: live
-/// has mask, schema drops it → MaskRemove with `class = Destructive`,
+/// **Mask removal classified Destructive on SQLite**: live
+/// has mask, schema drops it -> MaskRemove with `class = Destructive`,
 /// which the validate stage refuses under `strictness=strict` /
 /// `lenient` and applies under `strictness=off`.
 #[test]
@@ -7051,7 +7047,7 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
     });
 }
 
-/// **PR 6 — malformed sentinel does not poison introspection** on
+/// **Malformed sentinel does not poison introspection** on
 /// SQLite: a sibling carrying a garbled sentinel parses to "no mask"
 /// on the parent (and a `tracing::warn!` fires; the test only checks
 /// the introspection shape).
@@ -7092,20 +7088,20 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 }
 
 // ===========================================================================
-// P5.5 PR 7 — drift detection + bulk unmask + per-query unmask hint
+// Drift detection + bulk unmask + per-query unmask hint
 // ===========================================================================
 //
-// These tests drive the new dispatch helpers end-to-end on a real
+// These tests drive the dispatch helpers end-to-end on a real
 // SQLite backend:
 //
-//   * `drift_end_to_end_seeded_mismatch_detected` — seed a row where
+//   * `drift_end_to_end_seeded_mismatch_detected` - seed a row where
 //     the sibling text does NOT match `apply_mask_kind(plaintext)`,
 //     run the drift sweep, and assert (1) the report flags the row,
 //     (2) one row lands in `__zeroship_audit_mask_drift`.
-//   * `bulk_unmask_end_to_end` — atomic auth + bulk decrypt + single
-//     audit row per call (the dispatch shape PR 7 ships for
-//     `db.users.bulkUnmask([...])`).
-//   * `per_query_unmask_hint_end_to_end` — wire-up gate for the
+//   * `bulk_unmask_end_to_end` - atomic auth + bulk decrypt + single
+//     audit row per call (the dispatch shape
+//     `db.users.bulkUnmask([...])` uses).
+//   * `per_query_unmask_hint_end_to_end` - wire-up gate for the
 //     `find(filter, { unmask: [...], actor })` hint. We can't
 //     stand up V8 here, so the test drives the lower-level
 //     `dispatch_unmask_for_query` directly against rows pre-wrapped
@@ -7113,9 +7109,9 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 
 use zeroship_plugin_db::crud::mask_drift;
 
-/// **PR 7 — drift gate #1**: seeded mismatch is detected + recorded.
+/// **Drift gate #1**: seeded mismatch is detected + recorded.
 ///
-/// The PR 2 dual-write contract ensures the sibling is correct on
+/// The dual-write contract ensures the sibling is correct on
 /// fresh INSERTs. To simulate drift we UPDATE the sibling out-of-band
 /// after the insert so the stored value differs from
 /// `apply_mask_kind(plaintext)`. The drift sweep MUST flag it.
@@ -7198,7 +7194,7 @@ fn drift_end_to_end_seeded_mismatch_detected() {
     });
 }
 
-/// **PR 7 — drift gate #2**: aligned siblings produce zero drift.
+/// **drift gate #2**: aligned siblings produce zero drift.
 #[test]
 fn drift_check_returns_zero_when_aligned() {
     let schema = serde_json::json!({
@@ -7249,7 +7245,7 @@ fn drift_check_returns_zero_when_aligned() {
     });
 }
 
-/// **PR 7 — drift gate #3**: a NULL sibling on a non-NULL parent is
+/// **drift gate #3**: a NULL sibling on a non-NULL parent is
 /// flagged as drift (the dual-write contract guarantees both null
 /// together OR both populated together — a sibling NULL on populated
 /// parent violates the invariant).
@@ -7296,7 +7292,7 @@ fn drift_check_handles_null_sibling_drift() {
     });
 }
 
-/// **PR 7 — drift gate #4**: plaintext-column drift (no encryption).
+/// **drift gate #4**: plaintext-column drift (no encryption).
 /// Identical setup to gate #1, but uses `last4` mask kind to pin
 /// the apply_mask_kind round-trip on a non-email transform.
 #[test]
@@ -7355,7 +7351,7 @@ fn drift_check_handles_plaintext_column() {
     });
 }
 
-/// **PR 7 — drift gate #5**: encrypted column drift detection. Builds
+/// **drift gate #5**: encrypted column drift detection. Builds
 /// the encrypted column via the production CRUD encryption pass so the
 /// ciphertext is genuine; then mutates the sibling out-of-band to
 /// simulate drift; then runs the drift check (which decrypts under
@@ -7442,7 +7438,7 @@ use zeroship_plugin_db::crud::unmask::{
     dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem,
 };
 
-/// **PR 7 — bulk gate #1**: authorised actor unmasks many columns
+/// **bulk gate #1**: authorised actor unmasks many columns
 /// across many rows in one call; the result map carries plaintext
 /// for every pair, and exactly ONE audit row lands.
 #[test]
@@ -7522,7 +7518,7 @@ fn bulk_unmask_end_to_end() {
     });
 }
 
-/// **PR 7 — bulk gate #2**: ANY unauthorised pair refuses the WHOLE
+/// **bulk gate #2**: ANY unauthorised pair refuses the WHOLE
 /// call (Q-MASK-F atomic). One audit row with outcome `denied`; no
 /// plaintext returned for the authorised pair either.
 #[test]
@@ -7592,7 +7588,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
     });
 }
 
-/// **PR 7 — bulk gate #3**: unknown column on the schema raises the
+/// **bulk gate #3**: unknown column on the schema raises the
 /// typed `unmask_column_not_masked` error BEFORE any audit row writes.
 #[test]
 fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
@@ -7638,7 +7634,7 @@ use zeroship_plugin_db::crud::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
 };
 
-/// **PR 7 — per-query gate #1**: an authorised actor with a query
+/// **per-query gate #1**: an authorised actor with a query
 /// hint sees plaintext in the listed columns; non-listed masked
 /// columns keep their `__zsmask__` wrapping.
 #[test]
@@ -7748,7 +7744,7 @@ fn per_query_unmask_hint_end_to_end() {
     });
 }
 
-/// **PR 7 — per-query gate #2**: an unauthorised actor REFUSES the
+/// **per-query gate #2**: an unauthorised actor REFUSES the
 /// query entirely; we do not silently degrade to masked-only.
 #[test]
 fn per_query_unmask_hint_rejects_unauthorized_actor() {
@@ -7791,7 +7787,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
     });
 }
 
-/// **PR 7 — per-query gate #3**: unknown column on the schema raises
+/// **per-query gate #3**: unknown column on the schema raises
 /// the typed `unmask_column_not_masked` error before any DB hit.
 #[test]
 fn per_query_unmask_hint_unknown_column_returns_typed_error() {
@@ -7828,7 +7824,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 }
 
 // ---------------------------------------------------------------------------
-// P7 PR 2 — system-field prefix + auto-indexes end-to-end on SQLite
+// System-field prefix + auto-indexes end-to-end on SQLite
 //
 // These tests exercise `build_create_table_with_fks_for_dialect(Sqlite)`
 // end-to-end: the emitter produces SQLite-flavoured DDL, the engine
@@ -7836,9 +7832,10 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 // and `PRAGMA table_info` / `sqlite_master` confirm the seven columns
 // and three indexes are present.
 //
-// The production register_model orchestrator is PG-only today — these
+// The production register_model orchestrator is PG-only today - these
 // tests drive the dialect emitter directly and `pool_exec` the result,
-// the same pattern PR 6 introspection tests use for SQLite.
+// the same pattern the introspection tests use for SQLite elsewhere in
+// this file.
 // ---------------------------------------------------------------------------
 
 /// `build_create_table_with_fks_for_dialect(Sqlite)` produces DDL the
@@ -7984,9 +7981,9 @@ fn freshly_registered_model_has_three_indexes_end_to_end() {
     });
 }
 
-/// **Deferred to PR 3** — the SDK INSERT auto-populate path (which
-/// supplies `id` + `created_at` etc. from the runtime) lands in PR 3.
-/// PR 2's responsibility is the DDL only, so this end-to-end test
+/// **Deferred**: the SDK INSERT auto-populate path (which
+/// supplies `id` + `created_at` etc. from the runtime) is out of
+/// scope here; only the DDL is exercised, so this end-to-end test
 /// supplies the system fields manually via a raw-SQL INSERT to confirm
 /// the emitted columns accept the canonical value shapes (TEXT id,
 /// CURRENT_TIMESTAMP defaults firing on omitted columns).
@@ -8024,9 +8021,9 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
                 .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
         }
 
-        // PR 2-era INSERT: supply only `id` (no SDK auto-populate yet
-        // — PR 3 wires that). The 3 NULL-able columns + 3 DEFAULT'd
-        // columns fill in from the engine.
+        // Raw INSERT: supply only `id` (no SDK auto-populate here).
+        // The 3 NULL-able columns + 3 DEFAULT'd columns fill in from
+        // the engine.
         backend
             .pool_exec(
                 "INSERT INTO \"app_demo\".\"posts\" (id) VALUES ('post_01')",
@@ -8061,7 +8058,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 }
 
 // ---------------------------------------------------------------------------
-// P7 PR 3 — INSERT auto-populates `id` + `created_by` / `updated_by`
+// INSERT auto-populates `id` + `created_by` / `updated_by`
 // ---------------------------------------------------------------------------
 
 /// End-to-end: the `apply_system_fields_on_insert` pass mints a typed_id
@@ -8176,7 +8173,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 }
 
 /// FK type cascade end-to-end: a `t.ref(...)` column now emits TEXT
-/// (not INTEGER per PR 1/2) so the column accepts typed_id string
+/// (not INTEGER) so the column accepts typed_id string
 /// values without storage-class mismatch.
 ///
 /// **Scope note**: the actual `FOREIGN KEY ... REFERENCES "app"."tbl"`
@@ -8184,8 +8181,8 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 /// CREATE TABLE parser refuses (a pre-existing PG-only path). This
 /// test stands up the posts table WITHOUT the FK clause (skipping the
 /// constraint with `FkEmission::Deferred` + empty existing set) and
-/// asserts the column TYPE is TEXT — which is the PR 3 cascade
-/// surface. End-to-end FK constraint validation on SQLite remains a
+/// asserts the column TYPE is TEXT - the FK type-cascade surface this
+/// test pins. End-to-end FK constraint validation on SQLite remains a
 /// PG-only path until the cross-app FK rework lands.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
@@ -8203,10 +8200,10 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             .expect("ensure_app_schema");
 
         // Stand up the posts table with an `authorId` ref column. The
-        // PR 3 cascade emits TEXT for the column type. We use
-        // `FkEmission::Deferred(empty)` so the FK clause is omitted —
+        // FK type cascade emits TEXT for the column type. We use
+        // `FkEmission::Deferred(empty)` so the FK clause is omitted -
         // SQLite refuses schema-qualified REFERENCES targets, a
-        // pre-existing PG-only path that PR 3 is not chartered to fix.
+        // pre-existing PG-only path this test does not attempt to fix.
         let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
         let posts_ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
@@ -8219,8 +8216,8 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             SqlDialect::Sqlite,
         )
         .expect("build posts DDL");
-        // Pin the FK column type to TEXT (PR 3 cascade — was INTEGER
-        // pre-PR 3).
+        // Pin the FK column type to TEXT (was INTEGER before the
+        // FK type cascade).
         assert!(
             posts_ddl.contains("\"authorId\" TEXT"),
             "expected TEXT FK column, got DDL: {posts_ddl}"
@@ -8236,12 +8233,13 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
                 .unwrap_or_else(|e| panic!("posts DDL: {trimmed}\n{e:?}"));
         }
 
-        // Insert a post whose authorId is a typed_id string. Pre-PR 3
-        // the column was INTEGER and a typed_id string would round-trip
-        // as the literal string under SQLite's permissive storage
-        // model but assert against the declared INTEGER affinity at
-        // introspection. Post-PR 3 the affinity is TEXT — no surprise
-        // on read-back.
+        // Insert a post whose authorId is a typed_id string. Before
+        // the FK type cascade the column was INTEGER and a typed_id
+        // string would round-trip as the literal string under
+        // SQLite's permissive storage model but assert against the
+        // declared INTEGER affinity at introspection. With the
+        // cascade applied the affinity is TEXT - no surprise on
+        // read-back.
         let mut post_doc = serde_json::json!({
             "title": "fk-ok",
             "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
@@ -8279,7 +8277,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P7 PR 4 — UPDATE auto-bumps version + updated_at + optimistic concurrency
+// UPDATE auto-bumps version + updated_at + optimistic concurrency
 // ---------------------------------------------------------------------------
 
 /// End-to-end: an UPDATE built via `build_update_one_with_system_fields`
@@ -8330,7 +8328,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         let client = backend.acquire_dedicated_client().await.unwrap();
         client.query(&ins.sql, &ins_params).await.expect("INSERT");
 
-        // UPDATE via PR 4 builder.
+        // UPDATE via the system-fields-aware builder.
         let filter = serde_json::json!({ "id": "post_v1bump" });
         let update = serde_json::json!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
@@ -8678,12 +8676,12 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P7 PR 5 — delete becomes soft-delete; add purge + restore; find auto-
-// filters deleted_at
+// Delete becomes soft-delete; add purge + restore; find auto-filters
+// deleted_at
 //
 // We use the `_many` builders on the SQLite arm because the `_one`
 // builders narrow via the PG-flavoured `ctid` subquery (SQLite doesn't
-// carry `ctid`); the PR4 UPDATE e2e tests follow the same convention.
+// carry `ctid`); the UPDATE e2e tests above follow the same convention.
 // Filter is narrowed to a single id so the multi-row builder still
 // touches exactly one row in practice.
 // ---------------------------------------------------------------------------
@@ -9235,7 +9233,7 @@ fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P9 PR 3 — nested-transaction SAVEPOINT SQL validated against the SQLite
+// Nested-transaction SAVEPOINT SQL validated against the SQLite
 // engine.
 //
 // The native `Db.transaction(fn)` orchestrator now drives SQLite through
@@ -9360,13 +9358,13 @@ fn nested_savepoint_release_keeps_both_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// P6b — the SQLite dev tier auto-migrates through the HARDENED MIGRATION ENGINE.
+// The SQLite dev tier auto-migrates through the HARDENED MIGRATION ENGINE.
 // On the PG dialect `registerModel` applies no DDL (the engine owns the schema at
 // deploy); on SQLite (dev) `registerModel` drives `run_sqlite_via_engine` (the
 // retired `run_sqlite_pipeline` is gone). This test drives the EXACT production
 // dialect dispatch (`exec_register_model` via `..._via_dispatch_for_tests`) with
 // a SQLite backend installed in the per-isolate context, and asserts the table
-// is auto-created AND journaled in `zs-<app>.migrations.sqlite` — proving the
+// is auto-created AND journaled in `zs-<app>.migrations.sqlite` - proving the
 // engine path applies the declared schema end-to-end.
 // ---------------------------------------------------------------------------
 #[test]
@@ -9423,7 +9421,7 @@ fn p5_sqlite_register_model_still_auto_migrates() {
              sqlite_master rows: {rows:?}"
         );
 
-        // P6b PROOF: the migration is JOURNALED in zs-<app>.migrations.sqlite (a
+        // PROOF: the migration is JOURNALED in zs-<app>.migrations.sqlite (a
         // real versioned journal the old run_sqlite_pipeline never wrote). The
         // engine wrote a `completed` row to `_mig.schema_migrations` in the app's
         // migrations file; verify the file exists and carries a completed row.
@@ -9453,7 +9451,7 @@ fn p5_sqlite_register_model_still_auto_migrates() {
 }
 
 // ---------------------------------------------------------------------------
-// P6b BARRIER (critical) — the cold-path first `env.db` touch triggers the
+// Barrier (critical): the cold-path first `env.db` touch triggers the
 // migration on the hardened backend B, B is dropped, A re-ATTACHes, and the
 // SUBSEQUENT CRUD on connection A sees the FULLY-MIGRATED schema (no stale
 // schema-cache, no missing table). This proves the single-owner window + the
@@ -9510,7 +9508,7 @@ fn p6b_barrier_crud_on_a_sees_the_fully_migrated_schema() {
 }
 
 // ---------------------------------------------------------------------------
-// P6b DESTRUCTIVE applies in dev — a schema change that DROPS a column ACTUALLY
+// Destructive applies in dev: a schema change that DROPS a column ACTUALLY
 // applies on SQLite in dev (auto-approved), data preserved per the 12-step
 // rebuild. Contrast the OLD silent-skip (`apply_sqlite` `continue`d on
 // destructive ops, so a DROP COLUMN was ignored and the dev DB diverged).
@@ -9548,9 +9546,9 @@ fn p6b_destructive_drop_column_actually_applies_in_dev() {
 
         // The schema cache the dispatch stamped lets `cached_schemas_for_app`
         // round-trip; mark v1 registered is implicit via dispatch. Re-register
-        // the SAME collection with `legacy_flag` REMOVED — a destructive DROP
+        // the SAME collection with `legacy_flag` REMOVED - a destructive DROP
         // COLUMN that the engine reconciles via a 12-step rebuild (auto-approved
-        // in dev). Pre-P6b this was SILENTLY SKIPPED.
+        // in dev). Previously this was SILENTLY SKIPPED.
         let v2 = serde_json::json!({
             "_meta": {"strictness": "lenient"},
             "label": {"type": "string", "required": true},
@@ -9593,7 +9591,7 @@ fn p6b_destructive_drop_column_actually_applies_in_dev() {
 }
 
 // ---------------------------------------------------------------------------
-// P6b BASELINE adoption (H3) — an existing app file with tables but an EMPTY
+// Baseline adoption (H3): an existing app file with tables but an EMPTY
 // `_mig` journal (the run_sqlite_pipeline legacy shape) is ADOPTED by the engine
 // on first boot: it baselines the live schema (no re-create, no drift abort),
 // then an additive deploy works. We simulate the legacy file by creating the app

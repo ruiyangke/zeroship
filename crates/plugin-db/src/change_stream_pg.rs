@@ -1,15 +1,13 @@
 //! PG-side [`crate::backend::ChangeStream`] adapter — the thin wrapper
 //! that re-routes `replication::ensure_publication_and_slot` +
-//! `wal_consumer::run_supervised` through the trait surface introduced
-//! in **P2 PR 1**.
+//! `wal_consumer::run_supervised` through the trait surface.
 //!
 //! Source plan: `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-//! §2.5, §9 PR 1.
+//! §2.5, §9.
 //!
-//! **PR 1 is a mechanical refactor.** PG behaviour is unchanged: this
-//! adapter wraps the same calls the orchestrator made directly from
-//! `replication_ops.rs` before P2; the dispatcher just routes through
-//! one extra fn. Every existing PG CDC test passes unchanged.
+//! This adapter wraps the same calls the orchestrator previously made
+//! directly from `replication_ops.rs`; the dispatcher just routes
+//! through one extra fn.
 //!
 //! **Why an adapter, not a direct `impl ChangeStream for PostgresBackend`**
 //! — the `provision`/`deprovision` paths reach for the
@@ -18,9 +16,9 @@
 //! through a borrowed-reference wrapper than through extra accessor
 //! methods on `PostgresBackend`; it also keeps the `ChangeStream` impl
 //! co-located with the WAL-consumer plumbing it routes to. The SQLite
-//! peer (`crate::backend::sqlite::cdc::SqliteChangeStream`, PR 2 onward)
-//! follows the same shape for the same reasons (session-actor
-//! ownership lives next to the impl).
+//! peer (`crate::backend::sqlite::cdc::SqliteChangeStream`) follows the
+//! same shape for the same reasons (session-actor ownership lives next
+//! to the impl).
 
 use std::rc::Rc;
 
@@ -28,19 +26,18 @@ use crate::backend::postgres::PostgresBackend;
 use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
 use crate::error::DbError;
 
-/// Handle returned by [`PgChangeStream::spawn_consumer`]. **PR 1**:
-/// a unit struct — the existing
-/// `compio::runtime::spawn(...).detach()` shape in
+/// Handle returned by [`PgChangeStream::spawn_consumer`]: a unit
+/// struct - the `compio::runtime::spawn(...).detach()` shape in
 /// `replication_ops::start_replication_consumer_dispatch` does not
 /// hand back a join handle (the supervisor exits cleanly on CopyDone
 /// or a fatal error and there is nowhere to await it). The unit
-/// struct exists so future PRs can swap in a real handle without
+/// struct exists so a real handle can be swapped in later without
 /// re-shaping the [`ChangeStream`] surface.
 ///
-/// PR 4 may upgrade this to carry the `app_id` + a shutdown signal
-/// so explicit teardown becomes possible (matching the SQLite-side
-/// session-actor model). PR 1 ships the minimal shape that makes
-/// the trait surface stable across both arms.
+/// Carrying the `app_id` + a shutdown signal here would make explicit
+/// teardown possible (matching the SQLite-side session-actor model);
+/// the minimal shape is what keeps the trait surface stable across
+/// both arms.
 #[derive(Debug)]
 pub struct WalConsumerHandle {
     /// The app id the consumer was spawned for. Carried so a future
@@ -62,12 +59,11 @@ pub struct WalConsumerHandle {
 /// Rc-clone is cheap (one pointer-increment) and pairs with the same
 /// shape `BackendHandle` already uses.
 ///
-/// **`#[allow(dead_code)]` on `backend`**: PR 1 only calls
-/// `spawn_consumer` from the existing dispatcher (a no-op marker —
-/// see the method's rustdoc) so `provision` (the only consumer of
-/// `self.backend.pool()`) is dead from rustc's perspective until
-/// PR 4 lands the migrations / register-model call sites. Removing
-/// the allow once those callers exist.
+/// **`#[allow(dead_code)]` on `backend`**: the dispatcher only calls
+/// `spawn_consumer` (a no-op - see the method's rustdoc), so
+/// `provision` (the only consumer of `self.backend.pool()`) is dead
+/// from rustc's perspective until the migrations / register-model call
+/// sites route through this adapter. Drop the allow once they do.
 pub struct PgChangeStream {
     #[allow(dead_code)]
     backend: Rc<PostgresBackend>,
@@ -99,12 +95,12 @@ impl ChangeStream for PgChangeStream {
     /// slot for `app_id`. Routes through
     /// [`crate::replication::ensure_publication_and_slot`] — the same
     /// helper `replication_ops::replication_setup_dispatch` /
-    /// `start_replication_consumer_dispatch` called directly before
-    /// PR 1. Returns `Ok(())` on success; the typed `SetupOutcome`
+    /// `start_replication_consumer_dispatch` previously called
+    /// directly. Returns `Ok(())` on success; the typed `SetupOutcome`
     /// returned by the underlying helper is discarded here because
     /// the [`ChangeStream::provision`] contract is "provisioned" /
-    /// "failed", not "what LSN are we at" (PR 4+ can re-introduce
-    /// the LSN if any caller needs it).
+    /// "failed", not "what LSN are we at" (the LSN can be
+    /// re-introduced if any caller needs it).
     async fn provision(&self, app_id: &str) -> Result<(), DbError> {
         let _outcome =
             crate::replication::ensure_publication_and_slot(self.backend.pool(), app_id)
@@ -115,7 +111,7 @@ impl ChangeStream for PgChangeStream {
     /// Idempotently tear down CDC state for `app_id` — the §17.7 PG
     /// drop-namespace teardown for THIS worker's slot + publication.
     ///
-    /// **P6a-3**: routes through
+    /// Routes through
     /// [`crate::replication::drop_publication_and_slot`], which runs the
     /// §17.7 PG order: force the slot inactive
     /// (`pg_terminate_backend` against the listed backend after the
@@ -138,8 +134,7 @@ impl ChangeStream for PgChangeStream {
 
     /// Spawn the supervised WAL consumer for `app_id`.
     ///
-    /// **PR 1 mechanical-refactor scope**: this method does NOT spawn
-    /// anything today. The existing call site
+    /// This method does NOT spawn anything today. The call site
     /// ([`crate::replication_ops::start_replication_consumer_dispatch`])
     /// keeps the `compio::runtime::spawn` + `ConsumerRunningGuard`
     /// claim on its own side because the guard's atomic try-mark /
@@ -151,42 +146,40 @@ impl ChangeStream for PgChangeStream {
     /// signature to `Result<impl Future<Output = ()>, DbError>`,
     /// which doesn't fit the `Self::ConsumerHandle` shape).
     ///
-    /// PR 1 ships the trait surface and the new indirection without
-    /// changing PG behaviour: the dispatcher continues to call
+    /// The trait surface and the indirection exist without changing PG
+    /// behaviour: the dispatcher continues to call
     /// `replication::ensure_publication_and_slot` directly (it needs
     /// the `SetupOutcome` for both the `with_start_lsn(...)` argument
     /// and the JS response envelope's `confirmed_flush_lsn` field)
     /// and continues to own the `compio::runtime::spawn(run_supervised)`
     /// + `ConsumerRunningGuard` block. The dispatcher additionally
-    /// calls `change_stream().spawn_consumer(app_id)` so the new
-    /// indirection is wired through — that call is the no-op marker
-    /// proving the trait is reachable from the consumer's
-    /// `BackendHandle`-routed call shape.
+    /// calls `change_stream().spawn_consumer(app_id)` so the
+    /// indirection is wired through - that call proves the trait is
+    /// reachable from the consumer's `BackendHandle`-routed call
+    /// shape.
     ///
-    /// **PR 4** (suppression-rail integration) is where the spawn
-    /// itself migrates into this method: the broker-pause /
-    /// schema-pending plumbing needs the guard lifetime to wrap the
-    /// spawned task, so the natural home is here.
+    /// Migrating the spawn itself into this method is the natural next
+    /// step: the broker-pause / schema-pending plumbing needs the
+    /// guard lifetime to wrap the spawned task, so this is where it
+    /// belongs.
     async fn spawn_consumer(&self, app_id: &str) -> Result<Self::ConsumerHandle, DbError> {
-        // PR 1 marker — no `provision`, no spawn. See rustdoc above
-        // for why. The handle exists so the trait surface is stable
-        // across PR boundaries.
+        // No `provision`, no spawn. See rustdoc above for why. The
+        // handle exists so the trait surface stays stable.
         Ok(WalConsumerHandle {
             _app_id: app_id.to_string(),
         })
     }
 
-    /// Return a [`BrokerPauseGuard`] for `app_id`. **PR 1**: the
-    /// guard's `Drop` is a no-op (see the trait doc comment); PR 4
-    /// wires it through `wal_consumer::suppress_app`.
+    /// Return a [`BrokerPauseGuard`] for `app_id`. Construction
+    /// suppresses the app via `wal_consumer::suppress_app`; the
+    /// guard's `Drop` unsuppresses and emits a resync.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
         BrokerPauseGuard::new(app_id.to_string())
     }
 
-    /// Return a [`SchemaPendingGuard`] for `app_id`. **PR 1**: the
-    /// guard's `Drop` is a no-op (see the trait doc comment); PR 4
-    /// wires it through the broker's `schema_pending_apps` set +
-    /// `resume_app_with_resync`.
+    /// Return a [`SchemaPendingGuard`] for `app_id`. Construction adds
+    /// the app to the broker's `schema_pending_apps` set; the guard's
+    /// `Drop` clears it and calls `resume_app_with_resync`.
     fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard {
         SchemaPendingGuard::new(app_id.to_string())
     }
@@ -196,4 +189,4 @@ impl ChangeStream for PgChangeStream {
 // PgChangeStream` live in `crate::backend::tests` alongside the rest of
 // the `assert_postgres_backend_impls_*` family. Folding them into the
 // existing `compile_time_assertions_link` test keeps the lib-test
-// count stable (PR 1 is a mechanical refactor — no new tests).
+// count stable.

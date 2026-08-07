@@ -1,10 +1,10 @@
-//! Read-set capture + predicate evaluation — Phase 8b (P8b).
+//! Read-set capture + predicate evaluation.
 //!
-//! P8a + P8a.2 shipped the broker and the cross-worker WAL consumer
-//! with **coarse-grained** delivery: every subscription on
+//! Without a read-set, the broker and the cross-worker WAL consumer
+//! deliver **coarse-grained**: every subscription on
 //! `(app_id, collection)` receives every change to that collection.
-//! P8b narrows the delivery to "only events whose row actually matches
-//! the subscription's filter".
+//! This module narrows the delivery to "only events whose row actually
+//! matches the subscription's filter".
 //!
 //! ## What a read-set is
 //!
@@ -27,7 +27,7 @@
 //!
 //! `predicate == None` (a missing or unsupported filter shape) means
 //! "match every row in the collection" — equivalent to the coarse-grained
-//! P8a behaviour. Subscribers that use `$or`, `$nor`, JSON path operators,
+//! default. Subscribers that use `$or`, `$nor`, JSON path operators,
 //! or any other shape we don't normalise fall back to this safe default.
 //!
 //! ## Capture site
@@ -232,7 +232,7 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
     let mut conjuncts: Vec<Conjunct> = Vec::with_capacity(map.len());
     for (key, value) in map {
         if key.starts_with('$') {
-            // Top-level operator. P8b doesn't decompose these. $and on
+            // Top-level operator. This does not decompose these. $and on
             // a flat list of bare conjuncts could in principle be
             // unrolled, but it's a rare shape from real apps; fall
             // back coarse-grained to keep the code small.

@@ -9,8 +9,7 @@
 //!   `name`: subsequent calls for the same `name` return the same
 //!   `Collection` JS object (`env.db.collection("users") ===
 //!   env.db.collection("users")` holds).
-//! - `transaction(fn, opts?)` — the native transaction orchestrator
-//!   (P9 PR 3).
+//! - `transaction(fn, opts?)` — the native transaction orchestrator.
 //!
 //! Per-collection CRUD lives on the `Collection` wrapper, not here —
 //! every `find` / `insert` / `update` / `delete` etc. is a
@@ -73,8 +72,8 @@ pub struct Db {
     /// calls return the same Global so identity holds:
     /// `env.db.collection("users") === env.db.collection("users")`.
     pub(crate) collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
-    // **P9 PR 4** — the `migrations` / `replication` namespace caches
-    // moved to `DbPlatform` (they're reached via `__platform.migrations`
+    // The `migrations` / `replication` namespace caches live on
+    // `DbPlatform` (they're reached via `__platform.migrations`
     // / `__platform.replication`, not `env.db.*`). The `DbPlatform`
     // instance itself is stashed on this wrapper under the `ZS_PLATFORM`
     // private symbol (set in `mint_db`), not as a struct field — its
@@ -140,12 +139,12 @@ impl Db {
         }
     }
 
-    // **P9 PR 4** — `db.registerModel` moved to
-    // `DbPlatform::register_model` (reached via `__platform`, not
-    // `env.db`). The `register_model_dispatch` pipeline is unchanged.
+    // `db.registerModel` moved to `DbPlatform::register_model` (reached
+    // via `__platform`, not `env.db`). The `register_model_dispatch`
+    // pipeline is unchanged.
 
     /// `db.transaction(asyncFn, opts?)` — run `asyncFn` inside a
-    /// transaction (P9 PR 3).
+    /// transaction.
     ///
     /// This is the native orchestrator behind the creator-facing
     /// `await env.db.transaction(async tx => { ... })`. `asyncFn` is
@@ -204,19 +203,18 @@ impl Db {
         Ok(transaction_dispatch(scope, user_fn, isolation, self.app_id.clone()).into())
     }
 
-    // **P9 PR 4** — `db.startReplicationConsumer`, `db.setMaskPolicy`,
-    // and the `db.replication` getter moved to `DbPlatform` (reached
-    // via the `__platform` capability handle, not `env.db`). Their
-    // dispatch pipelines (`start_replication_consumer_dispatch`,
+    // `db.startReplicationConsumer`, `db.setMaskPolicy`, and the
+    // `db.replication` getter moved to `DbPlatform` (reached via the
+    // `__platform` capability handle, not `env.db`). Their dispatch
+    // pipelines (`start_replication_consumer_dispatch`,
     // `dispatch_set_mask_policy_field`, `mint_replication`) are
     // unchanged — only the JS carrier relocated.
     //
-    // **P9 PR 2** — `db.unmaskField` / `db.bulkUnmaskFields` had already
-    // moved to `Collection.unmaskField` / `.bulkUnmask` +
-    // `MaskedValue.unmask`.
+    // `db.unmaskField` / `db.bulkUnmaskFields` moved to
+    // `Collection.unmaskField` / `.bulkUnmask` + `MaskedValue.unmask`.
 
-    /// `env.db.__platform` (string access) — **actively refused** (P9
-    /// §8). The real `DbPlatform` capability handle lives under the
+    /// `env.db.__platform` (string access) — **actively refused**. The
+    /// real `DbPlatform` capability handle lives under the
     /// `ZS_PLATFORM` private symbol, not under any string-named
     /// property, so a creator reading `env.db.__platform` hits this trap
     /// and gets a typed `platform_internal_only` error rather than the
@@ -268,7 +266,7 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
 /// delete this helper (and its tests) — making the regression visible
 /// in review.
 ///
-/// **P9 PR 4** — `startReplicationConsumer` moved to
+/// `startReplicationConsumer` moved to
 /// [`super::db_platform::DbPlatform`]; this helper stays here (its
 /// `consumer_app_id_*` unit tests live in this module) and is called by
 /// `DbPlatform::start_replication_consumer` via
@@ -321,9 +319,9 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value.
 ///
-/// **P9 PR 4** — before returning, this also mints a [`DbPlatform`]
+/// Before returning, this also mints a [`DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the
-/// `Db` object under the `ZS_PLATFORM` private symbol (§8). The handle
+/// `Db` object under the `ZS_PLATFORM` private symbol. The handle
 /// holds the platform-internal callables (`registerModel`,
 /// `setMaskPolicy`, `startReplicationConsumer`, `migrations`,
 /// `replication`); it is unreachable from creator JS (a `v8::Private`
@@ -334,7 +332,7 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    // **T6** — stamp this app's deploy/schema-version token into the per-isolate
+    // Stamp this app's deploy/schema-version token into the per-isolate
     // DB context. The worker injects the app's `deploy_hash` as the
     // `ZEROSHIP_DEPLOY_ID` env var at load (see `worker::cache::load_app`); a
     // redeploy that changes the hash re-mints this wrapper, re-stamping the new
@@ -385,7 +383,7 @@ pub fn mint_db<'s>(
     );
     std::mem::forget(weak);
 
-    // **P9 PR 4** — mint the platform capability handle and stash it on
+    // Mint the platform capability handle and stash it on
     // the Db object under the `ZS_PLATFORM` private symbol. A failure to
     // mint the handle is non-fatal: the Db is still usable for the public
     // `collection` / `transaction` surface; `__platform` resolution
@@ -408,7 +406,7 @@ pub fn mint_db<'s>(
 #[cfg(test)]
 mod tests {
     //! Regression guards for the cross-app replication-consumer
-    //! hijack fix (security review r2, 2026-05-22). Prior to the fix,
+    //! hijack fix. Prior to the fix,
     //! `Db::start_replication_consumer` accepted a string `opts`
     //! argument and used it as an app-id override, letting App A
     //! spawn a WAL consumer reading any victim app's WAL stream. The

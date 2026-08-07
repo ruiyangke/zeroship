@@ -1,6 +1,6 @@
 //! SQLite-side error mapping.
 //!
-//! **P1 PR 2** lights this up: a SQLSTATE-equivalent switch over
+//! This module implements a SQLSTATE-equivalent switch over
 //! `rusqlite::Error` produces typed [`DbError`] variants whose
 //! `.code` matches the PG-side codes the SDK already branches on
 //! (`unique_violation`, `fk_violation`, `not_null_violation`,

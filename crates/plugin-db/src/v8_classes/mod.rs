@@ -7,15 +7,15 @@
 //!   returning a `Collection` v8_class wrapper, plus the native
 //!   `transaction(fn)` orchestrator. The platform-internal entry points
 //!   (`registerModel`, `setMaskPolicy`, `startReplicationConsumer`,
-//!   `replication`) moved to [`db_platform`] in P9 PR 4.
-//! - [`db_platform`] — **P9 PR 4**: `DbPlatform`, the capability handle
+//!   `replication`) moved to [`db_platform`].
+//! - [`db_platform`] — `DbPlatform`, the capability handle
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
 //!   platform-internal callables; unreachable from creator JS.
 //! - [`collection`] — per-collection CRUD. Each method walks its
 //!   `v8::Local<Value>` args directly into a `serde_json::Value` via
 //!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
 //!   calls a shared `crud::dispatch_*` helper.
-//! - [`transaction`] — **P9 PR 3**: hosts `mint_tx_view`, the
+//! - [`transaction`] — hosts `mint_tx_view`, the
 //!   collections-only object handed to a `Db.transaction(fn)` callback.
 //!   The `Transaction` v8_class (`commit`/`rollback`/`collection` +
 //!   GC-auto-rollback) is gone; transaction orchestration lives entirely
@@ -23,8 +23,8 @@
 //!   collections routes through the open transaction connection
 //!   (`IsolateDbContext::tx_conn`) automatically, since the orchestrator
 //!   sets that slot for the transaction's duration.
-//! - [`subscription`] — `env.db.<collection>.openSubscription()` (P9 PR 1:
-//!   the duplicate `env.db.openSubscription(name)` entry was removed)
+//! - [`subscription`] — `env.db.<collection>.openSubscription()` (the
+//!   duplicate `env.db.openSubscription(name)` entry was removed)
 //!   returns a `Subscription` wrapper. GC finalizer closes the broker
 //!   entry so callers that drop the wrapper without `.close()` still release
 //!   the slot.

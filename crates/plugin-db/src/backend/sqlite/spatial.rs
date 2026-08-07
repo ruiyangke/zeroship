@@ -1,8 +1,8 @@
 //! SQLite spatial helpers — haversine within-radius math + `geoPoint`
 //! BLOB packing.
 //!
-//! **P4 PR 5** (`docs/proposals/p4-search-implementation-plan.md` §4.3
-//! + §8 PR 5). This module owns the cryptography-of-math: the
+//! See `docs/proposals/p4-search-implementation-plan.md` §4.3 + §8.
+//! This module owns the cryptography-of-math: the
 //! haversine distance function (great-circle metres on a spherical
 //! Earth approximation), the `(lat, lng)` ↔ `BLOB` round-trip
 //! (`f64 × 2` little-endian = 16 bytes), and the column-DDL emitter
@@ -36,7 +36,7 @@
 //! Same little-endian assumption as `vector.rs`: every platform the
 //! workspace targets is LE, so `f64::to_le_bytes` / `from_le_bytes`
 //! is the canonical layout. A big-endian target would silently swap
-//! the byte order on read — out of scope for P4.
+//! the byte order on read — this module does not handle that case.
 
 use crate::backend::GeoPoint;
 use crate::error::DbError;

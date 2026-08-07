@@ -4,12 +4,12 @@
 //!
 //! # Why this exists
 //!
-//! Before P6b the SQLite dev tier ran a stateless, additive-only,
+//! Previously the SQLite dev tier ran a stateless, additive-only,
 //! journal-less diff (`run_sqlite_pipeline` + `apply_sqlite`). That path
 //! **silently skipped destructive ops** and had no versioning / journal /
-//! rollback / drift / 12-step rebuild. The engine (P1–P6a) is the
-//! security-first migrator the platform builds and runs everywhere; P6b wires
-//! the dev tier into it so dev gains a real `_mig` journal, destructive ops
+//! rollback / drift / 12-step rebuild. The engine is the
+//! security-first migrator the platform builds and runs everywhere; wiring
+//! the dev tier into it gives dev a real `_mig` journal, destructive ops
 //! that *actually apply* (auto-approved on the operator's own local file), and
 //! the 12-step rebuild for type/rename changes.
 //!
@@ -25,7 +25,7 @@
 //! ```text
 //! run_sqlite_via_engine(app_id, …):
 //!   1. open B on (db_dir/zs-<app>.sqlite, …migrations.sqlite)
-//!   2. ensure journal + baseline-if-needed (H3 adoption)
+//!   2. ensure journal + baseline-if-needed
 //!   3. plan_declarative(Sqlite) + apply via the engine  ← B owns the file
 //!   4. drop B  (releases B's main+_mig handles)
 //!   5. A.ensure_app_schema  → ATTACH zs-<app>.sqlite     ← A opens AFTER B is gone
@@ -53,7 +53,7 @@
 //! pass `Approval::Approved` — a developer's `DROP COLUMN` / type-narrow in
 //! `schema.ts` just applies (data preserved per the 12-step rebuild), contrast
 //! the old silent-skip. This is structurally safe in prod: the worker
-//! hard-aborts on a SQLite DSN (P6b-1), so this whole arm is unreachable there.
+//! hard-aborts on a SQLite DSN, so this whole arm is unreachable there.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -101,7 +101,7 @@ pub(crate) async fn run_sqlite_via_engine(
     // policy, not a SQLite limitation) — same as the old pipeline's first step.
     crate::cross_app_fk::reject_cross_app_fk(schema, app_id)?;
 
-    // M1/M2 — construct B's paths from A's db_dir() + the app_id mapping A uses,
+    // Construct B's paths from A's db_dir() + the app_id mapping A uses,
     // so the two can NEVER diverge on which file is the app's (§7b.1):
     //   app_path     = <db_dir>/zs-<app_id>.sqlite
     //   journal_path = <db_dir>/zs-<app_id>.migrations.sqlite
@@ -115,7 +115,7 @@ pub(crate) async fn run_sqlite_via_engine(
     // ops for the new/changed collection; the siblings (desired == live) diff to
     // nothing.
     //
-    // H1 — this union is necessarily PARTIAL on a warm multi-collection file: a
+    // This union is necessarily PARTIAL on a warm multi-collection file: a
     // fresh isolate registers collections one-at-a-time (install-schema.ts), so
     // when the FIRST collection registers the sibling cache is empty and a live
     // sibling table (already in the file from a prior isolate) is absent from
@@ -167,7 +167,7 @@ pub(crate) async fn run_sqlite_via_engine(
     // scope, then DROP B before A touches the file (the single-owner window).
     let plan_changed: HashSet<String> = {
         // -- Step 2: ensure the `_mig` journal + baseline an existing journal-less
-        //    file (H3 adoption) so the first engine boot against a warm
+        //    file so the first engine boot against a warm
         //    run_sqlite_pipeline file does NOT drift-abort or re-create tables.
         backend_b
             .ensure_journal_sqlite()
@@ -180,7 +180,7 @@ pub(crate) async fn run_sqlite_via_engine(
             DbError::internal(format!("sqlite engine: live introspection failed: {e}"))
         })?;
 
-        // H1 — reconcile the PARTIAL per-collection `desired` against `live` so the
+        // Reconcile the PARTIAL per-collection `desired` against `live` so the
         // diff never (a) fails-closed nor (b) phantom-DROPs a sibling that's merely
         // not-yet-registered on this isolate. A live table is one of three kinds:
         //
@@ -222,7 +222,7 @@ pub(crate) async fn run_sqlite_via_engine(
         // The set of collections whose column shape changed — for the CDC bridge
         // (§7b.4). The plain plan for this register touches only `collection`'s
         // table (create / add-column); each rebuild rewrites its table (new
-        // columns to the CDC decoder). `renames` is ALWAYS empty on SQLite (H1).
+        // columns to the CDC decoder). `renames` is ALWAYS empty on SQLite.
         let mut changed: HashSet<String> = HashSet::new();
         if !plan.plain.items.is_empty() {
             changed.insert(collection.to_string());
@@ -276,7 +276,7 @@ fn other_schemas(app_id: &str) -> Vec<(String, Value)> {
     crate::context::with(|c| c.cached_schemas_for_app(app_id))
 }
 
-/// Baseline an existing journal-less app file (H3) before planning. If the
+/// Baseline an existing journal-less app file before planning. If the
 /// journal is EMPTY but the app file already has user tables (the
 /// run_sqlite_pipeline legacy shape), record the live schema as a `baseline`
 /// journal entry WITHOUT running its `up`, so the first engine boot adopts the

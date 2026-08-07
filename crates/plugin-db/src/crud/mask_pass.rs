@@ -1,4 +1,11 @@
-//! **P5.5 PR 2** — Path B mask transforms + atomic dual-write CRUD pass.
+//! Sibling-column mask transforms + atomic dual-write CRUD pass.
+//!
+//! The sibling-column strategy is "Path B" in
+//! `docs/archive/sensitive-field-masking.md` (resolved 2026-05-24): the masked
+//! representation is computed at write time and stored beside the ciphertext,
+//! so a default read touches no key material. Path A - computing the mask on
+//! read - was rejected there for key-scope reasons. The name is worth keeping
+//! because the trade-off analysis is only recorded under it.
 //!
 //! For every column with `def.mask = Some(_)` and `kind != "none"`,
 //! the [`apply_mask_on_write`] companion pass computes the masked
@@ -63,7 +70,7 @@ use crate::error::DbError;
 /// column's masked output without a redundant decrypt round-trip.
 pub(crate) type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 
-/// **P5.5 PR 2** — apply mask transforms to a row before INSERT/UPDATE.
+/// Apply mask transforms to a row before INSERT/UPDATE.
 ///
 /// Walks every column on the schema; when the column carries a
 /// `mask = { kind: <kind>, classification: <class> }` entry AND
@@ -151,7 +158,7 @@ pub(crate) fn apply_mask_on_write(
     Ok(())
 }
 
-/// **P5.5 PR 2** — apply a single mask transform.
+/// Apply a single mask transform.
 ///
 /// Pure function; total over `(MaskKind, &str)`. Edge cases:
 /// - Empty string → empty string (`""` in, `""` out) for every kind.
@@ -336,7 +343,7 @@ fn mask_date_year(plaintext: &str) -> String {
 /// becomes `?`. Same fall-back as [`mask_date_year`] for non-date
 /// inputs.
 ///
-/// **Idempotent** (SEC-4): the 4th year position may already be the `?`
+/// **Idempotent**: the 4th year position may already be the `?`
 /// sentinel from a prior masking, so re-masking the function's own
 /// output (`"198?-**-**"`) is a no-op rather than collapsing to `"***"`.
 /// `wrap_row_on_read` re-applies the mask transform defensively, and the
@@ -359,10 +366,10 @@ fn mask_date_decade(plaintext: &str) -> String {
 }
 
 // =====================================================================
-// P5.5 PR 3 — read-side flip: wrap masked columns in MaskedValueRepr
+// Read-side flip: wrap masked columns in MaskedValueRepr
 // =====================================================================
 
-/// **P5.5 PR 3** — wrap each masked column on `row` in a
+/// Wrap each masked column on `row` in a
 /// `MaskedValueRepr` so the JS-side SDK can construct `MaskedValue<T>`
 /// from the wire payload.
 ///
@@ -371,7 +378,7 @@ fn mask_date_decade(plaintext: &str) -> String {
 ///
 /// Two row shapes are handled uniformly:
 ///
-/// 1. **Aliased-SELECT shape** (`find`, PR 3 read-side flip): the
+/// 1. **Aliased-SELECT shape** (`find`, read-side flip): the
 ///    SELECT clause already aliased `<col>_masked AS <col>`, so
 ///    `row[col]` holds the masked string and no `<col>_masked` key
 ///    is present. We wrap `row[col]` in place.
@@ -387,13 +394,13 @@ fn mask_date_decade(plaintext: &str) -> String {
 /// The wire shape mirrors the SDK's `MaskedValueRepr` (sdks/db/src/
 /// types.ts): a `sentinel: "__zsmask__"` discriminator plus `masked`
 /// (the user-facing string) and `classification` (drives unmask
-/// authorization in PR 4). Per-row metadata (`{collection, row_pk,
-/// column}`) rides on a `_meta` key so PR 4's `.unmask()` can route
+/// authorization). Per-row metadata (`{collection, row_pk,
+/// column}`) rides on a `_meta` key so `.unmask()` can route
 /// the round-trip back to the right row.
 ///
 /// **Opt-out** (`mask: { kind: "none" }`): columns explicitly opted
 /// out of masking are skipped — they retain whatever value the SELECT
-/// produced (typically plaintext via the P5 decrypt-on-read path).
+/// produced (typically plaintext via the decrypt-on-read path).
 ///
 /// Returns `Ok(())` when the schema declares no masked columns or the
 /// row is missing fields; never errors on a malformed row.
@@ -409,11 +416,11 @@ pub(crate) fn wrap_row_on_read(
         return Ok(());
     };
 
-    // The unmask round-trip (PR 4) needs the row's PK to identify which
+    // The unmask round-trip needs the row's PK to identify which
     // row to fetch plaintext for. We pluck it once up-front; rows that
     // didn't surface an `id` (composite-PK collections, or rows that
     // came back via a projection without `id`) get the empty string —
-    // PR 4 will reject `unmask()` on those with a typed error.
+    // `unmask()` will reject those with a typed error.
     let row_pk = obj
         .get("id")
         .map(|v| match v {
@@ -449,8 +456,8 @@ pub(crate) fn wrap_row_on_read(
         //     already holds the masked string; use it verbatim.
         //  2. No sibling, but the parent slot holds a string → the SELECT
         //     aliased the sibling back to the parent name (`"<col>_masked"
-        //     AS "<col>"`, the P5.5 read-side flip / aggregate
-        //     substitution), OR — the SEC-4 hazard — a builder lowered a
+        //     AS "<col>"`, the read-side flip / aggregate
+        //     substitution), OR a builder lowered a
         //     masked column to plaintext. We CANNOT distinguish "already
         //     masked" from "raw plaintext" by value, so we MUST NOT trust
         //     the parent slot as already-masked: re-apply the mask
@@ -490,7 +497,7 @@ pub(crate) fn wrap_row_on_read(
     for (col, masked, classification) in to_wrap {
         let repr = serde_json::json!({
             "sentinel": "__zsmask__",
-            // DB-7: an unforgeable per-process signature. Only sentinels the
+            // An unforgeable per-process signature. Only sentinels the
             // read pipeline itself produced carry it; the decoder refuses to
             // mint a MaskedValue from any sentinel lacking it, so app JS cannot
             // fabricate a `__zsmask__` object (e.g. stashed in a JSONB column it
@@ -510,7 +517,7 @@ pub(crate) fn wrap_row_on_read(
     Ok(())
 }
 
-/// DB-7: per-process secret stamped into every pipeline-minted mask sentinel
+/// Per-process secret stamped into every pipeline-minted mask sentinel
 /// (`_sig`) and verified at rehydration. App JS cannot read it — the rehydrator
 /// consumes the raw sentinel into a `MaskedValue` (whose internal fields do not
 /// expose `_sig`) before any handler sees the row, and the value is never
@@ -868,7 +875,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 3 — wrap_row_on_read: read-side flip
+    // wrap_row_on_read: read-side flip
     // -----------------------------------------------------------------
 
     #[test]
@@ -931,7 +938,7 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_skips_kind_none() {
-        // Opt-out: `kind: "none"` retains plaintext-on-read (P5
+        // Opt-out: `kind: "none"` retains plaintext-on-read (the
         // decrypt-on-read path); no wrapping happens.
         let schema = json!({
             "ssn": {
@@ -958,7 +965,7 @@ mod tests {
     #[test]
     fn wrap_row_on_read_uses_default_pii_classification() {
         // When the schema mask block omits `classification`, default is
-        // `"pii"` (mirrors PR 1's PR-defined default).
+        // `"pii"` (mirrors the SDK's default).
         let schema = json!({
             "email": {
                 "type": "string",
@@ -1001,8 +1008,8 @@ mod tests {
     #[test]
     fn wrap_row_on_read_handles_missing_id() {
         // Projection that excluded `id` — `row_pk` falls back to empty
-        // string; the wrap still happens (PR 4 will surface a typed
-        // error on `unmask()` when row_pk is empty).
+        // string; the wrap still happens (`unmask()` will surface a typed
+        // error when row_pk is empty).
         let schema = json!({
             "ssn": {
                 "type": "string",
@@ -1021,7 +1028,7 @@ mod tests {
 
     #[test]
     fn sec4_wrap_row_on_read_never_returns_parent_plaintext_when_no_sibling() {
-        // SEC-4: an aggregate that grouped on a masked column WITHOUT
+        // An aggregate that grouped on a masked column WITHOUT
         // substituting the sibling lands here with the parent slot
         // holding PLAINTEXT and no `<col>_masked` sibling present. The
         // old code wrapped the parent value verbatim — i.e. it surfaced

@@ -1,17 +1,16 @@
 //! In-memory subscription broker — foundation for C1 reactive queries.
 //!
-//! The broker is the routing table between change events (today: local
-//! mutations within the same isolate; in P8a.2: pgoutput WAL frames
-//! decoded by the streaming consumer) and the subscribers who care
-//! about them.
+//! The broker is the routing table between change events (local
+//! mutations within the same isolate, and pgoutput WAL frames decoded
+//! by the streaming consumer) and the subscribers who care about them.
 //!
-//! ## P8a scope vs. proposal
+//! ## Scope
 //!
-//! - **Granularity:** coarse-grained collection match only. A
-//!   subscription `(collection="messages")` fires on EVERY change to
-//!   `messages`. The proposal's predicate-filtered fingerprint
-//!   matching (`channelId=42 | *`) is deferred to P8b — see
-//!   `ReadSet` / `NormalisedPredicate` in the proposal §C1.
+//! - **Granularity:** a subscription with no read-set attached matches
+//!   coarsely on the collection - `(collection="messages")` fires on
+//!   EVERY change to `messages`. When a read-set IS attached, events
+//!   are narrowed against its predicates - see `ReadSet` /
+//!   `NormalisedPredicate` in the proposal §C1.
 //! - **Backpressure:** a bounded per-subscriber queue (default 1024
 //!   events) — overflow yields a `kind: "resync"` event and the queue
 //!   is cleared. Same semantics as the proposal's "subscriber falls
@@ -46,16 +45,14 @@
 //! same broker serve multiple subscribers without each subscriber
 //! holding a lock on the routing table.
 //!
-//! ## P8b/P8c integration points (intentionally hooked in here)
+//! ## Narrowing hooks
 //!
-//! - `Subscription::read_set` (Option) — left as `None` in P8a. P8b's
-//!   read-set capture writes a `ReadSet` here; `Broker::publish`
-//!   checks each subscription's `ReadSet` against the event before
-//!   pushing.
-//! - `ChangeEvent::changed_columns` — populated by the WAL consumer
-//!   when it lands. The local-emit path (P8a) populates it from the
-//!   mutation handler's `SET` clause for INSERT/UPDATE; DELETE
-//!   reports an empty set.
+//! - `Subscription::read_set` (Option) - `None` until the read-set
+//!   capture writes one; `Broker::publish` checks each subscription's
+//!   `ReadSet` against the event before pushing.
+//! - `ChangeEvent::changed_columns` - populated by the WAL consumer,
+//!   and by the local-emit path from the mutation handler's `SET`
+//!   clause for INSERT/UPDATE; DELETE reports an empty set.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -73,15 +70,15 @@ use crate::read_set::ReadSetEntry;
 
 /// One change event flowing through the broker.
 ///
-/// Today this is constructed by the mutation callbacks (INSERT,
-/// UPDATE, DELETE) on success. In P8a.2 the streaming WAL consumer
-/// builds the same shape from pgoutput frames so the broker doesn't
-/// care whether it came from a local mutation or replication.
+/// Constructed by the mutation callbacks (INSERT, UPDATE, DELETE) on
+/// success, and by the streaming WAL consumer from pgoutput frames, so
+/// the broker doesn't care whether it came from a local mutation or
+/// replication.
 ///
 /// The shape mirrors the proposal §C1 "broker event":
 /// `{app_id, schema, table, op, pk, changed_columns, new_tuple_excerpt}`.
-/// For P8a we conflate `schema` with `app_id` (every app has its own
-/// schema named after `app_id`).
+/// `schema` is conflated with `app_id` (every app has its own schema
+/// named after `app_id`).
 #[derive(Debug, Clone)]
 pub struct ChangeEvent {
     /// App that produced the event. Used by the routing table to
@@ -148,7 +145,7 @@ impl ChangeOp {
 /// proposal's stated default. Overflow triggers a `resync` event.
 pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 
-/// DB-12: max concurrent (live) subscriptions one app may hold. Each
+/// Max concurrent (live) subscriptions one app may hold. Each
 /// subscription carries a [`DEFAULT_QUEUE_DEPTH`]-slot queue and is iterated on
 /// every matching publish, so an unbounded `for (…) db.t.subscribe(…)` loop
 /// would grow the isolate's memory and per-event fan-out cost without bound.
@@ -197,12 +194,12 @@ struct SubscriptionInner {
     /// Avoids spamming the iterator with multiple Resync events for
     /// successive overflows.
     resync_pending: bool,
-    /// P8b read-set narrowing.
+    /// Read-set narrowing.
     ///
     /// `None` → coarse-grained: every change on this subscription's
-    /// `(app_id, collection)` is delivered (the P8a behaviour kept for
-    /// back-compat with the existing subscribe/subscribePoll callers
-    /// that haven't been routed through useQuery yet).
+    /// `(app_id, collection)` is delivered. This is what the
+    /// subscribe/subscribePoll callers that haven't been routed
+    /// through useQuery still get.
     ///
     /// `Some(entries)` → the broker evaluates each entry's predicate
     /// against the event tuple and delivers only if at least one entry
@@ -389,9 +386,10 @@ impl Subscription {
 /// The routing table.
 ///
 /// Indexed as a two-level map: `app_id → collection → Vec<Subscription>`.
-/// P8b will add a third-level index by `ReadSet` fingerprint; for
-/// P8a/P8b the per-collection list is scanned linearly on each publish
-/// (`O(subscribers_on_this_collection)`).
+/// The per-collection list is scanned linearly on each publish
+/// (`O(subscribers_on_this_collection)`); a third-level index by
+/// `ReadSet` fingerprint is the natural next step if that scan ever
+/// becomes hot.
 ///
 /// ## Why two levels (not a single `(String, String)` tuple key)
 ///
@@ -433,12 +431,12 @@ impl Broker {
     /// **Infallible** by design: the V8-side `subscribe()` call site
     /// (`v8_classes::subscription::mint_subscription`) and the rich
     /// existing test surface (~40 in-crate call sites) consume a
-    /// `Subscription` directly. The P2 PR 4 schema-pending rejection
-    /// branch is layered on top via [`Self::try_subscribe`], which
-    /// returns a `Result` so the SDK boundary can surface the typed
+    /// `Subscription` directly. The schema-pending rejection branch is
+    /// layered on top via [`Self::try_subscribe`], which returns a
+    /// `Result` so the SDK boundary can surface the typed
     /// `DbError::Coded { code: "schema_pending" }`. New SDK call sites
     /// should prefer `try_subscribe`; the infallible variant stays for
-    /// the back-compat surface.
+    /// the callers listed above.
     pub fn subscribe(&mut self, app_id: &str, collection: &str) -> Subscription {
         self.next_id += 1;
         let sub = Subscription::new(
@@ -493,7 +491,7 @@ impl Broker {
                 ),
             });
         }
-        // DB-12: cap the app's concurrent (live) subscriptions. Count only
+        // Cap the app's concurrent (live) subscriptions. Count only
         // non-closed subs so dropped/unsubscribed ones (pruned lazily on
         // publish) don't count against the limit.
         let live = self
@@ -543,7 +541,7 @@ impl Broker {
     /// `(app_id, collection)` whose read-set accepts the event tuple
     /// receive it; closed subscribers are pruned in the same pass.
     ///
-    /// P8b: filtering happens per-subscriber via
+    /// Filtering happens per-subscriber via
     /// `Subscription::accepts`. The bucket index by `(app_id,
     /// collection)` is still the primary fan-in — subscribers on
     /// unrelated collections never enter the predicate-eval path. The
@@ -663,11 +661,7 @@ impl Broker {
     /// Invoked from [`crate::backend::BrokerPauseGuard::drop`] (after a
     /// backfill window) and
     /// [`crate::backend::SchemaPendingGuard::drop`] (after the
-    /// schema-pending decoder window ends) per design §16.7. P2 PR 3
-    /// adds the primitive so PR 4 can wire the guards' `Drop` impls
-    /// without touching the broker again — and so the load-fanout
-    /// integration test can pin the resync codepath compiles +
-    /// dispatches correctly.
+    /// schema-pending decoder window ends) per design §16.7.
     ///
     /// **Idempotent on a per-call basis.** Calling
     /// `resume_app_with_resync` N times pushes N `Resync` messages onto
@@ -730,7 +724,7 @@ impl std::fmt::Debug for Broker {
 thread_local! {
     pub(crate) static BROKER: RefCell<Broker> = RefCell::new(Broker::new());
 
-    /// **P2 PR 4 — schema-pending decoder window** (design §16.7).
+    /// **Schema-pending decoder window** (design §16.7).
     ///
     /// App ids currently in the schema-pending state. Populated by
     /// [`engage_schema_pending`] (called from
@@ -797,7 +791,7 @@ pub fn subscribe(app_id: &str, collection: &str) -> Subscription {
 }
 
 /// Fallible variant of [`subscribe`] — surfaces the schema-pending
-/// rejection branch added in P2 PR 4. See [`Broker::try_subscribe`].
+/// rejection branch. See [`Broker::try_subscribe`].
 pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbError> {
     BROKER.with(|b| b.borrow_mut().try_subscribe(app_id, collection))
 }
@@ -884,7 +878,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
 // WS push-frame format
 // ---------------------------------------------------------------------------
 //
-// Mirrors the shape spelled out in the P8b task contract:
+// Mirrors the shape spelled out in the subscription task contract:
 //
 // ```json
 // { "type": "zs.subscription.event",
@@ -1139,7 +1133,7 @@ mod tests {
         assert_eq!(v["kind"], "resync");
     }
 
-    // ---------- P8b read-set narrowing ----------
+    // ---------- read-set narrowing ----------
 
     use crate::read_set::{self, ReadSetEntry};
 
@@ -1302,8 +1296,8 @@ mod tests {
 
     #[test]
     fn b8b_no_read_set_accepts_every_event() {
-        // Back-compat: subscriptions that don't set a read-set must
-        // continue to behave as P8a (coarse-grained collection match).
+        // Subscriptions that don't set a read-set fall back to a
+        // coarse-grained collection match.
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
         // No set_read_set call.
@@ -1430,12 +1424,12 @@ mod tests {
         assert!(!s3.is_closed());
     }
 
-    // ---------- resume_app_with_resync (P2 PR 3) ----------
+    // ---------- resume_app_with_resync ----------
 
     #[test]
     fn resume_app_with_resync_pushes_one_resync_to_each_subscription() {
-        // The P2 PR 4 guards' Drop impls call this primitive after a
-        // backfill window / schema-pending window. Every active
+        // The pause / schema-pending guards' Drop impls call this
+        // primitive after their window closes. Every active
         // subscription on the app should observe a single Resync.
         let mut b = Broker::new();
         let s1 = b.subscribe("a", "messages");
@@ -1588,7 +1582,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P2 PR 4 — schema-pending decoder window unit tests.
+    // Schema-pending decoder window unit tests.
     // -----------------------------------------------------------------
 
     /// Guard that engages schema-pending on construction + clears on
@@ -1697,12 +1691,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 8 — §11 closeout: `cdc_event_carries_masked_value_for_
-    // masked_columns`
+    // `cdc_event_carries_masked_value_for_masked_columns` (§11)
     //
     // The proposal (Q-MASK-G) asserts that CDC subscribers see the
     // MASKED representation of a masked column — never the plaintext.
-    // For Path B (sibling-column storage) the WAL pipeline never
+    // With sibling-column storage (Path B, docs/archive/sensitive-field-masking.md)
+    // the WAL pipeline never
     // decrypts: `tuple_to_map` (in `wal_consumer.rs`) zips pgoutput
     // tuple bytes verbatim into `new_tuple`, so the parent column
     // carries ciphertext text-encoded by PG (e.g. `\xDEADBEEF` for

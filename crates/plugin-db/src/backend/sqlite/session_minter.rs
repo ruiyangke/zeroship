@@ -3,7 +3,7 @@
 //!
 //! ## Why this module exists
 //!
-//! P3 §5 (`docs/proposals/p3-sqlite-auth-implementation-plan.md`)
+//! `docs/proposals/p3-sqlite-auth-implementation-plan.md` §5
 //! specifies SQLite's session-minter as **in-memory only**: no
 //! `__zeroship_sessions` table, no ATTACH, no schema. Tokens are
 //! signed with `HMAC-SHA256(secret, payload)`; replay protection is
@@ -24,7 +24,7 @@
 //! On the PG side `pid` is `p_pid::TEXT` (the integer backend PID
 //! as a string); on the SQLite side `pid` is the cross-backend
 //! `SessionInit::pid` carried verbatim. The cross-backend
-//! equivalence test in PR 4 pins the bytes when both sides are
+//! equivalence test pins the bytes when both sides are
 //! handed positionally identical strings.
 //!
 //! ## Gating

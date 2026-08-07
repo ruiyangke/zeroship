@@ -234,22 +234,21 @@ pub fn start_replication_consumer_dispatch<'s>(
         };
 
         // Step 1b: route the consumer-spawn handshake through the new
-        // `ChangeStream` capability adapter (P2 PR 1 mechanical
-        // refactor — `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-        // §2.5, §9 PR 1). The PG-arm `spawn_consumer` is a no-op
+        // `ChangeStream` capability adapter (see
+        // `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
+        // §2.5, §9). The PG-arm `spawn_consumer` is a no-op
         // marker today (the actual `compio::runtime::spawn` of
         // `run_supervised` stays at this dispatcher because the
         // `ConsumerRunningGuard` claim needs the spawn-closure capture);
         // routing through the trait surface here proves the adapter is
         // reachable from a `BackendHandle`-routed call shape and
-        // gives PR 4 a stable site to migrate the spawn into.
+        // gives a stable site to migrate the spawn into later.
         //
         // **PG behaviour unchanged**: the call does not provision (the
         // direct `ensure_publication_and_slot` call above already did
         // that with the `SetupOutcome` we need for the response
         // envelope), does not allocate any background task, and the
-        // returned `WalConsumerHandle` is intentionally unused at
-        // this PR.
+        // returned `WalConsumerHandle` is intentionally unused here.
         let backend = match crate::context::with(|c| c.backend()) {
             Some(b) => b,
             None => {
@@ -289,8 +288,8 @@ pub fn start_replication_consumer_dispatch<'s>(
 
         // Step 2: build the consumer descriptor.
         //
-        // WalConsumer::new now returns Result<_, DbError> (post r5-r7
-        // MAJOR-R5-4 fix). Two failure classes flow through verbatim:
+        // WalConsumer::new returns Result<_, DbError>. Two failure
+        // classes flow through verbatim:
         // - DbError::ValidationFailed { code: "invalid_app_id" } for
         //   developer/deploy errors (sanitise failure).
         // - DbError::Configuration { code: "not_provisioned" } for
@@ -322,17 +321,6 @@ pub fn start_replication_consumer_dispatch<'s>(
         // re-call); try_claim closes the tight race window where two
         // rapid-succession dispatches both pass the outer gate before
         // either has marked.
-        //
-        // History (each pass closed a specific failure mode):
-        // - e399eeea (cycle 05:25, MAJOR-R5-2): added Drop-based unmark
-        //   so panic in run_supervised doesn't leave the mark stuck.
-        // - 34d209b5 (cycle 06:00, MAJOR-R6-1): moved the mark INSIDE
-        //   the guard's constructor (was previously synchronous before
-        //   spawn) so future-dropped-pre-poll also fires Drop.
-        // - 70921112 (cycle 06:25, concurrency r7 NEW MINOR): replaced
-        //   bare mark with atomic try_mark so two concurrent dispatches
-        //   that race past the outer gate cannot both spawn — the loser
-        //   bails without provisioning, the winner runs run_supervised.
         //
         // Defense: spawned task try-marks atomically via
         // `ConsumerRunningGuard::try_claim` (defined at module scope

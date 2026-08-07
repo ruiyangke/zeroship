@@ -10,19 +10,14 @@
 //! `audit_err=…`. A future commit that renames one of those fields
 //! silently breaks the runbook with no compile error.
 //!
-//! Cycle 13:17 (`7c6bd2ec`) drifted one such site: the F1 warn-half
-//! in `register_model::apply` had its `audit_err`
-//! field renamed to `error` in passing; commit `18aee490` reverted
-//! the drift after a code review caught it. A snapshot test running
-//! under this capture layer would have caught the drift pre-commit.
+//! One such site has already drifted once: the warn-half in
+//! `register_model::apply` had its `audit_err` field renamed to
+//! `error` in passing; a code review caught it and the rename was
+//! reverted. A snapshot test running under this capture layer would
+//! have caught the drift pre-commit.
 //!
-//! References:
-//! - test-coverage r11 NEW-R11-1 — establish a `tracing-subscriber`
-//!   capture harness so warn-shape can be unit-tested.
-//! - test-coverage r12 NEW-R12-1 — the F1 warn half (`5d9acab8` /
-//!   `fcf7ce3c` / `7c6bd2ec` / `18aee490`) needs the harness.
-//! - test-coverage r13 NEW-R13-* — extend to the [I6]
-//!   `release_advisory_lock` typed-error caller paths.
+//! This capture harness also covers the `release_advisory_lock`
+//! typed-error caller paths.
 //!
 //! # Scope
 //!

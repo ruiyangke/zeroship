@@ -1,13 +1,13 @@
 //! In-process advisory-lock registry.
 //!
-//! **P1 PR 4** wires the body of the [`InProcessLockRegistry`] —
+//! This module wires the body of the [`InProcessLockRegistry`] —
 //! the single-process HashMap [`super::SqliteBackend`]'s
 //! [`crate::backend::LockManager`] impl routes through. Per design §8.5,
 //! SQLite is in-process by definition; both
 //! [`crate::backend::LockScope::GlobalApp`] and
 //! [`crate::backend::LockScope::LocalApp`] route through this registry —
-//! cross-process serialisation (BEGIN IMMEDIATE / sentinel table) is a
-//! P5+ concern.
+//! cross-process serialisation (BEGIN IMMEDIATE / sentinel table) is
+//! deferred future work.
 //!
 //! **Storage shape** (design §8.5):
 //! `RefCell<HashMap<(String, String), Rc<Cell<bool>>>>` — the
@@ -15,7 +15,7 @@
 //! derivation; the inner `Cell<bool>` tracks "currently held". The
 //! outer `Rc<Cell<…>>` is deliberate: a later `SqliteLockGuard` sibling
 //! can clone the `Rc` at acquisition time and release on drop without
-//! re-walking the map. PR 4 only exercises the primitive surface
+//! re-walking the map. This module only exercises the primitive surface
 //! (`try_acquire` / `release`); the guard sibling lands separately.
 //!
 //! **Cell-borrow discipline**: every `try_acquire` / `release` call

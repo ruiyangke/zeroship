@@ -19,7 +19,7 @@ use crate::descriptors::EncryptionMode;
 use crate::diff::{Classification, EncryptionMeta, MaskKind, WrappedType};
 use crate::error::MaskSentinelError;
 
-/// **P4 HALF A** — the canonical wire string for an [`EncryptionMode`] in a
+/// The canonical wire string for an [`EncryptionMode`] in a
 /// `zsenc:` sentinel. `randomised` is the canonical spelling (the US
 /// `randomized` is normalised to it at emit time so the parser only needs the
 /// one form). Kept here next to the codec rather than on `EncryptionMode` so the
@@ -32,7 +32,7 @@ fn encryption_mode_as_sql(mode: EncryptionMode) -> &'static str {
     }
 }
 
-/// **P4 HALF A** — parse a `zsenc:` mode token. Accepts the canonical
+/// Parse a `zsenc:` mode token. Accepts the canonical
 /// `randomised` plus the legacy US `randomized` spelling (the SDK historically
 /// emitted it; the emit path normalises to `randomised`, but a hand-written
 /// migration may carry either). `None` for any other token.
@@ -45,7 +45,7 @@ fn encryption_mode_from_sql(s: &str) -> Option<EncryptionMode> {
     }
 }
 
-/// **P4 HALF A** — the canonical wire string for a [`WrappedType`].
+/// The canonical wire string for a [`WrappedType`].
 #[must_use]
 fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
     match w {
@@ -55,7 +55,7 @@ fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
     }
 }
 
-/// **P4 HALF A** — parse a `zsenc:` wraps token. `None` for an unknown token.
+/// Parse a `zsenc:` wraps token. `None` for an unknown token.
 #[must_use]
 fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     match s {
@@ -66,7 +66,7 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     }
 }
 
-/// **P4 HALF A** — build the canonical encryption-sentinel BODY for an
+/// Build the canonical encryption-sentinel BODY for an
 /// [`EncryptionMeta`]: `zsenc:<mode>:<keyId>:<wraps>`.
 ///
 /// This is the COMMENT-body form (no surrounding `/* */`): on PG it is stored
@@ -90,7 +90,7 @@ pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
     )
 }
 
-/// **P4 HALF A** — parse a `zsenc:<mode>:<keyId>:<wraps>` sentinel body back
+/// Parse a `zsenc:<mode>:<keyId>:<wraps>` sentinel body back
 /// into an [`EncryptionMeta`].
 ///
 /// Accepts either the bare comment body (`zsenc:randomised:default:string`, the
@@ -149,7 +149,7 @@ pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinel
     })
 }
 
-/// **P5.5 PR 6** — build the canonical mask-sentinel string for a
+/// Build the canonical mask-sentinel string for a
 /// `(kind, classification)` pair.
 ///
 /// Stored on PG via `COMMENT ON COLUMN "<schema>"."<table>"."<sibling>"
@@ -167,7 +167,7 @@ pub fn build_mask_sentinel(kind: MaskKind, classification: Classification) -> St
     )
 }
 
-/// **P5.5 PR 6** — parse a `__zsmask:kind=…,classification=…`
+/// Parse a `__zsmask:kind=…,classification=…`
 /// sentinel string back into a `(MaskKind, Classification)` pair.
 ///
 /// Returns `Err(MaskSentinelError)` whose `.message` carries the
@@ -292,7 +292,7 @@ mod tests {
         assert!(err.message().contains("mask_sentinel_malformed"));
     }
 
-    // ----- P4 HALF A — encryption sentinel codec -----
+    // ----- encryption sentinel codec -----
 
     fn enc(mode: EncryptionMode, key: &str, wraps: WrappedType) -> EncryptionMeta {
         EncryptionMeta {

@@ -6,9 +6,8 @@
 //! — the SDK can then branch on `err.code` instead of substring-matching
 //! opaque messages.
 //!
-//! `Result<_, String>` is now (post-[I28] sweep, commit `0049d9be`)
-//! confined to a small set of deliberate hold-outs across three
-//! categories:
+//! `Result<_, String>` is now confined to a small set of deliberate
+//! hold-outs across three categories:
 //!
 //! 1. **Wire-contract envelopes**: `crate::register_model::validate`
 //!    whose `Err` IS the `validation_refused` JSON envelope (a
@@ -32,7 +31,7 @@
 //! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
 //!    the call sites at `register_model/mod.rs` and `exec.rs::ensure_pool`
 //!    synthesise `DbError::Configuration` with
-//!    code `lazy_init_failed` (unified at `7d0bc4c5`; same code at
+//!    code `lazy_init_failed` (the same code at
 //!    every cold-init call site).
 //!
 //! 5. **Test helpers** (`exec.rs::exec_query_with_pool_for_tests`,
@@ -141,7 +140,7 @@ pub enum DbError {
     /// lock unavailable, `wal_level != logical`, etc.). Not a user
     /// error and not retriable — the SDK should surface the `.hint`
     /// to the operator since this typically requires a config edit +
-    /// restart (error-ux r7 INFO: this is the variant most needing
+    /// restart (this is the variant most needing
     /// remediation prose).
     Configuration {
         code: &'static str,
@@ -159,7 +158,7 @@ pub enum DbError {
         hint: Option<String>,
     },
 
-    /// **P9 PR 4** — a platform-internal capability was reached through a
+    /// A platform-internal capability was reached through a
     /// creator-visible path that must refuse it. Today the sole source is
     /// the `env.db.__platform` string-access getter trap
     /// (`platform_internal_only`): the real `DbPlatform` capability handle
@@ -398,7 +397,7 @@ impl DbError {
         }
     }
 
-    /// **P7 PR 4** — optimistic-concurrency check failed. The UPDATE
+    /// Optimistic-concurrency check failed. The UPDATE
     /// filter included `version: N` but the row's current `version`
     /// no longer matched (another writer won the race; affected-rows
     /// came back 0).
@@ -429,12 +428,12 @@ impl DbError {
         }
     }
 
-    /// **P7 PR 4** — UPDATE filter carried `version: N` but no `id`
+    /// UPDATE filter carried `version: N` but no `id`
     /// predicate. The CAS semantics don't generalise cleanly to
     /// multi-row UPDATEs (the affected-rows count conflates "row
     /// missing", "version mismatched", and "filter matched but version
-    /// matched" — there's no clean per-row mismatch report). PR 4
-    /// refuses this shape eagerly with a typed code so the SDK can
+    /// matched" — there's no clean per-row mismatch report). This
+    /// refuses the shape eagerly with a typed code so the SDK can
     /// guide the creator toward an explicit per-id loop.
     pub fn multi_row_version_filter_unsupported(collection: &str) -> Self {
         DbError::ValidationFailed {
@@ -452,7 +451,7 @@ impl DbError {
         }
     }
 
-    /// **I5** — nested `$and` / `$or` `version` predicates are
+    /// Nested `$and` / `$or` `version` predicates are
     /// refused because the CAS path only honours a top-level equality
     /// predicate. Failing closed avoids silently degrading a
     /// compare-and-swap write into a blind last-writer-wins update.
@@ -480,12 +479,12 @@ impl DbError {
     /// `migrations` / `migration` / `register_model` / `transaction`
     /// paths.
     ///
-    /// **Post-P0 mop-up (code-critique R15-1 / R15-2)**: prior hand-rolled
-    /// `DbError::Configuration { code: "backend_unsupported", ... }`
-    /// literals at four call sites had drifted into three distinct
-    /// `hint` shapes (two `None`, one PG-only sentence, one bare
-    /// `"register_model"`); centralising here keeps the SDK-visible
-    /// hint stable as the backend-arm dispatcher evolves.
+    /// Prior hand-rolled `DbError::Configuration { code:
+    /// "backend_unsupported", ... }` literals at four call sites had
+    /// drifted into three distinct `hint` shapes (two `None`, one
+    /// PG-only sentence, one bare `"register_model"`); centralising
+    /// here keeps the SDK-visible hint stable as the backend-arm
+    /// dispatcher evolves.
     ///
     /// `op` names the operation surface for the message body
     /// (e.g. `"transaction"`, `"register_model"`, `"migration RPC"`)
@@ -559,8 +558,8 @@ pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 /// [`DbError::Internal`] naming the operation. Used to close the
 /// silent-empty-RETURNING bug class: callers that previously chained
 /// `.first().map(...).unwrap_or_default()` coerced an empty RETURNING
-/// set into a sentinel value (the audit-id=0 bug fixed in d7cfc089;
-/// the replication-slot empty-LSN twin fixed alongside it). The helper
+/// set into a sentinel value (the audit-id=0 bug; the replication-slot
+/// empty-LSN twin was fixed alongside it). The helper
 /// names the predicate in one place so every empty-RETURNING site
 /// emits the same `DbError::Internal { message: "<op>: returned no
 /// row" }` shape for every empty-`RETURNING` site.
@@ -628,7 +627,7 @@ impl From<compio_postgres::Error> for DbError {
 impl From<crate::query::QueryError> for DbError {
     fn from(e: crate::query::QueryError) -> Self {
         use crate::query::QueryError;
-        // **P7 PR 1** — `ReservedSystemFieldName` carries a fixed hint
+        // `ReservedSystemFieldName` carries a fixed hint
         // listing the seven system fields so SDK consumers see the same
         // remediation message Rust prints in test failures. The other
         // three variants carry no hint (builder errors are deterministic
@@ -647,7 +646,7 @@ impl From<crate::query::QueryError> for DbError {
                         .to_string(),
                 ),
             ),
-            // **P7 PR 4** — UPDATE patch attempted to overwrite an
+            // UPDATE patch attempted to overwrite an
             // immutable write-once system field (`id`, `created_at`,
             // `created_by`). Distinct code so SDK consumers can branch
             // (e.g. surface a "you can't change the id of a row"
@@ -671,9 +670,9 @@ impl From<crate::query::QueryError> for DbError {
     }
 }
 
-// **Schema-authority P1** — the live-introspection helpers
-// (`zeroship_schema::diff::{read_live_schema, estimate_row_count}`) were
-// relocated into the leaf crate, which cannot name `DbError` (it is built
+// The live-introspection helpers
+// (`zeroship_schema::diff::{read_live_schema, estimate_row_count}`) are
+// in the leaf crate, which cannot name `DbError` (it is built
 // on `zeroship_runtime::OpError`). They return [`zeroship_schema::error::SchemaError`]
 // carrying the per-call-site context phrase + the raw driver error. This
 // `From` re-creates the exact pre-extraction shape: the diff layer wrapped
@@ -687,7 +686,7 @@ impl From<zeroship_schema::error::SchemaError> for DbError {
     }
 }
 
-// **Schema-authority P1** — the mask-sentinel codec
+// The mask-sentinel codec
 // (`zeroship_schema::mask_codec::parse_mask_sentinel`) was relocated into the
 // leaf crate and returns [`zeroship_schema::error::MaskSentinelError`] whose
 // `.message` already carries the `mask_sentinel_malformed: …` prefix the SDK
@@ -705,7 +704,7 @@ impl From<zeroship_schema::error::MaskSentinelError> for DbError {
 /// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
 /// the old `fmt_db_err` from `v8_bridge` so the message shape is
 /// preserved (`db: <wrapper> — caused by: <cause>`).
-/// DB-18: drop the Postgres `DETAIL` line from a constraint-violation message
+/// Drop the Postgres `DETAIL` line from a constraint-violation message
 /// before it reaches app JS. PG puts the conflicting VALUE there (e.g.
 /// `Key (email)=(alice@example.com) already exists`), turning a unique/check
 /// probe into a value-exfiltration oracle for the app's own — possibly masked —
@@ -930,10 +929,10 @@ mod tests {
     }
 
     /// On an empty slice the helper must produce `DbError::Internal`
-    /// whose message names the operation. The audit-id=0 regression
-    /// (d7cfc089) is the canonical site this contract protects:
-    /// substring matching against the op name is how the in-tree
-    /// regression test in `audit.rs` verifies the contract.
+    /// whose message names the operation. The audit-id=0 regression is
+    /// the canonical site this contract protects: substring matching
+    /// against the op name is how the in-tree regression test in
+    /// `audit.rs` verifies the contract.
     #[test]
     fn first_row_or_internal_returns_internal_err_on_empty() {
         let rows: Vec<i64> = vec![];
@@ -1094,7 +1093,7 @@ mod tests {
     /// onto a `ValidationFailed` with a stable static code the SDK
     /// branches on. Each kind must map to a distinct code.
     ///
-    /// **P7 PR 1** — the three legacy kinds carry no hint; the new
+    /// The three legacy kinds carry no hint; the new
     /// `ReservedSystemFieldName` variant carries a fixed hint listing
     /// all seven system fields (covered separately by
     /// `from_query_error_reserved_system_field_carries_hint`).
@@ -1126,7 +1125,7 @@ mod tests {
         }
     }
 
-    /// **P7 PR 1** — `ReservedSystemFieldName` maps to a distinct
+    /// `ReservedSystemFieldName` maps to a distinct
     /// `reserved_system_field_name` code and carries a hint enumerating
     /// the seven system fields.
     #[test]
@@ -1158,7 +1157,7 @@ mod tests {
         }
     }
 
-    /// **Schema-authority P1** — relocated from `query.rs`'s test module
+    /// Relocated from `query.rs`'s test module
     /// (which moved to the leaf crate `zeroship-schema`, where `DbError`
     /// is not nameable). Pins the end-to-end lift: the schema-crate
     /// validator `validate_field_name_for_declaration` rejects a reserved
@@ -1184,7 +1183,7 @@ mod tests {
         }
     }
 
-    // ---- P7 PR 4 — new typed-error helpers ------------------------
+    // ---- New typed-error helpers ------------------------
 
     /// `ImmutableSystemField` maps to the `immutable_system_field`
     /// code with a hint listing the three write-once names.

@@ -1,4 +1,4 @@
-//! **P5.5 PR 4** — `unmask()` RPC + authorization stub + audit trail.
+//! `unmask()` RPC + authorization + audit trail.
 //!
 //! The MaskedValue surface (`sdks/db/src/types.ts`) calls into this
 //! module via the `zeroship.db.unmaskField` native op (registered as a
@@ -8,10 +8,11 @@
 //! 1. Look up the column's mask metadata (classification) from the
 //!    cached schema. A column with no mask declaration cannot be
 //!    unmasked — surface `unmask_column_not_masked`.
-//! 2. Authorise via [`check_unmask_authorization`]. PR 4 ships a strict
-//!    default-deny stub: only the `auto` actor kind (system / migrations
-//!    / background jobs) can unmask any classification. PR 5 will
-//!    replace this with a per-app [`MaskPolicy`] lookup. Denied attempts
+//! 2. Authorise via [`check_unmask_authorization`]: consult the app's
+//!    per-app [`MaskPolicy`] (configured via `defineMaskPolicy()`) when
+//!    one is cached; otherwise fall back to a strict default-deny rule
+//!    where only the `auto` actor kind (system / migrations /
+//!    background jobs) can unmask any classification. Denied attempts
 //!    emit an audit row with `outcome = "denied"`.
 //! 3. Look up the column's encryption metadata. If encrypted, SELECT
 //!    the BYTEA / BLOB ciphertext, reconstruct the canonical AAD
@@ -30,12 +31,12 @@
 //! schema. App-scoped audit data should not require platform-role
 //! access to query — operators query via the per-app schema.
 //!
-//! ## Default-deny authorization stub
+//! ## Default-deny authorization fallback
 //!
-//! PR 4's [`check_unmask_authorization`] is deliberately strict: most
-//! real apps will need PR 5's `defineMaskPolicy()` to grant access.
-//! PR 4 ships the machinery (RPC + audit + decrypt); PR 5 makes it
-//! useful for non-system callers.
+//! [`check_unmask_authorization`] is deliberately strict when no policy
+//! is configured: most real apps need `defineMaskPolicy()` to grant
+//! access to non-system callers. Without a configured policy, only the
+//! `auto` system actor can unmask.
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -48,10 +49,8 @@ use crate::error::DbError;
 
 /// Inputs to `dispatch_unmask`. Mirrors the `MaskedValue._meta` payload
 /// the SDK ships through `zeroship.db.unmaskField({...})`. The `actor`
-/// argument is currently the bare `Actor = Record<string, unknown>`
-/// shape (PR 1 placeholder); PR 5 will tighten it once
-/// `defineMaskPolicy()` lands and the policy lookup needs structured
-/// fields. PR 4 only inspects `actor.kind` and `actor.id`.
+/// argument is the bare `Actor = Record<string, unknown>` shape; only
+/// `actor.kind` and `actor.id` are inspected.
 ///
 /// `pub` under `test-helpers` so `tests/sqlite_integration.rs` can drive
 /// `dispatch_unmask` directly; production callers reach this through
@@ -61,9 +60,8 @@ pub struct UnmaskFieldArgs {
     pub collection: String,
     pub row_pk: String,
     pub column: String,
-    /// Opaque actor descriptor. PR 4 inspects `actor.kind` and `actor.id`
-    /// only; PR 5 will widen the surface. `None` → unauthenticated
-    /// caller (default-denied by the stub).
+    /// Opaque actor descriptor. Only `actor.kind` and `actor.id` are
+    /// inspected. `None` → unauthenticated caller (default-denied).
     pub actor: Option<Value>,
     /// Free-text rationale recorded on the audit row. Truncation is the
     /// caller's responsibility — long reasons are stored verbatim.
@@ -249,12 +247,10 @@ fn lookup_encryption_meta(
 }
 
 // ---------------------------------------------------------------------------
-// Authorization (P5.5 PR 5 — per-app policy lookup)
+// Authorization (per-app policy lookup)
 // ---------------------------------------------------------------------------
 
-/// **P5.5 PR 5** — real authorization for the unmask path.
-///
-/// Replaces PR 4's default-deny stub. Resolution rules:
+/// Authorization for the unmask path. Resolution rules:
 ///
 /// 1. **Unauthenticated** (`actor = None` or `actor.kind` missing) →
 ///    deny. The denied path still writes an audit row.
@@ -264,10 +260,10 @@ fn lookup_encryption_meta(
 ///    enforces the `auto`-actor fallback rule (system actor allowed
 ///    by default unless the policy explicitly restricts it).
 ///
-/// 3. **No cached policy + sync caller** → fall back to PR 4's
-///    default-deny stub (`auto` allowed; everyone else denied). The
-///    real first-use load happens inside [`dispatch_unmask`] before
-///    this helper runs — that load is async, so cannot live here.
+/// 3. **No cached policy** → fall back to a strict default-deny rule
+///    (`auto` allowed; everyone else denied). The real first-use load
+///    happens inside [`dispatch_unmask`] before this helper runs —
+///    that load is async, so cannot live here.
 ///
 /// **Sync entry point**: this function does not perform I/O. The
 /// per-app policy MUST be cached (via [`ensure_mask_policy_cached`])
@@ -277,7 +273,7 @@ fn lookup_encryption_meta(
 /// these broad access; app JS must never be able to claim one.
 pub(crate) const RESERVED_SYSTEM_ACTOR_KINDS: &[&str] = &["auto"];
 
-/// DB-3: sanitize an actor descriptor that originated from **app JS** (the
+/// Sanitize an actor descriptor that originated from **app JS** (the
 /// `{ actor }` field of an `unmask` / `find({unmask})` call). The unmask
 /// authorization read `actor.kind` straight off this app-supplied object, and
 /// `kind: "auto"` is the privileged system default that the default-deny stub
@@ -313,17 +309,17 @@ pub(crate) fn check_unmask_authorization(
     match policy {
         Some(p) => Ok(p.allows(kind, classification)),
         None => {
-            // PR 4 default-deny stub: only `auto` allowed when the app
+            // Default-deny fallback: only `auto` allowed when the app
             // has not declared a policy.
             Ok(kind == "auto")
         }
     }
 }
 
-/// **P5.5 PR 5** — best-effort lazy load of the durable policy for
+/// Best-effort lazy load of the durable policy for
 /// `app_id` into the per-isolate cache. Called by [`dispatch_unmask`]
 /// before the auth check. A storage miss is a no-op (cache stays
-/// empty, default-deny stub applies on the auth path); a storage hit
+/// empty, the default-deny fallback applies on the auth path); a storage hit
 /// installs the loaded policy via
 /// [`crate::context::IsolateDbContext::set_mask_policy_for_app`].
 ///
@@ -395,10 +391,10 @@ pub async fn dispatch_unmask(
         })?;
     args.column = mask_meta.canonical_column.clone();
 
-    // Step 2 — authorization. **P5.5 PR 5**: load the per-app policy
-    // into the cache (best-effort) THEN consult `check_unmask_authorization`,
-    // which honours the cached policy or falls back to PR 4's
-    // default-deny stub on a miss.
+    // Step 2 — authorization: load the per-app policy into the cache
+    // (best-effort) THEN consult `check_unmask_authorization`, which
+    // honours the cached policy or falls back to the default-deny
+    // rule on a miss.
     ensure_mask_policy_cached(app_id).await?;
     let allowed = check_unmask_authorization(app_id, &args.actor, &mask_meta.classification)?;
     if !allowed {
@@ -950,7 +946,7 @@ async fn ensure_audit_unmask_table(app_id: &str) -> Result<(), DbError> {
 }
 
 // ===========================================================================
-// P5.5 PR 7 — bulk unmask + per-query unmask hint
+// Bulk unmask + per-query unmask hint
 // ===========================================================================
 //
 // These two entry points wrap the single-column unmask machinery for
@@ -973,7 +969,7 @@ async fn ensure_audit_unmask_table(app_id: &str) -> Result<(), DbError> {
 // `[query_hint] <caller-reason>` so operators querying the audit log
 // can filter by dispatch shape without needing a new column.
 
-/// **P5.5 PR 7** — args for the bulk unmask dispatcher.
+/// Args for the bulk unmask dispatcher.
 ///
 /// `items[i].columns` is the list of column names to unmask on
 /// `items[i].row_pk`. An item with an empty `columns` list is treated
@@ -992,7 +988,7 @@ pub struct BulkUnmaskArgs {
     pub reason: Option<String>,
 }
 
-/// **P5.5 PR 7** — result of a successful bulk unmask.
+/// Result of a successful bulk unmask.
 ///
 /// `results[row_pk][column]` carries the plaintext for every requested
 /// pair. The shape mirrors the SDK's `Map<id, Record<col, plaintext>>`
@@ -1002,7 +998,7 @@ pub struct BulkUnmaskResult {
     pub results: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
-/// **P5.5 PR 7** — public dispatch entry for `zeroship.db.bulkUnmaskFields`.
+/// Public dispatch entry for `zeroship.db.bulkUnmaskFields`.
 ///
 /// Atomic authorization (Q-MASK-F): BEFORE any decrypt happens, every
 /// (row_pk, column) pair is authorised against the per-app policy. If
@@ -1144,7 +1140,7 @@ pub async fn dispatch_bulk_unmask(
     Ok(out)
 }
 
-/// **P5.5 PR 7** — write the single audit row covering an entire
+/// Write the single audit row covering an entire
 /// bulk-unmask call. Reuses `__zeroship_audit_unmask`; the row's
 /// `column` carries a comma-joined column list, `row_pk` carries the
 /// comma-joined row PK list, and `reason` is prefixed `[bulk_unmask]`
@@ -1221,7 +1217,7 @@ async fn write_audit_bulk_row(
 // Per-query unmask hint
 // ---------------------------------------------------------------------------
 
-/// **P5.5 PR 7** — pre-query authorization for the
+/// Pre-query authorization for the
 /// `find({...}, { unmask: [...], actor })` hint.
 ///
 /// Resolves every column in `unmask_columns` against the cached
@@ -1302,7 +1298,7 @@ pub async fn authorize_query_hint(
     Ok(())
 }
 
-/// **P5.5 PR 7** — write the audit row for a successful per-query
+/// Write the audit row for a successful per-query
 /// unmask hint. Called by the find dispatcher AFTER the SELECT lands.
 /// Single row per query (NOT per row), so the audit-log volume scales
 /// with query count not row count.
@@ -1339,7 +1335,7 @@ pub async fn audit_query_hint_granted(
     .await
 }
 
-/// **P5.5 PR 7** — rewrite rows from a `find` result so the
+/// Rewrite rows from a `find` result so the
 /// `unmask`-listed columns carry plaintext instead of the
 /// `__zsmask__`-wrapped sibling.
 ///
@@ -1523,7 +1519,7 @@ fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
             ),
         });
     }
-    // DB-3: app JS cannot claim the reserved `auto` system actor.
+    // App JS cannot claim the reserved `auto` system actor.
     let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
@@ -1550,7 +1546,7 @@ fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Str
 }
 
 // ---------------------------------------------------------------------------
-// P5.5 PR 7 — V8 dispatch glue for `bulkUnmaskFields`
+// V8 dispatch glue for `bulkUnmaskFields`
 // ---------------------------------------------------------------------------
 
 /// V8-facing dispatch helper for `zeroship.db.bulkUnmaskFields`.
@@ -1686,7 +1682,7 @@ fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
         }
         items.push(BulkUnmaskItem { row_pk, columns });
     }
-    // DB-3: app JS cannot claim the reserved `auto` system actor.
+    // App JS cannot claim the reserved `auto` system actor.
     let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
@@ -1753,10 +1749,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // PR 4 default-deny stub — exercised by passing an `app_id` that
-    // has no policy cached. **P5.5 PR 5** kept the stub behaviour
-    // intact for the no-policy fallthrough path; these tests pin that
-    // fallthrough.
+    // Default-deny fallback — exercised by passing an `app_id` that
+    // has no policy cached; these tests pin that fallthrough
+    // behaviour.
     //
     // Unit tests reach the per-isolate ISOLATE_CTX (which the
     // `check_unmask_authorization` body uses to look up the cached
@@ -1804,7 +1799,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // P5.5 PR 5 — per-app policy lookup
+    // Per-app policy lookup
     // ---------------------------------------------------------------
 
     /// Helper: install a [`MaskPolicy`] for `app_id` on the current
@@ -2004,7 +1999,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // P5.5 PR 7 — parse_bulk_args validation
+    // parse_bulk_args validation
     // ---------------------------------------------------------------
 
     #[test]
@@ -2122,7 +2117,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // P5.5 PR 7 — dispatch_bulk_unmask atomic auth fence
+    // dispatch_bulk_unmask atomic auth fence
     // ---------------------------------------------------------------
 
     #[test]
@@ -2165,7 +2160,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // P5.5 PR 7 — authorize_query_hint unit behaviour
+    // authorize_query_hint unit behaviour
     // ---------------------------------------------------------------
 
     #[test]

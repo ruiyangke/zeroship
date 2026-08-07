@@ -7,7 +7,7 @@
 //! its consumer) and the lock. This module is the single place the
 //! ordering lives so it can't drift.
 //!
-//! ## Ordering (§17.7, with the per-app role from P6a-2 dropped last)
+//! ## Ordering (§17.7, with the per-app role dropped last)
 //!
 //! 1. **Subscription gate.** If any subscription is active on the app,
 //!    defer with `subscriptions_active` + a count. Under `--force`, fire
@@ -26,13 +26,13 @@
 //!    `deprovision`; requires inactive, which the terminate guarantees.
 //! 5. `DROP PUBLICATION <pub>` — folded into step 3's `deprovision`.
 //! 6. `DROP SCHEMA "<app_id>" CASCADE`.
-//! 7. `DROP ROLE "app_<id>_role"` — the per-app role (P6a-2). Dropped
+//! 7. `DROP ROLE "app_<id>_role"` — the per-app role. Dropped
 //!    AFTER the schema so no objects depend on it.
 //!
-//! ## CRITICAL #4 — DDL ordering while the writer is alive
+//! ## DDL ordering while the writer is alive
 //!
-//! §17.7's CRITICAL #4 fix is "reorder so DDL runs while the writer is
-//! alive." For PG that means the **publication** (which references the
+//! §17.7 requires that DDL run while the writer is alive. For PG that
+//! means the **publication** (which references the
 //! schema via `FOR TABLES IN SCHEMA "<app_id>"`) must be dropped BEFORE
 //! the schema — otherwise `DROP SCHEMA CASCADE` would tear out tables a
 //! live publication still tracks, and Postgres would either error or
@@ -167,7 +167,7 @@ pub async fn drop_namespace(
 
     // ---- Step 6: DROP SCHEMA CASCADE ----
     // After the publication is gone (step 3) so the CASCADE never tears
-    // out tables a live publication tracks (CRITICAL #4). Idempotent.
+    // out tables a live publication tracks. Idempotent.
     let schema = crate::query::quote_ident(app_id);
     pool.query_text_params(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), &[])
         .await
@@ -177,7 +177,7 @@ pub async fn drop_namespace(
             err
         })?;
 
-    // ---- Step 7: DROP ROLE (per-app role from P6a-2) ----
+    // ---- Step 7: DROP ROLE (per-app role) ----
     // Dropped LAST: the schema CASCADE removed the role's objects +
     // grants, so the role no longer owns anything and can be dropped.
     // Idempotent (`DROP ROLE IF EXISTS`).

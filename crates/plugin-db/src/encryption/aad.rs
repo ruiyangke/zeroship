@@ -21,7 +21,7 @@
 //!   produce a different ciphertext per row and break that lookup
 //!   (the entire reason deterministic mode exists).
 //!
-//!   **DB-13 — accepted residual risk:** because deterministic columns omit
+//!   **Accepted residual risk:** because deterministic columns omit
 //!   row_pk, the Camp-A relocation defence does NOT cover them: an attacker
 //!   with UPDATE access who copies row A's deterministic ciphertext into row
 //!   B's same column reads A's secret through B (AAD still matches). This is an
@@ -31,7 +31,7 @@
 //!   relocation risk is unacceptable must use randomised mode (which binds
 //!   row_pk) and forgo equality search.
 //!
-//! All modes additionally bind the **wire version** (DB-14) so the
+//! All modes additionally bind the **wire version** so the
 //! version flag — otherwise unauthenticated framing in the wire envelope —
 //! cannot be downgraded to force a weaker AAD reconstruction.
 //!
@@ -84,7 +84,7 @@ pub fn canonical_aad(
     let mut out = Vec::with_capacity(
         17 + collection.len() + column.len() + row_pk_bytes.map_or(0, <[u8]>::len),
     );
-    // DB-14: bind the wire version FIRST, so the version byte (unauthenticated
+    // Bind the wire version FIRST, so the version byte (unauthenticated
     // framing in the wire envelope) is authenticated by the AEAD tag. A future
     // `0x02` (row-version-binding) shape that downgraded a stored `0x02` → `0x01`
     // would force the weaker AAD reconstruction; binding the version here makes
@@ -172,11 +172,11 @@ mod tests {
     }
 
     /// Spot-check the exact byte layout — locks in the wire
-    /// encoding for cross-backend compatibility (PR 3 SQLite arm and
-    /// PR 2 PG arm produce identical AAD bytes from this helper).
+    /// encoding for cross-backend compatibility (the SQLite arm and
+    /// the PG arm produce identical AAD bytes from this helper).
     #[test]
     fn explicit_byte_layout() {
-        // version = 0x01 (DB-14, bound first), collection = "u", column = "s",
+        // version = 0x01 (bound first), collection = "u", column = "s",
         // pk = "p". Encoding: 00000001 01 | 00000001 75 | 00000001 73 | 00000001 70
         let aad = canonical_aad("u", "s", Some(b"p"));
         assert_eq!(
@@ -192,7 +192,7 @@ mod tests {
         );
     }
 
-    /// DB-14: the wire version is bound into the AAD (first segment).
+    /// The wire version is bound into the AAD (first segment).
     #[test]
     fn aad_binds_wire_version_db14() {
         let aad = canonical_aad("users", "ssn", None);

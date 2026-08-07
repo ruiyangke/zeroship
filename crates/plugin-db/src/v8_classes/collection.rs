@@ -171,7 +171,7 @@ impl Collection {
         dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
-    /// `collection.purge(filter)` — **P7 PR 5**. Explicit hard-delete
+    /// `collection.purge(filter)` — explicit hard-delete
     /// of a single matching row. Always emits `DELETE FROM ...`
     /// regardless of the system-fields marker. For compliance /
     /// right-to-be-forgotten flows.
@@ -188,7 +188,7 @@ impl Collection {
         dispatch_purge_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
-    /// `collection.purgeMany(filter)` — **P7 PR 5**. Bulk hard-delete.
+    /// `collection.purgeMany(filter)` — bulk hard-delete.
     #[v8_method]
     #[v8_name = "purgeMany"]
     fn purge_many<'s>(
@@ -203,7 +203,7 @@ impl Collection {
         dispatch_purge_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
-    /// `collection.restore(filter)` — **P7 PR 5**. Clear `deleted_at`
+    /// `collection.restore(filter)` — clear `deleted_at`
     /// on the first matching soft-deleted row.
     #[v8_method]
     fn restore<'s>(
@@ -218,7 +218,7 @@ impl Collection {
         dispatch_restore_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
-    /// `collection.restoreMany(filter)` — **P7 PR 5**. Bulk-restore.
+    /// `collection.restoreMany(filter)` — bulk-restore.
     #[v8_method]
     #[v8_name = "restoreMany"]
     fn restore_many<'s>(
@@ -280,7 +280,7 @@ impl Collection {
 
     /// `collection.count(filter, opts?)` — count matching rows.
     ///
-    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// `opts.include_deleted: true` opts out of the
     /// auto `AND deleted_at IS NULL` filter.
     #[v8_method]
     fn count<'s>(
@@ -298,7 +298,7 @@ impl Collection {
     /// of `opts.field` across rows matching `filter`. Filter-first to
     /// match the rest of the read surface.
     ///
-    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// `opts.include_deleted: true` opts out of the
     /// auto `AND deleted_at IS NULL` filter.
     #[v8_method]
     fn distinct<'s>(
@@ -323,7 +323,7 @@ impl Collection {
     /// `collection.aggregate(pipeline, opts?)` — run an aggregation
     /// pipeline.
     ///
-    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// `opts.include_deleted: true` opts out of the
     /// auto-prepended soft-delete `$match`.
     #[v8_method]
     fn aggregate<'s>(
@@ -337,14 +337,14 @@ impl Collection {
         dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v, opts_v).into()
     }
 
-    /// `collection.search(args)` — **P4 PR 2** vector / FTS search.
+    /// `collection.search(args)` — vector / FTS search.
     ///
     /// `args` is a discriminated union:
     /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
     ///   — pgvector nearest-neighbour search. Resolves with a row
     ///   array; each row carries a synthetic `_distance` field.
-    /// - `{ text, ... }` — reserved for P4 PR 3 FTS (rejects with
-    ///   `fts_unsupported` until that PR lands).
+    /// - `{ text, ... }` — reserved for future FTS support (rejects
+    ///   with `fts_unsupported` until implemented).
     ///
     /// Routes to [`dispatch_search`] which inspects the discriminator
     /// and dispatches to the appropriate backend impl.
@@ -358,7 +358,7 @@ impl Collection {
         dispatch_search(scope, &self.app_id, &self.name, args_v).into()
     }
 
-    /// `collection.near(args)` — **P4 PR 3** spatial within-radius search.
+    /// `collection.near(args)` — spatial within-radius search.
     ///
     /// `args` shape:
     /// ```ts
@@ -373,7 +373,7 @@ impl Collection {
     /// `_distance_m` field (the metric distance in metres). PG arm
     /// routes to PostGIS `ST_DWithin` / `ST_Distance` against a
     /// `geography(POINT, 4326)` column; SQLite arm returns
-    /// `spatial_unsupported` until P4 PR 5 lands the haversine impl.
+    /// `spatial_unsupported` until the haversine implementation lands.
     #[v8_method]
     fn near<'s>(
         &self,
@@ -384,8 +384,8 @@ impl Collection {
         dispatch_near(scope, &self.app_id, &self.name, args_v).into()
     }
 
-    /// `collection.unmaskField(rowPk, column, opts?)` — **P9 PR 2**.
-    /// Single-cell unmask round-trip for the ad-hoc "no MaskedValue in
+    /// `collection.unmaskField(rowPk, column, opts?)` — single-cell
+    /// unmask round-trip for the ad-hoc "no MaskedValue in
     /// hand" case (e.g. unmask a known `(rowPk, column)` without first
     /// reading the row). Moved off `Db` so the collection name is
     /// inherited from the receiver and cannot be spoofed via the args
@@ -424,7 +424,7 @@ impl Collection {
         dispatch_unmask_field(scope, &self.app_id, Value::Object(args)).into()
     }
 
-    /// `collection.bulkUnmask(items, opts?)` — **P9 PR 2**. Bulk,
+    /// `collection.bulkUnmask(items, opts?)` — bulk,
     /// many-row / many-column unmask in one V8↔Rust hop. Moved off
     /// `Db.bulkUnmaskFields`; the collection name is inherited from the
     /// receiver.
@@ -464,7 +464,7 @@ impl Collection {
     /// collection. Synchronous mint; broker entry released by the
     /// wrapper's Weak finalizer (or `.close()`).
     ///
-    /// **P2 PR 3** — refuses materialised-view shadow names
+    /// Refuses materialised-view shadow names
     /// (`__zeroship_mv_*`) at the SDK boundary. The CDC dispatcher's
     /// relation filter drops MV writes before they reach the broker, so
     /// a subscription on an MV shadow name would silently never fire;

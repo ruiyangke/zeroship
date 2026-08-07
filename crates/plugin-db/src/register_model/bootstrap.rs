@@ -48,7 +48,7 @@ pub(crate) struct RegisterContext {
     /// `compute_diff` so the plan correctly identifies which need
     /// `CREATE INDEX CONCURRENTLY`.
     pub declared_indexes: Vec<query::IndexSpec>,
-    /// **P5.5 PR 6** — collection name + declared schema JSON. The
+    /// Collection name + declared schema JSON. The
     /// apply stage needs both to dispatch `MaskBackfill` / `MaskRewrite`
     /// (the schema carries the optional `encrypted` block per column;
     /// the collection is the SQL table identifier). Threaded through
@@ -80,7 +80,7 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// where each `dispatch_zs` spins a fresh runtime and would orphan a
 /// freshly-spawned connection.
 ///
-/// **P0 PR 3**: bound narrowed from `&PostgresBackend` to
+/// Bound narrowed from `&PostgresBackend` to
 /// [`RegisterBackend`] — the composition marker over the six
 /// capability traits this stage actually uses. The
 /// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
@@ -90,7 +90,7 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
 /// `docs/proposals/db-system-design.md` §7).
 ///
-/// **P0 PR 6**: the lock site is classified as
+/// The lock site is classified as
 /// `LockScope::GlobalApp { app_id, name: "register_model" }` — the
 /// canonical §10.5 shape. `LockScope::to_keys` then yields
 /// `(format!("{app_id}:register_model"), "register_model")`, which
@@ -113,7 +113,7 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
         .to_string();
 
     // -------------------------------------------------------------------
-    // P1 PR 5 — cross-app FK parse-time check (design §18 Q1, plan §6).
+    // Cross-app FK parse-time check (design §18 Q1, plan §6).
     //
     // Pure-Rust JSON walk over the field set; rejects any `t.ref` whose
     // `refTarget` carries an `<other_app>.` prefix. Runs on BOTH
@@ -141,14 +141,14 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
     // transaction). Released when `apply` calls [`LockGuard::release`]
     // at the end of pass 1.
     //
-    // P0 PR 3: closes the `backend.pool().get()` escape hatch — the
+    // Closes the `backend.pool().get()` escape hatch — the
     // PG-only `PgLockManager::acquire_pooled_client_for_lock` returns
     // the same `PooledClient<'p>` shape so `'p` still threads through
     // `LockGuard<'p>` exactly as before. The error mapping
     // (`DbError::Transient` with the same operator-facing prefix)
-    // lives in the PG impl now. Open Q5 resolution.
+    // lives in the PG impl now.
     //
-    // P0 PR 6: typed [`LockScope::GlobalApp`] classifies this site as
+    // Typed [`LockScope::GlobalApp`] classifies this site as
     // cluster-wide (visible to every worker pointed at the same DB);
     // `LockScope::to_keys` derives the `(key1, key2)` pair the
     // underlying `LockManager` primitive consumes.
@@ -218,7 +218,7 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
 /// the lock has been acquired so the outer function can release on
 /// `Err` in one place.
 ///
-/// **P0 PR 3**: bound narrowed from `&PostgresBackend` to
+/// Bound narrowed from `&PostgresBackend` to
 /// [`RegisterBackend`] in lock-step with `bootstrap`. See the
 /// outer function's rustdoc for the rationale.
 #[allow(clippy::too_many_arguments)]

@@ -59,7 +59,7 @@ pub(crate) async fn apply(
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
-    // **P4 HALF B** — the runtime data-access metadata (column types, encrypted
+    // The runtime data-access metadata (column types, encrypted
     // mode/keyId/wraps, mask kind/classification) is sourced from LIVE
     // introspection + the engine's sentinels (design §6), NOT the in-memory
     // declared schema. `runtime_schema_for` caches per (app, collection, deploy)

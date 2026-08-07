@@ -46,18 +46,18 @@ pub struct BootstrapOutcome {
     pub created_hmac_keys_table: bool,
     pub created_nonces_table: bool,
     pub created_session_ctx_table: bool,
-    /// **P5 PR 2** — created the `__zeroship_admin.column_keys`
+    /// Created the `__zeroship_admin.column_keys`
     /// table that stores per-key-id 32-byte root keys for column
     /// encryption. Read only via the SECURITY DEFINER
     /// `get_column_key` function below.
     pub created_column_keys_table: bool,
-    /// **P5 PR 4** — created the `__zeroship_admin.pitr_targets`
+    /// Created the `__zeroship_admin.pitr_targets`
     /// table that records the operator's PITR replay target per
     /// app. The `Backup::pitr_replay` PG impl writes a row here;
     /// the actual WAL recovery is performed out-of-band via
-    /// `recovery.conf` (P5 ships the API surface only).
+    /// `recovery.conf` (only the API surface lives here).
     pub created_pitr_targets_table: bool,
-    /// **P5.5 PR 5** — created the `__zeroship_admin.mask_policies`
+    /// Created the `__zeroship_admin.mask_policies`
     /// table that stores per-app actor-role → classifications maps.
     /// Read only via the SECURITY DEFINER `get_mask_policy` function;
     /// written via the SECURITY DEFINER `set_mask_policy` function.
@@ -181,15 +181,15 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     out.created_hmac_keys_table = ensure_hmac_keys_table(pool).await?;
     out.created_nonces_table = ensure_nonces_table(pool).await?;
     out.created_session_ctx_table = ensure_session_ctx_table(pool).await?;
-    // **P5 PR 2** — column-encryption key table. Bytes never reach
+    // Column-encryption key table. Bytes never reach
     // app code; only `__zeroship_admin.get_column_key(text)` does.
     out.created_column_keys_table = ensure_column_keys_table(pool).await?;
-    // **P5 PR 4** — PITR target log. The PG `Backup::pitr_replay`
+    // PITR target log. The PG `Backup::pitr_replay`
     // shim writes (app_id, target, recorded_at) rows here; the
-    // actual WAL recovery is operator-driven via `recovery.conf`.
-    // P5 ships the API surface only.
+    // actual WAL recovery is operator-driven via `recovery.conf`,
+    // so only the API surface lives here.
     out.created_pitr_targets_table = ensure_pitr_targets_table(pool).await?;
-    // **P5.5 PR 5** — per-app mask policy table. Drives
+    // Per-app mask policy table. Drives
     // `defineMaskPolicy()` durable storage. SECURITY DEFINER
     // get/set wrappers mediate access from app code.
     out.created_mask_policies_table = ensure_mask_policies_table(pool).await?;
@@ -202,10 +202,10 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     install_reset_session_function(pool).await?;
     install_rotate_keys_function(pool).await?;
     install_slot_wrapper_functions(pool).await?;
-    // **P5 PR 2** — the SECURITY DEFINER getter the
+    // The SECURITY DEFINER getter the
     // `KeySource::PgAdminTable` resolver calls.
     install_get_column_key_function(pool).await?;
-    // **P5.5 PR 5** — the SECURITY DEFINER get/set wrappers around
+    // The SECURITY DEFINER get/set wrappers around
     // the mask-policy table.
     install_mask_policy_functions(pool).await?;
 
@@ -378,7 +378,7 @@ async fn ensure_session_ctx_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
-/// **P5 PR 2** — `__zeroship_admin.column_keys` (key_id text PK,
+/// `__zeroship_admin.column_keys` (key_id text PK,
 /// root_key bytea, created_at timestamptz). Stores 32-byte root keys
 /// HKDF-expanded per-(app, slot) by `crate::encryption::keys::KeyStore`.
 /// REVOKEd from PUBLIC; only the SECURITY DEFINER getter is callable
@@ -417,7 +417,7 @@ async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
-/// **P5 PR 4** — `__zeroship_admin.pitr_targets` (app_id text PK,
+/// `__zeroship_admin.pitr_targets` (app_id text PK,
 /// target text, recorded_at timestamptz). One row per app; the
 /// `Backup::pitr_replay` PG shim upserts on the PK so the latest
 /// target wins.
@@ -474,7 +474,7 @@ async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
-/// **P5.5 PR 5** — `__zeroship_admin.mask_policies` (app_id text PK,
+/// `__zeroship_admin.mask_policies` (app_id text PK,
 /// policy jsonb, updated_at timestamptz). One row per app; the SDK's
 /// `defineMaskPolicy()` round-trips through the
 /// `__zeroship_admin.set_mask_policy` SECURITY DEFINER wrapper, and
@@ -518,7 +518,7 @@ async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
-/// **P5.5 PR 5** — SECURITY DEFINER get/set wrappers around
+/// SECURITY DEFINER get/set wrappers around
 /// `mask_policies`.
 ///
 /// - `get_mask_policy(app_id)` → JSONB. Returns the policy or NULL.
@@ -528,7 +528,7 @@ async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
 /// app code never reaches the rows except through these wrappers. The
 /// boundary moves the privilege check from the caller to the function
 /// owner (`__zeroship_platform_role`). Mirrors the `get_column_key`
-/// pattern from P5 PR 2.
+/// pattern.
 #[cfg(any(test, feature = "test-helpers"))]
 async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
     // get_mask_policy: STABLE SQL function — same shape as get_column_key.
@@ -597,7 +597,7 @@ async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
     Ok(())
 }
 
-/// **P5 PR 2** — SECURITY DEFINER getter for column root keys.
+/// SECURITY DEFINER getter for column root keys.
 ///
 /// Returns the 32-byte root key for `p_key_id`, or NULL when the row is
 /// absent. `KeySource::PgAdminTable` calls this; NULL falls through to
@@ -822,9 +822,9 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
 ///     (so it survives connection reuse correctly: the next checkout
 ///     overwrites the row).
 ///
-/// **P3 PR 2 additive change**: `p_pid INTEGER DEFAULT NULL` is the
-/// PID the token was minted against. When `NULL` (every pre-P3
-/// caller — including the existing free-fn `init_session` wrapper —
+/// `p_pid INTEGER DEFAULT NULL` is the
+/// PID the token was minted against. When `NULL` (every caller that
+/// doesn't pass one -- including the free-fn `init_session` wrapper --
 /// passes nothing), the function falls back to `pg_backend_pid()` —
 /// byte-for-byte today's behaviour. When non-NULL, the trait-impl
 /// path passes `token.backend_pid` so HMAC verification reproduces
@@ -840,7 +840,7 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
 #[cfg(any(test, feature = "test-helpers"))]
 async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
     // `CREATE OR REPLACE FUNCTION` refuses to change a function's
-    // parameter list. P3 PR 2 widens `init_session` from a 6-arg to
+    // parameter list. This widens `init_session` from a 6-arg to
     // a 7-arg signature (additive `p_pid INTEGER DEFAULT NULL`); we
     // DROP the legacy 6-arg signature first so the CREATE installs
     // cleanly on a previously-bootstrapped cluster. `IF EXISTS`
@@ -1445,7 +1445,7 @@ pub fn reset_role_sql() -> &'static str {
     "RESET ROLE"
 }
 
-// ── DB-1: per-app connection-hold / statement-time guards ────────────────────
+// ── Per-app connection-hold / statement-time guards ────────────────────────
 //
 // Bound how long any one app connection can pin shared-Postgres resources, so a
 // single tenant cannot exhaust the shared instance — neither by parking a
@@ -1463,7 +1463,7 @@ pub const DB_IDLE_IN_TX_TIMEOUT_MS: u32 = 15_000;
 /// Max time a statement waits on a lock before erroring (avoids lock pileups).
 pub const DB_LOCK_TIMEOUT_MS: u32 = 10_000;
 
-/// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
+/// Combined per-transaction client setup: `SET LOCAL ROLE` + the timeout
 /// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,
 /// so every value (role + timeouts) auto-reverts at COMMIT/ROLLBACK and can
 /// never leak to a later checkout of the (dedicated, but defensively reset)
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn set_role_sql_doubles_embedded_quote_via_quote_ident() {
-        // DB-15: the role name is the single statement enforcing per-tenant
+        // The role name is the single statement enforcing per-tenant
         // role separation. It MUST flow through quote_ident (doubling any
         // embedded `"`), not a hand-written `"{}"` splice — even though app_id
         // is validated upstream, this boundary must not rely on that.
@@ -1721,7 +1721,7 @@ mod tests {
 
     #[test]
     fn tx_session_setup_bounds_hold_and_statement_time() {
-        // DB-1: every dedicated transaction client must SET LOCAL the timeout
+        // Every dedicated transaction client must SET LOCAL the timeout
         // guards that bound how long it can be held idle-in-transaction and how
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
@@ -1735,8 +1735,8 @@ mod tests {
 
     #[test]
     fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
-        // P2-C1 + DB-1: the pooled autocommit path is pool-bounded (8) but a
-        // slow statement still pins one of those shared connections — bound it
+        // The pooled autocommit path is pool-bounded (8) but a
+        // slow statement still pins one of those shared connections -- bound it
         // with a statement_timeout. Crucially every value is `SET LOCAL`, run
         // inside an explicit transaction, so role + timeouts auto-revert at
         // COMMIT/ROLLBACK (including rollback-on-drop on cancellation) and can
@@ -1811,9 +1811,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Typed-error sweep [I28]
+    // Typed-error sweep
     //
-    // `ensure_admin_schema` + every helper now returns `Result<_, DbError>`
+    // `ensure_admin_schema` + every helper returns `Result<_, DbError>`
     // with SQLSTATE classification preserved by `coded_sql`. The
     // end-to-end behaviour is exercised by `tests/integration.rs::b8c_*`
     // against pg-test; the unit-level guards below pin the signature

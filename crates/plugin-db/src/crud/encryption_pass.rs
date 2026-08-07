@@ -81,7 +81,7 @@ use crate::error::DbError;
 /// know which placeholders need the `decode($N, 'base64')::bytea`
 /// cast. The marker is stripped before the row leaves the SQL builder.
 ///
-/// **P5.5 PR 2** — overload that captures plaintexts for the
+/// This is the overload that captures plaintexts for the
 /// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
 /// for the version that populates a [`MaskPlaintextSidechannel`]
 /// (`HashMap<String, Zeroizing<String>>`) BEFORE replacing the plaintext with
@@ -113,7 +113,7 @@ where
     .await
 }
 
-/// **P5.5 PR 2** — encrypt with plaintext sidechannel capture.
+/// Encrypt with plaintext sidechannel capture.
 ///
 /// Behaves identically to [`encrypt_row_on_write`] EXCEPT it populates
 /// `sidechannel[col]` with the raw plaintext for every encrypted

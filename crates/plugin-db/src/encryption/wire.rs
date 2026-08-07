@@ -6,12 +6,12 @@
 //!
 //! ## Why the leading version flag
 //!
-//! P5 baseline ships `version_flag = 0x01` (AAD = `(collection, column,
+//! The baseline ships `version_flag = 0x01` (AAD = `(collection, column,
 //! row_pk_bytes?)`). The post-system-fields proposal (see
 //! `docs/proposals/platform-system-fields.md` §8) introduces a
 //! `version_flag = 0x02` shape where AAD additionally binds the
-//! row-version bytes. The leading byte is reserved from P5 day one so
-//! the upgrade requires no in-place data migration of P5-era
+//! row-version bytes. The leading byte is reserved from day one so
+//! the upgrade requires no in-place data migration of existing
 //! ciphertext — `re-encrypt-on-write` produces v2 blobs naturally,
 //! and decryption inspects the flag to pick the right AAD
 //! reconstruction.
@@ -26,10 +26,10 @@
 
 use crate::error::DbError;
 
-/// Reserved version flag for the P5-baseline AAD shape.
+/// Reserved version flag for the baseline AAD shape.
 ///
-/// PR 1 emits only this version; the post-system-fields phase will
-/// introduce `0x02` alongside the version-bytes AAD extension.
+/// Only this version is emitted today; the post-system-fields phase
+/// will introduce `0x02` alongside the version-bytes AAD extension.
 pub const WIRE_VERSION_V1: u8 = 0x01;
 
 /// AES-GCM nonce length (RFC 5116 §5.3). The aes-gcm crate's
@@ -135,7 +135,7 @@ mod tests {
         assert!(unpack(&boundary).is_err());
     }
 
-    /// Unpack rejects any version flag other than `0x01` in PR 1.
+    /// Unpack rejects any version flag other than `0x01` today.
     /// `0x02` is reserved for the post-system-fields shape but is not
     /// yet emitted; treat as unknown.
     #[test]

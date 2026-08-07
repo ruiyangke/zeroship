@@ -1,11 +1,10 @@
 //! SQLite-side [`crate::backend::ChangeStream`] adapter — the
 //! `preupdate_hook` / `commit_hook` / `rollback_hook` integration.
 //!
-//! **PR 2** lights up the dispatcher: this file now installs the three
-//! hooks on the writer-actor's `rusqlite::Connection`, buffers
-//! per-transaction change events, and ships a `CommitPacket` over a
-//! `flume` channel to a publisher task that calls
-//! [`crate::broker::publish`] on the compio thread.
+//! This file installs the three hooks on the writer-actor's
+//! `rusqlite::Connection`, buffers per-transaction change events, and
+//! ships a `CommitPacket` over a `flume` channel to a publisher task
+//! that calls [`crate::broker::publish`] on the compio thread.
 //!
 //! Source plan: `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
 //! §2.2-2.5, §4-5, §11.
@@ -70,7 +69,7 @@
 //! Names are memoised inside the publisher task in a local
 //! `HashMap<(db, table), Arc<Vec<String>>>` so the second touch on the
 //! same table doesn't pay another round-trip. Cache invalidation on
-//! DDL is deferred to PR 4 (per plan §10 Q-P2-B); the engaged
+//! DDL is not yet implemented (per plan §10 Q-P2-B); the engaged
 //! schema-pending guard clears the cache at that point.
 
 use std::cell::RefCell;
@@ -150,7 +149,7 @@ pub(crate) struct PendingEvent {
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
     pub(crate) events: Vec<PendingEvent>,
-    #[allow(dead_code)] // PR 2: stamped but no downstream consumer yet.
+    #[allow(dead_code)] // Stamped but no downstream consumer yet.
     pub(crate) commit_id: u64,
 }
 
@@ -237,11 +236,10 @@ fn preupdate_callback(
     case: &PreUpdateCase,
     buffer: &Arc<Mutex<CdcTxBuffer>>,
 ) {
-    // Filter system / bookkeeping relations. PR 2 wired the full filter
-    // set already (per plan §6: MV shadow, audit, migrations,
-    // `__zs_*`, `sqlite_*`); PR 3 only adds the integration coverage +
-    // the SDK-boundary refusal that keeps subscribers from opening on
-    // `__zeroship_mv_*` names. This early-return is FIRST after the
+    // Filter system / bookkeeping relations (per plan §6: MV shadow,
+    // audit, migrations, `__zs_*`, `sqlite_*`). The SDK boundary
+    // separately refuses subscribers opening on `__zeroship_mv_*`
+    // names. This early-return is FIRST after the
     // action discriminant on purpose: filtered relations must never
     // build a `PendingEvent`, never touch the buffer mutex, never
     // increment any per-tx counters.
@@ -250,10 +248,10 @@ fn preupdate_callback(
     }
 
     // The hook also fires for writes to the "main" attached database
-    // (the control session SqliteBackend opened with). For PR 2 we
-    // suppress those — every app-side write lands against an ATTACHed
+    // (the control session SqliteBackend opened with). Those are
+    // suppressed - every app-side write lands against an ATTACHed
     // alias, and "main" only carries the control session's own
-    // bookkeeping (none in PR 2 — the control session is empty).
+    // bookkeeping (none today - the control session is empty).
     // Filtering here keeps the publisher's per-event app_id derivation
     // straightforward (`app_id = db_name`).
     if db_name == "main" {
@@ -295,8 +293,8 @@ fn preupdate_callback(
         PreUpdateCase::Unknown => {
             // Plan §10 Q-P2-C — drop silently + tracing::warn once per
             // session. The "once" gate would require a session-level
-            // flag; for PR 2 a per-fire warn is acceptable noise (the
-            // variant only appears with engine/binding version skew).
+            // flag; a per-fire warn is acceptable noise (the variant
+            // only appears with engine/binding version skew).
             tracing::warn!(
                 action = ?action,
                 db_name = %db_name,
@@ -458,7 +456,7 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
 /// - `__zeroship_mv_*`  — materialised-view shadow tables (§13.5)
 /// - `__zeroship_audit_*` — audit trail (§10.7)
 /// - `__zeroship_migrations` — migration audit table
-/// - `__zs_*` — P1 SQLite bookkeeping (e.g. `__zs_migrations`)
+/// - `__zs_*` - SQLite bookkeeping (e.g. `__zs_migrations`)
 /// - `sqlite_*` — engine-internal (`sqlite_master`, `sqlite_sequence`,
 ///   `sqlite_autoindex_*`)
 fn is_filtered_relation(table: &str) -> bool {
@@ -501,15 +499,15 @@ async fn publisher_loop(
     rx: flume::Receiver<CommitPacket>,
 ) {
     // Per-task local cache: `(db_name, table) → Arc<Vec<String>>`. The
-    // dispatcher's `column_cache` field is reserved for a future PR 3
-    // pre-cache strategy that runs inside the writer thread. For PR 2
+    // dispatcher's `column_cache` field is reserved for a future
+    // pre-cache strategy that runs inside the writer thread. Today
     // every name resolution flows through this map so the publisher
     // owns the lookup end-to-end (one PRAGMA round-trip per (db,
     // table) per process lifetime; tens of microseconds at dev scale).
     let mut name_cache: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
-        // P2 PR 4 — backfill pause + schema-pending decoder fence
+        // Backfill pause + schema-pending decoder fence
         // (plan §5 + §7). The publisher runs on the compio thread and
         // owns the broker-side; it is THE chokepoint where suppression
         // applies for the SQLite arm (the PG arm uses the legacy
@@ -636,8 +634,8 @@ async fn publisher_loop(
             };
 
             // The broker is thread-local to THIS thread — safe to call
-            // directly. Suppression / schema-pending filters are
-            // deferred to PR 4 (plan §9).
+            // directly. Suppression / schema-pending filtering already
+            // ran over the packet's events above (plan §9).
             crate::broker::publish(&event);
         }
     }
@@ -699,15 +697,14 @@ fn quote_ident(name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// PR 1 stub — `SqliteChangeStream` adapter (kept; PR 4 wires the real
-// `pause_broker` / `engage_schema_pending` bodies).
+// `SqliteChangeStream` adapter.
 // ---------------------------------------------------------------------------
 
 /// Handle returned by [`SqliteChangeStream::spawn_consumer`].
 ///
-/// PR 2 keeps the unit-struct shape from PR 1. PR 4 grows it to carry
-/// the dispatcher's commit-id watermark for `Resync` correlation; PR 2
-/// has no consumer that observes the handle.
+/// A unit struct: no consumer observes the handle today. Carrying the
+/// dispatcher's commit-id watermark for `Resync` correlation is the
+/// natural extension if one ever does.
 #[derive(Debug)]
 pub struct SqliteConsumerHandle;
 
@@ -720,12 +717,12 @@ pub struct SqliteConsumerHandle;
 /// (`async fn`-in-trait futures don't compose with borrowed-reference
 /// self).
 ///
-/// **PR 2**: the hook triplet is installed automatically at
+/// The hook triplet is installed automatically at
 /// [`SqliteBackend::new`] time (see `backend/sqlite/mod.rs`) rather
 /// than via this adapter — the writer-actor's lifetime IS the
-/// dispatcher's lifetime, so deferred `provision` would just be a
-/// noop. PR 4 may revisit if `provision`/`deprovision` grow per-app
-/// state.
+/// dispatcher's lifetime, so a deferred `provision` would just be a
+/// noop. That split would be worth revisiting if
+/// `provision`/`deprovision` ever grow per-app state.
 #[allow(dead_code, reason = "concrete adapter stays available for the sqlite change-stream capability surface")]
 #[derive(Debug)]
 pub struct SqliteChangeStream {
@@ -745,38 +742,37 @@ impl SqliteChangeStream {
 impl ChangeStream for SqliteChangeStream {
     type ConsumerHandle = SqliteConsumerHandle;
 
-    /// **PR 2**: no-op. The dispatcher is installed at backend
-    /// construction; `provision` would re-arm an already-armed
-    /// connection, which is harmless on the engine side but adds no
-    /// value. PR 4 may grow per-app `Command::CdcSuppress` admin
-    /// commands here.
+    /// No-op. The dispatcher is installed at backend construction;
+    /// `provision` would re-arm an already-armed connection, which is
+    /// harmless on the engine side but adds no value. Per-app
+    /// `Command::CdcSuppress` admin commands would belong here.
     async fn provision(&self, _app_id: &str) -> Result<(), DbError> {
         Ok(())
     }
 
-    /// **PR 2**: no-op. PR 4 disarms hooks for a session whose app is
-    /// being torn down.
+    /// No-op. Disarming hooks for a session whose app is being torn
+    /// down is not implemented.
     async fn deprovision(&self, _app_id: &str) -> Result<(), DbError> {
         Ok(())
     }
 
-    /// **PR 2**: returns a unit handle. The publisher task is already
-    /// running (spawned at `SqliteBackend::new`); there is no per-app
+    /// Returns a unit handle. The publisher task is already running
+    /// (spawned at `SqliteBackend::new`); there is no per-app
     /// consumer to spawn on the SQLite arm.
     async fn spawn_consumer(&self, _app_id: &str) -> Result<Self::ConsumerHandle, DbError> {
         Ok(SqliteConsumerHandle)
     }
 
-    /// **PR 2**: returns a no-op [`BrokerPauseGuard`]. PR 4 wires the
-    /// guard's `Drop` to clear the per-session `Command::CdcSuppress
-    /// { on: false }` admin flag + emit `Broker::resume_app_with_resync`.
+    /// Returns a [`BrokerPauseGuard`], which engages the suppression
+    /// flag on construction; its `Drop` unsuppresses and emits
+    /// `Broker::resume_app_with_resync`.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
         BrokerPauseGuard::new(app_id.to_string())
     }
 
-    /// **PR 2**: returns a no-op [`SchemaPendingGuard`]. PR 4 wires the
-    /// broker's thread-local `schema_pending_apps` set + `subscribe`
-    /// rejection.
+    /// Returns a [`SchemaPendingGuard`], which engages the broker's
+    /// thread-local `schema_pending_apps` entry on construction (so
+    /// `subscribe` is rejected while held) and disengages on `Drop`.
     fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard {
         SchemaPendingGuard::new(app_id.to_string())
     }

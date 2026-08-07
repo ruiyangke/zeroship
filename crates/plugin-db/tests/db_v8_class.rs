@@ -1,4 +1,4 @@
-//! Stage 2 — Db + Collection v8_class tests.
+//! Db + Collection v8_class tests.
 //!
 //! Verifies the runtime-side wiring of `env.db` as a `Db` v8_class
 //! instance and the `Collection` v8_class returned by
@@ -189,13 +189,13 @@ fn db_brand_check_rejects_non_db() {
 
 
 // ---------------------------------------------------------------------------
-// P9 PR 3 — native Db.transaction surface
+// Native Db.transaction surface
 // ---------------------------------------------------------------------------
 
 /// `db.transaction` is a native method (function) on the `Db` v8 surface.
 /// (Previously the tx entry point on `Db` was `beginTransaction`; the
 /// creator-facing `transaction` was a bootstrap-installed JS function.
-/// P9 PR 3 makes `transaction` the native method.)
+/// `transaction` is now the native method.)
 #[test]
 fn db_transaction_is_a_native_method() {
     init_v8();
@@ -215,7 +215,7 @@ fn db_transaction_is_a_native_method() {
 }
 
 /// `db.beginTransaction` is GONE — not on the instance, not up the
-/// prototype chain. The native primitive was deleted entirely in P9 PR 3
+/// prototype chain. The native primitive was deleted entirely
 /// (not hidden behind `__platform`).
 #[test]
 fn db_begin_transaction_is_not_exposed() {
@@ -238,7 +238,7 @@ fn db_begin_transaction_is_not_exposed() {
 }
 
 // ---------------------------------------------------------------------------
-// P9 PR 4 — `__platform` capability handle fence tests (§8)
+// `__platform` capability handle fence tests
 // ---------------------------------------------------------------------------
 //
 // The platform-internal callables (`registerModel`, `setMaskPolicy`,

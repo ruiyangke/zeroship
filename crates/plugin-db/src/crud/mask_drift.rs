@@ -1,10 +1,10 @@
-//! **P5.5 PR 7** — drift detection for masked sibling columns.
+//! Drift detection for masked sibling columns.
 //!
-//! The dual-write CRUD pass (PR 2), backfill (PR 6a) and rewrite
-//! (PR 6b) jobs are responsible for keeping `<col>_masked` in lock-step
+//! The dual-write CRUD pass, backfill, and rewrite
+//! jobs are responsible for keeping `<col>_masked` in lock-step
 //! with the parent column's plaintext under the column's declared
 //! `MaskKind`. Drift would let stale or wrong masked text leak into
-//! defaults reads — silently weakening the privacy guarantee P5.5 makes.
+//! defaults reads — silently weakening the masking privacy guarantee.
 //!
 //! This module periodically samples rows for every masked column on
 //! every collection and verifies the equation
@@ -90,7 +90,7 @@ impl DriftReport {
     }
 }
 
-/// **P5.5 PR 7** — drift-check one masked column on one collection.
+/// Drift-check one masked column on one collection.
 ///
 /// Algorithm (per the module doc-comment):
 /// 1. Resolve the column's `MaskKind` + optional `EncryptionMeta` from

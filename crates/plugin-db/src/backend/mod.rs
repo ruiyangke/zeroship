@@ -1,7 +1,7 @@
 //! Backend abstraction — "the data store boundary".
 //!
-//! Stage 8e — R2 of the plugin-db architecture review
-//! (`docs/reviews/plugin-db-architecture-review-2026-05-21.md`).
+//! See `docs/reviews/plugin-db-architecture-review-2026-05-21.md` for the
+//! rationale behind this seam.
 //!
 //! ## What this is
 //!
@@ -38,30 +38,28 @@
 //! instead. The PG impl ties them to the concrete types in
 //! [`postgres::PostgresBackend`].
 //!
-//! ## Capability traits (P0 PR 1 + PR 2)
+//! ## Capability traits
 //!
-//! After P0 PR 2, [`Backend`] is a **pure composition marker** — every
-//! operation lives on one of five focused capability traits:
+//! [`Backend`] is a **pure composition marker** — every operation lives
+//! on one of five focused capability traits:
 //!
-//! - [`SqlExecutor`] — connection lifecycle + run-a-statement (PR 1).
-//! - [`LockManager`] — session-scoped advisory locks (PR 1).
-//! - [`NamespaceManager`] — idempotent per-app schema bootstrap (PR 2).
-//! - [`SchemaIntrospect`] — live-schema snapshot + row-count estimate
-//!   (PR 2). Owns the `LiveSchema` associated type that used to live
-//!   on `Backend`.
+//! - [`SqlExecutor`] — connection lifecycle + run-a-statement.
+//! - [`LockManager`] — session-scoped advisory locks.
+//! - [`NamespaceManager`] — idempotent per-app schema bootstrap.
+//! - [`SchemaIntrospect`] — live-schema snapshot + row-count estimate.
+//!   Owns the `LiveSchema` associated type that used to live on
+//!   `Backend`.
 //! - [`IndexBuilder`] — `CREATE INDEX CONCURRENTLY` with audit-driven
-//!   retry recovery (PR 2).
+//!   retry recovery.
 //!
 //! A sixth PG-only extension trait, [`PgSqlExecutor`], exposes
 //! `pool_handle()` so free-function audit helpers in [`crate::audit`]
 //! can reach `&compio_postgres::Pool` without naming the concrete
-//! backend (Open Q1 resolution, see
-//! `docs/proposals/p0-implementation-plan.md` §3 Q1).
+//! backend (see `docs/proposals/p0-implementation-plan.md` §3 Q1).
 //!
 //! The 16 audit-table operations that used to live as methods on
-//! `Backend` (`ensure_audit_table`, `write_audit_row`, …) were deleted
-//! in PR 2; they stay as `pub`/`pub(crate)` free functions in
-//! [`crate::audit`].
+//! `Backend` (`ensure_audit_table`, `write_audit_row`, …) were deleted;
+//! they stay as `pub`/`pub(crate)` free functions in [`crate::audit`].
 
 use std::rc::Rc;
 
@@ -71,9 +69,9 @@ use crate::error::DbError;
 pub(crate) mod lock_guard;
 pub mod postgres;
 // SQLite module — crate-private by default; under `test-helpers` it
-// becomes `pub` so the integration target
-// (`tests/sqlite_integration.rs` — P1 PR 2) can name
-// `backend::sqlite::SqliteBackend` and the session-handle accessor.
+// becomes `pub` so the integration target (`tests/sqlite_integration.rs`)
+// can name `backend::sqlite::SqliteBackend` and the session-handle
+// accessor.
 // The PG-side test target reaches its backend through
 // `backend::PostgresBackend` (re-exported below); the SQLite arm has
 // session-actor internals worth pinning at the integration level, so
@@ -91,13 +89,12 @@ pub use sqlite::SqliteBackend;
 /// SQL execution capability — the "connection lifecycle + run a
 /// statement" slice of the data-store boundary.
 ///
-/// Carved out of the monolithic [`Backend`] trait in P0 PR 1 (see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 1" and the
+/// Carved out of the monolithic [`Backend`] trait (see
+/// `docs/proposals/p0-implementation-plan.md` and the
 /// converged design at `docs/proposals/db-system-design.md` §7).
-/// Future P0 PRs will narrow consumer bounds onto this trait (and
-/// [`LockManager`]) instead of the omnibus [`Backend`] super-trait;
-/// see the deferred-backlog [C1] entry in
-/// `docs/reviews/plugin-db-deferred.md`.
+/// Consumer bounds narrow onto this trait (and [`LockManager`])
+/// instead of the omnibus [`Backend`] super-trait; see the
+/// deferred-backlog [C1] entry in `docs/reviews/plugin-db-deferred.md`.
 ///
 /// Not `Send + Sync` on purpose — the compio runtime is
 /// single-threaded per worker, so we don't pay for atomics or
@@ -183,7 +180,7 @@ pub trait SqlExecutor: 'static {
 ///   visible cluster-wide. A future SQLite backend would map it to
 ///   either `BEGIN EXCLUSIVE` (when the lock duration aligns with a
 ///   transaction) or a sentinel-row in a `__zs_locks` table (for
-///   session-scoped duration). The two existing P0 sites are both in
+///   session-scoped duration). The two existing call sites are both in
 ///   this category: the register-model orchestrator's per-app
 ///   serialiser (`name = "register_model"`) and the per-migration
 ///   progress lock (`name = format!("mig:{spec.name}")`).
@@ -193,8 +190,8 @@ pub trait SqlExecutor: 'static {
 ///   in-process Rust HashMap registry, NOT by SQL. No SQL is issued;
 ///   the backend impl maps this to whatever in-memory coordination
 ///   primitive that backend already runs. The variant exists today
-///   so call sites can classify their intent explicitly; P0 has no
-///   production `LocalApp` callers — every site is `GlobalApp`.
+///   so call sites can classify their intent explicitly; there is no
+///   production `LocalApp` caller yet — every site is `GlobalApp`.
 ///
 /// **§7.2 / §10.5 key-naming convention**: implementations derive the
 /// underlying `(key1, key2)` string-key pair from the variant fields
@@ -221,7 +218,7 @@ pub enum LockScope {
     },
     /// Single-process / in-Rust advisory lock. Coordinates work inside
     /// one worker's Rust runtime — backed by an in-memory HashMap
-    /// registry, NOT by SQL. No P0 production caller; the variant
+    /// registry, NOT by SQL. No production caller yet; the variant
     /// exists so future call sites can classify their intent.
     #[allow(dead_code, reason = "LocalApp remains part of the lock model for test-helper coverage even though the release build only constructs GlobalApp.")]
     LocalApp {
@@ -272,13 +269,13 @@ impl LockScope {
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
 /// on a [`SqlExecutor::Client`].
 ///
-/// Carved out of the monolithic [`Backend`] trait in P0 PR 1 (see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 1" and
+/// Carved out of the monolithic [`Backend`] trait (see
+/// `docs/proposals/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The `: SqlExecutor`
 /// super-bound is load-bearing — every method takes a `&Self::Client`
 /// and that associated type lives on [`SqlExecutor`].
 ///
-/// **Two-tier surface** (P0 PR 6):
+/// **Two-tier surface**:
 ///
 /// - The **typed API** ([`Self::acquire`] / [`Self::try_acquire`] /
 ///   [`Self::release`] / [`Self::try_acquire_with_backoff`]) takes a
@@ -295,13 +292,12 @@ impl LockScope {
 ///   primitives the typed API dispatches through, and the PG impl's
 ///   `hashtext()` SQL lives at this layer. `acquire_advisory_lock`
 ///   itself is **no longer routed through** by the typed surface —
-///   security [I43] (cycle 18:17) replaced
-///   `LockManager::acquire`'s indefinite-wait `acquire_advisory_lock`
-///   dispatch with the bounded
-///   [`Self::try_acquire_with_backoff`] loop. All three legacy
-///   methods stay `#[doc(hidden)]`; eager removal of
-///   `acquire_advisory_lock` is now unblocked but deferred to a
-///   separate cleanup PR.
+///   a security fix replaced `LockManager::acquire`'s indefinite-wait
+///   `acquire_advisory_lock` dispatch with the bounded
+///   [`Self::try_acquire_with_backoff`] loop, since the indefinite
+///   wait let a malicious app holding its own lock stall every other
+///   caller. All three legacy methods stay `#[doc(hidden)]`; eager
+///   removal of `acquire_advisory_lock` is unblocked but not done.
 pub trait LockManager: SqlExecutor {
     /// Acquire a session-scoped advisory lock for the given
     /// [`LockScope`], bounded by a short retry loop on
@@ -315,7 +311,7 @@ pub trait LockManager: SqlExecutor {
     /// the next iteration's sleep is cancellable. Dropping the future
     /// mid-await leaks no client-side state.
     ///
-    /// **Security [I43]** (cycle 18:17): the previous version called
+    /// **Security**: the previous version called
     /// `acquire_advisory_lock`, which on PG issues `pg_advisory_lock`
     /// — a server-side wait that has no timeout. A malicious app
     /// holding its own register-model lock indefinitely could stall
@@ -325,8 +321,8 @@ pub trait LockManager: SqlExecutor {
     /// `DbError::LockContention` (wire code `lock_not_available`)
     /// on exhaustion so the caller decides how to react.
     ///
-    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so call
-    /// sites can construct a single binding and pass it to both
+    /// Takes `&LockScope` so call sites can construct a single binding
+    /// and pass it to both
     /// `try_acquire` / `acquire` and the matching `release` without
     /// either cloning or rebuilding the struct literal. The default
     /// impl only needs `&self` on the scope (it calls `to_keys`).
@@ -367,8 +363,8 @@ pub trait LockManager: SqlExecutor {
         client: &Self::Client,
         scope: &LockScope,
     ) -> Result<(), DbError> {
-        // Backoff schedule per §[I43] (security r13). Attempts 1..=5
-        // with the listed `pre-wait` (the first attempt waits 0).
+        // Attempts 1..=5 with the listed `pre-wait` (the first
+        // attempt waits 0).
         // Tuple shape `(attempt_idx, pre_wait_ms)` is read off in the
         // loop body so a future contributor sees the cumulative
         // budget without re-deriving it: 0+50+200+500+1000 = 1750ms.
@@ -434,8 +430,7 @@ pub trait LockManager: SqlExecutor {
     /// [`LockScope`]; `Ok(false)` if another holder already owns it.
     /// Typed wrapper over [`Self::try_acquire_advisory_lock`].
     ///
-    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` — see
-    /// [`Self::acquire`].
+    /// Takes `&LockScope` — see [`Self::acquire`].
     #[allow(async_fn_in_trait)]
     async fn try_acquire(
         &self,
@@ -450,9 +445,9 @@ pub trait LockManager: SqlExecutor {
     /// [`Self::acquire`] / [`Self::try_acquire`]. Typed wrapper over
     /// [`Self::release_advisory_lock`].
     ///
-    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so the
-    /// release site can reuse the same binding the acquisition used
-    /// — the §10.5 key-derivation invariant lives in the single
+    /// Takes `&LockScope` so the release site can reuse the same
+    /// binding the acquisition used — the §10.5 key-derivation
+    /// invariant lives in the single
     /// `LockScope` value, not in textual identity across two struct
     /// literals.
     #[allow(async_fn_in_trait)]
@@ -473,20 +468,19 @@ pub trait LockManager: SqlExecutor {
     /// sqlite has no advisory locks — that backend would need a
     /// `BEGIN EXCLUSIVE` or a sentinel table).
     ///
-    /// **Security [I43]** (cycle 18:17): the indefinite-wait shape
-    /// is a within-app DoS vector — a malicious app holding its own
-    /// session-scoped advisory lock stalls every subsequent
-    /// `register_model` / migration call for that same app. The
-    /// typed [`Self::acquire`] surface no longer dispatches through
-    /// this method; it routes via [`Self::try_acquire_with_backoff`]
-    /// instead. This method is retained as the trait primitive only
-    /// because (a) some future backend may want to expose the
-    /// indefinite-wait shape behind a feature gate, and (b) the
-    /// integration test `b1_advisory_lock_prevents_concurrent_runs`
-    /// at `tests/integration.rs` still calls
-    /// `pg_advisory_lock` SQL directly to exercise the contended
-    /// branch. **No production caller** invokes it as of [I43]
-    /// closure.
+    /// **Security**: the indefinite-wait shape is a within-app DoS
+    /// vector — a malicious app holding its own session-scoped
+    /// advisory lock stalls every subsequent `register_model` /
+    /// migration call for that same app. The typed [`Self::acquire`]
+    /// surface no longer dispatches through this method; it routes
+    /// via [`Self::try_acquire_with_backoff`] instead. This method is
+    /// retained as the trait primitive only because (a) some future
+    /// backend may want to expose the indefinite-wait shape behind a
+    /// feature gate, and (b) the integration test
+    /// `b1_advisory_lock_prevents_concurrent_runs` at
+    /// `tests/integration.rs` still calls `pg_advisory_lock` SQL
+    /// directly to exercise the contended branch. No production
+    /// caller invokes it.
     ///
     /// Prefer [`Self::acquire`] / [`Self::try_acquire_with_backoff`]
     /// at every call site.
@@ -520,8 +514,7 @@ pub trait LockManager: SqlExecutor {
     /// callers can treat an `Err` as observability-only
     /// (warn-and-continue) — but returning the typed error lets them
     /// emit a structured log instead of silently swallowing it.
-    /// Mirrors the pattern `LockGuard::release` adopted at `ffb1e101`
-    /// (code-critique MAJOR-R5-5).
+    /// Mirrors the pattern `LockGuard::release` adopted.
     ///
     /// Prefer [`Self::release`] at new call sites.
     #[doc(hidden)]
@@ -537,13 +530,12 @@ pub trait LockManager: SqlExecutor {
 /// Per-app schema-namespace capability — "idempotently provision the
 /// app's logical namespace".
 ///
-/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and the
+/// Carved out of the monolithic [`Backend`] trait (see
+/// `docs/proposals/p0-implementation-plan.md` and the
 /// converged design at `docs/proposals/db-system-design.md` §7). Carries
 /// the single `ensure_app_schema` method that used to live on
 /// [`Backend`] directly; consumer bounds in
-/// `register_model/bootstrap.rs` will narrow onto this
-/// trait in PR 3.
+/// `register_model/bootstrap.rs` narrow onto this trait.
 ///
 /// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
 pub trait NamespaceManager: 'static {
@@ -560,8 +552,8 @@ pub trait NamespaceManager: 'static {
 /// Live-schema introspection capability — "read the catalog and return
 /// a typed snapshot the diff engine can consume".
 ///
-/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
+/// Carved out of the monolithic [`Backend`] trait (see
+/// `docs/proposals/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The trait owns the
 /// `LiveSchema` associated type that used to live on [`Backend`] —
 /// pinning it here means consumer bounds like
@@ -595,8 +587,8 @@ pub trait SchemaIntrospect: 'static {
 /// Online index-build capability — "create an index without blocking
 /// writers, classify SQLSTATE failures, audit retries".
 ///
-/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
-/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
+/// Carved out of the monolithic [`Backend`] trait (see
+/// `docs/proposals/p0-implementation-plan.md` and
 /// `docs/proposals/db-system-design.md` §7). The single method —
 /// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
 /// a SQLSTATE-driven retry loop and writes structured audit rows on
@@ -636,8 +628,8 @@ pub trait IndexBuilder: SqlExecutor {
 /// validation / backfill event into the per-app `__zeroship_migrations`
 /// table".
 ///
-/// **Introduced in P1 PR 5** (decision AW-1 in
-/// `docs/proposals/p1-sqlite-implementation-plan.md` §3.5 + §10). The
+/// Introduced per decision AW-1 in
+/// `docs/proposals/p1-sqlite-implementation-plan.md` §3.5 + §10. The
 /// trait exists so [`IndexBuilder::create_index_with_recovery`] (and
 /// future audit-emitting hooks) can stamp rows without hard-coding the
 /// PG-only [`crate::audit::write_audit_row`] free function.
@@ -651,7 +643,7 @@ pub trait IndexBuilder: SqlExecutor {
 ///   parameterised INSERT through the session actor.
 ///
 /// **Why not on `Backend` super-bound?** The trait composition stays
-/// PR-1-shaped (5 sub-traits + `'static`). `AuditWriter` is opt-in:
+/// as 5 sub-traits + `'static`. `AuditWriter` is opt-in:
 /// `IndexBuilder` consumers (today, just the per-backend `impl
 /// IndexBuilder for …` methods inside this crate) bound on it
 /// explicitly when they need to write rows. Forcing it onto every
@@ -704,12 +696,11 @@ pub trait AuditWriter: 'static {
 /// anchor used by both the PG SECURITY DEFINER pipeline and the
 /// upcoming SQLite in-process minter.
 ///
-/// **Introduced in P3 PR 1** (see
-/// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §3). The
-/// trait declaration is **not** feature-gated — both backends will
-/// implement it. The PG impl (PR 2) lives at the bottom of
+/// See `docs/proposals/p3-sqlite-auth-implementation-plan.md` §3. The
+/// trait declaration is **not** feature-gated — both backends
+/// implement it. The PG impl lives at the bottom of
 /// `crate::auth::session` and wraps SECURITY DEFINER functions managed
-/// by `crate::auth::bootstrap`. The SQLite impl (PR 3) lives in
+/// by `crate::auth::bootstrap`. The SQLite impl lives in
 /// `crate::backend::sqlite::session_minter` and is gated only by the
 /// `sqlite` feature — dev tier per the design doc, no SQL surface,
 /// HMAC-SHA256 + bounded LRU nonce cache in Rust.
@@ -724,7 +715,7 @@ pub trait AuditWriter: 'static {
 ///            || hex(nonce) || '|' || expires_at_iso
 /// ```
 ///
-/// A cross-backend equivalence test (P3 PR 4) pins the bytes.
+/// A cross-backend equivalence test pins the bytes.
 ///
 /// ## Dyn-compatibility
 ///
@@ -734,7 +725,7 @@ pub trait AuditWriter: 'static {
 /// used by [`AuditWriter`] and the `ChangeStream` family.
 ///
 /// Not `Send + Sync` for the same single-threaded-per-worker reason
-/// as the rest of the capability traits (Open Q4 in P0).
+/// as the rest of the capability traits (Open Q4).
 #[cfg(feature = "test-helpers")]
 pub trait SessionMinter: 'static {
     /// Mint a fresh session token. `ttl_secs = None` defers to the
@@ -763,11 +754,11 @@ pub trait SessionMinter: 'static {
 
 /// Inputs for [`SessionMinter::mint_session_token`]. The cross-backend
 /// shape — distinct from the legacy `crate::auth::session::SessionInit`
-/// which carries no `pid` field. The PG impl (PR 2) translates the
+/// which carries no `pid` field. The PG impl translates the
 /// trait shape into the legacy free-fn shape before calling into
 /// `__zeroship_admin.sign_session`.
 ///
-/// `pid` is the design §12 project-id binding new in P3. Today's PG
+/// `pid` is the design §12 project-id binding. Today's PG
 /// free-fn impl ties tokens to `pg_backend_pid()`; trait-routed PG
 /// callers can pass `pid: Some(...)` to opt into the canonical-payload
 /// shape, and `pid: None` preserves today's PG-side behaviour.
@@ -808,17 +799,16 @@ pub struct MintedToken {
 /// SQL-dialect strategy — the seam every per-engine SQL-string
 /// builder route through.
 ///
-/// **Introduced in P1 PR 1** (see
-/// `docs/proposals/p1-sqlite-implementation-plan.md` §5). The six
-/// methods listed below are the minimum-viable hook set; PR 2-5 fill
-/// in additional hooks (RETURNING/upsert/JSON/vector/FTS) alongside
+/// See `docs/proposals/p1-sqlite-implementation-plan.md` §5. The six
+/// methods listed below are the minimum-viable hook set; additional
+/// hooks (RETURNING/upsert/JSON/vector/FTS) fill in alongside
 /// the consumers that need them.
 ///
-/// **No production caller as of PR 1** — the trait + ZST impls
-/// (`SqliteDialect` here; `PgDialect` lands in PR 3) exist so the
+/// **No production caller yet** — the trait + ZST impls
+/// (`SqliteDialect` here; `PgDialect` in the PG arm) exist so the
 /// `query.rs` free-function builders can be retargeted onto a
 /// dialect-typed entry point without re-shaping their call sites.
-/// Until PR 3 wires that retarget, `quote_ident` etc. continue to
+/// Until that retarget lands, `quote_ident` etc. continue to
 /// live as free `quote_ident_pg(...)`-style functions inside `query.rs`.
 ///
 /// **Why on the backend, not on `SqlExecutor`**: dialect choice is a
@@ -882,15 +872,15 @@ pub trait DialectBuilder: 'static {
 /// [`crate::audit`] — can reach an `&compio_postgres::Pool` without
 /// naming the concrete backend type.
 ///
-/// **Open Q1 resolution (P0 PR 2)**: the 16 audit-table operations
+/// **Open Q1 resolution**: the 16 audit-table operations
 /// that used to live as methods on [`Backend`] were deleted; the
 /// helpers stay as free functions in `crate::audit::*` taking
 /// `&Pool` / `&Client`, and generic consumers reach the pool through
 /// `backend.pool_handle()`. See `docs/proposals/p0-implementation-plan.md`
-/// §"PR 2" + §3 Q1 and `docs/proposals/db-system-design.md` §7.
+/// §3 Q1 and `docs/proposals/db-system-design.md` §7.
 ///
-/// **Feature gating**: this trait is unconditional at HEAD. P0 PR 5 will
-/// move the `impl` side onto the PG backend only; a hypothetical
+/// **Feature gating**: this trait is unconditional at HEAD. The `impl`
+/// side moves onto the PG backend only; a hypothetical
 /// `SqliteBackend` would not implement this trait — it would have its
 /// own audit-helper signatures (a `SqliteExecutor` accessor returning
 /// `&sqlite::Connection`, etc.).
@@ -909,7 +899,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// whose `'p` borrow lifetime threads through
 /// [`crate::backend::lock_guard::LockGuard`].
 ///
-/// **Open Q5 resolution (P0 PR 3)**: the alternative was a GAT on
+/// **Open Q5 resolution**: the alternative was a GAT on
 /// [`LockManager`] of the form
 /// `type PooledLockClient<'p>: 'p where Self: 'p`. async-fn-in-trait
 /// + GAT is workable but fights the trait solver in subtle ways
@@ -918,8 +908,8 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// future backends (sqlite, planetscale) would have their own
 /// session-management primitive on a different extension trait —
 /// we take the PG extension-trait path and defer cross-backend
-/// lifetime threading to P1. See
-/// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
+/// lifetime threading. See
+/// `docs/proposals/p0-implementation-plan.md` §3 Q5 and
 /// `docs/proposals/db-system-design.md` §7.
 ///
 /// The `: LockManager<Client = compio_postgres::Client>` super-bound
@@ -947,7 +937,7 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
 /// Change-stream capability — the "produce CDC events for an app" slice
 /// of the data-store boundary.
 ///
-/// Introduced in **P2 PR 1** as the cross-backend surface for SQLite's
+/// Introduced as the cross-backend surface for SQLite's
 /// `preupdate_hook`-driven CDC arm (`docs/proposals/p2-sqlite-cdc-implementation-plan.md`
 /// §2.1, §2.5). PG and SQLite both implement this on adapter types
 /// (`change_stream_pg::PgChangeStream` and
@@ -967,18 +957,18 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
 /// detached `compio::runtime::spawn` task on PG, an actor-driven flume
 /// channel on SQLite) doesn't naturally share an erased shape.
 ///
-/// **Guards in PR 1 are no-ops** — they exist so call sites can adopt
-/// the shape today; the real Drop bodies that wire into
+/// **Some guards start as no-ops** — they exist so call sites can
+/// adopt the shape today; the real Drop bodies that wire into
 /// `wal_consumer::suppress_app` / `broker::resume_app_with_resync`
-/// land in PR 4.
-// `#[allow(dead_code)]` on the trait: PR 1 ships the surface with
+/// land once the consumers below are wired up.
+// `#[allow(dead_code)]` on the trait: today the surface ships with
 // only `spawn_consumer` invoked from
 // `replication_ops::start_replication_consumer_dispatch` (the no-op
 // marker call). `provision` / `deprovision` / `pause_broker` /
-// `engage_schema_pending` are part of the stable trait surface PR 4
-// wires up — `migrations.run` will pull `pause_broker`, the
+// `engage_schema_pending` are part of the stable trait surface that
+// still needs wiring — `migrations.run` will pull `pause_broker`, the
 // `bundle_invalidated` control-event will pull `engage_schema_pending`,
-// and per-app deletion (future PR) will pull `deprovision`. Removing
+// and per-app deletion will pull `deprovision`. Remove
 // the allow once those callers exist.
 #[allow(dead_code)]
 pub trait ChangeStream: 'static {
@@ -1006,8 +996,8 @@ pub trait ChangeStream: 'static {
     /// Spawn the long-running consumer task for `app_id`. The returned
     /// [`Self::ConsumerHandle`] represents the running consumer; the
     /// orchestrator does not currently join it (PG detaches; SQLite
-    /// runs in the session actor) but the handle exists so PR 4+ can
-    /// implement explicit shutdown when needed.
+    /// runs in the session actor) but the handle exists so explicit
+    /// shutdown can be implemented when needed.
     #[allow(async_fn_in_trait)]
     async fn spawn_consumer(&self, app_id: &str) -> Result<Self::ConsumerHandle, DbError>;
 
@@ -1015,8 +1005,8 @@ pub trait ChangeStream: 'static {
     /// Returns a [`BrokerPauseGuard`] whose `Drop` resumes delivery
     /// and emits a `Resync` to every active subscriber (§16.7).
     ///
-    /// **PR 1**: the guard's `Drop` is a no-op (tracing::trace! only);
-    /// PR 4 wires it through `wal_consumer::suppress_app` /
+    /// The guard's `Drop` starts as a no-op (tracing::trace! only)
+    /// until it is wired through `wal_consumer::suppress_app` /
     /// `broker::resume_app_with_resync`.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard;
 
@@ -1026,8 +1016,8 @@ pub trait ChangeStream: 'static {
     /// `Broker::subscribe(app_id, …)` rejects new subscriptions with
     /// `DbError::Conflict { code: "schema_pending" }`.
     ///
-    /// **PR 1**: the guard's `Drop` is a no-op (tracing::trace! only);
-    /// PR 4 wires both halves (subscribe-rejection + resync-on-drop).
+    /// The guard's `Drop` starts as a no-op (tracing::trace! only)
+    /// until both halves (subscribe-rejection + resync-on-drop) are wired.
     fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard;
 }
 
@@ -1035,7 +1025,7 @@ pub trait ChangeStream: 'static {
 /// broker for `app_id` (and emitting one `Resync` per active
 /// subscription) happens on `Drop`.
 ///
-/// **P2 PR 4 wired body** (plan §7 backfill pause):
+/// Wired body (plan §7 backfill pause):
 ///
 /// 1. `::new(app_id)` — calls
 ///    [`crate::wal_consumer::suppress_app`] which sets the
@@ -1115,10 +1105,10 @@ impl Drop for BrokerPauseGuard {
 /// column and run a top-k nearest-neighbour query" slice of the
 /// data-store boundary.
 ///
-/// Introduced in **P4 PR 1** (`docs/proposals/p4-search-implementation-plan.md`
-/// §2). The PG impl (PR 2) wraps `pgvector` (`CREATE INDEX … USING
+/// See `docs/proposals/p4-search-implementation-plan.md`
+/// §2. The PG impl wraps `pgvector` (`CREATE INDEX … USING
 /// ivfflat`, `<->` / `<#>` / `<=>` operators by metric). The SQLite
-/// impl (PR 4) is a pure-Rust flat scan over a `BLOB` column holding
+/// impl is a pure-Rust flat scan over a `BLOB` column holding
 /// little-endian `[f32]` payloads — dev tier only, ≤50k rows, ≤1024
 /// dims, HNSW deferred (riskiest-decision Q-P4-D, plan §10).
 ///
@@ -1131,7 +1121,7 @@ impl Drop for BrokerPauseGuard {
 /// `VectorIndex` to the omnibus `Backend` super-trait would force
 /// every backend to implement it (including hypothetical future
 /// arms that have no vector primitive), and the consumer migration
-/// path on PR 2-5 will go through the same `as_*()?.vector_search(...)`
+/// path goes through the same `as_*()?.vector_search(...)`
 /// shape the [`AuditWriter`] / `SessionMinter` consumers already use.
 ///
 /// ## Method signatures
@@ -1159,8 +1149,8 @@ impl Drop for BrokerPauseGuard {
 pub trait VectorIndex: 'static {
     /// Idempotently create the vector index. PG: `CREATE INDEX
     /// CONCURRENTLY IF NOT EXISTS … USING ivfflat ("col" vector_{metric}_ops)`.
-    /// SQLite: no-op (flat scan needs no index; PR 4 wires the
-    /// CHECK constraint at column-DDL time instead).
+    /// SQLite: no-op (flat scan needs no index; the CHECK constraint
+    /// is wired at column-DDL time instead).
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(async_fn_in_trait)]
     async fn ensure_vector_index(
@@ -1191,7 +1181,7 @@ pub trait VectorIndex: 'static {
     ) -> Result<Vec<serde_json::Value>, DbError>;
 }
 
-// **Schema-authority P1** — `VectorMetric` is a schema-shape descriptor
+// `VectorMetric` is a schema-shape descriptor
 // (consumed by the DDL builder in `zeroship_schema::query` to pick the
 // pgvector opclass). It was relocated into the leaf crate
 // `zeroship-schema` and is re-exported here so existing
@@ -1202,10 +1192,10 @@ pub use zeroship_schema::descriptors::VectorMetric;
 /// inverted index over one or more text columns and run a phrase /
 /// proximity query" slice of the data-store boundary.
 ///
-/// Introduced in **P4 PR 1** (plan §2). The PG impl (PR 3) maintains
+/// See plan §2. The PG impl maintains
 /// a generated `__fts tsvector` column + GIN index + an `AFTER
 /// INSERT/UPDATE` trigger calling `tsvector_update_trigger(...)`.
-/// The SQLite impl (PR 5) uses FTS5 external-content virtual tables
+/// The SQLite impl uses FTS5 external-content virtual tables
 /// keyed by `rowid` with `AFTER` triggers mirroring writes.
 ///
 /// `language` is honoured on PG (selects the tsvector configuration —
@@ -1254,9 +1244,9 @@ pub trait FullTextIndex: 'static {
 /// `geography(POINT)` column and run a within-radius point query"
 /// slice of the data-store boundary.
 ///
-/// Introduced in **P4 PR 1** (plan §2). The PG impl (PR 3) wraps
+/// See plan §2. The PG impl wraps
 /// PostGIS (`geography(POINT, 4326)` column type, `GIST` index,
-/// `ST_DWithin` / `ST_MakePoint` operators). The SQLite impl (PR 5)
+/// `ST_DWithin` / `ST_MakePoint` operators). The SQLite impl
 /// is a pure-Rust haversine within-radius post-filter over a `BLOB`
 /// column packed as `(lat, lng)` little-endian `f64` × 2 = 16 bytes —
 /// dev tier only, no R-tree (Q-P4-C: polygon ops PG-only).
@@ -1267,7 +1257,7 @@ pub trait FullTextIndex: 'static {
 /// within-radius predicate via `AND`. Each returned `Value` includes
 /// a synthetic `"_distance_m"` field (`f64`).
 ///
-/// **`spatial_near` only** in P4 (Q-P4-C): polygon ops (`within`,
+/// **`spatial_near` only** (Q-P4-C): polygon ops (`within`,
 /// `intersects`) are deferred. The SQLite impl rejects polygon
 /// input with `Configuration { code: "polygon_ops_pg_only" }`.
 pub trait SpatialIndex: 'static {
@@ -1298,7 +1288,7 @@ pub trait SpatialIndex: 'static {
     ) -> Result<Vec<serde_json::Value>, DbError>;
 }
 
-// **Schema-authority P1** — `GeoPoint` is a schema-shape descriptor
+// `GeoPoint` is a schema-shape descriptor
 // (consumed by `zeroship_schema::query::build_spatial_near` and the
 // `geoPoint` DDL emitter). It was relocated into the leaf crate
 // `zeroship-schema` and is re-exported here so existing
@@ -1307,28 +1297,26 @@ pub trait SpatialIndex: 'static {
 pub use zeroship_schema::descriptors::GeoPoint;
 
 // ===========================================================================
-// P5 PR 1 — EncryptedColumn + Backup capability traits
+// EncryptedColumn + Backup capability traits
 // ===========================================================================
 //
-// Two new capability traits land here per
-// `docs/proposals/p5-encryption-backup-implementation-plan.md` §2 + §9 PR 1.
+// Two capability traits defined per
+// `docs/proposals/p5-encryption-backup-implementation-plan.md` §2 + §9.
 // Neither joins the [`Backend`] super-trait composition or the
 // [`RegisterBackend`] marker — they're admin-surface accessors routed
 // via dedicated `BackendHandle::as_encrypted_column_*` /
 // `as_backup_*` accessors (mirror of the `as_change_stream_*` shape
-// the [`ChangeStream`] capability adopted in P2 PR 1).
+// the [`ChangeStream`] capability adopted).
 //
-// PR 1 ships:
+// This section brings:
 //   - the trait declarations themselves;
 //   - the supporting [`EncryptionMode`] / [`BusyPolicy`] /
 //     [`SnapshotOpts`] / [`SnapshotHandle`] / [`PitrTarget`] types;
-//   - stub impls on `PostgresBackend` + `SqliteBackend` that return
-//     a typed `Configuration { code: "p5_pr2_stub" }` error;
+//   - impls on `PostgresBackend` + `SqliteBackend`;
 //   - compile-time trait-shape pins in the `tests` module.
 //
-// PR 2 (PG) and PR 3 (SQLite) backfill the real bodies. The encryption
-// module they delegate to is at `crate::encryption` and lands in this
-// same PR.
+// The encryption module the impls delegate to is at
+// `crate::encryption`.
 
 /// AEAD encrypt/decrypt at the storage boundary.
 ///
@@ -1342,7 +1330,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 ///   [`Self::KeyHandle`] associated type lets each backend pick its
 ///   own key-material container without forcing a common type on the
 ///   read/write surface.
-/// - The 13 carved capability traits in P0-P4 set the pattern: focused
+/// - The 13 carved capability traits set the pattern: focused
 ///   trait per capability, accessor-routed dispatch through
 ///   [`BackendHandle`], no boxed dyn in the hot path.
 ///
@@ -1356,17 +1344,17 @@ pub use zeroship_schema::descriptors::GeoPoint;
 /// **Not `Send + Sync`** — same Open Q4 reasoning as the rest of the
 /// backend traits: the compio runtime is single-threaded per worker.
 pub trait EncryptedColumn: 'static {
-    /// Backend-specific key handle. PG (in PR 2) uses
-    /// `crate::encryption::aead::AeadKey`; SQLite (PR 3) likely the
+    /// Backend-specific key handle. PG uses
+    /// `crate::encryption::aead::AeadKey`; SQLite likely uses the
     /// same. The associated type leaves room for a PG variant that
     /// wraps an opaque KMS handle in the future.
     type KeyHandle: 'static;
 
     /// Resolve (cache or derive) the AEAD key for `(app_id, key_id)`.
-    /// PR 2 (PG) reads through the admin-schema SECURITY DEFINER
-    /// getter; PR 3 (SQLite) reads the env var; both pass the bytes
+    /// PG reads through the admin-schema SECURITY DEFINER
+    /// getter; SQLite reads the env var; both pass the bytes
     /// through `crate::encryption::keys::KeyStore::resolve` which
-    /// does the HKDF expansion. PR 1 stub returns `p5_pr2_stub`.
+    /// does the HKDF expansion.
     #[allow(async_fn_in_trait)]
     async fn resolve_key(
         &self,
@@ -1400,7 +1388,7 @@ pub trait EncryptedColumn: 'static {
     ) -> Result<Vec<u8>, DbError>;
 }
 
-// **Schema-authority P1** — `EncryptionMode` is a schema-shape descriptor
+// `EncryptionMode` is a schema-shape descriptor
 // (the `t.encrypted({mode})` facet; the DDL builder emits the `zsenc`
 // sentinel from it, and the data-plane AEAD path reconstructs the AAD from
 // it). It was relocated into the leaf crate `zeroship-schema` and is
@@ -1416,8 +1404,8 @@ pub use zeroship_schema::descriptors::EncryptionMode;
 /// trait is routed through the `BackendHandle::as_backup_*`
 /// accessors rather than joining the [`Backend`] super-trait. App
 /// code never reaches this; only the platform's backup orchestrator
-/// does. PR 4 (PG) ships `pg_dump`/`pg_restore` shell-out + PITR
-/// placeholder; PR 5 (SQLite) ships `VACUUM INTO`
+/// does. PG ships `pg_dump`/`pg_restore` shell-out + PITR
+/// placeholder; SQLite ships `VACUUM INTO`
 /// + atomic-rename restore + `pitr_pg_only` refusal.
 #[cfg(feature = "test-helpers")]
 pub trait Backup: 'static {
@@ -1432,8 +1420,8 @@ pub trait Backup: 'static {
         opts: SnapshotOpts,
     ) -> Result<SnapshotHandle, DbError>;
 
-    /// Restore a snapshot taken by [`Self::snapshot`]. PR 4 (PG):
-    /// downloads + `pg_restore` + atomic schema swap. PR 5 (SQLite):
+    /// Restore a snapshot taken by [`Self::snapshot`]. PG:
+    /// downloads + `pg_restore` + atomic schema swap. SQLite:
     /// downloads + atomic rename + isolate evict.
     #[allow(async_fn_in_trait)]
     async fn restore(
@@ -1442,9 +1430,9 @@ pub trait Backup: 'static {
         snapshot: &SnapshotHandle,
     ) -> Result<(), DbError>;
 
-    /// Replay WAL up to `target`. PR 4 (PG): records the target in
+    /// Replay WAL up to `target`. PG: records the target in
     /// `__zeroship_admin.pitr_targets`; operator runs `recovery.conf`.
-    /// PR 5 (SQLite): returns `Configuration { code: "pitr_pg_only" }`
+    /// SQLite: returns `Configuration { code: "pitr_pg_only" }`
     /// — SQLite has no WAL-archive PITR story.
     #[allow(async_fn_in_trait)]
     async fn pitr_replay(
@@ -1456,7 +1444,7 @@ pub trait Backup: 'static {
 
 /// Options for [`Backup::snapshot`].
 ///
-/// Today carries only [`Self::if_busy`]; reserved so future PRs can
+/// Today carries only [`Self::if_busy`]; reserved so future work can
 /// add compression / encryption-at-rest knobs without changing the
 /// trait method signature.
 #[cfg(feature = "test-helpers")]
@@ -1473,7 +1461,7 @@ pub enum BusyPolicy {
     /// Surface a typed `Configuration { code: "backup_busy" }` error
     /// to the caller immediately. The caller decides whether to retry.
     Abort,
-    /// In-trait retry with a small backoff (PR 5: 3 × 1s).
+    /// In-trait retry with a small backoff (3 × 1s).
     Retry,
 }
 
@@ -1482,7 +1470,7 @@ pub enum BusyPolicy {
 #[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
-    /// Where the snapshot lives. PR 4/5 conventions:
+    /// Where the snapshot lives. Convention:
     /// `s3://<bucket>/snapshots/<app>/<ts>-<hash>.<ext>` or
     /// `file:///<path>`.
     pub uri: String,
@@ -1514,7 +1502,7 @@ pub enum PitrTarget {
 /// Disengaging the schema-pending decoder (and emitting one `Resync`
 /// per active subscription) happens on `Drop`.
 ///
-/// **P2 PR 4 wired body** (plan §7 + design §16.7):
+/// Wired body (plan §7 + design §16.7):
 ///
 /// 1. `::new(app_id)` — calls
 ///    [`crate::broker::engage_schema_pending`] which inserts the app
@@ -1583,7 +1571,7 @@ impl Drop for SchemaPendingGuard {
 /// signatures can write `B: RegisterBackend` instead of restating the
 /// 6-trait compound bound at each function.
 ///
-/// **P0 PR 3 ergonomics**: the bound is exactly
+/// For ergonomics, the bound is exactly
 /// [`PgSqlExecutor`] (transitively [`SqlExecutor`]) +
 /// [`LockManager`] + [`NamespaceManager`] + [`SchemaIntrospect`] with
 /// `LiveSchema = crate::diff::LiveSchema` + [`IndexBuilder`] +
@@ -1592,9 +1580,10 @@ impl Drop for SchemaPendingGuard {
 /// six sub-bounds (today, [`PostgresBackend`]; tomorrow, any other
 /// concrete impl that wires up the same set).
 ///
-/// See `docs/proposals/p0-implementation-plan.md` §"PR 3" step 4
-/// ("Ergonomics") and `docs/proposals/db-system-design.md` §7.
-// **P5.5 PR 6** — the `EncryptedColumn` super-bound is required for
+/// See the "Ergonomics" step in
+/// `docs/proposals/p0-implementation-plan.md` and
+/// `docs/proposals/db-system-design.md` §7.
+// The `EncryptedColumn` super-bound is required for
 // the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
 // (the backfill decrypts encrypted columns before applying the mask
 // transform). Both backends impl `EncryptedColumn` unconditionally.
@@ -1632,24 +1621,23 @@ impl<T> RegisterBackend for T where
 /// Postgres ([`PostgresBackend`]).
 ///
 /// `Backend` is now a **pure composition marker** — every operation
-/// lives on a focused sub-trait. After P0 PR 2 the super-trait bound
+/// lives on a focused sub-trait. The super-trait bound
 /// is the carved capability set:
 ///
-/// - [`SqlExecutor`] — **P1 PR 1**: the `Client = compio_postgres::Client`
+/// - [`SqlExecutor`] — the `Client = compio_postgres::Client`
 ///   pin was dropped from this super-bound so a `SqliteBackend` whose
 ///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
 ///   `Backend`. PG-only consumers that *need* the concrete client
 ///   type continue to bound on
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
-///   `Client = compio_postgres::Client`) — see the grep-audit table
-///   in the P1 PR 1 commit message for the per-site verdict.
+///   `Client = compio_postgres::Client`).
 /// - [`LockManager`]
 /// - [`NamespaceManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
 /// - [`IndexBuilder`]
 ///
 /// The 16 audit-table operations that used to live here (`ensure_audit_table`,
-/// `next_schema_version`, `write_audit_row`, …) were deleted in PR 2
+/// `next_schema_version`, `write_audit_row`, …) were deleted
 /// — they stay as free functions in [`crate::audit`], reached via
 /// [`PgSqlExecutor::pool_handle`] (Open Q1 resolution, see
 /// `docs/proposals/p0-implementation-plan.md` §3 Q1).
@@ -1678,9 +1666,9 @@ pub trait Backend:
 /// Per-isolate backend handle — the typed enum stashed on
 /// [`crate::context::IsolateDbContext`].
 ///
-/// **Why an enum, not `Box<dyn Backend>`** (round-3 critic CRITICAL #3,
-/// closes `docs/proposals/db-system-design.md` §5.5 and
-/// `docs/proposals/p0-implementation-plan.md` §"PR 5"):
+/// **Why an enum, not `Box<dyn Backend>`** (closes
+/// `docs/proposals/db-system-design.md` §5.5 and
+/// `docs/proposals/p0-implementation-plan.md`):
 ///
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
@@ -1690,18 +1678,17 @@ pub trait Backend:
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers
 ///   take by `&Self::Client` reference.
-/// - The set of backends is closed (PG today; SQLite reserved for P1).
+/// - The set of backends is closed (PG and SQLite today).
 ///   An enum is the canonical shape for a closed sum.
 ///
-/// **Single-arm enum in P0**: the SQLite arm and its `sqlite` Cargo
-/// feature were declared in r14 but the underlying
-/// `crate::backend::sqlite` module never landed, so `--features sqlite`
-/// failed to compile (E0433). The arm and the feature were removed in
-/// the P0 mop-up cycle (post-r14) — both will be re-introduced
-/// atomically with the `crate::backend::sqlite::SqliteBackend` impl in
-/// P1. A build with `--no-default-features` is expected to fail at
-/// compile time (no backend arm) — the failure mode is meaningful,
-/// not a silent miscompile.
+/// The SQLite arm and its `sqlite` Cargo feature were previously
+/// declared before the underlying `crate::backend::sqlite` module
+/// landed, so `--features sqlite` failed to compile (E0433). The arm
+/// and the feature were removed and later re-introduced atomically
+/// with the `crate::backend::sqlite::SqliteBackend` impl. A build with
+/// `--no-default-features` is expected to fail at compile time (no
+/// backend arm) — the failure mode is meaningful, not a silent
+/// miscompile.
 #[derive(Debug, Clone)]
 pub enum BackendHandle {
     /// Postgres backend handle. Wraps an [`Rc<PostgresBackend>`] so
@@ -1710,13 +1697,9 @@ pub enum BackendHandle {
     /// migrates to this arm one-to-one.
     Postgres(Rc<PostgresBackend>),
 
-    /// SQLite backend handle. Re-introduced in **P1 PR 1** alongside
-    /// the [`crate::backend::sqlite::SqliteBackend`] module skeleton
-    /// (the previous declaration was removed in the P0 mop-up because
-    /// the underlying module never landed and `--features sqlite`
-    /// failed E0433). At PR 1 the inner type's capability-impl
-    /// bodies are stubs returning `DbError::Internal { … "P1 PR2+ stub" … }`;
-    /// PR 2-5 backfill behaviour per
+    /// SQLite backend handle, wrapping
+    /// [`crate::backend::sqlite::SqliteBackend`]. The inner type's
+    /// capability-impl behaviour follows
     /// `docs/proposals/p1-sqlite-implementation-plan.md` §9.
     Sqlite(Rc<SqliteBackend>),
 }
@@ -1724,14 +1707,14 @@ pub enum BackendHandle {
 impl BackendHandle {
     /// Run `f` against the inner [`PostgresBackend`].
     ///
-    /// **No `dyn Backend` anywhere** (round-3 critic CRITICAL #3):
-    /// dispatching to the concrete impl through an enum match keeps
+    /// **No `dyn Backend` anywhere**: dispatching to the concrete
+    /// impl through an enum match keeps
     /// every consumer site monomorphised over `PostgresBackend` — the
     /// trait-method calls inline through the PG impl exactly as they
     /// did when the field was `Option<Rc<PostgresBackend>>`. No
     /// allocation, no vtable, no per-call overhead.
     ///
-    /// **P1 PR 1**: the SQLite arm is now reachable, so the closure
+    /// The SQLite arm is reachable, so the closure
     /// must convey "not the PG arm" rather than always running.
     /// Return type became `Option<R>` (mirrors [`Self::as_postgres`])
     /// — the closure runs and yields `Some(R)` on the PG arm; the
@@ -1750,7 +1733,7 @@ impl BackendHandle {
     /// Borrow the inner [`PostgresBackend`] as a `&PostgresBackend`
     /// reference — the async-friendly companion to [`Self::with_postgres`].
     ///
-    /// **Why both shapes** (P0 PR 5 step 4 recommendation): the sync
+    /// **Why both shapes**: the sync
     /// closure ([`Self::with_postgres`]) composes cleanly when the
     /// caller's body is sync, but it cannot `.await` across the
     /// closure boundary without lifetime gymnastics (the closure's
@@ -1767,13 +1750,10 @@ impl BackendHandle {
     /// pg.acquire_dedicated_client().await
     /// ```
     ///
-    /// Returns `Some(&PostgresBackend)` unconditionally in P0 (the
-    /// enum has a single arm). The `Option`-shaped signature is the
-    /// stable consumer contract — when the SQLite arm returns in P1
-    /// this accessor will continue to return `None` on the SQLite arm
-    /// so the existing `ok_or_else(...)?` consumer sites map the
-    /// non-PG case to a typed `backend_unsupported` error rather than
-    /// a panic. See the P0 mop-up commit and MAJOR-R14-1.
+    /// Returns `None` on the SQLite arm. The `Option`-shaped signature
+    /// is the stable consumer contract so the existing
+    /// `ok_or_else(...)?` consumer sites map the non-PG case to a
+    /// typed `backend_unsupported` error rather than a panic.
     pub fn as_postgres(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
@@ -1784,11 +1764,11 @@ impl BackendHandle {
     /// Run `f` against the inner [`SqliteBackend`], yielding
     /// `Some(R)` on the SQLite arm or `None` otherwise.
     ///
-    /// **P1 PR 1**: symmetric counterpart to [`Self::with_postgres`].
+    /// Symmetric counterpart to [`Self::with_postgres`].
     /// The `Option`-shaped return makes the consumer code style
     /// identical across backend arms.
     ///
-    /// Consumers still on the PG arm pattern at PR 1 typically write:
+    /// Consumers still on the PG arm pattern typically write:
     ///
     /// ```ignore
     /// let pg = backend.as_postgres().ok_or_else(|| backend_unsupported(...))?;
@@ -1808,9 +1788,9 @@ impl BackendHandle {
     /// Returns `Some(&SqliteBackend)` on the SQLite arm; `None` on
     /// the PG arm.
     ///
-    /// **P1 PR 1**: present so PR 2-5's `as_sqlite()?` consumer
-    /// migration has a stable accessor to migrate onto. PR 1 has no
-    /// production caller — the orchestrator / migrations / register-model
+    /// Present so `as_sqlite()?` consumer
+    /// migration has a stable accessor to migrate onto. Has no
+    /// production caller yet — the orchestrator / migrations / register-model
     /// paths continue to use `as_postgres()?` against the PG arm only.
     pub fn as_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
@@ -1824,7 +1804,7 @@ impl BackendHandle {
     /// re-routes `ensure_publication_and_slot` /
     /// `wal_consumer::run_supervised` through the trait surface.
     ///
-    /// **P2 PR 1**: introduced alongside the [`ChangeStream`] trait.
+    /// Introduced alongside the [`ChangeStream`] trait.
     /// Associated types (`type ConsumerHandle`) block dyn dispatch, so
     /// the consumer migration path mirrors the `as_postgres` /
     /// `as_sqlite` accessor shape rather than a `with_change_stream`
@@ -1845,13 +1825,13 @@ impl BackendHandle {
 
     /// Borrow a [`ChangeStream`] adapter over the SQLite arm —
     /// returns the [`crate::backend::sqlite::cdc::SqliteChangeStream`]
-    /// wrapper that PR 2+ fills with `preupdate_hook`/`commit_hook`
+    /// wrapper that fills in `preupdate_hook`/`commit_hook`
     /// integration.
     ///
-    /// **P2 PR 1**: stub. The returned adapter's
+    /// Starts as a stub. The returned adapter's
     /// `provision`/`deprovision`/`spawn_consumer` are `Ok(())`/unit
     /// returns; `pause_broker` / `engage_schema_pending` return no-op
-    /// guards. PR 2 wires the real session-hook installation.
+    /// guards until the real session-hook installation is wired.
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
     ///
@@ -1869,22 +1849,20 @@ impl BackendHandle {
     }
 
     // -----------------------------------------------------------------
-    // P5 PR 1 — EncryptedColumn + Backup accessors
+    // EncryptedColumn + Backup accessors
     // -----------------------------------------------------------------
     //
     // Same shape as the `as_change_stream_*` accessors above: one
-    // accessor per (capability, backend arm) pair. PR 1 returns
-    // `Some(&PostgresBackend)` / `Some(&SqliteBackend)` (the PR-1
-    // stub impls return `Configuration { code: "p5_pr2_stub" }` for
-    // every method); PR 2-5 backfill the real bodies, and the
-    // accessor shapes never change so the orchestrator-side consumer
-    // sites stay stable across the PR sequence.
+    // accessor per (capability, backend arm) pair. Each returns
+    // `Some(&PostgresBackend)` / `Some(&SqliteBackend)` on its own arm
+    // and `None` on the other, so the orchestrator-side consumer sites
+    // keep a stable shape regardless of which backend is configured.
 
     /// Borrow an [`EncryptedColumn`] capability over the PG arm.
     ///
-    /// **P5 PR 1**: returns `Some(&PostgresBackend)` on the PG arm.
+    /// Returns `Some(&PostgresBackend)` on the PG arm.
     /// The `EncryptedColumn` impl wires the admin-schema SECURITY
-    /// DEFINER getter for `column_keys`. PR 2 backfills the real body.
+    /// DEFINER getter for `column_keys`.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
     pub fn as_encrypted_column_pg(&self) -> Option<&PostgresBackend> {
@@ -1896,10 +1874,9 @@ impl BackendHandle {
 
     /// Borrow an [`EncryptedColumn`] capability over the SQLite arm.
     ///
-    /// **P5 PR 1**: returns `Some(&SqliteBackend)` on the SQLite
+    /// Returns `Some(&SqliteBackend)` on the SQLite
     /// arm. The SQLite impl is gated only by `feature = "sqlite"`
-    /// (env-var key sourcing, no admin schema). PR 3 backfills the
-    /// real body.
+    /// (env-var key sourcing, no admin schema).
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
     pub fn as_encrypted_column_sqlite(&self) -> Option<&SqliteBackend> {
@@ -1911,7 +1888,7 @@ impl BackendHandle {
 
     /// Borrow a [`Backup`] capability over the PG arm.
     ///
-    /// **P5 PR 4**: returns `Some(&PostgresBackend)` on the PG arm.
+    /// Returns `Some(&PostgresBackend)` on the PG arm.
     /// The real `Backup` impl is pg_dump/pg_restore shell-out plus a
     /// PITR placeholder that writes to `__zeroship_admin.pitr_targets`.
     /// Mirrors the [`Self::as_encrypted_column_pg`] shape.
@@ -1927,8 +1904,8 @@ impl BackendHandle {
 
     /// Borrow a [`Backup`] capability over the SQLite arm.
     ///
-    /// **P5 PR 1**: returns `Some(&SqliteBackend)` on the SQLite
-    /// arm. PR 5 backfills `VACUUM INTO` snapshot + atomic-rename
+    /// Returns `Some(&SqliteBackend)` on the SQLite
+    /// arm. The real body is `VACUUM INTO` snapshot + atomic-rename
     /// restore + `pitr_pg_only` refusal.
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
@@ -1972,7 +1949,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`SqlExecutor`] capability super-trait (P0 PR 1). If a future
+    /// [`SqlExecutor`] capability super-trait. If a future
     /// refactor accidentally pulls a `SqlExecutor` method back onto
     /// the omnibus `Backend` trait — or detaches the impl block from
     /// the `PostgresBackend` type — this stops compiling.
@@ -1982,7 +1959,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`LockManager`] capability super-trait (P0 PR 1). The
+    /// [`LockManager`] capability super-trait. The
     /// `: SqlExecutor` super-bound on `LockManager` plus the
     /// `Client = compio_postgres::Client` constraint here pin the
     /// shape end-to-end — a regression in either direction fails
@@ -1993,7 +1970,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`NamespaceManager`] capability trait (P0 PR 2). If a future
+    /// [`NamespaceManager`] capability trait. If a future
     /// refactor pulls `ensure_app_schema` back onto the omnibus
     /// `Backend` trait or detaches the impl block, this stops
     /// compiling.
@@ -2004,7 +1981,7 @@ mod tests {
 
     /// Compile-time: [`PostgresBackend`] satisfies
     /// [`SchemaIntrospect`] with the associated type pinned to
-    /// [`crate::diff::LiveSchema`] (P0 PR 2). This is the constraint
+    /// [`crate::diff::LiveSchema`]. This is the constraint
     /// `register_model::plan` now uses (`<B: SchemaIntrospect<LiveSchema = LiveSchema>>`).
     fn assert_postgres_backend_impls_schema_introspect() {
         fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
@@ -2012,7 +1989,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`IndexBuilder`] capability trait (P0 PR 2). The
+    /// [`IndexBuilder`] capability trait. The
     /// `: SqlExecutor` super-bound on `IndexBuilder` plus the
     /// PG-side `Client = compio_postgres::Client` constraint pin the
     /// shape so a regression on either side fails compilation here.
@@ -2022,7 +1999,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the PG-only
-    /// [`PgSqlExecutor`] extension trait (P0 PR 2). The free-function
+    /// [`PgSqlExecutor`] extension trait. The free-function
     /// audit-helper path (Open Q1 resolution) hinges on `pool_handle()`
     /// being reachable through this trait without naming
     /// `PostgresBackend`.
@@ -2032,7 +2009,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the PG-only
-    /// [`PgLockManager`] extension trait (P0 PR 3). This is the
+    /// [`PgLockManager`] extension trait. This is the
     /// escape-hatch closer for the `backend.pool().get()` call site at
     /// `register_model/bootstrap.rs:103`: the returned
     /// `PooledClient<'p>` keeps the `'p` lifetime threaded through
@@ -2044,7 +2021,7 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the
-    /// [`RegisterBackend`] marker super-trait (P0 PR 3). The
+    /// [`RegisterBackend`] marker super-trait. The
     /// blanket `impl<T> RegisterBackend for T where T: …` auto-impls
     /// the marker for any type with the six sub-bounds; if a future
     /// refactor pulls one bound off (or detaches a sub-impl block),
@@ -2058,7 +2035,7 @@ mod tests {
     /// Compile-time: the PG-arm [`ChangeStream`] adapter
     /// [`crate::change_stream_pg::PgChangeStream`] satisfies the
     /// [`ChangeStream`] trait with the agreed
-    /// `ConsumerHandle = WalConsumerHandle` shape (P2 PR 1). A
+    /// `ConsumerHandle = WalConsumerHandle` shape. A
     /// regression that detaches the impl block from `PgChangeStream`
     /// — or that renames the associated type away from the agreed
     /// shape — trips compilation here rather than at the
@@ -2072,31 +2049,31 @@ mod tests {
         assert_impl::<crate::change_stream_pg::PgChangeStream>();
     }
 
-    /// Compile-time (P4 PR 1): the [`VectorIndex`] trait's shape is
-    /// pinned. PR 1 ships no impl — neither [`PostgresBackend`] nor
+    /// Compile-time: the [`VectorIndex`] trait's shape is
+    /// pinned. Ships no impl — neither [`PostgresBackend`] nor
     /// [`SqliteBackend`] yet satisfies the trait, so this assertion
     /// only checks that the trait *itself* compiles (object-safety,
-    /// `async fn` placement, signature shape). PR 2/4 will instantiate
-    /// this against the concrete backends.
+    /// `async fn` placement, signature shape). A later change will
+    /// instantiate this against the concrete backends.
     #[allow(dead_code)]
     fn _assert_vector_index<T: VectorIndex>() {}
 
-    /// Compile-time (P4 PR 1): the [`FullTextIndex`] trait's shape is
-    /// pinned. PR 1 ships no impl — neither backend yet satisfies the
-    /// trait. PR 3/5 will instantiate this against the concrete
+    /// Compile-time: the [`FullTextIndex`] trait's shape is
+    /// pinned. Ships no impl — neither backend yet satisfies the
+    /// trait. A later change will instantiate this against the concrete
     /// backends.
     #[allow(dead_code)]
     fn _assert_fts_index<T: FullTextIndex>() {}
 
-    /// Compile-time (P4 PR 1): the [`SpatialIndex`] trait's shape is
-    /// pinned. PR 1 ships no impl — neither backend yet satisfies the
-    /// trait. PR 3/5 will instantiate this against the concrete
+    /// Compile-time: the [`SpatialIndex`] trait's shape is
+    /// pinned. Ships no impl — neither backend yet satisfies the
+    /// trait. A later change will instantiate this against the concrete
     /// backends.
     #[allow(dead_code)]
     fn _assert_spatial_index<T: SpatialIndex>() {}
 
-    /// Compile-time (P5 PR 1): the [`EncryptedColumn`] trait's shape
-    /// is pinned. PR 1 ships stub impls on both `PostgresBackend`
+    /// Compile-time: the [`EncryptedColumn`] trait's shape
+    /// is pinned. Ships stub impls on both `PostgresBackend`
     /// and `SqliteBackend` (under `sqlite`) — see
     /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`
     /// below for the per-backend instantiations. This unparameterised
@@ -2105,34 +2082,33 @@ mod tests {
     #[allow(dead_code)]
     fn _assert_encrypted_column<T: EncryptedColumn>() {}
 
-    /// Compile-time (P5 PR 1): the [`Backup`] trait's shape is
-    /// pinned. PR 1 ships stub impls on both backends; the
-    /// per-backend instantiations are below.
+    /// Compile-time: the [`Backup`] trait's shape is pinned. Both
+    /// backends implement it; the per-backend instantiations are
+    /// below.
     #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_backup<T: Backup>() {}
 
-    /// Compile-time (P5 PR 1): `PostgresBackend` satisfies
-    /// [`EncryptedColumn`] (PR 1 stub impl returned `p5_pr2_stub`;
-    /// PR 2 backfilled the SECURITY DEFINER body).
+    /// Compile-time: `PostgresBackend` satisfies
+    /// [`EncryptedColumn`], keyed through the admin-schema SECURITY
+    /// DEFINER getter.
     #[allow(dead_code)]
     fn _assert_postgres_backend_impls_encrypted_column() {
         fn assert_impl<T: EncryptedColumn>() {}
         assert_impl::<PostgresBackend>();
     }
 
-    /// Compile-time (P5 PR 1): `SqliteBackend` satisfies
-    /// [`EncryptedColumn`] under the `sqlite` feature. PR 1 stub
-    /// impl returns `p5_pr2_stub`; PR 3 backfills the real body
-    /// against env-var key sourcing.
+    /// Compile-time: `SqliteBackend` satisfies
+    /// [`EncryptedColumn`] under the `sqlite` feature, keyed from the
+    /// env var rather than an admin schema.
     #[allow(dead_code)]
     fn _assert_sqlite_backend_impls_encrypted_column() {
         fn assert_impl<T: EncryptedColumn>() {}
         assert_impl::<SqliteBackend>();
     }
 
-    /// Compile-time (P5 PR 4): `PostgresBackend` satisfies [`Backup`].
-    /// PR 4 backfilled the `pg_dump`/`pg_restore` shell-out body; the
+    /// Compile-time: `PostgresBackend` satisfies [`Backup`].
+    /// The `pg_dump`/`pg_restore` shell-out body is backfilled; the
     /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
     /// table. Mirrors the
     /// `_assert_postgres_backend_impls_encrypted_column` shape above.
@@ -2143,8 +2119,8 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
-    /// Compile-time (P5 PR 1): `SqliteBackend` satisfies [`Backup`].
-    /// PR 5 backfills the `VACUUM INTO` body.
+    /// Compile-time: `SqliteBackend` satisfies [`Backup`].
+    /// The `VACUUM INTO` body is backfilled separately.
     #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_sqlite_backend_impls_backup() {
@@ -2156,7 +2132,7 @@ mod tests {
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
     /// regression here would silently change every `B::Client` /
     /// `B::LiveSchema` consumer's expectations. `LiveSchema` flows
-    /// through [`SchemaIntrospect`] now (P0 PR 2 moved it off
+    /// through [`SchemaIntrospect`] now (moved off
     /// [`Backend`]); `Backend` re-anchors it via the
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
@@ -2184,7 +2160,7 @@ mod tests {
     /// flows through because the enum's only data is `Rc<…>` of
     /// `'static` impls.
     ///
-    /// **P0 PR 5 (round-3 critic CRITICAL #3 closure)**: this test
+    /// This test
     /// replaced the deleted `assert_backend_handle_alias` that pinned
     /// `BackendHandle == Rc<PostgresBackend>`. The alias is gone;
     /// what stays is the shape contract the consumers depend on.
@@ -2216,9 +2192,8 @@ mod tests {
         // PostgresBackend lives in tests/integration.rs (which spins
         // up Postgres). This test pins the *type* shape.
         fn _shape_check(handle: BackendHandle) -> bool {
-            // P1 PR 1: both accessors return `Option<…>` now (the PG
+            // Both accessors return `Option<…>` (the PG
             // arm yields `Some(…)`; the SQLite arm yields `None`).
-            // The exhaustive-match audit lives in the commit message.
             let _: Option<()> = handle.with_postgres(|_b: &PostgresBackend| ());
             let _: Option<&PostgresBackend> = handle.as_postgres();
             true
@@ -2226,7 +2201,7 @@ mod tests {
         let _ = _shape_check as fn(BackendHandle) -> bool;
     }
 
-    /// Compile-time (P0 PR 6): [`LockScope`] satisfies the trait
+    /// Compile-time: [`LockScope`] satisfies the trait
     /// bounds the typed [`LockManager`] API depends on. The variant
     /// is `Clone + 'static` so call sites can stash it across awaits
     /// (e.g. the `release_scope` re-construction in `migrations.rs`'s
@@ -2238,7 +2213,7 @@ mod tests {
         assert_bounds::<LockScope>();
     }
 
-    /// Compile-time + runtime (P0 PR 6): construct both
+    /// Compile-time + runtime: construct both
     /// [`LockScope`] variants and dispatch through
     /// [`PostgresBackend::try_acquire`] to verify the typed
     /// keyed-mapping wires through. We can't actually issue SQL
@@ -2247,7 +2222,7 @@ mod tests {
     /// and confirm both variants produce the canonical
     /// `(format!("{app_id}:{name}"), name)` shape.
     ///
-    /// **Why both variants here**: the P0 production sites are all
+    /// **Why both variants here**: the production sites are all
     /// `GlobalApp`; `LocalApp` exists today purely as a classification
     /// hook for future call sites (see [`LockScope`] rustdoc). Pinning
     /// the shape here ensures a future contributor adding a `LocalApp`
@@ -2273,8 +2248,8 @@ mod tests {
         // backend primitive handles dispatch) not *key layout*. A
         // future SQLite backend would HashMap on the derived strings
         // for both variants; the PG backend currently treats `LocalApp`
-        // the same as `GlobalApp` (only `GlobalApp` callers exist in
-        // P0).
+        // the same as `GlobalApp` (only `GlobalApp` callers exist
+        // today).
         let scope = LockScope::LocalApp {
             app_id: "app_99".to_string(),
             name: "mig:add_archived_flag".to_string(),
@@ -2286,7 +2261,7 @@ mod tests {
         assert_eq!(scope.name(), "mig:add_archived_flag");
     }
 
-    /// Compile-time (P0 PR 6): the typed [`LockManager::try_acquire`]
+    /// Compile-time: the typed [`LockManager::try_acquire`]
     /// API dispatches the canonical `LockScope` shape through
     /// [`PostgresBackend`] without the caller naming the underlying
     /// `(key1, key2)` string-key primitive. We can't issue SQL from a
@@ -2315,7 +2290,7 @@ mod tests {
         backend.try_acquire(client, &local).await
     }
 
-    /// **Security [I43]** (cycle 18:17): exhaust the bounded-retry
+    /// **Security**: exhaust the bounded-retry
     /// loop in [`LockManager::try_acquire_with_backoff`] against a
     /// mock backend whose `try_acquire_advisory_lock` always returns
     /// `Ok(false)` (perpetual contention). The result must be a
