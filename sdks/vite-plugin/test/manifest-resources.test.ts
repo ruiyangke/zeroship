@@ -58,6 +58,13 @@ describe("computeManifestExtras", () => {
           isStream: false,
           config: { idempotent: true },
         },
+        {
+          filePath: resolve(fix.root, "src/server/todos.ts"),
+          exportName: "purge",
+          moduleSlug: "src-server-todos",
+          kind: "action",
+          isStream: false,
+        },
       ];
 
       // Use development mode here — these procedures don't pin explicit
@@ -84,6 +91,16 @@ describe("computeManifestExtras", () => {
         result.resources["rpc:add"].idempotent,
         true,
         "idempotent passed through from config"
+      );
+
+      // An omitted kind reads as "unknown" to the gateway, not as "action".
+      // The CSRF origin guard fires on Some(Mutation) | Some(Action) or an
+      // unsafe method, so dropping it leaves an action reachable over GET
+      // with no origin check.
+      assert.equal(
+        result.resources["rpc:purge"].kind,
+        "action",
+        "action kind reaches the wire so the gateway can gate it"
       );
 
       // Transformer default is json.
