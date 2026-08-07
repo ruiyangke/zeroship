@@ -234,9 +234,7 @@ pub fn start_replication_consumer_dispatch<'s>(
         };
 
         // Step 1b: route the consumer-spawn handshake through the new
-        // `ChangeStream` capability adapter (see
-        // `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-        // §2.5, §9). The PG-arm `spawn_consumer` is a no-op
+        // `ChangeStream` capability adapter. The PG-arm `spawn_consumer` is a no-op
         // marker today (the actual `compio::runtime::spawn` of
         // `run_supervised` stays at this dispatcher because the
         // `ConsumerRunningGuard` claim needs the spawn-closure capture);

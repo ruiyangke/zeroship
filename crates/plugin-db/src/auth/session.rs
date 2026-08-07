@@ -237,8 +237,7 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), Db
 /// Like [`init_session`], but lets the caller pass the explicit
 /// `p_pid` the SECURITY DEFINER uses for HMAC verification.
 ///
-/// **Why this exists** (Q-P3-A -- the riskiest decision in
-/// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §10): the
+/// **Why this exists** (Q-P3-A, the riskiest decision in this area): the
 /// new `SessionMinter` trait separates `mint_session_token` from
 /// `init_session`. Trait callers acquire a fresh pool client per
 /// call — the init-side `pg_backend_pid()` no longer matches the
@@ -457,8 +456,7 @@ impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
 // codec used to live here. They were relocated to `crate::auth::util`
 // so the SQLite `SessionMinter` impl (gated only by the
 // `sqlite` feature) can reuse them without dragging in the rest of the
-// PG-only `auth::*` surface. See
-// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
+// PG-only `auth::*` surface (H-1).
 
 // ---------------------------------------------------------------------------
 // Tests

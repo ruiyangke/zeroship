@@ -2509,7 +2509,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 // ---------------------------------------------------------------------------
 // Gap B — emit deferred until COMMIT
 //
-// Robustness audit (`docs/research/db-robustness-gaps-2026-05-19.md`):
+// Robustness audit:
 // mutations inside a `db.transaction` block must NOT publish their
 // broker events until the outer COMMIT lands. Pre-fix, every
 // successful INSERT/UPDATE/DELETE inside a tx fired `emit_local`

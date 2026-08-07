@@ -2,9 +2,6 @@
 //! that re-routes `replication::ensure_publication_and_slot` +
 //! `wal_consumer::run_supervised` through the trait surface.
 //!
-//! Source plan: `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
-//! §2.5, §9.
-//!
 //! This adapter wraps the same calls the orchestrator previously made
 //! directly from `replication_ops.rs`; the dispatcher just routes
 //! through one extra fn.

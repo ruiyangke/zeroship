@@ -11,8 +11,7 @@
 //! `backend/sqlite/session_minter.rs`. Both impls must produce
 //! byte-identical canonical payloads + token shapes for the same
 //! `(secret, init, nonce, expires_at)`. The helpers therefore have to
-//! be reachable from BOTH arms — see
-//! `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
+//! be reachable from BOTH arms (H-1).
 //!
 //! ## Gating
 //!

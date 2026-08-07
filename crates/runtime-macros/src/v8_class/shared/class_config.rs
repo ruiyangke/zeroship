@@ -89,8 +89,7 @@ pub(crate) struct ClassConfig<'a> {
     /// pass-through). Caching here means the `format_ident!` runs
     /// once at config-build time; emit sites read the cached value.
     /// Cosmetic/performance refinement — same ident, fewer
-    /// allocations. Closes N1 from
-    /// docs/reviews/runtime-macros-architecture-critique-2026-05-05-v2.md.
+    /// allocations.
     pub brand_check_ident: syn::Ident,
 }
 
