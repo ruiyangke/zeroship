@@ -19,6 +19,14 @@
 //     `getTypeParser` forces oid 20/1700/1016 → `String`, independent of any global
 //     override. The poison oracle proves these win.
 //
+//     Oid 16 (bool) is pinned by the same mechanism for a different failure mode:
+//     `valueToCell` classifies a bool by its column OID and coerces with
+//     `Boolean(value)`, so a global override that leaks the raw wire string makes
+//     `Boolean("f")` return `true` and turns every `false` into `true` with no error.
+//     Bool is the only non-integer type that crosses uncast (the apply path
+//     `::text`-casts enums, `"char"` and timestamps, and the int arms re-coerce with
+//     `Number(value)`, which yields a loud NaN for garbage).
+//
 //  2. `executeTextParams` is a DISTINCT path: it receives a
 //     `(string | null)[]` and calls `client.query(sql, values)` with NO explicit
 //     param type OIDs — `pg` sends them text-format and PG INFERS the target type
@@ -63,23 +71,55 @@ const OID_INT8_ARRAY = 1016;
 // `Vec<String>` (TextArray) decode. See `connectionScopedTypes`.
 const OID_NAME_ARRAY = 1003;
 const OID_TEXT_ARRAY = 1009;
+// `bool`. Pinned like the exact-integer OIDs because `valueToCell` classifies a bool
+// by OID, so a poisoned global parser silently flips `false` to `true`. See
+// `connectionScopedTypes`.
+const OID_BOOL = 16;
+
+/**
+ * Decode a text-format `bool` from the wire. Throws on anything other than the two
+ * values PostgreSQL's `boolout` emits, so an unexpected encoding fails the verb
+ * loudly instead of being guessed into a `true`.
+ */
+function parseBoolStrict(value: string): boolean {
+  if (value === "t") return true;
+  if (value === "f") return false;
+  throw new Error(
+    `host pg driver: unexpected bool wire value ${JSON.stringify(value)} (expected "t" or "f")`,
+  );
+}
 
 /**
  * Build a connection-scoped `types` object whose `getTypeParser(oid, format)`
- * forces the exact-integer OIDs (int8/numeric/int8[]) to `String`, deferring every
- * other OID to node-pg's default parser. This is IMMUNE to a global
- * `pg.types.setTypeParser` override, because the Client is constructed with
+ * forces the exact-integer OIDs (int8/numeric/int8[]) to `String` and decodes bool
+ * itself, deferring every other OID to node-pg's default parser. This is IMMUNE to a
+ * global `pg.types.setTypeParser` override, because the Client is constructed with
  * this object as its own `types`.
  */
 function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, format?: unknown) => (value: string) => unknown } {
   // The default parser factory: node-pg's own `types.getTypeParser`. We call it for
-  // any OID we don't override, so int4/text/bool/etc. behave exactly as usual —
+  // any OID we don't override, so int4/text/etc. behave exactly as usual,
   // EXCEPT that even the default for oid 20/1700 is a string parser, so overriding
   // to `String` is belt-and-suspenders against a poisoned global default.
   const defaults = pg.types;
   const identityString = (value: string): string => value;
   return {
     getTypeParser(oid: number, format?: unknown): (value: string) => unknown {
+      if (oid === OID_BOOL) {
+        // bool: decode the wire text here rather than trusting the global parser.
+        // `valueToCell` classifies a bool by OID and coerces with `Boolean(value)`,
+        // so a global override that leaks the raw string turns `"f"` into `true`:
+        // every `false` becomes `true` with no error to catch it.
+        //
+        // The ONLY values accepted are `"t"` and `"f"`, because PostgreSQL's
+        // `boolout` emits exactly those two. The wider spellings node-pg's default
+        // parser tolerates (`true`, `yes`, `on`, `1`, ...) are `boolin` INPUT
+        // syntax and never appear on the wire, so accepting them would only widen
+        // what a mistyped column can smuggle through. NULL never reaches here:
+        // node-pg's row parser short-circuits a -1-length field to `null` before
+        // calling any type parser.
+        return parseBoolStrict;
+      }
       if (oid === OID_INT8 || oid === OID_NUMERIC) {
         // Exact integer / decimal: cross as the verbatim string. NEVER Number(x)
         // (which truncates > 2^53). This wins over any global override.
@@ -236,7 +276,6 @@ function cellsToParams(binds: JsCell[]): unknown[] {
 // domain — `character_maximum_length`, row counts).
 const OID_INT4 = 23;
 const OID_INT2 = 21;
-const OID_BOOL = 16;
 
 /**
  * Marshal a `pg` result value (already parsed by the connection-scoped parsers) →

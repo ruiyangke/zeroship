@@ -17,8 +17,11 @@
 //      target row is exact. (Exercised via the create-first apply's system-field
 //      DML text params; a dedicated text→timestamptz case is noted.)
 //   3. `status()`/`history()` over the host driver.
-//   5. `pg` type-parser POISON: a global setTypeParser(20 → Number) BEFORE apply;
-//      journal `event_seq`/`version` stay exact (connection-scoped parsers win).
+//   5. `pg` type-parser POISON: a global setTypeParser(20 -> Number) plus raw-string
+//      overrides for oid 16/18/23/1009 BEFORE apply; the journal `event_seq`/`version`
+//      stay exact and the applied catalog facts are unchanged (connection-scoped
+//      parsers win). Oid 16 is the load-bearing one: `valueToCell` classifies bool by
+//      OID and `Boolean("f")` is `true`, so an unpinned bool inverts every `false`.
 //   7. Checksum: the host journal `Checksum::of_ir` anchor is one stable value
 //      across all DDL steps of the IR envelope.
 //   + ShadowUnsupported honesty: no `dryRun` verb (shadow deferred).
@@ -137,10 +140,21 @@ async function main() {
   await adm.connect();
   await adm.query(`CREATE SCHEMA "${hostSchema}"`);
 
-  // ---- Oracle 5 (setup): POISON the global int8 parser BEFORE the host apply ----
+  // ---- Oracle 5 (setup): POISON the global type parsers BEFORE the host apply ----
   // A host app's footgun: override oid 20 (int8) to return a truncating JS number.
   // The connection-scoped parsers in driver-pg MUST win, keeping event_seq exact.
   pg.types.setTypeParser(20, (v: string) => Number(v));
+  // The same footgun on the other OIDs the seam decodes. `(v) => v` leaks the raw
+  // wire string, the worst case for any decode inferred from the column OID:
+  //   16   bool  - `valueToCell` classifies by OID and coerces with `Boolean(value)`,
+  //                so a leaked `"f"` would read as `true` and every `false` in the
+  //                live catalog (attnotnull, indisunique, ...) would invert silently.
+  //   18   "char" and 23 int4 - expected to be immune already: the apply path
+  //                `::text`-casts `"char"` and the int arm re-coerces with `Number`.
+  //   1009 text[] - the array framing the seam's TextArray decode needs.
+  for (const oid of [16, 18, 23, 1009]) {
+    pg.types.setTypeParser(oid, (v: string) => v);
+  }
 
   // ---- Oracle 1/2/5: the HOST apply over driver-pg ----
   let hostApplyOk = true;
@@ -227,6 +241,26 @@ async function main() {
       "oracle-2 target DDL applied via host driver (widgets label/status/qty exist)",
       cols.rows.length === 3,
       `${cols.rows.length}/3 columns present`,
+    );
+
+    // Oracle 5 (bool arm): the catalog facts are UNCHANGED under the poisoned
+    // parsers. Nullability is read back as `information_schema` text ('YES'/'NO'),
+    // so this read is itself immune to the poison and reports what the apply
+    // actually wrote: `label`/`status` NOT NULL, `qty` nullable.
+    const nullability = await adm.query(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_schema=$1 AND table_name='widgets'
+       AND column_name IN ('label','status','qty')
+       ORDER BY column_name`,
+      [hostSchema],
+    );
+    const nullMap = Object.fromEntries(
+      nullability.rows.map((r) => [r.column_name as string, r.is_nullable as string]),
+    );
+    record(
+      "oracle-5 poison-parser: catalog nullability facts unchanged (bool/char/int4/text[] pins won)",
+      nullMap.label === "NO" && nullMap.status === "NO" && nullMap.qty === "YES",
+      `is_nullable=${JSON.stringify(nullMap)}`,
     );
   }
 
