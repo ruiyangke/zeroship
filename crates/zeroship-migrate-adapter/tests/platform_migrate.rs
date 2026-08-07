@@ -492,16 +492,30 @@ mod platform_cli {
         // truncated index name on another. Checking realized names is the only
         // check that sees the whole budget. A stored name of exactly 63 bytes is
         // already indistinguishable from a truncated one.
+        // Constraints are checked as well as indexes. A unique or primary-key
+        // constraint is index-backed and so appears in pg_indexes, but a check or
+        // foreign-key constraint has no index row while its name truncates on the
+        // same rule. That matters because a later guarded drop probes the AUTHORED
+        // name against the introspected catalog, finds the truncated one instead,
+        // concludes the object is already gone, skips the statement and journals it
+        // as completed. The constraint survives and the history says it was removed.
         if !scalar_bool(
             &probe,
-            "SELECT NOT EXISTS (SELECT 1 FROM pg_indexes \
-             WHERE schemaname = 'zeroship' AND length(indexname) >= 63)",
+            "SELECT NOT EXISTS ( \
+               SELECT 1 FROM pg_indexes \
+                WHERE schemaname = 'zeroship' AND length(indexname) >= 63 \
+               UNION ALL \
+               SELECT 1 FROM pg_constraint c \
+                 JOIN pg_namespace n ON n.oid = c.connamespace \
+                WHERE n.nspname = 'zeroship' AND length(c.conname) >= 63 \
+             )",
         )
         .await
         {
             return Err(
-                "an index name in schema 'zeroship' reached PostgreSQL's 63-byte \
-                 identifier limit and may have been silently truncated"
+                "an index or constraint name in schema 'zeroship' reached \
+                 PostgreSQL's 63-byte identifier limit and may have been silently \
+                 truncated"
                     .to_string(),
             );
         }
