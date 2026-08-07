@@ -1,12 +1,16 @@
 //! **`genArtifacts` byte-identical-by-construction + v1-shape pins.**
 //!
 //! The schema-artifact emitter (`gen-types`) has two front-doors:
-//!   - `render_artifacts(ops, schema, effective)` — the GENERATED source (op.*
-//!     migrations).
-//!   - `render_artifacts_from_descriptors(descriptors, schema, effective)` — the
-//!     MANUAL source (a declared `CollectionDescriptor` set), routed through
+//!   - `render_artifacts(ops, dialect, schema, effective)` - the GENERATED source
+//!     (op.* migrations).
+//!   - `render_artifacts_from_descriptors(descriptors, dialect, schema, effective)`
+//!     - the MANUAL source (a declared `CollectionDescriptor` set), routed through
 //!     `descriptors_to_create_ops` (which injects the confined system shape under
 //!     `effective`) and then the SAME renderer tail.
+//!
+//! Both arms pin Postgres. The byte-identical guarantee is per-dialect and these
+//! fixtures carry no dialectal leg, so this file does not cover cross-dialect
+//! artifact divergence - `gen-artifacts-dialect.test.ts` does, against live servers.
 //!
 //! This test constructs the SAME logical schema two independent ways — a
 //! **RAW author-only** `op.*` `CreateTable` (the exact shape the pure-JS recorder
@@ -39,7 +43,9 @@ use serde_json::Value;
 
 use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{render_artifacts, render_artifacts_from_descriptors, ResolvedInject};
+use zero_migrate::{
+    render_artifacts, render_artifacts_from_descriptors, ResolvedInject, SqlDialect,
+};
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
@@ -147,10 +153,20 @@ fn people_ops_generated() -> Vec<Op> {
 #[test]
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let effective = support::confined_charter();
-    let generated =
-        render_artifacts(&people_ops_generated(), SCHEMA, &effective).expect("generated render");
-    let manual = render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &effective)
-        .expect("manual render");
+    let generated = render_artifacts(
+        &people_ops_generated(),
+        SqlDialect::Postgres,
+        SCHEMA,
+        &effective,
+    )
+    .expect("generated render");
+    let manual = render_artifacts_from_descriptors(
+        &[people_descriptor()],
+        SqlDialect::Postgres,
+        SCHEMA,
+        &effective,
+    )
+    .expect("manual render");
 
     assert_eq!(
         generated.runtime_json, manual.runtime_json,
@@ -169,6 +185,7 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
+        SqlDialect::Postgres,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -228,6 +245,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
+        SqlDialect::Postgres,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -284,6 +302,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
+        SqlDialect::Postgres,
         SCHEMA,
         &support::confined_charter(),
     )

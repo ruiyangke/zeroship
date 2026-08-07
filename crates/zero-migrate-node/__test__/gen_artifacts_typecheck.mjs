@@ -156,6 +156,7 @@ const envelope = {
 
 const reply = addon.genArtifacts({
   envelopes: [envelope],
+  dialect: 'postgres',
   charterLayers: [NO_INJECT_CHARTER_TOML],
 });
 assert(reply.ok, `genArtifacts succeeds: ${reply.error ?? 'unknown error'}`);

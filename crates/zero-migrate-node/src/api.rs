@@ -130,6 +130,11 @@ fn schema_emit_policy(charter_layers: &[&str]) -> Result<EffectivePolicy, String
 /// envelopes (`{ ir_version, name, ops }`). Each envelope's `ops` are concatenated
 /// in order and folded through the shared renderer.
 ///
+/// `dialect` is the project's REAL target (`postgres`|`sqlite`|`mysql`) and has no
+/// default: the fold selects `Op::Dialectal` legs, so folding a MySQL project's
+/// history under Postgres emits columns the database does not have. An unknown
+/// spelling fails soft like every other bad input here.
+///
 /// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
 ///
 /// # System-shape resolution (mirrors `lower.rs`)
@@ -149,10 +154,15 @@ fn schema_emit_policy(charter_layers: &[&str]) -> Result<EffectivePolicy, String
 #[must_use]
 pub fn gen_artifacts_from_envelopes(
     envelopes: &[serde_json::Value],
+    dialect: &str,
     project_schema: Option<&str>,
     charter_layers: &[&str],
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
+    let dialect = match crate::verbs::preview_dialect(dialect) {
+        Ok(d) => d,
+        Err(e) => return gen_err(e),
+    };
     let effective = match schema_emit_policy(charter_layers) {
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
@@ -169,7 +179,7 @@ pub fn gen_artifacts_from_envelopes(
         // one policy-resolution seam for every generated-artifact caller.
         ops.extend(raw_ir.ops);
     }
-    match render_artifacts(&ops, schema, &effective) {
+    match render_artifacts(&ops, dialect, schema, &effective) {
         Ok(a) => gen_ok(a),
         Err(e) => gen_err(e.to_string()),
     }
@@ -182,6 +192,10 @@ pub fn gen_artifacts_from_envelopes(
 /// manual output is byte-identical to the generated output for an equivalent schema
 /// (both driven by the SAME charter).
 ///
+/// `dialect` is the project's REAL target and threads to the same fold. A descriptor
+/// set cannot express a dialectal leg, so the byte-identical guarantee against the
+/// envelope source holds only when BOTH are generated for the same target.
+///
 /// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`. The engine
 /// constructs no default charter: the caller must explicitly provide a no-inject
 /// charter when the author-owned shape should pass through.
@@ -191,15 +205,20 @@ pub fn gen_artifacts_from_envelopes(
 #[must_use]
 pub fn gen_artifacts_from_descriptors(
     descriptors: &[CollectionDescriptor],
+    dialect: &str,
     project_schema: Option<&str>,
     charter_layers: &[&str],
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
+    let dialect = match crate::verbs::preview_dialect(dialect) {
+        Ok(d) => d,
+        Err(e) => return gen_err(e),
+    };
     let effective = match schema_emit_policy(charter_layers) {
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
-    match render_artifacts_from_descriptors(descriptors, schema, &effective) {
+    match render_artifacts_from_descriptors(descriptors, dialect, schema, &effective) {
         Ok(a) => gen_ok(a),
         Err(e) => gen_err(e.to_string()),
     }
@@ -346,7 +365,8 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(&[envelope], None, &[CONFINED_CHARTER_TOML]);
+        let reply =
+            gen_artifacts_from_envelopes(&[envelope], "postgres", None, &[CONFINED_CHARTER_TOML]);
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let ts = reply.env_db_ts.expect("env.db.ts");
@@ -384,7 +404,8 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(&[envelope], None, &[CONFINED_CHARTER_TOML]);
+        let reply =
+            gen_artifacts_from_envelopes(&[envelope], "postgres", None, &[CONFINED_CHARTER_TOML]);
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let v: serde_json::Value = serde_json::from_str(&runtime).expect("runtime json parses");
@@ -430,7 +451,8 @@ mod tests {
     #[test]
     fn gen_artifacts_from_a_malformed_envelope_fails_soft() {
         let bad = serde_json::json!({ "ir_version": current_ir_version(), "ops": "not-an-array" });
-        let reply = gen_artifacts_from_envelopes(&[bad], None, &[CONFINED_CHARTER_TOML]);
+        let reply =
+            gen_artifacts_from_envelopes(&[bad], "postgres", None, &[CONFINED_CHARTER_TOML]);
         assert!(!reply.ok);
         assert!(reply.error.is_some());
         assert!(reply.runtime_json.is_none());
@@ -450,7 +472,12 @@ mod tests {
             indexes: Vec::new(),
             runtime_options: Default::default(),
         };
-        let reply = gen_artifacts_from_descriptors(&[descriptor], None, &[CONFINED_CHARTER_TOML]);
+        let reply = gen_artifacts_from_descriptors(
+            &[descriptor],
+            "postgres",
+            None,
+            &[CONFINED_CHARTER_TOML],
+        );
         assert!(reply.ok, "render ok: {:?}", reply.error);
         assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
         assert!(reply.env_db_ts.unwrap().contains("label: t.text(),"));

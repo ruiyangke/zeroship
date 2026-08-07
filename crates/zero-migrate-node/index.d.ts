@@ -250,10 +250,13 @@ export interface FieldDescriptorDto {
  * policy-driven, not a baked-in engine preset; the caller supplies the confined
  * charter).
  *
+ * `dialect` is REQUIRED and names the project's real target: the fold selects
+ * `Op::Dialectal` legs, so the artifacts are per-target, not portable.
+ *
  * Runs inline on the napi call thread (no DB, no host driver). Returns a typed
- * [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
- * malformed policy charter (never a throw). Exactly one of `envelopes`/`descriptors`
- * must be populated.
+ * [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source, an
+ * unknown dialect spelling, or a malformed policy charter (never a throw). Exactly
+ * one of `envelopes`/`descriptors` must be populated.
  */
 export declare function genArtifacts(source: GenArtifactsSource): GenArtifactsReply
 
@@ -302,6 +305,18 @@ export interface GenArtifactsSource {
    * Mutually exclusive with `envelopes`.
    */
   descriptors?: Array<CollectionDescriptorDto>
+  /**
+   * The project's REAL target dialect: `"postgres" | "sqlite" | "mysql"`.
+   *
+   * REQUIRED, with no default. The fold selects `Op::Dialectal` legs, so a
+   * history authored with `dialect({ pg, mysql })` yields a different column set
+   * per target; generating a MySQL project's artifacts under Postgres names
+   * columns its database does not have. Making the field optional would put that
+   * mistake back within reach, so omitting it is a type error rather than a
+   * silent Postgres fallback. This does not cover choosing the dialect for the
+   * caller: there is no URL or config in scope here.
+   */
+  dialect: string
   /**
    * The project schema the fold threads (FK `definition`s embed it). Optional;
    * defaults to `"public"`.

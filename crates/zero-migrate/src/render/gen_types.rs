@@ -21,7 +21,9 @@
 //! op.* migrations fold directly; a declared `CollectionDescriptor` set is turned
 //! into ops via [`crate::descriptors_to_create_ops`] and then folds the same way.
 //! So the generated and manual paths produce identical artifacts for equivalent
-//! schemas.
+//! schemas - for the SAME target dialect. The artifacts are per-target, not
+//! portable: the fold selects `Op::Dialectal` legs, so one history legitimately
+//! yields different column sets on Postgres and MySQL.
 //!
 //! [`check_artifacts`] regenerates in memory and diffs against committed artifacts —
 //! the CI drift gate, no DB write.
@@ -349,11 +351,12 @@ fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMe
 
 fn render_runtime_descriptor_v1(
     ops: &[Op],
+    dialect: SqlDialect,
     project_schema: &str,
     effective: &EffectivePolicy,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
 ) -> Result<Value, GenTypesError> {
-    let defs = crate::fold_to_field_defs(ops, SqlDialect::Postgres, project_schema, effective)
+    let defs = crate::fold_to_field_defs(ops, dialect, project_schema, effective)
         .map_err(GenTypesError::Fold)?;
     let mut metadata = metadata.clone();
     let collections = defs
@@ -379,14 +382,27 @@ fn render_runtime_descriptor_v1(
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
 ///
-/// The dialect is `Postgres` (the FieldDef map is dialect-neutral for type
-/// recovery). `project_schema` threads into the fold (FK `definition`s embed it;
-/// irrelevant to the recovered FieldDef map but required by the seam).
+/// `dialect` is the project's REAL target. It is not a formality: `Op::Dialectal`
+/// leg selection happens inside the fold, so a history carrying a `dialect({ pg,
+/// mysql })` leg produces a different column set per target, and an artifact folded
+/// under the wrong dialect names columns the database does not have. Every fold rule
+/// that keys on the dialect (leg selection, the materialized enum/domain capability
+/// gates, the identity/primary-key reuse rules) therefore reaches the artifacts.
+/// The type RECOVERY inside `ir_column_to_field` is dialect-neutral, which is what
+/// the earlier hard-coded `Postgres` argument was justified by; that justification
+/// never covered leg selection.
+///
+/// There is deliberately NO default: a caller that does not know its target cannot
+/// generate artifacts.
+///
+/// `project_schema` threads into the fold (FK `definition`s embed it; irrelevant to
+/// the recovered FieldDef map but required by the seam).
 ///
 /// # Errors
 /// [`GenTypesError::Fold`] if the schema source is structurally incoherent.
 pub fn render_artifacts(
     ops: &[Op],
+    dialect: SqlDialect,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
@@ -408,11 +424,12 @@ pub fn render_artifacts(
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
     let metadata = runtime_metadata_from_ops(ops);
-    let authoring_tables = authoring_tables_from_ops(ops).map_err(GenTypesError::Fold)?;
+    let authoring_tables = authoring_tables_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
-    let runtime_value = render_runtime_descriptor_v1(ops, project_schema, effective, &metadata)?;
+    let runtime_value =
+        render_runtime_descriptor_v1(ops, dialect, project_schema, effective, &metadata)?;
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -440,18 +457,24 @@ pub fn render_artifacts(
 /// `EffectivePolicy` (the monorepo passes zeroship's confined charter; the tests
 /// pass the generic confined test charter) and threads it in.
 ///
+/// `dialect` threads to the same fold [`render_artifacts`] runs. A declared
+/// descriptor set cannot express a dialectal leg, so leg selection cannot diverge
+/// here - but the capability-keyed fold rules still can, and the byte-identical
+/// guarantee against the generated source only holds per dialect.
+///
 /// # Errors
 /// [`GenTypesError::Produce`] if the descriptor set cannot be turned into ops
 /// (including a table-shape resolve failure under `effective`);
 /// [`GenTypesError::Fold`] if the produced ops are structurally incoherent.
 pub fn render_artifacts_from_descriptors(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
+    dialect: SqlDialect,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
     let ops = crate::descriptors_to_create_ops(descriptors, project_schema, effective)
         .map_err(GenTypesError::Produce)?;
-    render_artifacts(&ops, project_schema, effective)
+    render_artifacts(&ops, dialect, project_schema, effective)
 }
 
 #[derive(Debug, Clone)]
@@ -468,11 +491,18 @@ struct AuthoringTable {
 /// cannot represent. Structural coherence has already been checked by
 /// `fold_to_field_defs`; this replay preserves declaration order and the exact
 /// public-authoring facets needed by the TypeScript emitter.
+///
+/// `dialect` selects the `Op::Dialectal` leg, so it must be the SAME dialect
+/// `render_runtime_descriptor_v1` folds under or the two artifacts describe
+/// different tables. This does not cover `runtime_metadata_from_ops`, which reads
+/// the unflattened op list and so has never seen inside a dialectal leg on any
+/// target.
 fn authoring_tables_from_ops(
     ops: &[Op],
+    dialect: SqlDialect,
 ) -> Result<BTreeMap<String, AuthoringTable>, crate::FoldError> {
     let mut tables = BTreeMap::new();
-    for op in crate::render::fold::flatten_dialectal_ops(ops, SqlDialect::Postgres)? {
+    for op in crate::render::fold::flatten_dialectal_ops(ops, dialect)? {
         match op {
             Op::CreateTable {
                 name,
@@ -2108,9 +2138,14 @@ mod tests {
         let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
             .expect("confined descriptor resolves");
         let metadata = runtime_metadata_from_ops(&ops);
-        let value =
-            render_runtime_descriptor_v1(&ops, DEFAULT_PROJECT_SCHEMA, &effective, &metadata)
-                .expect("runtime descriptor renders");
+        let value = render_runtime_descriptor_v1(
+            &ops,
+            SqlDialect::Postgres,
+            DEFAULT_PROJECT_SCHEMA,
+            &effective,
+            &metadata,
+        )
+        .expect("runtime descriptor renders");
         assert_eq!(value["version"], 1);
         let fields = &value["collections"]["hits"]["fields"];
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")
@@ -2150,9 +2185,13 @@ mod tests {
             indexes: Vec::new(),
             runtime_options: Default::default(),
         }];
-        let artifacts =
-            render_artifacts_from_descriptors(&descriptors, DEFAULT_PROJECT_SCHEMA, &effective)
-                .expect("no-inject artifacts render");
+        let artifacts = render_artifacts_from_descriptors(
+            &descriptors,
+            SqlDialect::Postgres,
+            DEFAULT_PROJECT_SCHEMA,
+            &effective,
+        )
+        .expect("no-inject artifacts render");
         let value: Value = serde_json::from_str(&artifacts.runtime_json)
             .expect("runtime descriptor is valid JSON");
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "events")
@@ -2188,8 +2227,13 @@ mod tests {
             existence_guard: None,
         }];
 
-        let artifacts = render_artifacts(&ops, DEFAULT_PROJECT_SCHEMA, &effective)
-            .expect("no-inject UUID id renders");
+        let artifacts = render_artifacts(
+            &ops,
+            SqlDialect::Postgres,
+            DEFAULT_PROJECT_SCHEMA,
+            &effective,
+        )
+        .expect("no-inject UUID id renders");
         let value: Value = serde_json::from_str(&artifacts.runtime_json)
             .expect("runtime descriptor is valid JSON");
 

@@ -7833,6 +7833,7 @@ columns = [
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
         let artifacts = crate::render_artifacts_from_descriptors(
             &[d],
+            SqlDialect::Postgres,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )

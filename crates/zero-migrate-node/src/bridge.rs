@@ -121,16 +121,20 @@ pub fn load_verify(
 /// policy-driven, not a baked-in engine preset; the caller supplies the confined
 /// charter).
 ///
+/// `dialect` is REQUIRED and names the project's real target: the fold selects
+/// `Op::Dialectal` legs, so the artifacts are per-target, not portable.
+///
 /// Runs inline on the napi call thread (no DB, no host driver). Returns a typed
-/// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
-/// malformed policy charter (never a throw). Exactly one of `envelopes`/`descriptors`
-/// must be populated.
+/// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source, an
+/// unknown dialect spelling, or a malformed policy charter (never a throw). Exactly
+/// one of `envelopes`/`descriptors` must be populated.
 #[napi(js_name = "genArtifacts")]
 #[must_use]
 pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
     let GenArtifactsSource {
         envelopes,
         descriptors,
+        dialect,
         project_schema,
         charter_layers,
     } = source;
@@ -146,7 +150,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
              `descriptors` (manual source)",
         ),
         (Some(envelopes), None) => {
-            api::gen_artifacts_from_envelopes(&envelopes, schema, &charter_refs)
+            api::gen_artifacts_from_envelopes(&envelopes, &dialect, schema, &charter_refs)
         }
         (None, Some(dtos)) => {
             let descriptors = match dtos
@@ -157,7 +161,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
                 Ok(d) => d,
                 Err(e) => return gen_artifacts_err(e),
             };
-            api::gen_artifacts_from_descriptors(&descriptors, schema, &charter_refs)
+            api::gen_artifacts_from_descriptors(&descriptors, &dialect, schema, &charter_refs)
         }
     }
 }

@@ -107,10 +107,10 @@ const descriptor = {
   ],
 };
 
-const gen = addon.genArtifacts({ envelopes: [envelope], charterLayers: [CONFINED_CHARTER_TOML] });
+const gen = addon.genArtifacts({ envelopes: [envelope], dialect: 'postgres', charterLayers: [CONFINED_CHARTER_TOML] });
 assert(gen.ok, `generated source ok: ${gen.error}`);
 
-const man = addon.genArtifacts({ descriptors: [descriptor], charterLayers: [CONFINED_CHARTER_TOML] });
+const man = addon.genArtifacts({ descriptors: [descriptor], dialect: 'postgres', charterLayers: [CONFINED_CHARTER_TOML] });
 assert(man.ok, `manual source ok: ${man.error}`);
 
 // (1) byte-identical runtimeJson + envDbTs.
@@ -158,23 +158,37 @@ assert(!gen.envDbTs.includes('.create('), 'never executes a lifecycle operation'
 const both = addon.genArtifacts({
   envelopes: [envelope],
   descriptors: [descriptor],
+  dialect: 'postgres',
   charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(!both.ok && typeof both.error === 'string', 'both-arms is a soft error');
 
-const neither = addon.genArtifacts({ charterLayers: [CONFINED_CHARTER_TOML] });
+const neither = addon.genArtifacts({ dialect: 'postgres', charterLayers: [CONFINED_CHARTER_TOML] });
 assert(!neither.ok && typeof neither.error === 'string', 'no-arm is a soft error');
 
 const malformed = addon.genArtifacts({
   envelopes: [{ ir_version: addon.irVersion(), ops: 'nope' }],
+  dialect: 'postgres',
   charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(!malformed.ok && typeof malformed.error === 'string', 'malformed envelope is a soft error');
 
-const noCharters = addon.genArtifacts({ envelopes: [envelope], charterLayers: [] });
+const noCharters = addon.genArtifacts({ envelopes: [envelope], dialect: 'postgres', charterLayers: [] });
 assert(
   !noCharters.ok && noCharters.error?.includes('at least one policy charter is required'),
   'an empty charterLayers list preserves the layered loader error',
+);
+
+// `dialect` is required by the DTO, so OMITTING it is a napi conversion throw, not a
+// reply. A present-but-unrecognized spelling is ordinary bad input and stays soft.
+const badDialect = addon.genArtifacts({
+  envelopes: [envelope],
+  dialect: 'postgresql',
+  charterLayers: [CONFINED_CHARTER_TOML],
+});
+assert(
+  !badDialect.ok && badDialect.error?.includes('unknown dialect'),
+  `an unrecognized dialect is a soft error: ${JSON.stringify(badDialect)}`,
 );
 
 // --- (5) A REFERENCE field. A `ref` descriptor field declares ONE foreign key; the
@@ -226,12 +240,14 @@ const refDescriptors = [
 
 const refMan = addon.genArtifacts({
   descriptors: refDescriptors,
+  dialect: 'postgres',
   charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(refMan.ok, `a descriptor set with a reference field renders: ${refMan.error}`);
 
 const refGen = addon.genArtifacts({
   envelopes: [refEnvelope],
+  dialect: 'postgres',
   charterLayers: [CONFINED_CHARTER_TOML],
 });
 assert(refGen.ok, `an envelope with a reference column renders: ${refGen.error}`);

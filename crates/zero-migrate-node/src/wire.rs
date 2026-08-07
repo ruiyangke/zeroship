@@ -605,6 +605,16 @@ pub struct GenArtifactsSource {
     /// `createTable` ops via the producer, then folded through the same tail.
     /// Mutually exclusive with `envelopes`.
     pub descriptors: Option<Vec<CollectionDescriptorDto>>,
+    /// The project's REAL target dialect: `"postgres" | "sqlite" | "mysql"`.
+    ///
+    /// REQUIRED, with no default. The fold selects `Op::Dialectal` legs, so a
+    /// history authored with `dialect({ pg, mysql })` yields a different column set
+    /// per target; generating a MySQL project's artifacts under Postgres names
+    /// columns its database does not have. Making the field optional would put that
+    /// mistake back within reach, so omitting it is a type error rather than a
+    /// silent Postgres fallback. This does not cover choosing the dialect for the
+    /// caller: there is no URL or config in scope here.
+    pub dialect: String,
     /// The project schema the fold threads (FK `definition`s embed it). Optional;
     /// defaults to `"public"`.
     pub project_schema: Option<String>,
