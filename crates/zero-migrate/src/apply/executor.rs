@@ -2014,9 +2014,9 @@ pub enum RollbackError {
     /// Nothing was rolled back.
     #[error(
         "migration {version} has a SQLite `down` requiring the 12-step table rebuild ({reason}); \
-         the rebuild path is P3b (not yet built). P5 reverses only the additive operations SQLite \
-         supports natively (DROP TABLE/COLUMN/INDEX, RENAME). Author a compensating migration, or \
-         wait for the P3b rebuild phase."
+         the rebuild path is not implemented. Rollback reverses only the operations SQLite \
+         supports natively (DROP TABLE/COLUMN/INDEX, RENAME). Author a compensating migration \
+         instead."
     )]
     SqliteRebuildRequired {
         /// The migration whose `down` needs a table rebuild.
@@ -2260,6 +2260,251 @@ mod order_tests {
 }
 
 // ===========================================================================
+// Rollback selection - decide and refuse BEFORE anything executes.
+// ===========================================================================
+
+/// The ordered work a [`RollbackRequest`] resolves to, once every gate has passed.
+///
+/// Produced by [`plan_rollback`], which is TOTAL over its refusals: every reason a
+/// rollback can be refused is decided here, before a single `down` runs. A rollback
+/// that gets three migrations deep and then discovers the fourth is irreversible
+/// leaves a worse state than one that never started, so selection is all-or-nothing
+/// exactly like apply's static first pass.
+#[derive(Debug)]
+pub struct RollbackPlan<'a> {
+    /// The `down` steps to run, in reverse topological order of `depends_on`.
+    pub steps: Vec<&'a Migration>,
+    /// Irreversible versions the operator explicitly forced past.
+    pub skipped_irreversible: Vec<String>,
+}
+
+/// One net-applied migration as rollback selection needs to see it.
+///
+/// Selection needs three things the journal has and a bare version string does not:
+/// which migrations are net-applied, the order they were applied in, and the
+/// checksum each was applied under.
+///
+/// `event_seq` is the journal's monotonic append counter and is the ONLY sound
+/// apply order. Version order is not: `MigrationId::derive` stamps the high 48 bits
+/// with an `0xFF` marker and fills the rest from a SHA-256, so every IR-authored
+/// step id sorts above every `UUIDv7` file id and derived ids sort among themselves
+/// in hash order. Sorting version strings would make `Steps(1)` pick an arbitrary
+/// step of an IR plan rather than the last thing applied, and would make
+/// `ToVersion` on a file id select every IR migration ever applied. The apply path
+/// avoids this by chaining explicit `depends_on`; selection has to read the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedRecord {
+    /// The migration version.
+    pub version: String,
+    /// The checksum recorded when it was applied.
+    pub checksum: String,
+    /// The journal's monotonic sequence number for that apply event.
+    pub event_seq: i64,
+}
+
+/// Resolve a [`RollbackTarget`] to the net-applied records it unwinds, newest first
+/// by journal sequence.
+fn select_rollback_versions<'a>(
+    target: &RollbackTarget,
+    applied: &'a [AppliedRecord],
+) -> Result<Vec<&'a AppliedRecord>, RollbackError> {
+    let mut newest_first: Vec<&AppliedRecord> = applied.iter().collect();
+    newest_first.sort_by(|a, b| {
+        b.event_seq
+            .cmp(&a.event_seq)
+            .then_with(|| b.version.cmp(&a.version))
+    });
+
+    Ok(match target {
+        RollbackTarget::All => newest_first,
+        RollbackTarget::Steps(n) => newest_first.into_iter().take(*n).collect(),
+        RollbackTarget::ToVersion(v) => {
+            let target_v = v.as_str();
+            let Some(anchor) = applied.iter().find(|a| a.version == target_v) else {
+                return Err(RollbackError::UnknownTarget {
+                    version: target_v.to_string(),
+                });
+            };
+            // Strictly after, by APPLY order: the anchor itself is KEPT.
+            newest_first
+                .into_iter()
+                .filter(|a| a.event_seq > anchor.event_seq)
+                .collect()
+        }
+    })
+}
+
+/// Plan a rollback: select, gate, and order. Runs NO SQL.
+///
+/// Every refusal in [`RollbackError`] that is a selection-time decision is made here.
+/// The gates run in a deliberate order - cheapest and most categorical first, so an
+/// operator sees the most actionable message rather than the first one a scan
+/// happens to hit:
+///
+/// 1. approval, which is unconditional (every `down` tears structure down);
+/// 2. target resolution, so an unknown target fails before anything else is read;
+/// 3. availability of each selected migration's `down` in the supplied set;
+/// 4. checksum agreement between the journal and the supplied migration;
+/// 5. reversibility, then transactionality, then the guard over the `down` SQL;
+/// 6. dependency coherence for everything left applied;
+/// 7. ordering, which can still surface a cycle.
+///
+/// # Errors
+/// Any [`RollbackError`] selection variant. Never a `DownFailed` - nothing ran.
+pub fn plan_rollback<'a>(
+    request: &RollbackRequest,
+    migrations: &'a [Migration],
+    applied: &[AppliedRecord],
+    approval: Approval,
+    guard: &dyn crate::guard::MigrationGuard,
+) -> Result<RollbackPlan<'a>, RollbackError> {
+    // (1) Approval. A `down` is destructive by construction, so this is not a
+    //     per-migration flag question: rollback always requires it.
+    if !matches!(approval, Approval::Approved) {
+        return Err(RollbackError::ApprovalRequired);
+    }
+
+    // (2) Which versions does the target name?
+    let selected = select_rollback_versions(&request.target, applied)?;
+    if selected.is_empty() {
+        return Ok(RollbackPlan {
+            steps: Vec::new(),
+            skipped_irreversible: Vec::new(),
+        });
+    }
+    let selected_set: std::collections::HashSet<&str> =
+        selected.iter().map(|r| r.version.as_str()).collect();
+
+    let by_version: HashMap<&str, &Migration> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+
+    // (3) Every selected version must be in the supplied set: the `down` lives in
+    //     the migration file, not the journal, so an absent file means the reverse
+    //     SQL simply does not exist to run.
+    // (4) And it must be the SAME migration the journal applied. Without this,
+    //     rollback launders the drift gate: edit an applied migration's `up` and
+    //     `down`, roll it back so the edited `down` runs, and the `rolled_back`
+    //     event returns the version to pending - where the next apply runs the
+    //     edited `up` with no drift abort, because drift only compares versions
+    //     whose latest event is `applied`.
+    let mut chosen: Vec<&Migration> = Vec::with_capacity(selected.len());
+    for record in &selected {
+        let Some(m) = by_version.get(record.version.as_str()) else {
+            return Err(RollbackError::MissingFromSet {
+                version: record.version.clone(),
+            });
+        };
+        if !record.checksum.is_empty() && record.checksum != m.checksum.as_str() {
+            return Err(RollbackError::ChecksumDrift {
+                version: record.version.clone(),
+                recorded: record.checksum.clone(),
+                expected: m.checksum.as_str().to_string(),
+            });
+        }
+        chosen.push(m);
+    }
+
+    // (4)-(6) Per-migration gates, plus the forced-skip set.
+    let mut skipped_irreversible: Vec<String> = Vec::new();
+    let mut steps: Vec<&Migration> = Vec::with_capacity(chosen.len());
+    for m in &chosen {
+        let version = m.version.as_str();
+
+        // (5a) Reversible? `force` alone is not enough - forcing past an
+        //      irreversible step discards data, so it also takes an explicit backup
+        //      acknowledgement.
+        let Some(down) = m.down.as_deref() else {
+            if request.options.force && request.options.backup_acknowledged {
+                skipped_irreversible.push(version.to_string());
+                continue;
+            }
+            return Err(RollbackError::Irreversible {
+                version: version.to_string(),
+                name: m.name.clone(),
+            });
+        };
+
+        // (5b) Transactional? The executor runs each `down` inside a transaction, so
+        //      a migration marked non-transactional would fail at execution. Refuse
+        //      now, with the roll-forward alternative, rather than there.
+        if !m.flags.transactional {
+            return Err(RollbackError::NonTransactionalDown {
+                version: version.to_string(),
+                reason: "the migration declares transaction:false".to_string(),
+            });
+        }
+
+        // (5c) The `down` is author-supplied SQL that reaches the database, so it
+        //      gets the same line-1 guard the `up` does. Skipping this would make
+        //      `down` a way to run exactly what `up` is refused.
+        guard.check(down).map_err(|source| RollbackError::Guard {
+            version: version.to_string(),
+            source,
+        })?;
+
+        steps.push(m);
+    }
+
+    // (6) Dependency coherence. Anything that stays applied must not depend on
+    //     anything being torn down, or it is left referencing an object that no
+    //     longer exists. This covers both shapes the error surface names: a kept
+    //     migration below the threshold, and a migration force-skipped as
+    //     irreversible while its dependency is rolled back.
+    let rolled_back_set: std::collections::HashSet<&str> =
+        steps.iter().map(|m| m.version.as_str()).collect();
+    let forced_skips: std::collections::HashSet<&str> =
+        skipped_irreversible.iter().map(String::as_str).collect();
+    for kept_record in applied {
+        let kept = kept_record.version.as_str();
+        if rolled_back_set.contains(kept) {
+            continue;
+        }
+        let Some(kept_m) = by_version.get(kept) else {
+            // Applied but not supplied, and not being rolled back: it imposes no
+            // constraint we can see, and its own `down` is not needed.
+            continue;
+        };
+        for dep in &kept_m.depends_on {
+            let dep_v = dep.as_str();
+            if !rolled_back_set.contains(dep_v) {
+                continue;
+            }
+            if forced_skips.contains(kept) {
+                return Err(RollbackError::ForceSkipDependencyConflict {
+                    kept: kept.to_string(),
+                    dependency: dep_v.to_string(),
+                });
+            }
+            return Err(RollbackError::KeptDependsOnRolledBack {
+                kept: kept.to_string(),
+                dependency: dep_v.to_string(),
+            });
+        }
+    }
+
+    // (7) Reverse topological order: the transpose of apply's order. Every selected
+    //     dependency is in-set, so nothing is pre-satisfied; reversing an
+    //     ascending-version tiebreak yields the documented reverse-version
+    //     degradation when there are no edges.
+    let pre_satisfied: std::collections::HashSet<&str> = selected_set
+        .iter()
+        .copied()
+        .chain(applied.iter().map(|r| r.version.as_str()))
+        .collect();
+    let mut ordered =
+        topo_order_version_tiebroken(&steps, &pre_satisfied).map_err(|e| match e {
+            ApplyError::DependencyCycle(c) => RollbackError::DependencyCycle(c),
+            other => RollbackError::Backend(other.to_string()),
+        })?;
+    ordered.reverse();
+
+    Ok(RollbackPlan {
+        steps: ordered,
+        skipped_irreversible,
+    })
+}
+
+// ===========================================================================
 // Track A — the Trusted profile applies arbitrary SQL on a REAL Postgres.
 //
 // These MUST be in-crate: `ExecutorConfig::trusted` + `OperatorCapability::for_test`
@@ -2270,3 +2515,512 @@ mod order_tests {
 // prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op
 // still carries the approval flag (so the CLI `--yes` gate holds).
 // ===========================================================================
+
+#[cfg(test)]
+mod rollback_selection_tests {
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
+
+    /// A guard that admits everything, so gate tests isolate the gate under test.
+    struct PermissiveGuard;
+    impl crate::guard::MigrationGuard for PermissiveGuard {
+        fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
+            Ok(crate::guard::GuardOutcome::default())
+        }
+    }
+
+    /// A guard that refuses everything, to prove the `down` is guarded at all.
+    struct DenyingGuard;
+    impl crate::guard::MigrationGuard for DenyingGuard {
+        fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
+            Err(crate::guard::GuardError::MysqlRawSqlRejected)
+        }
+    }
+
+    fn mig(version: MigrationId, down: Option<&str>, depends_on: Vec<MigrationId>) -> Migration {
+        let up = format!("CREATE TABLE t_{}()", version.as_str());
+        let flags = MigrationFlags::default();
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: &up,
+            down,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &depends_on,
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up,
+            down: down.map(str::to_string),
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on,
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        }
+    }
+
+    fn req(target: RollbackTarget) -> RollbackRequest {
+        RollbackRequest {
+            target,
+            options: RollbackOptions::default(),
+        }
+    }
+
+    /// Applied records in APPLY order: seq 1, 2, 3 ... matching the slice order,
+    /// deliberately independent of how the version strings sort.
+    fn versions(ms: &[Migration]) -> Vec<AppliedRecord> {
+        ms.iter()
+            .enumerate()
+            .map(|(i, m)| AppliedRecord {
+                version: m.version.as_str().to_string(),
+                checksum: m.checksum.as_str().to_string(),
+                event_seq: i as i64 + 1,
+            })
+            .collect()
+    }
+
+    /// Three migrations with no edges, oldest first.
+    fn three() -> Vec<Migration> {
+        let a = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = MigrationId::generate();
+        vec![
+            mig(a, Some("DROP TABLE a"), vec![]),
+            mig(b, Some("DROP TABLE b"), vec![]),
+            mig(c, Some("DROP TABLE c"), vec![]),
+        ]
+    }
+
+    #[test]
+    fn rollback_without_approval_is_refused_before_anything_else() {
+        let set = three();
+        let err = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &versions(&set),
+            Approval::None,
+            &PermissiveGuard,
+        )
+        .expect_err("every down is destructive, so approval is unconditional");
+        assert!(matches!(err, RollbackError::ApprovalRequired), "{err:?}");
+    }
+
+    #[test]
+    fn unwinding_runs_newest_first() {
+        let set = three();
+        let plan = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan");
+        let got: Vec<&str> = plan.steps.iter().map(|m| m.version.as_str()).collect();
+        let mut want: Vec<&str> = set.iter().map(|m| m.version.as_str()).collect();
+        want.reverse();
+        assert_eq!(
+            got, want,
+            "with no edges, rollback is reverse-version order"
+        );
+    }
+
+    #[test]
+    fn to_version_keeps_the_named_migration() {
+        let set = three();
+        let vs = versions(&set);
+        let plan = plan_rollback(
+            &req(RollbackTarget::ToVersion(set[0].version.clone())),
+            &set,
+            &vs,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan");
+        let got: Vec<&str> = plan.steps.iter().map(|m| m.version.as_str()).collect();
+        assert_eq!(
+            got,
+            vec![set[2].version.as_str(), set[1].version.as_str()],
+            "unwind down TO the target, keeping it"
+        );
+    }
+
+    #[test]
+    fn steps_takes_the_most_recent_n() {
+        let set = three();
+        let plan = plan_rollback(
+            &req(RollbackTarget::Steps(2)),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan");
+        let got: Vec<&str> = plan.steps.iter().map(|m| m.version.as_str()).collect();
+        assert_eq!(got, vec![set[2].version.as_str(), set[1].version.as_str()]);
+    }
+
+    #[test]
+    fn an_unknown_target_is_refused() {
+        let set = three();
+        let stranger = MigrationId::generate();
+        let err = plan_rollback(
+            &req(RollbackTarget::ToVersion(stranger)),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("a target that is not applied cannot anchor an unwind");
+        assert!(
+            matches!(err, RollbackError::UnknownTarget { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_applied_migration_absent_from_the_set_is_refused() {
+        let set = three();
+        let mut vs = versions(&set);
+        vs.push(AppliedRecord {
+            version: MigrationId::generate().as_str().to_string(),
+            checksum: "deadbeef".into(),
+            event_seq: 99,
+        });
+        let err = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &vs,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("the down lives in the file, so an absent file has no reverse SQL");
+        assert!(
+            matches!(err, RollbackError::MissingFromSet { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_irreversible_migration_is_refused_unless_forced_with_a_backup() {
+        let a = MigrationId::generate();
+        let set = vec![mig(a, None, vec![])];
+        let vs = versions(&set);
+
+        let err = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &vs,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("down: None refuses by default");
+        assert!(matches!(err, RollbackError::Irreversible { .. }), "{err:?}");
+
+        // force alone is not enough - skipping an irreversible step loses data.
+        let force_only = RollbackRequest {
+            target: RollbackTarget::All,
+            options: RollbackOptions {
+                force: true,
+                backup_acknowledged: false,
+            },
+        };
+        let err = plan_rollback(&force_only, &set, &vs, Approval::Approved, &PermissiveGuard)
+            .expect_err("force without a backup acknowledgement still refuses");
+        assert!(matches!(err, RollbackError::Irreversible { .. }), "{err:?}");
+
+        let forced = RollbackRequest {
+            target: RollbackTarget::All,
+            options: RollbackOptions {
+                force: true,
+                backup_acknowledged: true,
+            },
+        };
+        let plan = plan_rollback(&forced, &set, &vs, Approval::Approved, &PermissiveGuard)
+            .expect("both flags together skip the step");
+        assert!(plan.steps.is_empty(), "nothing to run");
+        assert_eq!(plan.skipped_irreversible.len(), 1);
+    }
+
+    #[test]
+    fn a_non_transactional_down_is_refused() {
+        let a = MigrationId::generate();
+        let mut m = mig(a, Some("DROP INDEX CONCURRENTLY i"), vec![]);
+        m.flags.transactional = false;
+        let set = vec![m];
+        let err = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("the executor only runs a down inside a transaction");
+        assert!(
+            matches!(err, RollbackError::NonTransactionalDown { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_down_sql_goes_through_the_guard() {
+        let set = three();
+        let err = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &DenyingGuard,
+        )
+        .expect_err("a down is author SQL reaching the database, so it is guarded");
+        assert!(matches!(err, RollbackError::Guard { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_kept_migration_may_not_depend_on_a_rolled_back_one() {
+        // b depends on a. Rolling back only `a` would leave `b` applied and
+        // referencing an object that no longer exists.
+        let a = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = MigrationId::generate();
+        let set = vec![
+            mig(a.clone(), Some("DROP TABLE a"), vec![]),
+            mig(b, Some("DROP TABLE b"), vec![a]),
+        ];
+        let vs = versions(&set);
+
+        // Steps(1) takes only the newest (b) - coherent, because nothing left
+        // applied depends on what came out.
+        plan_rollback(
+            &req(RollbackTarget::Steps(1)),
+            &set,
+            &vs,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("rolling back the dependent alone is coherent");
+
+        // The incoherent shape needs an OLDER migration depending on a NEWER one,
+        // so the threshold can keep the dependent while tearing down its dependency.
+        // `depends_on` usually points backwards in time, which is why the ordinary
+        // unwind is safe; this is the case that is not.
+        let old = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let new = MigrationId::generate();
+        let inverted = vec![
+            mig(old.clone(), Some("DROP TABLE old"), vec![new.clone()]),
+            mig(new, Some("DROP TABLE new"), vec![]),
+        ];
+        let err = plan_rollback(
+            &req(RollbackTarget::ToVersion(old)),
+            &inverted,
+            &versions(&inverted),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("keeping `old` while rolling back what it depends on is incoherent");
+        assert!(
+            matches!(err, RollbackError::KeptDependsOnRolledBack { .. }),
+            "{err:?}"
+        );
+
+        // Force-skip b as irreversible while rolling back its dependency a.
+        let a2 = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b2 = MigrationId::generate();
+        let set2 = vec![
+            mig(a2.clone(), Some("DROP TABLE a"), vec![]),
+            mig(b2, None, vec![a2]),
+        ];
+        let forced = RollbackRequest {
+            target: RollbackTarget::All,
+            options: RollbackOptions {
+                force: true,
+                backup_acknowledged: true,
+            },
+        };
+        let err = plan_rollback(
+            &forced,
+            &set2,
+            &versions(&set2),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("a force-skipped migration still depends on what is torn down");
+        assert!(
+            matches!(err, RollbackError::ForceSkipDependencyConflict { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_dependent_runs_its_down_before_the_dependency() {
+        // b depends_on a, so apply order is a then b; rollback is the transpose.
+        let a = MigrationId::generate();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = MigrationId::generate();
+        let set = vec![
+            mig(a.clone(), Some("DROP TABLE a"), vec![]),
+            mig(b.clone(), Some("DROP TABLE b"), vec![a.clone()]),
+        ];
+        let plan = plan_rollback(
+            &req(RollbackTarget::All),
+            &set,
+            &versions(&set),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan");
+        let got: Vec<&str> = plan.steps.iter().map(|m| m.version.as_str()).collect();
+        assert_eq!(
+            got,
+            vec![b.as_str(), a.as_str()],
+            "the dependent tears down first"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rollback_selection_ordering_tests {
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
+
+    struct PermissiveGuard;
+    impl crate::guard::MigrationGuard for PermissiveGuard {
+        fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
+            Ok(crate::guard::GuardOutcome::default())
+        }
+    }
+
+    fn mig(version: MigrationId) -> Migration {
+        let up = "CREATE TABLE t()".to_string();
+        let down = Some("DROP TABLE t".to_string());
+        let flags = MigrationFlags::default();
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: &up,
+            down: down.as_deref(),
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up,
+            down,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        }
+    }
+
+    /// Selection follows the journal, not the version string.
+    ///
+    /// `MigrationId::derive` stamps the high 48 bits with an `0xFF` marker and fills
+    /// the rest from a SHA-256, so every derived (IR-authored) id sorts ABOVE every
+    /// `UUIDv7` file id. A selector that sorted versions would treat the derived id
+    /// as newest no matter when it was actually applied.
+    #[test]
+    fn selection_uses_apply_order_not_version_order() {
+        let derived = MigrationId::derive("ir_step", b"seed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let file = MigrationId::generate();
+
+        // The premise this test exists to defend.
+        assert!(
+            derived.as_str() > file.as_str(),
+            "a derived id sorts above a generated one: {} vs {}",
+            derived.as_str(),
+            file.as_str()
+        );
+
+        // But the DERIVED one was applied FIRST.
+        let set = vec![mig(derived.clone()), mig(file.clone())];
+        let applied = vec![
+            AppliedRecord {
+                version: derived.as_str().to_string(),
+                checksum: set[0].checksum.as_str().to_string(),
+                event_seq: 1,
+            },
+            AppliedRecord {
+                version: file.as_str().to_string(),
+                checksum: set[1].checksum.as_str().to_string(),
+                event_seq: 2,
+            },
+        ];
+
+        let plan = plan_rollback(
+            &RollbackRequest {
+                target: RollbackTarget::Steps(1),
+                options: RollbackOptions::default(),
+            },
+            &set,
+            &applied,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan");
+        assert_eq!(
+            plan.steps.len(),
+            1,
+            "Steps(1) unwinds exactly one migration"
+        );
+        assert_eq!(
+            plan.steps[0].version.as_str(),
+            file.as_str(),
+            "Steps(1) must take the LAST APPLIED migration, not the highest version"
+        );
+    }
+
+    /// Rollback must not launder the drift gate.
+    ///
+    /// Rolling a version back returns it to pending, where the next apply runs its
+    /// `up`. If the supplied migration no longer matches what the journal recorded,
+    /// rolling back would run an edited `down` and then re-apply an edited `up` with
+    /// no drift abort, because drift only compares versions whose latest event is
+    /// `applied`.
+    #[test]
+    fn a_migration_edited_since_it_applied_cannot_be_rolled_back() {
+        let v = MigrationId::generate();
+        let set = vec![mig(v.clone())];
+        let applied = vec![AppliedRecord {
+            version: v.as_str().to_string(),
+            checksum: "a-different-checksum".to_string(),
+            event_seq: 1,
+        }];
+
+        let err = plan_rollback(
+            &RollbackRequest {
+                target: RollbackTarget::All,
+                options: RollbackOptions::default(),
+            },
+            &set,
+            &applied,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("the supplied migration is not the one that was applied");
+        match err {
+            RollbackError::ChecksumDrift {
+                version, recorded, ..
+            } => {
+                assert_eq!(version, v.as_str());
+                assert_eq!(recorded, "a-different-checksum");
+            }
+            other => panic!("expected ChecksumDrift, got {other:?}"),
+        }
+    }
+}
