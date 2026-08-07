@@ -254,11 +254,20 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
 
 /// Same fixture with a caller-chosen admin quota, for the tests that are ABOUT
 /// the limiter and need one small enough to trip.
+/// Same fixture with a caller-chosen admin quota AND `trust_proxy` on, so a
+/// limiter test can send a unique `X-Forwarded-For` and get its OWN bucket.
+///
+/// The bucket lives in Postgres keyed by caller identity, and every test
+/// otherwise resolves to the same unresolved-client identity - so a test that
+/// deliberately exhausts the bucket would drain it for every test sharing the
+/// database, whatever quota their own fixture declares.
 async fn build_test_state_with_admin_quota(
     db_url: &str,
     label: &str,
     admin_quota: Quota,
 ) -> Fixture {
+    // Only the limiter test needs a distinguishable caller identity.
+    let trust_proxy_for_limiter = true;
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
 
@@ -308,7 +317,7 @@ async fn build_test_state_with_admin_quota(
         admin_limiter: Arc::new(RateLimiter::new(admin_quota)),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         insecure_dev: false,
-        trust_proxy: false,
+        trust_proxy: trust_proxy_for_limiter,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
         app_base_domain: "zeroship.localhost".to_string(),
@@ -1042,11 +1051,22 @@ async fn deploy_is_rate_limited() {
 
     // The admin bucket allows 30/minute per caller; go one past it.
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    // Unique caller identity so this test owns its bucket outright.
+    // Wide random space: the bucket persists in the database between runs, so a
+    // narrow one would eventually reuse an identity that still has tokens spent.
+    let r = Uuid::new_v4().as_u128();
+    let caller_ip = format!(
+        "10.{}.{}.{}",
+        (r >> 16) as u8,
+        (r >> 8) as u8,
+        (r as u8) | 1
+    );
     let mut statuses = Vec::new();
     for _ in 0..31 {
         let req = test::TestRequest::post()
             .uri(&format!("/api/apps/{app_id}/deploy"))
             .header("authorization", pat.bearer())
+            .header("x-forwarded-for", caller_ip.as_str())
             .header("content-type", "application/x-zship")
             .set_payload(b"never read".to_vec())
             .to_request();
