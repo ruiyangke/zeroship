@@ -15,7 +15,7 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
 use zeroship_auth::identity::totp;
-use zeroship_auth::sessions::totp_challenge::TotpChallenge;
+use zeroship_auth::sessions::totp_challenge::{FirstFactor, TotpChallenge};
 use zeroship_auth::store::{totp as totp_store, users};
 
 #[allow(clippy::future_not_send)]
@@ -101,7 +101,7 @@ async fn challenge_stash_binds_user_and_credential_version() {
     let cv = user.credential_version;
     let signing_key = b"test-stash-key-not-for-prod-32bytes!";
 
-    let stash = TotpChallenge::new(user.id, cv, "lc-xyz".into());
+    let stash = TotpChallenge::new(user.id, cv, "lc-xyz".into(), FirstFactor::Password);
     let cookie = stash.encode(signing_key);
     let decoded = TotpChallenge::decode(&cookie, signing_key).expect("decode");
     assert_eq!(decoded.user_id, user.id);

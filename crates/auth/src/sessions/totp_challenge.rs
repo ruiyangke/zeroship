@@ -31,28 +31,64 @@ pub const COOKIE_NAME_PROD: &str = "__Host-zsidp_2fa";
 /// Dev cookie name (no prefix → no Secure requirement).
 pub const COOKIE_NAME_DEV: &str = "zsidp_2fa";
 
+/// The factor the user cleared before this challenge was raised.
+///
+/// One handler (`/login/2fa`) completes every challenge, so the stash has to
+/// record which flow opened it. Without that, a magic-link user would complete
+/// through the password tail and walk away with a session whose `amr`/`acr`
+/// assert a password login that never happened - and `sessions::create` writes
+/// whatever the caller passes, so nothing downstream would catch it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "factor", rename_all = "snake_case")]
+pub enum FirstFactor {
+    /// `/login` verified an email and password.
+    Password,
+    /// A magic-link token was redeemed for this user. The token is consumed
+    /// before the challenge is raised, so abandoning the challenge does not
+    /// leave a replayable link behind.
+    Magic,
+    /// `/link` verified the local password of the account a federation
+    /// assertion collided with. The assertion rides in the stash because the
+    /// identity row is written only after the second factor lands: writing it
+    /// earlier would hand the upstream account a standing login path that
+    /// skips the second factor.
+    OauthLink {
+        provider: String,
+        subject: String,
+        email: String,
+    },
+}
+
 /// The factor-1-passed attestation for an in-flight login challenge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpChallenge {
-    /// The password-verified user awaiting a second factor.
+    /// The user who cleared factor 1 and is awaiting a second factor.
     pub user_id: uuid::Uuid,
-    /// Credential version captured at password-verify time; a later change
+    /// Credential version captured at factor-1 time; a later change
     /// (password reset / forced logout) invalidates this challenge.
     pub credential_version: i64,
     /// Validated same-origin path to redirect to once factor 2 passes.
     pub return_to: String,
+    /// Which flow raised this challenge, and what it needs to complete.
+    pub first_factor: FirstFactor,
     pub iat: i64,
     pub exp: i64,
 }
 
 impl TotpChallenge {
     #[must_use]
-    pub fn new(user_id: uuid::Uuid, credential_version: i64, return_to: String) -> Self {
+    pub fn new(
+        user_id: uuid::Uuid,
+        credential_version: i64,
+        return_to: String,
+        first_factor: FirstFactor,
+    ) -> Self {
         let iat = unix_now();
         Self {
             user_id,
             credential_version,
             return_to,
+            first_factor,
             iat,
             exp: iat.saturating_add(CHALLENGE_MAX_AGE_SECS),
         }
@@ -150,7 +186,12 @@ mod tests {
     use super::*;
 
     fn sample(key: &[u8]) -> (TotpChallenge, String) {
-        let c = TotpChallenge::new(uuid::Uuid::new_v4(), 7, "lc-abc".into());
+        let c = TotpChallenge::new(
+            uuid::Uuid::new_v4(),
+            7,
+            "lc-abc".into(),
+            FirstFactor::Password,
+        );
         let enc = c.encode(key);
         (c, enc)
     }
@@ -187,6 +228,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
             return_to: "/oauth2/authorize".into(),
+            first_factor: FirstFactor::Password,
             iat: now - 1000,
             exp: now - 600,
         };
@@ -201,6 +243,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
             return_to: "/oauth2/authorize".into(),
+            first_factor: FirstFactor::Password,
             iat: now + 120,
             exp: now + 600,
         };

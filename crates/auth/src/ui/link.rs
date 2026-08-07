@@ -43,7 +43,9 @@ use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
-use crate::store::{identities, sessions, users};
+use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
+use crate::store::{identities, sessions, totp as totp_store, users};
+use crate::ui::login::render_challenge;
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
 
 /// ACR + AMR tags for the post-link `IdP` session.
@@ -321,6 +323,45 @@ pub async fn post(
         );
     }
 
+    // Resolve the continuation target before anything durable happens, so an
+    // unusable target cannot leave a linked identity or a session behind.
+    let Some(native_return_to) = pending.return_to.as_deref() else {
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    };
+    let Some(native_return_to) = validated_native_return_to(native_return_to) else {
+        tracing::warn!("link native return_to failed use-time validation");
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    };
+
+    // 5. A confirmed second factor gates the LINK, not merely the session.
+    // Writing the identity row grants the upstream account a standing login
+    // path into this account, and the federation callback that would use it
+    // asks for no local second factor - so the row must not outlive a
+    // challenge the user never completed. The assertion rides in the signed
+    // stash and is applied by `finish_after_second_factor`.
+    match totp_store::is_enabled(db.as_ref(), u.id).await {
+        Ok(true) => {
+            return render_challenge(
+                &cfg,
+                &TotpChallenge::new(
+                    u.id,
+                    u.credential_version,
+                    native_return_to.to_string(),
+                    FirstFactor::OauthLink {
+                        provider: pending.provider.clone(),
+                        subject: pending.subject.clone(),
+                        email: pending.email.clone(),
+                    },
+                ),
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %u.id, "link totp is_enabled check failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    }
+
     // 5a. Create the identity row.
     if let Err(e) = identities::link(
         db.as_ref(),
@@ -365,14 +406,6 @@ pub async fn post(
     if let Err(e) = users::touch_last_login(db.as_ref(), u.id).await {
         tracing::warn!(error = %e, user_id = %u.id, "touch_last_login failed");
     }
-
-    let Some(native_return_to) = pending.return_to.as_deref() else {
-        return render_error_page(PublicErrorMessage::InvalidRequest);
-    };
-    let Some(native_return_to) = validated_native_return_to(native_return_to) else {
-        tracing::warn!("link native return_to failed use-time validation");
-        return render_error_page(PublicErrorMessage::InvalidRequest);
-    };
 
     audit::emit(
         db.as_ref(),
@@ -439,6 +472,89 @@ fn render_link_error_with_status(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
+}
+
+/// Write the federated-identity row and mint the session once `/login/2fa`
+/// has verified the second factor.
+///
+/// The link is deferred to here rather than done at password-verify time
+/// because the identity row is a standing login path for the upstream account;
+/// it must not survive a challenge the user never completed. `provider`,
+/// `subject` and `email` arrive from the HMAC-signed challenge stash, so they
+/// are the same assertion `/link` verified the password against.
+#[allow(clippy::future_not_send, clippy::too_many_arguments)]
+pub(crate) async fn finish_after_second_factor(
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+    user: &users::UserRow,
+    provider: &str,
+    subject: &str,
+    email: &str,
+    return_to: &str,
+    req: &HttpRequest,
+) -> HttpResponse {
+    let Some(native_return_to) = validated_native_return_to(return_to) else {
+        tracing::warn!("link native return_to failed use-time validation");
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    };
+
+    if let Err(e) = identities::link(db, user.id, provider, subject, Some(email), None).await {
+        tracing::error!(error = %e, "identities::link failed");
+        return render_error_page(PublicErrorMessage::ContactSupport);
+    }
+
+    let session = match sessions::create(
+        db,
+        &sessions::CreateSession {
+            user_id: user.id,
+            auth_method: provider,
+            // A federation assertion, the local password, and a TOTP or backup
+            // code all landed, so all three land in amr.
+            amr: vec!["oauth".into(), "pwd".into(), "otp".into()],
+            acr: Some(acr_for(provider)),
+            expected_credential_version: Some(user.credential_version),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "link second-factor sessions::create failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    };
+
+    if let Err(e) = users::touch_last_login(db, user.id).await {
+        tracing::warn!(error = %e, user_id = %user.id, "touch_last_login failed");
+    }
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "oauth_link_success",
+            outcome: "success",
+            user_id: Some(&user.id),
+            auth_method: Some(provider),
+            detail: json!({
+                "subject": subject,
+                "email": email,
+                "second_factor": "otp",
+            }),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
+
+    let mut resp = return_to::see_other(native_return_to);
+    resp.header(
+        SET_COOKIE,
+        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+    );
+    resp.header("cache-control", "no-store");
+    resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
+    resp.finish()
 }
 
 fn validated_native_return_to(return_to: &str) -> Option<&str> {
