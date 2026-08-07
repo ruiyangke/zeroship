@@ -6809,6 +6809,7 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-mailer",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -6845,6 +6846,7 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "uuid",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -6864,6 +6866,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zeroship-test-support",
  "zstd",
 ]
 
@@ -6915,6 +6918,7 @@ dependencies = [
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-stream",
+ "zeroship-test-support",
  "zeroship-workflow-scheduler",
  "zstd",
 ]
@@ -6953,6 +6957,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-bundle",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -6995,6 +7000,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -7017,6 +7023,7 @@ dependencies = [
  "tracing",
  "uuid",
  "x509-parser",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -7109,6 +7116,7 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-schema",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -7128,6 +7136,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -7148,6 +7157,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-metering",
  "zeroship-runtime",
+ "zeroship-test-support",
 ]
 
 [[package]]
@@ -7246,7 +7256,12 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "zeroship-test-support",
 ]
+
+[[package]]
+name = "zeroship-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "zeroship-worker"
