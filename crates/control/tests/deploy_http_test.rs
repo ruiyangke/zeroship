@@ -928,3 +928,73 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     let _ = fx.state.registry.delete_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 }
+
+/// Deploying to an app id that does not exist must be refused BEFORE the
+/// bundle's blobs are persisted. The handler streams the body, mmaps it and
+/// calls `deploy::ingest` (which writes every blob into the blob store) and
+/// only afterwards looks the app up and answers "app not found", so the blobs
+/// of a bundle for a nonexistent app outlive the request with nothing to
+/// reference or bill them.
+///
+/// The caller here holds a fleet-wide grant, which is what makes the arm
+/// reachable: an ordinary creator is denied by authz on an app they do not
+/// own, so this is an operator-shaped exposure rather than an anonymous one.
+#[compio::test]
+async fn deploy_to_nonexistent_app_does_not_write_blobs() {
+    let db_url = db_url();
+
+    let fx = build_test_state(&db_url, "ghost").await;
+
+    // A well-formed bundle, so nothing rejects it for its own shape. The only
+    // thing wrong with this request is that the app does not exist.
+    let html = b"<!doctype html><body>ghost app</body>";
+    let html_hash = sha256_hex(html);
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let manifest = manifest_for(
+        Some(&server_hash),
+        &[("/index.html", &html_hash, "text/html")],
+    );
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let blobs = vec![
+        (html_hash.clone(), html.to_vec()),
+        (server_hash.clone(), server.to_vec()),
+    ];
+    let body = build_zship(&manifest_bytes, &blobs, true);
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
+    )
+    .await;
+
+    // Never created through the registry, so no app row exists for it.
+    let ghost_id = Uuid::new_v4();
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{ghost_id}/deploy"))
+        .header("authorization", pat.bearer())
+        .header("content-type", "application/x-zship")
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "deploying to an app that does not exist must 404",
+    );
+    // Assert on the blob directory, not the store root: the store creates
+    // `blobs/` and `manifests/` when it is constructed, so the root is never
+    // empty and asserting on it would fail no matter what the handler did.
+    assert!(
+        dir_is_empty(&fx.blob_root.join("blobs")),
+        "a deploy for a nonexistent app must not leave blobs behind: the app is \
+         never created, so nothing will ever reference, bill, or garbage-collect them",
+    );
+}
