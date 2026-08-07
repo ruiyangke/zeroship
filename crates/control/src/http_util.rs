@@ -105,28 +105,9 @@ fn retry_after_header(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-
-    use ntex::http::StatusCode;
-    use ntex::web::test::TestRequest;
-    use uuid::Uuid;
+    use std::net::IpAddr;
 
     use super::*;
-
-    async fn pg() -> Option<compio_postgres::Client> {
-        let db_url = std::env::var("CONTROL_TEST_DB")
-            .or_else(|_| std::env::var("AUTH_DB_URL"))
-            .or_else(|_| std::env::var("PG_TEST_URL"))
-            .ok()?;
-        let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
-            .await
-            .expect("pg connect");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        Some(client)
-    }
 
     #[test]
     fn malformed_trusted_xff_falls_back_to_peer_identity() {
@@ -148,15 +129,52 @@ mod tests {
             Some(forwarded.to_string())
         );
     }
+}
+
+// The rate-limit gate is enforced by a `zeroship.rate_limits` row, so these
+// three cases need a reachable, migrated PostgreSQL and cannot run under a bare
+// `cargo test --workspace`. They live in their own module because the sibling
+// `tests` module above is pure and must keep running there; `required-features`
+// in Cargo.toml gates whole targets and cannot reach inside a lib, so the split
+// is what keeps the database-free half visible to the default build.
+//
+// They previously resolved their DSN from the environment and RETURNED EARLY
+// when it was unset, which cargo reports as a pass - a missing database
+// masquerading as coverage. Behind the gate that fallback is not needed and not
+// wanted: the DSN now defaults to the same dev Postgres the rest of the control
+// suite uses, and an unreachable server fails.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_db_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use ntex::http::StatusCode;
+    use ntex::web::test::TestRequest;
+    use uuid::Uuid;
+
+    use super::*;
+
+    async fn pg() -> compio_postgres::Client {
+        let db_url = std::env::var("CONTROL_TEST_DB")
+            .or_else(|_| std::env::var("AUTH_DB_URL"))
+            .or_else(|_| std::env::var("PG_TEST_URL"))
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| {
+                "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+            });
+        let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("pg connect");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+    }
 
     #[compio::test]
     async fn unresolved_identity_uses_shared_rate_limit_bucket() {
-        let Some(pg) = pg().await else {
-            eprintln!(
-                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
-            );
-            return;
-        };
+        let pg = pg().await;
         let namespace = format!("http-util-unresolved-{}", Uuid::new_v4().simple());
         let key = format!("control:{namespace}:ip:unresolved");
         pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
@@ -184,12 +202,7 @@ mod tests {
 
     #[compio::test]
     async fn distinct_resolvable_identities_use_independent_rate_limit_buckets() {
-        let Some(pg) = pg().await else {
-            eprintln!(
-                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
-            );
-            return;
-        };
+        let pg = pg().await;
         let namespace = format!("http-util-distinct-{}", Uuid::new_v4().simple());
         let first_ip = "198.51.100.31";
         let second_ip = "198.51.100.32";
@@ -235,12 +248,7 @@ mod tests {
 
     #[compio::test]
     async fn db_backed_rate_limit_throttles_across_calls() {
-        let Some(pg) = pg().await else {
-            eprintln!(
-                "[http_util::tests] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
-            );
-            return;
-        };
+        let pg = pg().await;
         let namespace = format!("http-util-test-{}", Uuid::new_v4().simple());
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 90));
         let key = format!("control:{namespace}:ip:{ip}");

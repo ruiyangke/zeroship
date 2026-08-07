@@ -118,6 +118,26 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         let _ = control_pg_conn.run().await;
     })
     .detach();
+
+    // The spend-band tests below drive the real spend-reconcile sweep, which
+    // fails closed with "global default FX missing" unless the shared
+    // `pricing_config` singleton exists. Nothing in the platform migration
+    // creates that row: it appeared only because `billing_reconcile_test` (whose
+    // fail-closed case deletes and then re-INSERTs it) happened to run FIRST in
+    // the old hand-ordered binary list. That is a hidden order dependency, and
+    // it broke the moment the runner stopped enumerating binaries by name. Seed
+    // it here so this binary is self-sufficient in any order. The value matches
+    // the restore in `billing_reconcile_test`, and `ON CONFLICT DO NOTHING`
+    // leaves a value another binary set alone.
+    control_pg_client
+        .execute(
+            "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
+             VALUES ('global', 30000000) ON CONFLICT (id) DO NOTHING",
+            &[],
+        )
+        .await
+        .expect("seed global pricing_config");
+
     let control_pg = Arc::new(control_pg_client);
 
     // The RECORDING notifier under test — kept as a handle so assertions read what was

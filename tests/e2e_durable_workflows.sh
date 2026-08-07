@@ -119,7 +119,10 @@ pass "release binaries built"
 
 echo "=== DW-07 test warmup ==="
 cargo test -p zeroship-control --test durable_workflows_keystone_e2e --no-run
-cargo test -p zeroship-control --test workflow_engine_test --no-run
+# workflow_engine_test needs a live PostgreSQL and therefore carries
+# `required-features = ["live-db-tests"]`; without the feature cargo reports "no
+# test target named workflow_engine_test" rather than building it.
+cargo test -p zeroship-control --features live-db-tests --test workflow_engine_test --no-run
 pass "test binaries warmed"
 
 echo "=== DW-07 database :$PG_PORT ==="
@@ -724,7 +727,7 @@ pass "stopped real services; workflow engine regression runs alone"
 
 echo "=== DW-07 workflow engine regression ==="
 CONTROL_TEST_DB="$DBURL" \
-  cargo test -p zeroship-control --test workflow_engine_test -- --nocapture --test-threads=1 || {
+  cargo test -p zeroship-control --features live-db-tests --test workflow_engine_test -- --nocapture --test-threads=1 || {
     fail "DW-07 workflow engine regression failed"
     echo "--- control.log ---"
     tail -120 "$WORK/control.log" || true

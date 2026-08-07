@@ -51,5 +51,31 @@ zeroship-migrate-adapter = { workspace = true }
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
+# ---------------------------------------------------------------------------
+# Live-database test gate
+# ---------------------------------------------------------------------------
+# Same contract as `zeroship-control`'s feature of the same name: it marks the
+# targets that CANNOT run without a reachable, migrated PostgreSQL. Determined
+# by measurement - the built test executables were run with MIGRATED_TEST_DB /
+# CONTROL_TEST_DB pointed at a dead port, and `apply_api_test` was the one
+# integration target that failed (it panics in `connect`, it does not skip).
+#
+# The feature also gates `migration_store`'s in-crate `mod tests`, whose two
+# `*_pg` cases dial the same database from the LIB target. A `required-features`
+# entry cannot reach inside a lib, so that module carries the `cfg` directly.
+#
+# Covered in CI by one invocation, with no second list to drift from this one:
+#
+#     cargo test -p zeroship-migrated --features live-db-tests
+#
+# driven by `tests/run_billing_suite.sh` (the `billing-gate` job).
+[features]
+live-db-tests = []
+
+[[test]]
+name = "apply_api_test"
+path = "tests/apply_api_test.rs"
+required-features = ["live-db-tests"]
+
 [lints]
 workspace = true

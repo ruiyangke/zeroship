@@ -129,6 +129,26 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     zeroship_control::bootstrap_console::seed_plans(&registry)
         .await
         .expect("seed builtin plans");
+    // The DW-24 rollout gate is `apps.workflows_enabled AND plans.workflows_allowed`
+    // (crates/control/src/workflow_rollout.rs), and both columns default to
+    // false. Without this the control instance API answers every
+    // `env.workflows.*` call with 403 "workflows are not enabled for this app or
+    // plan". `workflow_instance_api_test` enables the same two flags in its own
+    // fixture; this suite was never run by any CI job, so it never had to.
+    {
+        let setup_pg = pg(db_url).await;
+        setup_pg
+            .execute(
+                "UPDATE zeroship.plans SET workflows_allowed = true WHERE id IN ($1, $2, $3)",
+                &[
+                    &zeroship_control::bootstrap_console::free_plan_id(),
+                    &zeroship_control::bootstrap_console::pro_plan_id(),
+                    &zeroship_control::bootstrap_console::unlimited_plan_id(),
+                ],
+            )
+            .await
+            .expect("enable workflows on the built-in plans");
+    }
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
@@ -193,8 +213,8 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
     let app_name = format!("wf-plugin-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
+             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash', true)",
             &[
                 &app_id,
                 &app_name,

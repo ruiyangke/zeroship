@@ -458,7 +458,14 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
+// Every case in this module opens a real PostgreSQL connection and `expect`s it,
+// so with no server reachable the LIB test target panics and `cargo test
+// --workspace` - which provisions no database - can never be green. The
+// `live-db-tests` feature is the same gate the crate's `apply_api_test`
+// integration target carries in Cargo.toml; `required-features` cannot reach
+// inside a lib, hence the `cfg` here. Nothing in this module is database-free,
+// so the whole module moves behind the gate rather than individual cases.
+#[cfg(all(test, feature = "live-db-tests"))]
 mod tests {
     use super::*;
 

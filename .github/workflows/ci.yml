@@ -65,11 +65,20 @@ jobs:
             | grep -o '"executable":"[^"]*"' \
             | grep -v '"executable":null' \
             | sort -u | wc -l)
-          # Floor set below a local measurement of 306 because the count is
+          # Floor set below the local measurement (261) because the count is
           # environment-sensitive (feature resolution, optional deps) and the CI
           # number has never been observed. The step prints the real count: once a
           # run has shown it, raise this to that number to make the check tight.
-          floor=290
+          #
+          # 290 -> 245 when the live-database gate landed. The local measurement
+          # fell 306 -> 261, exactly the 45 targets that now carry
+          # `required-features = ["live-db-tests"]` (44 zeroship-control
+          # integration binaries + zeroship-migrated's apply_api_test). Those are
+          # the targets that panic on connect without a PostgreSQL, which this
+          # job does not provision; they are built and run by the billing-gate
+          # job instead. The floor moves by the measured delta and no further -
+          # it is not slack, and nothing else was allowed to disappear behind it.
+          floor=245
           echo "test targets built: $count (floor $floor)"
           if [ "$count" -lt "$floor" ]; then
             echo "::error::built test targets ($count) fell below the floor ($floor); a suite stopped being built"
@@ -100,16 +109,31 @@ jobs:
       # and nursery warning to a hard error, which the workspace does not satisfy.
       # Run `cargo clippy --workspace --all-targets` to see where it currently
       # stands. Let the declared levels decide: deny-level lints still fail here.
-      - run: cargo clippy --workspace --all-targets
+      #
+      # `--all-targets` only reaches targets whose `required-features` are
+      # satisfied, so the 45 live-database test files would silently stop being
+      # linted the moment they were gated - a second, quieter coverage loss on
+      # top of the one the floor above measures. Naming the feature keeps
+      # exactly the set that was linted before still linted.
+      - run: >
+          cargo clippy --workspace --all-targets
+          --features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests
 
-  # The billing & metering money-path integration suite talks to a real
-  # Postgres and drives the REAL fleet-wide cron sweeps (reconcile, spend
-  # recompute, stream forwarder). Its tests are DB-gated: without CONTROL_TEST_DB
-  # they self-skip, so `cargo test --workspace` above never exercises them.
-  # tests/run_billing_suite.sh provisions the DB, exports CONTROL_TEST_DB, and
-  # runs each money-path binary SERIALLY (the fleet sweeps are advisory-locked
-  # single-flight and cannot run two-at-a-time). This job is what actually gates
-  # the billing money-path regression tests on push/PR.
+  # The live-database gate. zeroship-control and zeroship-migrated between them
+  # hold 45 test targets that dial a real Postgres and panic on connect without
+  # one - the billing money path (which additionally drives the advisory-locked
+  # fleet-wide cron sweeps), plus deploy, oauth, device, token, admin, bootstrap,
+  # registry and workflow suites. They carry
+  # `required-features = ["live-db-tests"]`, so the `rust` job above skips them;
+  # this job provisions the database and is what actually runs them.
+  #
+  # The set it runs is the set that is gated, by construction: the script issues
+  # `cargo test -p <crate> --features live-db-tests`, which runs every target in
+  # the crate whose required-features are satisfied. There is no name list, so
+  # nothing can be gated out of the default build and land in neither job - which
+  # is exactly how fifteen non-billing control suites went unrun before.
+  #
+  # The job name is kept because branch protection references it.
   billing-gate:
     runs-on: ubuntu-latest
     services:
@@ -152,7 +176,7 @@ jobs:
             sleep 3
           done
           echo "redpanda failed to become healthy" >&2; docker logs redpanda; exit 1
-      - name: Run the billing money-path gate
+      - name: Run the live-database gate
         run: tests/run_billing_suite.sh
         env:
           PG_HOST: localhost

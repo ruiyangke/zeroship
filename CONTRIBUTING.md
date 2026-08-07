@@ -95,7 +95,9 @@ DB-gated and end-to-end suites (bring up the dev Postgres via
 own server):
 
 ```
-tests/run_billing_suite.sh      # provisions the DB + runs the billing money-path gate
+tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
+                                # (everything behind the `live-db-tests` feature
+                                #  in zeroship-control / zeroship-migrated)
 ./tests/golden_path.sh          # build a creator app locally and deploy it
 ./tests/e2e_platform.sh         # multi-service platform smoke
 ./tests/e2e_docker.sh           # the full stack under Docker Compose

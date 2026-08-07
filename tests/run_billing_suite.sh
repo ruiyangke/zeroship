@@ -1,61 +1,59 @@
 #!/usr/bin/env bash
 # ============================================================================
-# run_billing_suite.sh — the CI runner for the zeroship-control billing &
-# metering integration suite (ISS-31, billing-metering epic).
+# run_billing_suite.sh - the CI runner for every zeroship-control /
+# zeroship-migrated test that needs a live, migrated PostgreSQL.
 #
-# WHY THIS SCRIPT EXISTS (the constraint)
-# ----------------------------------------
-# The billing test binaries share one Postgres DB (:5440) and exercise the REAL
-# fleet-wide cron sweeps — `billing_reconcile`, `stripe_reconcile`,
-# `billing_notify`, `spend_reconcile`, plus the stream forwarder/recompute
-# billing rail. Each of those sweeps
-# is single-flighted FLEET-WIDE in production by a session-scoped
+# WHAT THIS SCRIPT GATES
+# ----------------------
+# `cargo test --workspace` provisions no database, so any target that dials one
+# either fails there or (worse) skips and reports a pass. Those targets carry
+# `required-features = ["live-db-tests"]` in crates/control/Cargo.toml and
+# crates/migrated/Cargo.toml, which removes them from the default build. This
+# script is what runs them, against a database it creates and migrates itself.
+#
+# NO NAME LIST. Earlier revisions enumerated the binaries here by hand, which
+# meant the set that RAN was maintained separately from the set that was GATED,
+# and the two drifted: the list held the billing binaries only, so roughly
+# fifteen non-billing control suites (deploy, oauth, device, token, admin,
+# bootstrap, workflow, ...) were gated out of `cargo test --workspace` and
+# picked up by nothing. The invocation below is by construction instead:
+#
+#     cargo test -p zeroship-control --features live-db-tests
+#
+# builds and runs EVERY target in the crate whose `required-features` are
+# satisfied - the gated ones plus the handful that were never gated. Adding a
+# `[[test]]` block with the feature is therefore sufficient to be covered here;
+# there is nothing to remember to update, and nothing that can fall out of step.
+# The crate's LIB target is built with the feature too, so the in-crate
+# `#[cfg(all(test, feature = "live-db-tests"))]` modules (cron::spend_recompute,
+# http_util) run in the same invocation.
+#
+# SERIALISATION (the original constraint, unchanged)
+# --------------------------------------------------
+# The billing binaries share one database and drive the REAL fleet-wide cron
+# sweeps - `billing_reconcile`, `stripe_reconcile`, `billing_notify`,
+# `spend_reconcile`, plus the stream forwarder/recompute rail. Each sweep is
+# single-flighted FLEET-WIDE in production by a session-scoped
 # `pg_try_advisory_lock(<stable key>)`: a second concurrent sweep LOSES the lock
-# and returns `Ok(0)` (it does nothing this tick). That advisory lock is a
-# production correctness mechanism (multi-instance safety) and is deliberately
-# NOT changed for tests.
+# and returns `Ok(0)`. That lock is a production correctness mechanism
+# (multi-instance safety) and is deliberately NOT relaxed for tests.
 #
-# Consequence: two DIFFERENT test binaries that each drive the SAME sweep cannot
-# run CONCURRENTLY. The loser's `tick` returns 0 and its `n == 1` / `billed == 1`
-# assertion fails. Several sweeps also bill/exports keyed on the CURRENT or
-# PREVIOUS calendar month (`Utc::now()`), so every reconcile-driving binary's
-# creators land in the SAME period window — the fleet sweep's count then spans
-# both binaries' data even setting the lock aside.
+# Consequence: two different test binaries that drive the SAME sweep cannot run
+# CONCURRENTLY. Within ONE binary the collision is already handled - each
+# serialises its own sweep-driving tests with a process-wide mutex
+# (RECONCILE_LOCK / EXPORT_LOCK / ...) and gives every test unique ids and (where
+# it can) its own far-future period bucket - so a binary run alone, even
+# multi-threaded internally, is reliable.
 #
-# Within ONE binary the collision is already handled: each binary serializes its
-# own sweep-driving tests with a process-wide mutex (RECONCILE_LOCK / EXPORT_LOCK
-# / …) and gives every test UNIQUE ids (creator/app/customer) + (where it can)
-# its OWN far-future period bucket. So a binary run ALONE — even multi-threaded
-# internally — is reliable. The ONLY thing that must be serialized is the set of
-# test BINARIES relative to each other.
-#
-# This runner therefore runs each billing test binary ONE AT A TIME (never two
-# concurrently). cargo is invoked with `--test <name>` per binary; the default
-# multi-threaded in-binary runner is kept (each binary's intra-binary mutexes +
-# unique ids make that safe and fast). This is a documented, honest serial
-# integration runner — strictly better than silently-flaky full parallelism.
-#
-# PARALLEL-SAFE vs SERIAL-ONLY (for reference)
-# --------------------------------------------
-# Parallel-safe in principle (no fleet-cron drive; pure per-entity, unique ids):
-#   account_status_test, billing_invoice_payments_test, billing_read_api_test,
-#   billing_redesign_regression_test, connect_fee_test, delete_app_billing_fk_test,
-#   spend_limit_http_test.
-# Serial-only (drive an advisory-locked fleet sweep and/or assert on its count,
-# and/or mutate a global singleton — pricing_config 'global' / metric_weights):
-#   billing_reconcile_test, billing_proration_test, billing_tax_test,
-#   billing_credit_test, billing_refund_void_test, billing_dispute_test,
-#   billing_notify_test, stripe_webhook_test, stripe_reconcile_test,
-#   spend_reconcile_test, billing_safety_net_test, stream_forwarder_recompute_test,
-#   pricing_config_test, plan_catalog, spend, stripe_store. (The zeroship-metering
-#   outbox WAL lib tests run separately below — a `-p zeroship-metering --lib`
-#   target, not a zeroship-control integration binary.)
-# This runner runs ALL of them serially (one binary at a time) so the operator
-# never has to remember which bucket a binary is in — it is always correct.
+# Cargo runs test binaries ONE AT A TIME (it parallelises within a binary, never
+# across them), which is exactly the property the old per-binary loop was
+# hand-rolling. `--no-fail-fast` is required so a failure in one binary does not
+# stop cargo before it has run the rest: without it the remaining binaries are
+# not run at all, and "not run" is indistinguishable from "passed" in the output.
 #
 # USAGE
 # -----
-#   tests/run_billing_suite.sh                 # recreate DB + migrate + run all
+#   tests/run_billing_suite.sh                      # recreate DB + migrate + run
 #   SKIP_DB_RECREATE=1 tests/run_billing_suite.sh   # reuse an already-migrated DB
 #   PG_PORT=5440 PG_USER=postgres PG_PASS=zeroship tests/run_billing_suite.sh
 #
@@ -63,14 +61,14 @@
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
 #   TEST_DB (zeroship_billing_test)
 #   PSQL    (auto-detected; override with an explicit psql path)
-#   SKIP_DB_RECREATE (unset)  — set to skip the drop/create/migrate step
-#   TEST_THREADS (unset)      — passed to each binary's `--test-threads`
+#   SKIP_DB_RECREATE (unset)  - set to skip the drop/create/migrate step
+#   TEST_THREADS (1)          - passed to each binary's `--test-threads`
+#   REDPANDA_BROKERS (unset)  - set to gate the real Kafka-wire stream path
 #
-# CONTROL_TEST_DB selects the DB the tests connect to. This script exports it
-# after creating/migrating an isolated TEST_DB. The tests never skip: with
-# CONTROL_TEST_DB unset they fall back to the dev Postgres DSN
-# (postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test) and fail
-# loudly if it is unreachable — a missing DB can never masquerade as a pass.
+# The tests never skip for want of a database: CONTROL_TEST_DB / AUTH_DB_URL /
+# MIGRATED_TEST_DB are exported below, and with them unset the targets fall back
+# to the dev DSN and fail loudly if it is unreachable. A missing database can
+# never masquerade as a pass.
 # ============================================================================
 set -euo pipefail
 
@@ -97,39 +95,15 @@ if [ -z "$PSQL" ]; then
   fi
 fi
 
-export CONTROL_TEST_DB="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-
-# The billing test binaries (excluding the *_live_test binaries, which require
-# real Stripe/OpenMeter credentials — they self-skip without creds, so they are
-# safe to include but are left out of the default CI gate). Run ONE AT A TIME.
-BILLING_TESTS=(
-  # --- serial-only: drive an advisory-locked fleet sweep / global singleton ---
-  billing_reconcile_test
-  billing_proration_test
-  billing_tax_test
-  billing_credit_test
-  billing_refund_void_test
-  billing_dispute_test
-  billing_notify_test
-  stripe_webhook_test
-  stripe_reconcile_test
-  spend_reconcile_test
-  billing_safety_net_test
-  stream_forwarder_recompute_test
-  pricing_config_test
-  plan_catalog
-  spend
-  stripe_store
-  provider_conformance
-  # --- parallel-safe in principle; run here too for one correct gate ---
-  account_status_test
-  billing_invoice_payments_test
-  billing_read_api_test
-  billing_redesign_regression_test
-  connect_fee_test
-  delete_app_billing_fk_test
-  spend_limit_http_test
-)
+DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
+# Three names for one database. The control suite is not consistent about which
+# it reads - the billing and registry targets take CONTROL_TEST_DB, the
+# auth-adjacent ones (admin / oauth / token / device / bootstrap handlers) take
+# AUTH_DB_URL, and zeroship-migrated takes MIGRATED_TEST_DB. Exporting all three
+# is what lets the single cargo invocation below cover all of them.
+export CONTROL_TEST_DB="$DSN"
+export AUTH_DB_URL="$DSN"
+export MIGRATED_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
@@ -147,31 +121,44 @@ else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"
 fi
 
-# Compile all the binaries first (once), so the per-binary runs are pure execution.
-echo "==> Compiling control test binaries"
-cargo test -p zeroship-control --no-run >/dev/null 2>&1
+# Default to ONE test thread per binary. The old name list ran only the billing
+# binaries, which carry their own intra-binary mutexes and tolerate the default
+# thread pool. The set now includes `workflow_engine_test` and
+# `workflow_instance_api_test`, which do not: they drive advisory-locked engine
+# ticks and assert on claim counts, so under the default pool sibling tests steal
+# each other's claims and ten of forty cases fail nondeterministically.
+# `tests/e2e_durable_workflows.sh` has always run those two with
+# `--test-threads=1` for the same reason. Determinism is worth the wall clock
+# here; override TEST_THREADS to trade it back.
+THREAD_ARG=(--test-threads "${TEST_THREADS:-1}")
 
-THREAD_ARG=()
-if [ -n "${TEST_THREADS:-}" ]; then
-  THREAD_ARG=(--test-threads "$TEST_THREADS")
-fi
-
-echo "==> Running ${#BILLING_TESTS[@]} billing test binaries SERIALLY (one binary at a time)"
 fail=0
 declare -a failed=()
-for t in "${BILLING_TESTS[@]}"; do
-  echo "------------------------------------------------------------------"
-  echo "==> $t"
-  if cargo test -p zeroship-control --test "$t" -- "${THREAD_ARG[@]}"; then
-    :
-  else
-    fail=1
-    failed+=("$t")
-  fi
-done
+
+echo "------------------------------------------------------------------"
+echo "==> zeroship-control live-database suite (--features live-db-tests)"
+if cargo test -p zeroship-control --features live-db-tests --no-fail-fast \
+     -- "${THREAD_ARG[@]}"; then
+  :
+else
+  fail=1
+  failed+=("zeroship-control::live-db-tests")
+fi
+
+echo "------------------------------------------------------------------"
+echo "==> zeroship-migrated live-database suite (--features live-db-tests)"
+if cargo test -p zeroship-migrated --features live-db-tests --no-fail-fast \
+     -- "${THREAD_ARG[@]}"; then
+  :
+else
+  fail=1
+  failed+=("zeroship-migrated::live-db-tests")
+fi
 
 echo "------------------------------------------------------------------"
 echo "==> zeroship-metering outbox WAL unit tests"
+# Not a zeroship-control target and not feature-gated, so the invocations above
+# do not reach it; the metering outbox is the producer half of the money path.
 if cargo test -p zeroship-metering --lib outbox -- "${THREAD_ARG[@]}"; then
   :
 else
@@ -179,35 +166,18 @@ else
   failed+=("zeroship-metering::outbox")
 fi
 
-echo "------------------------------------------------------------------"
-echo "==> zeroship-control spend_recompute enforcement lib tests"
-# The stream-recompute enforcement regression tests (event_id dedup + poison
-# skip) + the Warn/Degrade/Block evaluator tests live as lib unit tests, not
-# integration binaries, so they would otherwise miss the gate.
-if cargo test -p zeroship-control --lib cron::spend_recompute -- "${THREAD_ARG[@]}"; then
-  :
-else
-  fail=1
-  failed+=("zeroship-control::cron::spend_recompute")
-fi
-
 # Real-broker path. Rewind/seek and the wired producer->stream->recompute->spend
 # flow behave differently on a real Kafka-wire broker than on the in-process
 # memory transport (a real rewind cold-start seek bug once shipped precisely
-# because this path had no CI). Run them whenever REDPANDA_BROKERS is set; the CI
-# billing-gate job provides a redpanda service. Skipped (loudly) otherwise.
+# because this path had no CI). The control-side half
+# (`billing_pipeline_redpanda_e2e`) is an ungated target and therefore already
+# ran in the control invocation above, self-skipping unless REDPANDA_BROKERS is
+# set. Only the zeroship-stream half needs naming here.
 if [ -n "${REDPANDA_BROKERS:-}" ]; then
-  for t in redpanda_roundtrip; do
-    echo "------------------------------------------------------------------"
-    echo "==> real-broker: zeroship-stream::$t (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
-    if cargo test -p zeroship-stream --test "$t" -- "${THREAD_ARG[@]}"; then :; else
-      fail=1; failed+=("zeroship-stream::$t")
-    fi
-  done
   echo "------------------------------------------------------------------"
-  echo "==> real-broker: zeroship-control::billing_pipeline_redpanda_e2e"
-  if cargo test -p zeroship-control --test billing_pipeline_redpanda_e2e -- "${THREAD_ARG[@]}"; then :; else
-    fail=1; failed+=("zeroship-control::billing_pipeline_redpanda_e2e")
+  echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
+  if cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
+    fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
   fi
 else
   echo "------------------------------------------------------------------"
@@ -216,7 +186,7 @@ fi
 
 echo "=================================================================="
 if [ "$fail" -ne 0 ]; then
-  echo "BILLING SUITE FAILED: ${failed[*]}" >&2
+  echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
   exit 1
 fi
-echo "BILLING SUITE: ALL ${#BILLING_TESTS[@]} BINARIES PASSED"
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED"

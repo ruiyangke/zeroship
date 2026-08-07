@@ -319,8 +319,52 @@ fn decode_record(record: &StreamRecord) -> Result<UsageEvent, SpendRecomputeErro
     })
 }
 
+/// Database-free unit tests. Kept in their own module so they stay visible to a
+/// bare `cargo test --workspace`, which provisions no PostgreSQL: everything in
+/// `live_db_tests` below opens a real connection and `expect`s it.
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn periods_to_recompute_include_previous_until_settle_window_closes() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2035, 7, 1, 0, 10, 0)
+            .unwrap()
+            .timestamp();
+        let current = period_start_unix(now);
+        let previous = super::super::billing_reconcile::previous_period_start_unix(now);
+        assert_eq!(
+            periods_to_recompute(now, Duration::from_secs(3600)),
+            vec![current, previous],
+            "just-closed previous period stays in the witness recompute while settling"
+        );
+
+        let settled = super::super::billing_reconcile::period_end_unix(previous) + 3601;
+        assert_eq!(
+            periods_to_recompute(settled, Duration::from_secs(3600)),
+            vec![period_start_unix(settled)],
+            "after the settle window closes only the current period is recomputed"
+        );
+    }
+}
+
+/// The stream-recompute enforcement regression tests (event_id dedup, poison
+/// skip, empty-cycle snapshot preservation, unsettled-period rewrite). Each one
+/// seeds `zeroship.apps` / pricing rows and reads back the persisted spend
+/// snapshot, so it needs a reachable, migrated PostgreSQL and panics on connect
+/// without one.
+///
+/// `required-features` in Cargo.toml gates whole targets and cannot reach inside
+/// a lib, so the gate is spelled as a `cfg` here. It is the same
+/// `live-db-tests` feature the crate's 44 gated integration targets carry, and
+/// the same single `cargo test -p zeroship-control --features live-db-tests`
+/// invocation runs it - the lib target is built with the feature too, so these
+/// cases need no separate entry anywhere.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_db_tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -611,28 +655,6 @@ mod tests {
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
         assert_total(&client, app, period, 17).await;
-    }
-
-    #[test]
-    fn periods_to_recompute_include_previous_until_settle_window_closes() {
-        let now = chrono::Utc
-            .with_ymd_and_hms(2035, 7, 1, 0, 10, 0)
-            .unwrap()
-            .timestamp();
-        let current = period_start_unix(now);
-        let previous = super::super::billing_reconcile::previous_period_start_unix(now);
-        assert_eq!(
-            periods_to_recompute(now, Duration::from_secs(3600)),
-            vec![current, previous],
-            "just-closed previous period stays in the witness recompute while settling"
-        );
-
-        let settled = super::super::billing_reconcile::period_end_unix(previous) + 3601;
-        assert_eq!(
-            periods_to_recompute(settled, Duration::from_secs(3600)),
-            vec![period_start_unix(settled)],
-            "after the settle window closes only the current period is recomputed"
-        );
     }
 
     #[compio::test]

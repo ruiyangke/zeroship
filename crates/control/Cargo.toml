@@ -106,5 +106,259 @@ serial_test = "3"
 zeroship-runtime = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# Live-database test gate
+# ---------------------------------------------------------------------------
+# `live-db-tests` gates every integration target that CANNOT run without a
+# reachable, migrated PostgreSQL. Those targets resolve their DSN from
+# CONTROL_TEST_DB / AUTH_DB_URL and fall back to the dev Postgres on :5440; with
+# no server there they panic on connect ("error connecting to server"), so
+# `cargo test --workspace` - which provisions no database - could never be green.
+#
+# The failing-without-a-database property is what this feature encodes, and the
+# set below was determined by MEASUREMENT, not by grep: every control test
+# executable was built once and then run with the DSN environment variables
+# pointed at a dead port. The 44 that failed are listed here; the six that
+# passed (authz_guard_supabase_test, billing_pipeline_redpanda_e2e,
+# durable_workflows_keystone_e2e, no_liquibase_residue_test,
+# provider_conformance, trusted_clients_test) are deliberately NOT listed, so
+# they keep running under a bare `cargo test --workspace`.
+#
+# Gating hides a target from the default build, which is exactly the failure
+# mode a gate is supposed to prevent, so it is only honest while something else
+# runs the gated set. That something is a SINGLE invocation:
+#
+#     cargo test -p zeroship-control --features live-db-tests
+#
+# which builds and runs every target whose `required-features` are satisfied -
+# the 44 below AND the six ungated ones. There is no second list to keep in
+# step: a target added to this file is covered by that command the moment it is
+# added, and a target removed from it stops being gated rather than stops being
+# run. `tests/run_billing_suite.sh` drives that one command (it no longer
+# enumerates binaries by name), and CI's `billing-gate` job runs the script.
+[features]
+live-db-tests = []
+
+[[test]]
+name = "account_status_test"
+path = "tests/account_status_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "admin_handlers_test"
+path = "tests/admin_handlers_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "app_logs_http_test"
+path = "tests/app_logs_http_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "app_oauth_client_test"
+path = "tests/app_oauth_client_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "audit_retention_test"
+path = "tests/audit_retention_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "authz_guard_oauth_test"
+path = "tests/authz_guard_oauth_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_credit_test"
+path = "tests/billing_credit_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_dispute_test"
+path = "tests/billing_dispute_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_invoice_payments_test"
+path = "tests/billing_invoice_payments_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_notify_test"
+path = "tests/billing_notify_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_proration_test"
+path = "tests/billing_proration_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_read_api_test"
+path = "tests/billing_read_api_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_reconcile_test"
+path = "tests/billing_reconcile_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_redesign_regression_test"
+path = "tests/billing_redesign_regression_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_refund_void_test"
+path = "tests/billing_refund_void_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_safety_net_test"
+path = "tests/billing_safety_net_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "billing_tax_test"
+path = "tests/billing_tax_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "bootstrap_builder_test"
+path = "tests/bootstrap_builder_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "bootstrap_console_test"
+path = "tests/bootstrap_console_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "connect_fee_test"
+path = "tests/connect_fee_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "delete_app_billing_fk_test"
+path = "tests/delete_app_billing_fk_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "deploy_http_test"
+path = "tests/deploy_http_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "deploy_test"
+path = "tests/deploy_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "device_handlers_test"
+path = "tests/device_handlers_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "env_store"
+path = "tests/env_store.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "identity_bridge_test"
+path = "tests/identity_bridge_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "oauth_grants_handlers_test"
+path = "tests/oauth_grants_handlers_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "oauth_handlers_test"
+path = "tests/oauth_handlers_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "orphaned_app_reaper_test"
+path = "tests/orphaned_app_reaper_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "plan_catalog"
+path = "tests/plan_catalog.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "pricing_config_test"
+path = "tests/pricing_config_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "registry_schema_test"
+path = "tests/registry_schema_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "set_plan_authz_test"
+path = "tests/set_plan_authz_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "spend"
+path = "tests/spend.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "spend_limit_http_test"
+path = "tests/spend_limit_http_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "spend_reconcile_test"
+path = "tests/spend_reconcile_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "stream_forwarder_recompute_test"
+path = "tests/stream_forwarder_recompute_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "stripe_reconcile_test"
+path = "tests/stripe_reconcile_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "stripe_store"
+path = "tests/stripe_store.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "stripe_webhook_test"
+path = "tests/stripe_webhook_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "token_handlers_test"
+path = "tests/token_handlers_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "workflow_engine_test"
+path = "tests/workflow_engine_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "workflow_instance_api_test"
+path = "tests/workflow_instance_api_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "workflow_plugin"
+path = "tests/workflow_plugin.rs"
+required-features = ["live-db-tests"]
+
 [lints]
 workspace = true
