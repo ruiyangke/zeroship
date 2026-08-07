@@ -42,22 +42,41 @@ jobs:
       # mistake anyone can fix in place. Filtering the matched path instead of
       # the containing file silently lets all four through, since none of those
       # directory names appear in the cited path.
+      # The pattern is ANCHORED (-P, negative lookbehind) and that is load-bearing.
+      # Unanchored, it matches a doc path sitting INSIDE a longer path: a GitHub
+      # URL, an absolute filesystem path, a vendored copy. This check shipped
+      # unanchored and was green because the two doc paths it pulled out of
+      # GitHub URLs happened to name local files. It would have failed the first
+      # time anyone linked to a doc in another repository, which is the ordinary
+      # reason to write a URL rather than a relative path.
+      #
+      # The `found` floor is the other half. This step counts what is MISSING and
+      # passes at zero, so an extraction that yields nothing passes too - a broken
+      # pattern, a wrong directory list, or a file the tool declines to read all
+      # report a clean tree. Counting what was checked is what tells those apart
+      # from a tree that is genuinely clean.
       - name: Doc citations resolve
         run: |
           missing=0
-          for p in $(grep -rhoE '(\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
+          found=0
+          for p in $(grep -rhoP '(?<![A-Za-z0-9_/.-])(?:\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
               --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
               --include='*.toml' --include='*.sh' \
               --exclude-dir=wpt --exclude-dir=dist \
               --exclude-dir=node_modules --exclude-dir=target \
               crates/ sdks/ libs/ tests/ db/ examples/ 2>/dev/null \
             | sed 's|^\(\.\./\)*||' | sort -u); do
+            found=$((found + 1))
             if [ ! -f "$p" ]; then
               echo "::error::comment cites $p, which does not exist"
               missing=$((missing + 1))
             fi
           done
-          echo "unresolvable doc citations: $missing"
+          echo "doc citations checked: $found, unresolvable: $missing"
+          if [ "$found" -lt 20 ]; then
+            echo "::error::only $found doc citations found; the scan is not reaching the tree it claims to cover, so a clean result would mean nothing"
+            exit 1
+          fi
           [ "$missing" -eq 0 ]
       - name: Test-target enumeration floor
         run: |
