@@ -23,6 +23,14 @@ jobs:
       # PostgreSQL that this job does not provision, and they belong with the
       # other live-database gates rather than here.
       - run: cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
+      # Same shape one level down: the platform-migrate suite is a single
+      # `#[cfg(feature = "platform-cli")]` module, so without the feature it
+      # compiled away and the target ran empty - "running 0 tests ... ok".
+      # It now declares the requirement, so `cargo test --workspace` skips it
+      # rather than reporting a pass it did not earn, and this step is what
+      # actually runs it. The tests needing a live server skip internally; the
+      # rest do not.
+      - run: cargo test -p zeroship-migrate-adapter --features platform-cli --test platform_migrate
       # The lint policy lives in the root Cargo.toml `[workspace.lints]` table:
       # `clippy::all` is deny, `pedantic` and `nursery` are warn. Passing
       # `-D warnings` here would flatten that grading and promote every pedantic
