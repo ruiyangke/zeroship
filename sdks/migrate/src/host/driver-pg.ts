@@ -119,6 +119,13 @@ function parsePgTextArray(literal: string): Array<string | null> {
       sawQuotes = true;
       continue;
     }
+    if (ch === "{" || ch === "}") {
+      // A brace outside quotes means more than one dimension. The seam carries a
+      // one-dimensional array, so there is no faithful reading: treating these as
+      // ordinary characters would yield elements like "{a" and "b}" and the cell
+      // fold would pass them on as strings. Fail the verb instead of mangling it.
+      throw new Error(`nested PostgreSQL array literal is not supported: ${literal}`);
+    }
     if (ch === ",") {
       out.push(!sawQuotes && current === "NULL" ? null : current);
       current = "";

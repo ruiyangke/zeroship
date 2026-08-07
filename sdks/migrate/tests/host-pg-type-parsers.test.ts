@@ -87,6 +87,25 @@ test("the array parser handles quoting, escapes, nulls and the empty array", () 
   assert.throws(() => parse("a,b"), /malformed/, "a literal without braces is rejected");
 });
 
+test("a nested array is rejected rather than flattened into garbage", () => {
+  // The seam carries a one-dimensional array, so a nested value has no faithful
+  // form here. Treating the inner braces as ordinary characters yields elements
+  // like "{a" and "b}", which the cell fold would happily pass on as strings.
+  // Failing the verb is the only honest option; silently mangling is not.
+  assert.throws(
+    () => __testing.parsePgTextArray("{{a,b},{c}}"),
+    /nested/,
+    "a nested literal must throw, not decode to broken elements",
+  );
+
+  // A dimension prefix has no faithful one-dimensional reading either.
+  assert.throws(
+    () => __testing.parsePgTextArray("[1:2]={a,b}"),
+    /malformed/,
+    "a dimension-prefixed literal must throw",
+  );
+});
+
 test("exact-integer pinning still holds and other oids still delegate", () => {
   const scoped = __testing.connectionScopedTypes(poisonedPgModule() as never);
 
