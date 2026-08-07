@@ -500,19 +500,22 @@ mod platform_cli {
         //     the same name happily, so for these the risk is purely that the
         //     authored name and the catalog name diverge.
         //
-        // Divergence alone is enough to matter: a later guarded drop probes the
-        // AUTHORED name, does not find it, concludes the object is already gone,
-        // and journals a skip as completed.
+        // Divergence alone is enough to matter, and this is observed rather than
+        // reasoned: the engine maintainers ran it against a live PostgreSQL. A
+        // guarded drop probes the AUTHORED 64-byte name, the catalog holds the
+        // truncated 63-byte one, the probe concludes the object is already gone,
+        // the executor skips the statement, and the journal records it Completed.
+        // The constraint is still in the database and the history says it was
+        // removed.
+        //
+        // Their load-time gate now bounds authored identifiers, but a caller
+        // reaching the lower seam directly bypasses it and their probe still
+        // reproduces after that fix. So this check is not scaffolding waiting on
+        // an upstream release; it is the thing that actually catches this, and it
+        // should stay.
         //
         // A stored name of exactly 63 bytes is already indistinguishable from a
         // truncated one.
-        // Constraints are checked as well as indexes. A unique or primary-key
-        // constraint is index-backed and so appears in pg_indexes, but a check or
-        // foreign-key constraint has no index row while its name truncates on the
-        // same rule. That matters because a later guarded drop probes the AUTHORED
-        // name against the introspected catalog, finds the truncated one instead,
-        // concludes the object is already gone, skips the statement and journals it
-        // as completed. The constraint survives and the history says it was removed.
         if !scalar_bool(
             &probe,
             "SELECT NOT EXISTS ( \
