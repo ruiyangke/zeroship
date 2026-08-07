@@ -36,8 +36,8 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::guard::GuardConfig;
 use zero_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, ApprovalScope,
-    ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationId, MigrationIr,
-    PlanStep, PostgresBackend, RenameStep, SqlDialect,
+    ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationId,
+    MigrationIr, Phase, PlanStep, PostgresBackend, RenameStep, SqlDialect,
 };
 use zero_migrate_policy::EffectivePolicy as PdpPolicy;
 
@@ -119,6 +119,14 @@ pub enum PlatformMigrateError {
     Connect(String),
     /// Provisioning the primary schema failed.
     Provision(String),
+    /// Creating, reading, or writing the per-file completion ledger failed.
+    Ledger(String),
+    /// A previously applied migration file no longer has the recorded source bytes.
+    ChecksumMismatch {
+        file: String,
+        applied_checksum: String,
+        current_checksum: String,
+    },
     /// V8 authoring a `.ts` into a v1 envelope failed.
     Author { file: String, message: String },
     /// Folding the confined table-shape / resolving policy failed.
@@ -139,10 +147,23 @@ impl std::fmt::Display for PlatformMigrateError {
             Self::Read { path, message } => write!(f, "read {path}: {message}"),
             Self::Connect(m) => write!(f, "connect: {m}"),
             Self::Provision(m) => write!(f, "provision schema: {m}"),
+            Self::Ledger(m) => write!(f, "platform migration completion ledger: {m}"),
+            Self::ChecksumMismatch {
+                file,
+                applied_checksum,
+                current_checksum,
+            } => write!(
+                f,
+                "migration file {file} was edited after it was applied: source checksum \
+                 mismatch (applied {applied_checksum}, current {current_checksum})"
+            ),
             Self::Author { file, message } => write!(f, "author {file}: {message}"),
             Self::Shape { file, message } => write!(f, "table-shape {file}: {message}"),
             Self::Lower { file, message } => {
-                write!(f, "lower {file}: {message} (possible engine op-support gap)")
+                write!(
+                    f,
+                    "lower {file}: {message} (possible engine op-support gap)"
+                )
             }
             Self::Apply { file, message } => write!(f, "apply {file}: {message}"),
             Self::Snapshot(m) => write!(f, "snapshot live schema: {m}"),
@@ -158,6 +179,24 @@ impl std::error::Error for PlatformMigrateError {}
 struct ApplyState {
     registry: std::collections::BTreeMap<String, String>,
     live_schema: LiveSchema,
+}
+
+/// One discovered migration and the exact source bytes used for both hashing and
+/// V8 authoring.
+struct MigrationFile {
+    path: PathBuf,
+    filename: String,
+    source: Vec<u8>,
+    checksum: String,
+}
+
+impl MigrationFile {
+    fn source_str(&self) -> Result<&str, PlatformMigrateError> {
+        std::str::from_utf8(&self.source).map_err(|e| PlatformMigrateError::Read {
+            path: self.path.display().to_string(),
+            message: format!("migration source is not UTF-8: {e}"),
+        })
+    }
 }
 
 /// Discover `db/migrations-ts/*.ts` files, deterministically ordered by filename.
@@ -184,6 +223,25 @@ fn discover_ts_files(dir: &Path) -> Result<Vec<PathBuf>, PlatformMigrateError> {
     }
     files.sort();
     Ok(files)
+}
+
+fn load_migration_file(path: PathBuf) -> Result<MigrationFile, PlatformMigrateError> {
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    let source = std::fs::read(&path).map_err(|e| PlatformMigrateError::Read {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let checksum = zero_migrate::manifest_entry::sha256_hex(&source);
+    Ok(MigrationFile {
+        path,
+        filename,
+        source,
+        checksum,
+    })
 }
 
 /// Derive the STABLE per-file version anchor from a `db/migrations-ts` filename:
@@ -282,52 +340,35 @@ impl LowerCtx {
     }
 }
 
-/// AUTHOR (V8, v1 recorder) + LOWER (fail-closed load gate + guarded lower under
-/// the Platform guard) ONE `.ts` file against the current live `state`. This is the
-/// half of the pipeline that runs entirely on the published engine and needs NO
-/// privileged executor seam — so it is fully reachable + provable in the monorepo.
-///
-/// Returns the lowered artifact (plan steps + touched/created tables).
-fn author_and_lower_file(
+fn author_and_resolve_file(
     ctx: &LowerCtx,
-    state: &ApplyState,
-    path: &Path,
-) -> Result<
-    (
-        MigrationIr,
-        zero_migrate::render::lower::LoweredArtifact,
-    ),
-    PlatformMigrateError,
-> {
-    let file = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>")
-        .to_string();
+    migration: &MigrationFile,
+) -> Result<MigrationIr, PlatformMigrateError> {
+    let file = migration.filename.clone();
+    let source = migration.source_str()?;
 
-    // (1) read the `.ts` source.
-    let source = std::fs::read_to_string(path).map_err(|e| PlatformMigrateError::Read {
-        path: file.clone(),
-        message: e.to_string(),
-    })?;
-
-    // (2) AUTHOR the v1 envelope in zeroship-runtime's V8 (S2 mechanism).
-    let name = name_from_filename(path);
-    let envelope =
-        author::author_v1_envelope(&source, &name).map_err(|message| PlatformMigrateError::Author {
+    let name = name_from_filename(&migration.path);
+    let envelope = author::author_v1_envelope(source, &name).map_err(|message| {
+        PlatformMigrateError::Author {
             file: file.clone(),
             message,
-        })?;
+        }
+    })?;
 
-    // (3) fold the Platform table-shape profile into every createTable BEFORE the
-    // fail-closed load gate. Non-createTable ops pass through untouched.
-    let resolved = resolve_shape(&envelope, &ctx.policy, &ctx.project_schema, &file)?;
-    let bytes = serde_json::to_string(&resolved).map_err(|e| PlatformMigrateError::Shape {
-        file: file.clone(),
+    resolve_shape(&envelope, &ctx.policy, &ctx.project_schema, &file)
+}
+
+fn lower_resolved_file(
+    ctx: &LowerCtx,
+    state: &ApplyState,
+    file: &str,
+    resolved: &MigrationIr,
+) -> Result<zero_migrate::render::lower::LoweredArtifact, PlatformMigrateError> {
+    let bytes = serde_json::to_string(resolved).map_err(|e| PlatformMigrateError::Shape {
+        file: file.to_string(),
         message: format!("re-serialize resolved IR envelope: {e}"),
     })?;
 
-    // (4) fail-closed load gate + guarded lower under the Platform guard.
     let ir_author = IrAuthor::new(
         &ctx.project_schema,
         ctx.owner_app,
@@ -338,7 +379,7 @@ fn author_and_lower_file(
         Some(scope) => ir_author.with_schema_scope(scope),
         None => ir_author,
     };
-    let lowered = ir_author
+    ir_author
         .load_and_lower_guarded(
             &bytes,
             ctx.owner_app,
@@ -347,9 +388,19 @@ fn author_and_lower_file(
             &ctx.guard_cfg,
         )
         .map_err(|e| PlatformMigrateError::Lower {
-            file: file.clone(),
+            file: file.to_string(),
             message: e.to_string(),
-        })?;
+        })
+}
+
+/// Author, resolve, and lower one migration against the current live state.
+fn author_and_lower_file(
+    ctx: &LowerCtx,
+    state: &ApplyState,
+    migration: &MigrationFile,
+) -> Result<(MigrationIr, zero_migrate::render::lower::LoweredArtifact), PlatformMigrateError> {
+    let resolved = author_and_resolve_file(ctx, migration)?;
+    let lowered = lower_resolved_file(ctx, state, &migration.filename, &resolved)?;
     Ok((resolved, lowered))
 }
 
@@ -362,6 +413,226 @@ fn author_and_lower_file(
 /// dozen) × the stride stays far below [`VERSION_CEILING`] (2^48), so the
 /// numeric-version → id encoding never saturates the 48-bit ordering field.
 const FILE_VERSION_STRIDE: u64 = 1 << 20;
+
+/// The per-file completion ledger stored beside the engine journal.
+pub const PLATFORM_MIGRATION_LEDGER_TABLE: &str = "platform_migration_files";
+
+#[derive(Debug, Default)]
+struct FileJournalState {
+    completed: Vec<(u64, String)>,
+    has_started: bool,
+}
+
+impl FileJournalState {
+    fn completed_versions(&self) -> impl Iterator<Item = String> + '_ {
+        self.completed.iter().map(|(_, version)| version.clone())
+    }
+
+    fn is_complete_legacy_range(&self, file_ordinal: usize) -> bool {
+        if self.has_started || self.completed.is_empty() {
+            return false;
+        }
+        let base = (file_ordinal as u64) * FILE_VERSION_STRIDE;
+        self.completed
+            .iter()
+            .enumerate()
+            .all(|(step_index, (numeric, version))| {
+                let expected = base + step_index as u64;
+                *numeric == expected
+                    && version == zero_migrate::migration_id_for_version(expected).as_str()
+            })
+    }
+}
+
+fn journal_state_by_file(
+    entries: &[zero_migrate::AppliedEntry],
+    file_count: usize,
+) -> Result<Vec<FileJournalState>, PlatformMigrateError> {
+    let mut states: Vec<FileJournalState> = (0..file_count).map(|_| Default::default()).collect();
+    let covered_end = (file_count as u64) * FILE_VERSION_STRIDE;
+
+    for entry in entries {
+        let version = MigrationId::parse(&entry.version).map_err(|e| {
+            PlatformMigrateError::Ledger(format!(
+                "journal contains invalid migration version {}: {e}",
+                entry.version
+            ))
+        })?;
+        let numeric = version.timestamp_ms();
+        if numeric >= covered_end {
+            continue;
+        }
+        let file_ordinal = (numeric / FILE_VERSION_STRIDE) as usize;
+        match entry.phase {
+            Phase::Completed => states[file_ordinal]
+                .completed
+                .push((numeric, entry.version.clone())),
+            Phase::Started => states[file_ordinal].has_started = true,
+        }
+    }
+
+    for state in &mut states {
+        state.completed.sort_by_key(|(numeric, _)| *numeric);
+    }
+    Ok(states)
+}
+
+fn quote_pg_ident(ident: &str) -> Result<String, PlatformMigrateError> {
+    if ident.is_empty() || ident.contains('\0') {
+        return Err(PlatformMigrateError::Ledger(
+            "metadata schema is not a valid PostgreSQL identifier".to_string(),
+        ));
+    }
+    Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+}
+
+async fn completion_ledger_exists(
+    session: &CompioPgSession,
+    meta_schema: &str,
+) -> Result<bool, PlatformMigrateError> {
+    let binds = [
+        meta_schema.to_string().into(),
+        PLATFORM_MIGRATION_LEDGER_TABLE.into(),
+    ];
+    let row = session
+        .query_one(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM information_schema.tables \
+                  WHERE table_schema = $1 AND table_name = $2\
+             ) AS present",
+            &binds,
+        )
+        .await
+        .map_err(|e| PlatformMigrateError::Ledger(format!("detect ledger table: {e}")))?;
+    row.try_get("present")
+        .map_err(|e| PlatformMigrateError::Ledger(format!("decode ledger table probe: {e}")))
+}
+
+async fn load_completion_ledger(
+    session: &CompioPgSession,
+    meta_schema: &str,
+) -> Result<std::collections::BTreeMap<String, String>, PlatformMigrateError> {
+    let meta = quote_pg_ident(meta_schema)?;
+    let rows = session
+        .query(
+            &format!(
+                "SELECT filename, checksum FROM {meta}.{PLATFORM_MIGRATION_LEDGER_TABLE} \
+                 ORDER BY filename"
+            ),
+            &[],
+        )
+        .await
+        .map_err(|e| PlatformMigrateError::Ledger(format!("read ledger rows: {e}")))?;
+    let mut ledger = std::collections::BTreeMap::new();
+    for row in rows {
+        let filename: String = row
+            .try_get("filename")
+            .map_err(|e| PlatformMigrateError::Ledger(format!("decode ledger filename: {e}")))?;
+        let checksum: String = row
+            .try_get("checksum")
+            .map_err(|e| PlatformMigrateError::Ledger(format!("decode ledger checksum: {e}")))?;
+        ledger.insert(filename, checksum);
+    }
+    Ok(ledger)
+}
+
+async fn initialize_completion_ledger(
+    session: &CompioPgSession,
+    meta_schema: &str,
+    files: &[MigrationFile],
+    journal: &[FileJournalState],
+) -> Result<(), PlatformMigrateError> {
+    let meta = quote_pg_ident(meta_schema)?;
+    session
+        .batch("BEGIN")
+        .await
+        .map_err(|e| PlatformMigrateError::Ledger(format!("begin ledger setup: {e}")))?;
+
+    let result: Result<(), PlatformMigrateError> = async {
+        session
+            .batch(&format!(
+                "CREATE TABLE {meta}.{PLATFORM_MIGRATION_LEDGER_TABLE} (\
+                     filename TEXT PRIMARY KEY, \
+                     applied_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                     checksum TEXT NOT NULL CHECK (checksum ~ '^[0-9a-f]{{64}}$')\
+                 )"
+            ))
+            .await
+            .map_err(|e| PlatformMigrateError::Ledger(format!("create ledger table: {e}")))?;
+
+        for (file_ordinal, migration) in files.iter().enumerate() {
+            if !journal[file_ordinal].is_complete_legacy_range(file_ordinal) {
+                continue;
+            }
+            let binds = [
+                migration.filename.clone().into(),
+                migration.checksum.clone().into(),
+            ];
+            session
+                .exec(
+                    &format!(
+                        "INSERT INTO {meta}.{PLATFORM_MIGRATION_LEDGER_TABLE} \
+                             (filename, checksum) VALUES ($1, $2)"
+                    ),
+                    &binds,
+                )
+                .await
+                .map_err(|e| {
+                    PlatformMigrateError::Ledger(format!(
+                        "backfill ledger row for {}: {e}",
+                        migration.filename
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => session
+            .batch("COMMIT")
+            .await
+            .map_err(|e| PlatformMigrateError::Ledger(format!("commit ledger setup: {e}"))),
+        Err(error) => {
+            let _ = session.batch("ROLLBACK").await;
+            Err(error)
+        }
+    }
+}
+
+async fn insert_completion_ledger_row(
+    session: &CompioPgSession,
+    meta_schema: &str,
+    migration: &MigrationFile,
+) -> Result<(), PlatformMigrateError> {
+    let meta = quote_pg_ident(meta_schema)?;
+    let binds = [
+        migration.filename.clone().into(),
+        migration.checksum.clone().into(),
+    ];
+    let inserted = session
+        .exec(
+            &format!(
+                "INSERT INTO {meta}.{PLATFORM_MIGRATION_LEDGER_TABLE} \
+                     (filename, checksum) VALUES ($1, $2)"
+            ),
+            &binds,
+        )
+        .await
+        .map_err(|e| {
+            PlatformMigrateError::Ledger(format!(
+                "record completed file {}: {e}",
+                migration.filename
+            ))
+        })?;
+    if inserted != 1 {
+        return Err(PlatformMigrateError::Ledger(format!(
+            "record completed file {} affected {inserted} rows",
+            migration.filename
+        )));
+    }
+    Ok(())
+}
 
 /// Re-stamp EVERY lowered migration's journal `version` with a DETERMINISTIC,
 /// ORDER-PRESERVING id anchored on the migration's `db/migrations-ts` FILENAME (its
@@ -417,7 +688,8 @@ fn restamp_stable_versions(
     // Pass 1 — assign each Ddl migration a deterministic, order-preserving new
     // version and record the old→new mapping (for the depends_on remap). Fail closed
     // on any non-Ddl step (unexpected for the pure-DDL platform path).
-    let mut remap: std::collections::HashMap<String, MigrationId> = std::collections::HashMap::new();
+    let mut remap: std::collections::HashMap<String, MigrationId> =
+        std::collections::HashMap::new();
     for (step_index, step) in lowered.plan.steps.iter().enumerate() {
         match step {
             PlanStep::Ddl(m) => {
@@ -483,6 +755,21 @@ fn advance_state(state: &mut ApplyState, owner_app: &str, created_tables: &[Stri
     }
 }
 
+fn advance_authored_logical_columns(
+    ctx: &LowerCtx,
+    state: &mut ApplyState,
+    file: &str,
+    resolved: &MigrationIr,
+) -> Result<(), PlatformMigrateError> {
+    state
+        .live_schema
+        .advance_logical_columns(resolved, SqlDialect::Postgres, &ctx.project_schema, None)
+        .map_err(|e| PlatformMigrateError::Lower {
+            file: file.to_string(),
+            message: format!("advance authored logical columns: {e}"),
+        })
+}
+
 /// AUTHOR + LOWER every `db/migrations-ts/*.ts` file in order, threading the live
 /// state across files, WITHOUT applying. This is the fully-reachable proof half of
 /// the pipeline: it exercises the V8 authoring + the published engine's
@@ -490,13 +777,16 @@ fn advance_state(state: &mut ApplyState, owner_app: &str, created_tables: &[Stri
 /// over an EMPTY starting `state` (no DB required). Returns the per-file lowered
 /// artifacts so a caller can inspect the generated plan steps.
 ///
-/// Used by the gated integration test to assert all 11 platform migrations author
-/// + lower cleanly on the standalone (v1) engine.
+/// Used by the gated integration test to assert every platform migration authors
+/// and lowers cleanly on the standalone (v1) engine.
 pub fn author_and_lower_all(
     migrations_dir: &Path,
     project_schema: &str,
 ) -> Result<Vec<(String, zero_migrate::render::lower::LoweredArtifact)>, PlatformMigrateError> {
-    let files = discover_ts_files(migrations_dir)?;
+    let files = discover_ts_files(migrations_dir)?
+        .into_iter()
+        .map(load_migration_file)
+        .collect::<Result<Vec<_>, _>>()?;
     let ctx = LowerCtx::new(project_schema);
     // Empty live state: authoring + lowering do not consult the DB. Cross-file
     // table references (e.g. functions/triggers/grants targeting tables created in
@@ -506,37 +796,24 @@ pub fn author_and_lower_all(
         live_schema: LiveSchema::default(),
     };
     let mut out = Vec::with_capacity(files.len());
-    for path in &files {
-        let file = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
-        let (resolved, lowered) = author_and_lower_file(&ctx, &state, path)?;
-        state
-            .live_schema
-            .advance_logical_columns(
-                &resolved,
-                SqlDialect::Postgres,
-                &ctx.project_schema,
-                None,
-            )
-            .map_err(|e| PlatformMigrateError::Lower {
-                file: file.clone(),
-                message: format!("advance authored logical columns: {e}"),
-            })?;
+    for migration in &files {
+        let file = migration.filename.clone();
+        let (resolved, lowered) = author_and_lower_file(&ctx, &state, migration)?;
+        advance_authored_logical_columns(&ctx, &mut state, &file, &resolved)?;
         advance_state(&mut state, ctx.owner_app, &lowered.created_tables);
         out.push((file, lowered));
     }
     Ok(out)
 }
 
-/// Run all platform migrations end to end. Holds the project advisory lock across
-/// the whole set (acquire on the first file, already-held for the rest).
+/// Run all platform migrations end to end under one project advisory lock.
 pub async fn run_platform_migrations(
     cfg: &PlatformMigrateConfig,
 ) -> Result<PlatformMigrateReport, PlatformMigrateError> {
-    let files = discover_ts_files(&cfg.migrations_dir)?;
+    let files = discover_ts_files(&cfg.migrations_dir)?
+        .into_iter()
+        .map(load_migration_file)
+        .collect::<Result<Vec<_>, _>>()?;
 
     // ── driver: open a native compio session + provision the primary schema ──
     let session = CompioPgSession::connect(&cfg.database_url)
@@ -563,118 +840,161 @@ pub async fn run_platform_migrations(
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
 
-    let mut state = seed_state(&session, &cfg.project_schema, owner_app).await?;
-    let mut report = PlatformMigrateReport {
-        files: files.len(),
-        ..Default::default()
-    };
+    backend
+        .ensure_journal(&exec_cfg)
+        .await
+        .map_err(|e| PlatformMigrateError::Ledger(format!("initialize engine journal: {e}")))?;
+    backend
+        .acquire_project_lock(&exec_cfg)
+        .await
+        .map_err(|e| PlatformMigrateError::Apply {
+            file: "<platform runner>".to_string(),
+            message: format!("acquire project lock: {e}"),
+        })?;
 
-    for (index, path) in files.iter().enumerate() {
-        let file = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
-
-        // AUTHOR (V8) + LOWER (Platform guard) — the fully-reachable half.
-        let (resolved, mut lowered) = author_and_lower_file(&ctx, &state, path)?;
-
-        // Re-stamp every lowered step's journal version DETERMINISTICALLY from this
-        // file's sorted position + step order, so a re-run reproduces byte-identical
-        // versions and the engine's already-applied skip matches (the idempotent
-        // one-shot). `index` is the file's deterministic sorted-filename ordinal.
-        let version_prefix = version_prefix_from_filename(path);
-        restamp_stable_versions(&mut lowered, index, &version_prefix)?;
-
-        // The set of THIS file's own step versions — the accurate applied/skipped
-        // denominator. The engine's per-apply outcome reports the FULL journal's
-        // completed set as "skipped" (every prior file's rows accumulate), so we
-        // intersect against this file's versions to avoid the cross-file
-        // over-reporting (thousands of spurious "already applied" lines).
-        let file_versions: std::collections::HashSet<String> = lowered
-            .plan
-            .steps
-            .iter()
-            .filter_map(|s| match s {
-                PlanStep::Ddl(m) => Some(m.version.as_str().to_string()),
-                _ => None,
-            })
-            .collect();
-
-        // APPLY over the native compio seam, holding the project lock across the
-        // whole set. Under the reachable Confined executor this fail-closes at the
-        // first platform-DDL op — the surfaced engine gap.
-        let lock_mode = if index == 0 {
-            LockMode::Acquire
-        } else {
-            LockMode::AlreadyHeld
-        };
-        let outcome = engine
-            .apply_plan_with_touched_and_depends_scoped(
-                &lowered.plan.steps,
-                &lowered.touched_tables,
-                &lowered.depends_on,
-                // Operator-side unattended platform apply: the committed platform
-                // schema is trusted, and a destructive migration (e.g.
-                // `drop_metering_exports` DROP TABLE … CASCADE) is a deliberate,
-                // reviewed part of that committed set. This is the docker-compose
-                // one-shot posture — auto-approved, scope = all — matching the
-                // retired in-tree CLI's platform-apply behaviour.
-                Approval::Approved,
-                &ApprovalScope::All,
-                &backend,
-                &exec_cfg,
-                "phase-f-stage4a",
-                lock_mode,
-                None,
-            )
+    let result: Result<PlatformMigrateReport, PlatformMigrateError> = async {
+        let journal_entries = zero_migrate::applied(&session, &exec_cfg)
             .await
-            .map_err(|e| PlatformMigrateError::Apply {
-                file: file.clone(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| PlatformMigrateError::Ledger(format!("read engine journal: {e}")))?;
+        let journal = journal_state_by_file(&journal_entries, files.len())?;
+        if !completion_ledger_exists(&session, &exec_cfg.pg.meta_schema).await? {
+            initialize_completion_ledger(&session, &exec_cfg.pg.meta_schema, &files, &journal)
+                .await?;
+        }
+        let mut ledger = load_completion_ledger(&session, &exec_cfg.pg.meta_schema).await?;
 
-        // Attribute only THIS file's own versions to the run report. The engine's
-        // outcome lists every already-completed journal version (all prior files'
-        // rows) under `skipped`; filtering to `file_versions` keeps the report — and
-        // the CLI's per-line output — accurate instead of over-reporting thousands
-        // of cross-file "already applied" lines.
-        report
-            .applied
-            .extend(outcome.applied.applied.into_iter().filter(|v| file_versions.contains(v)));
-        report
-            .skipped
-            .extend(outcome.applied.skipped.into_iter().filter(|v| file_versions.contains(v)));
-        // Re-introspect the live catalog after each file so the NEXT file lowers
-        // against the full column-level snapshot of everything applied so far. The
-        // engine's FK/reference resolution needs the target table's live catalog
-        // SNAPSHOT (columns), not just its name — an in-memory name-only advance
-        // (see `advance_state`) leaves a later cross-file FK (e.g. a constraints
-        // file referencing a table created several files earlier) unresolvable:
-        // "unmanaged target has no live catalog snapshot". A fresh snapshot_schema
-        // is authoritative and cheap at platform-setup cadence. Authored value
-        // formats cannot be reconstructed from that physical catalog, so retain
-        // the earlier logical contracts and advance them through this file on the
-        // freshly seeded state.
-        let logical_columns = std::mem::take(&mut state.live_schema.logical_columns);
-        let mut refreshed = seed_state(&session, &cfg.project_schema, owner_app).await?;
-        refreshed.live_schema.logical_columns = logical_columns;
-        refreshed
-            .live_schema
-            .advance_logical_columns(
-                &resolved,
-                SqlDialect::Postgres,
-                &ctx.project_schema,
-                None,
-            )
-            .map_err(|e| PlatformMigrateError::Lower {
-                file: file.clone(),
-                message: format!("advance authored logical columns: {e}"),
-            })?;
-        state = refreshed;
+        let mut state = seed_state(&session, &cfg.project_schema, owner_app).await?;
+        let mut report = PlatformMigrateReport {
+            files: files.len(),
+            ..Default::default()
+        };
+
+        for (index, migration) in files.iter().enumerate() {
+            let file = migration.filename.clone();
+            if let Some(applied_checksum) = ledger.get(&file) {
+                if applied_checksum != &migration.checksum {
+                    return Err(PlatformMigrateError::ChecksumMismatch {
+                        file,
+                        applied_checksum: applied_checksum.clone(),
+                        current_checksum: migration.checksum.clone(),
+                    });
+                }
+                // Rebuild authored contracts without lowering against the current
+                // catalog or submitting any work to the executor.
+                let resolved = author_and_resolve_file(&ctx, migration)?;
+                advance_authored_logical_columns(&ctx, &mut state, &file, &resolved)?;
+                report.skipped.extend(journal[index].completed_versions());
+                continue;
+            }
+
+            // AUTHOR (V8) + LOWER (Platform guard) only when this filename has no
+            // durable completion record.
+            let (resolved, mut lowered) = author_and_lower_file(&ctx, &state, migration)?;
+
+            // Re-stamp every lowered step's journal version DETERMINISTICALLY from this
+            // file's sorted position + step order. `index` is the file's deterministic
+            // sorted-filename ordinal.
+            let version_prefix = version_prefix_from_filename(&migration.path);
+            restamp_stable_versions(&mut lowered, index, &version_prefix)?;
+
+            // The engine reports the full completed journal as skipped, so retain only
+            // the versions assigned to this file.
+            let file_versions: std::collections::HashSet<String> = lowered
+                .plan
+                .steps
+                .iter()
+                .filter_map(|s| match s {
+                    PlanStep::Ddl(m) => Some(m.version.as_str().to_string()),
+                    _ => None,
+                })
+                .collect();
+
+            let outcome = engine
+                .apply_plan_with_touched_and_depends_scoped(
+                    &lowered.plan.steps,
+                    &lowered.touched_tables,
+                    &lowered.depends_on,
+                    // Operator-side unattended platform apply: the committed platform
+                    // schema is trusted, and a destructive migration (e.g.
+                    // `drop_metering_exports` DROP TABLE … CASCADE) is a deliberate,
+                    // reviewed part of that committed set. This is the docker-compose
+                    // one-shot posture — auto-approved, scope = all — matching the
+                    // retired in-tree CLI's platform-apply behaviour.
+                    Approval::Approved,
+                    &ApprovalScope::All,
+                    &backend,
+                    &exec_cfg,
+                    "phase-f-stage4a",
+                    LockMode::AlreadyHeld,
+                    None,
+                )
+                .await
+                .map_err(|e| PlatformMigrateError::Apply {
+                    file: file.clone(),
+                    message: e.to_string(),
+                })?;
+
+            let applied: Vec<String> = outcome
+                .applied
+                .applied
+                .into_iter()
+                .filter(|v| file_versions.contains(v))
+                .collect();
+            let skipped: Vec<String> = outcome
+                .applied
+                .skipped
+                .into_iter()
+                .filter(|v| file_versions.contains(v))
+                .collect();
+            let completed: std::collections::HashSet<String> =
+                zero_migrate::applied(&session, &exec_cfg)
+                    .await
+                    .map_err(|e| {
+                        PlatformMigrateError::Ledger(format!(
+                            "verify completed journal range for {file}: {e}"
+                        ))
+                    })?
+                    .into_iter()
+                    .filter(|entry| entry.phase == Phase::Completed)
+                    .map(|entry| entry.version)
+                    .collect();
+            if !file_versions
+                .iter()
+                .all(|version| completed.contains(version))
+            {
+                return Err(PlatformMigrateError::Ledger(format!(
+                    "engine returned success for {file} without completing every file version"
+                )));
+            }
+
+            // Re-introspect the live catalog after each applied file so the next file
+            // lowers against complete column snapshots while retaining authored value
+            // formats that cannot be reconstructed from the physical catalog.
+            let logical_columns = std::mem::take(&mut state.live_schema.logical_columns);
+            let mut refreshed = seed_state(&session, &cfg.project_schema, owner_app).await?;
+            refreshed.live_schema.logical_columns = logical_columns;
+            advance_authored_logical_columns(&ctx, &mut refreshed, &file, &resolved)?;
+            state = refreshed;
+
+            insert_completion_ledger_row(&session, &exec_cfg.pg.meta_schema, migration).await?;
+            ledger.insert(file.clone(), migration.checksum.clone());
+            report.applied.extend(applied);
+            report.skipped.extend(skipped);
+        }
+
+        Ok(report)
     }
+    .await;
 
-    Ok(report)
+    let release = backend.release_project_lock(&exec_cfg).await;
+    match (result, release) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(PlatformMigrateError::Apply {
+            file: "<platform runner>".to_string(),
+            message: format!("release project lock: {error}"),
+        }),
+    }
 }
 
 /// Fold the Platform table-shape policy into an envelope's createTable ops. The

@@ -16,17 +16,18 @@
 
 #[cfg(feature = "platform-cli")]
 mod platform_cli {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use std::sync::Mutex;
 
     use zero_migrate::driver::SqlSession;
     use zeroship_migrate_adapter::platform::{
-        author_and_lower_all, run_platform_migrations, PlatformMigrateConfig,
+        author_and_lower_all, run_platform_migrations, PlatformMigrateConfig, PlatformMigrateError,
+        PLATFORM_MIGRATION_LEDGER_TABLE,
     };
     use zeroship_migrate_adapter::CompioPgSession;
 
-    /// Serialize the three live-PG apply tests. Each provisions a scratch DB and creates
+    /// Serialize the live-PG apply tests. Some provision a scratch DB and create
     /// the platform's CLUSTER-GLOBAL roles (`CREATE ROLE zeroship_control`, …); run in
     /// parallel they race on the shared `pg_authid` catalog and PG aborts one with
     /// `tuple concurrently updated`. `cargo test` runs test fns on multiple OS threads
@@ -62,6 +63,58 @@ mod platform_cli {
             .expect("repo root two levels above the crate")
             .join("db")
             .join("migrations-ts")
+    }
+
+    fn copy_migration_corpus(destination: &Path) -> Result<(), String> {
+        for entry in std::fs::read_dir(migrations_dir())
+            .map_err(|e| format!("read platform migration corpus: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("read platform migration entry: {e}"))?;
+            let source = entry.path();
+            if source.extension().and_then(|ext| ext.to_str()) != Some("ts") {
+                continue;
+            }
+            let filename = source
+                .file_name()
+                .ok_or_else(|| format!("migration path has no filename: {}", source.display()))?;
+            std::fs::copy(&source, destination.join(filename))
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
+        }
+        Ok(())
+    }
+
+    fn copy_migration_prefix(destination: &Path, count: usize) -> Result<(), String> {
+        let mut sources = std::fs::read_dir(migrations_dir())
+            .map_err(|e| format!("read platform migration corpus: {e}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|e| format!("read platform migration entry: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        sources.retain(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ts"));
+        sources.sort();
+        if sources.len() < count {
+            return Err(format!(
+                "platform migration corpus has {} files, cannot copy a prefix of {count}",
+                sources.len()
+            ));
+        }
+        for source in sources.into_iter().take(count) {
+            let filename = source
+                .file_name()
+                .ok_or_else(|| format!("migration path has no filename: {}", source.display()))?;
+            std::fs::copy(&source, destination.join(filename))
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
+        }
+        Ok(())
+    }
+
+    fn write_migration(directory: &Path, filename: &str, source: &str) -> Result<PathBuf, String> {
+        let path = directory.join(filename);
+        std::fs::write(&path, source)
+            .map_err(|e| format!("write temporary migration {}: {e}", path.display()))?;
+        Ok(path)
     }
 
     fn pg_url() -> Option<String> {
@@ -168,6 +221,44 @@ mod platform_cli {
             .expect("connect admin session (postgres maintenance DB)")
     }
 
+    struct ScratchDatabase {
+        name: String,
+        dsn: String,
+    }
+
+    async fn create_scratch_database(url: &str, prefix: &str) -> Result<ScratchDatabase, String> {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("read system clock: {e}"))?
+            .as_nanos();
+        let name = format!("{prefix}_{suffix}");
+        let dsn = dsn_with_db(url, &name);
+        let admin = admin_session(url).await;
+        let _ = admin
+            .batch(&format!("DROP DATABASE IF EXISTS \"{name}\""))
+            .await;
+        admin
+            .batch(&format!("CREATE DATABASE \"{name}\""))
+            .await
+            .map_err(|e| format!("CREATE DATABASE {name}: {e}"))?;
+        Ok(ScratchDatabase { name, dsn })
+    }
+
+    async fn drop_scratch_database(url: &str, scratch: &ScratchDatabase) -> Result<(), String> {
+        let admin = admin_session(url).await;
+        let _ = admin
+            .batch(&format!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE datname = '{}' AND pid <> pg_backend_pid()",
+                scratch.name
+            ))
+            .await;
+        admin
+            .batch(&format!("DROP DATABASE IF EXISTS \"{}\"", scratch.name))
+            .await
+            .map_err(|e| format!("DROP DATABASE {}: {e}", scratch.name))
+    }
+
     /// A single scalar-bool probe over the seam (the independent `psql`-equivalent
     /// assertion path — a SECOND connection, distinct from the migrate run).
     async fn scalar_bool(session: &CompioPgSession, sql: &str) -> bool {
@@ -194,6 +285,94 @@ mod platform_cli {
             .await
             .expect("count platform journal rows");
         row.try_get::<_, i64>(0).expect("decode journal count")
+    }
+
+    async fn ledger_row_count(session: &CompioPgSession) -> i64 {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT count(*)::bigint FROM zeroship_migrations.{}",
+                    PLATFORM_MIGRATION_LEDGER_TABLE
+                ),
+                &[],
+            )
+            .await
+            .expect("count platform file ledger rows");
+        row.try_get::<_, i64>(0)
+            .expect("decode platform file ledger count")
+    }
+
+    async fn ledger_has_file(session: &CompioPgSession, filename: &str) -> bool {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM zeroship_migrations.{} \
+                     WHERE filename = $1)",
+                    PLATFORM_MIGRATION_LEDGER_TABLE
+                ),
+                &[&filename],
+            )
+            .await
+            .expect("probe platform file ledger row");
+        row.try_get::<_, bool>(0)
+            .expect("decode platform file ledger probe")
+    }
+
+    async fn table_exists(session: &CompioPgSession, table: &str) -> bool {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                 WHERE table_schema = 'zeroship' AND table_name = $1)",
+                &[&table],
+            )
+            .await
+            .expect("probe platform table");
+        row.try_get::<_, bool>(0)
+            .expect("decode platform table probe")
+    }
+
+    async fn column_exists(session: &CompioPgSession, table: &str, column: &str) -> bool {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                 WHERE table_schema = 'zeroship' AND table_name = $1 AND column_name = $2)",
+                &[&table, &column],
+            )
+            .await
+            .expect("probe platform table column");
+        row.try_get::<_, bool>(0)
+            .expect("decode platform table column probe")
+    }
+
+    async fn foreign_key_targets(
+        session: &CompioPgSession,
+        constraint: &str,
+        child_table: &str,
+        parent_table: &str,
+    ) -> bool {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT EXISTS (\
+                     SELECT 1 FROM pg_constraint fk \
+                     JOIN pg_class child ON child.oid = fk.conrelid \
+                     JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace \
+                     JOIN pg_class parent ON parent.oid = fk.confrelid \
+                     JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace \
+                     WHERE fk.contype = 'f' AND fk.conname = $1 \
+                       AND child_ns.nspname = 'zeroship' AND child.relname = $2 \
+                       AND parent_ns.nspname = 'zeroship' AND parent.relname = $3\
+                 )",
+                &[&constraint, &child_table, &parent_table],
+            )
+            .await
+            .expect("probe platform foreign key");
+        row.try_get::<_, bool>(0)
+            .expect("decode platform foreign-key probe")
     }
 
     /// PROVE the apply path end to end: apply EVERY platform migration to a FRESH
@@ -605,6 +784,503 @@ mod platform_cli {
             ));
         }
 
+        Ok(())
+    }
+
+    const APPEND_FILENAME: &str = "20260710000100_append_probe.ts";
+    const APPEND_SOURCE: &str = r#"
+import { table, t } from "@zeroship/migrate";
+
+export const name = "append_probe";
+
+export function up() {
+  table("platform_append_probe", { schema: "zeroship" }).create({
+    columns: {
+      id: t.bigInt().notNull(),
+      app_id: t.uuid().notNull(),
+    },
+    primaryKey: ["id"],
+  });
+  table("platform_append_probe", { schema: "zeroship" })
+    .foreignKey("platform_append_probe_app_id_fkey")
+    .add({
+      columns: ["app_id"],
+      references: { table: "apps", columns: ["id"], schema: "zeroship" },
+      onDelete: "cascade",
+    });
+}
+
+export function down() {}
+"#;
+
+    const APPEND_MIGRATION_STEPS: usize = 2;
+
+    const APPLIED_CORPUS_PREFIX_FILES: usize = 9;
+
+    const PARTIAL_FILENAME: &str = "20260806000100_partial_resume.ts";
+    const PARTIAL_SOURCE: &str = r#"
+import { raw } from "@zeroship/migrate";
+
+export const name = "partial_resume";
+
+export function up() {
+  raw({
+    reason: "Add the first independently journaled column.",
+    sql: "ALTER TABLE zeroship.resume_a ADD COLUMN applied boolean",
+  });
+  raw({
+    reason: "Add the second independently journaled column.",
+    sql: "ALTER TABLE zeroship.resume_b ADD COLUMN applied boolean",
+  });
+}
+
+export function down() {}
+"#;
+
+    const EDITED_FILENAME: &str = "20260806000200_edited_source.ts";
+    const EDITED_SOURCE: &str = r#"
+import { raw } from "@zeroship/migrate";
+
+export const name = "edited_source";
+
+export function up() {
+  raw({
+    reason: "Create the checksum edit probe.",
+    sql: "CREATE TABLE zeroship.edited_source_probe (id bigint PRIMARY KEY)",
+  });
+}
+
+export function down() {}
+"#;
+
+    fn test_config(database_url: &str, migrations_dir: &Path) -> PlatformMigrateConfig {
+        PlatformMigrateConfig {
+            database_url: database_url.to_string(),
+            migrations_dir: migrations_dir.to_path_buf(),
+            project_schema: "zeroship".to_string(),
+            project_id: "zeroship".to_string(),
+        }
+    }
+
+    #[compio::test]
+    async fn platform_migrate_applies_only_newly_appended_file() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping appended-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        copy_migration_corpus(corpus.path()).expect("copy platform migration corpus");
+        let scratch = create_scratch_database(&url, "zs_ledger_append")
+            .await
+            .expect("create appended-file scratch database");
+
+        let result = run_appended_file_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop appended-file scratch database");
+        result.expect("only the newly appended migration file must apply");
+    }
+
+    async fn run_appended_file_assertions(scratch_dsn: &str, corpus: &Path) -> Result<(), String> {
+        let cfg = test_config(scratch_dsn, corpus);
+        let run1 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("initial corpus apply failed: {e}"))?;
+        if run1.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "initial corpus reported {} files, expected {PLATFORM_MIGRATION_FILES}",
+                run1.files
+            ));
+        }
+        if run1.applied.is_empty() || !run1.skipped.is_empty() {
+            return Err(format!(
+                "initial corpus reported {} applied and {} skipped",
+                run1.applied.len(),
+                run1.skipped.len()
+            ));
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect appended-file probe: {e}"))?;
+        let rows_before_append = journal_completed_count(&probe).await;
+        write_migration(corpus, APPEND_FILENAME, APPEND_SOURCE)?;
+
+        let run2 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("appended corpus apply failed: {e}"))?;
+        if run2.files != PLATFORM_MIGRATION_FILES + 1 {
+            return Err(format!(
+                "appended corpus reported {} files, expected {}",
+                run2.files,
+                PLATFORM_MIGRATION_FILES + 1
+            ));
+        }
+        if run2.applied.len() != APPEND_MIGRATION_STEPS {
+            return Err(format!(
+                "appended corpus applied {} steps, expected {APPEND_MIGRATION_STEPS}: {:?}",
+                run2.applied.len(),
+                run2.applied
+            ));
+        }
+        if run2.skipped.len() != run1.applied.len() {
+            return Err(format!(
+                "appended corpus skipped {} prior steps, expected {}",
+                run2.skipped.len(),
+                run1.applied.len()
+            ));
+        }
+        let rows_after_append = journal_completed_count(&probe).await;
+        if rows_after_append != rows_before_append + APPEND_MIGRATION_STEPS as i64 {
+            return Err(format!(
+                "journal grew from {rows_before_append} to {rows_after_append}, expected \
+                 {APPEND_MIGRATION_STEPS} rows"
+            ));
+        }
+        if !table_exists(&probe, "platform_append_probe").await {
+            return Err("newly appended migration did not create its probe table".to_string());
+        }
+        if !foreign_key_targets(
+            &probe,
+            "platform_append_probe_app_id_fkey",
+            "platform_append_probe",
+            "apps",
+        )
+        .await
+        {
+            return Err(
+                "newly appended migration did not create its foreign key to zeroship.apps"
+                    .to_string(),
+            );
+        }
+        let ledger_rows = ledger_row_count(&probe).await;
+        if ledger_rows != (PLATFORM_MIGRATION_FILES + 1) as i64 {
+            return Err(format!(
+                "file ledger contains {ledger_rows} rows, expected {}",
+                PLATFORM_MIGRATION_FILES + 1
+            ));
+        }
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn platform_migrate_resumes_partially_applied_corpus() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping corpus-prefix resume proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        copy_migration_prefix(corpus.path(), APPLIED_CORPUS_PREFIX_FILES)
+            .expect("copy platform migration prefix");
+        let scratch = create_scratch_database(&url, "zs_ledger_corpus_prefix")
+            .await
+            .expect("create corpus-prefix scratch database");
+
+        let result = run_corpus_prefix_resume_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop corpus-prefix scratch database");
+        result.expect("the complete corpus must resume after an applied prefix");
+    }
+
+    async fn run_corpus_prefix_resume_assertions(
+        scratch_dsn: &str,
+        corpus: &Path,
+    ) -> Result<(), String> {
+        let cfg = test_config(scratch_dsn, corpus);
+        let prefix = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("migration prefix apply failed: {e}"))?;
+        if prefix.files != APPLIED_CORPUS_PREFIX_FILES
+            || prefix.applied.is_empty()
+            || !prefix.skipped.is_empty()
+        {
+            return Err(format!(
+                "migration prefix reported files={}, applied={}, skipped={}",
+                prefix.files,
+                prefix.applied.len(),
+                prefix.skipped.len()
+            ));
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect corpus-prefix probe: {e}"))?;
+        let rows_after_prefix = journal_completed_count(&probe).await;
+        if rows_after_prefix != prefix.applied.len() as i64 {
+            return Err(format!(
+                "migration prefix applied {} steps but journal has {rows_after_prefix}",
+                prefix.applied.len()
+            ));
+        }
+        if ledger_row_count(&probe).await != APPLIED_CORPUS_PREFIX_FILES as i64 {
+            return Err("migration prefix did not record every completed file".to_string());
+        }
+
+        probe
+            .batch(&format!(
+                "DROP TABLE zeroship_migrations.{PLATFORM_MIGRATION_LEDGER_TABLE}"
+            ))
+            .await
+            .map_err(|e| format!("remove file ledger before corpus resume: {e}"))?;
+        copy_migration_corpus(corpus)?;
+
+        let resumed = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("complete corpus resume failed: {e}"))?;
+        if resumed.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "complete corpus reported {} files, expected {PLATFORM_MIGRATION_FILES}",
+                resumed.files
+            ));
+        }
+        if resumed.applied.is_empty() {
+            return Err("complete corpus did not apply any remaining migration".to_string());
+        }
+        if resumed.skipped.len() != prefix.applied.len() {
+            return Err(format!(
+                "complete corpus skipped {} prior steps, expected {}",
+                resumed.skipped.len(),
+                prefix.applied.len()
+            ));
+        }
+        let rows_after_resume = journal_completed_count(&probe).await;
+        if rows_after_resume != rows_after_prefix + resumed.applied.len() as i64 {
+            return Err(format!(
+                "journal grew from {rows_after_prefix} to {rows_after_resume}, but resume \
+                 applied {} steps",
+                resumed.applied.len()
+            ));
+        }
+        if ledger_row_count(&probe).await != PLATFORM_MIGRATION_FILES as i64 {
+            return Err("complete corpus did not record every migration file".to_string());
+        }
+        for table in DURABLE_WORKFLOW_JOURNAL_TABLES {
+            if !table_exists(&probe, table).await {
+                return Err(format!(
+                    "durable-workflow table zeroship.{table} is missing"
+                ));
+            }
+        }
+        for column in ["line_kind", "correction_dedup_key"] {
+            if !column_exists(&probe, "invoice_lines", column).await {
+                return Err(format!(
+                    "billing correction column invoice_lines.{column} is missing"
+                ));
+            }
+        }
+        if table_exists(&probe, "metering_exports").await {
+            return Err("metering_exports still exists after complete corpus resume".to_string());
+        }
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn platform_migrate_resumes_a_partially_applied_file() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping partial-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        write_migration(corpus.path(), PARTIAL_FILENAME, PARTIAL_SOURCE)
+            .expect("write partial-file migration");
+        let scratch = create_scratch_database(&url, "zs_ledger_partial")
+            .await
+            .expect("create partial-file scratch database");
+
+        let result = run_partial_file_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop partial-file scratch database");
+        result.expect("a rerun must complete the remaining file step");
+    }
+
+    async fn run_partial_file_assertions(scratch_dsn: &str, corpus: &Path) -> Result<(), String> {
+        let setup = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect partial-file setup: {e}"))?;
+        setup
+            .batch(
+                "CREATE SCHEMA zeroship; \
+                 CREATE TABLE zeroship.resume_a (id bigint PRIMARY KEY); \
+                 CREATE TABLE zeroship.resume_b (id bigint PRIMARY KEY)",
+            )
+            .await
+            .map_err(|e| format!("create partial-file probe tables: {e}"))?;
+
+        let blocker = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect partial-file blocker: {e}"))?;
+        blocker
+            .batch("BEGIN; LOCK TABLE zeroship.resume_b IN ACCESS SHARE MODE")
+            .await
+            .map_err(|e| format!("lock second probe table: {e}"))?;
+
+        let cfg = test_config(scratch_dsn, corpus);
+        let first_run = run_platform_migrations(&cfg).await;
+        blocker
+            .batch("ROLLBACK")
+            .await
+            .map_err(|e| format!("release second probe table: {e}"))?;
+        match first_run {
+            Err(PlatformMigrateError::Apply { file, .. }) if file == PARTIAL_FILENAME => {}
+            Err(other) => {
+                return Err(format!(
+                    "partial-file run failed through the wrong error path: {other}"
+                ));
+            }
+            Ok(report) => {
+                return Err(format!(
+                    "partial-file run unexpectedly succeeded with {} applied steps",
+                    report.applied.len()
+                ));
+            }
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect partial-file probe: {e}"))?;
+        if !column_exists(&probe, "resume_a", "applied").await {
+            return Err("the first file step did not commit before interruption".to_string());
+        }
+        if column_exists(&probe, "resume_b", "applied").await {
+            return Err("the blocked file step unexpectedly committed".to_string());
+        }
+        if journal_completed_count(&probe).await != 1 {
+            return Err("partial-file journal must contain exactly one completed step".to_string());
+        }
+        if ledger_has_file(&probe, PARTIAL_FILENAME).await {
+            return Err("partial file was recorded complete after a failed step".to_string());
+        }
+
+        let rerun = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("partial-file rerun failed: {e}"))?;
+        if rerun.files != 1 || rerun.applied.len() != 1 || rerun.skipped.len() != 1 {
+            return Err(format!(
+                "partial-file rerun reported files={}, applied={}, skipped={}",
+                rerun.files,
+                rerun.applied.len(),
+                rerun.skipped.len()
+            ));
+        }
+        if !column_exists(&probe, "resume_b", "applied").await {
+            return Err("partial-file rerun did not complete the remaining step".to_string());
+        }
+        if journal_completed_count(&probe).await != 2 {
+            return Err("partial-file journal must contain both completed steps".to_string());
+        }
+        if !ledger_has_file(&probe, PARTIAL_FILENAME).await {
+            return Err("completed partial file is missing from the ledger".to_string());
+        }
+        Ok(())
+    }
+
+    #[compio::test]
+    async fn platform_migrate_rejects_an_edited_applied_file() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping edited-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        let migration_path = write_migration(corpus.path(), EDITED_FILENAME, EDITED_SOURCE)
+            .expect("write edited-file migration");
+        let scratch = create_scratch_database(&url, "zs_ledger_edited")
+            .await
+            .expect("create edited-file scratch database");
+
+        let result = run_edited_file_assertions(&scratch.dsn, corpus.path(), &migration_path).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop edited-file scratch database");
+        result.expect("an applied file edit must fail with a checksum mismatch");
+    }
+
+    async fn run_edited_file_assertions(
+        scratch_dsn: &str,
+        corpus: &Path,
+        migration_path: &Path,
+    ) -> Result<(), String> {
+        let cfg = test_config(scratch_dsn, corpus);
+        let run1 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("initial edited-file apply failed: {e}"))?;
+        if run1.files != 1 || run1.applied.len() != 1 || !run1.skipped.is_empty() {
+            return Err(format!(
+                "initial edited-file apply reported files={}, applied={}, skipped={}",
+                run1.files,
+                run1.applied.len(),
+                run1.skipped.len()
+            ));
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect edited-file probe: {e}"))?;
+        let rows_before_edit = journal_completed_count(&probe).await;
+        let edited_source = format!("{EDITED_SOURCE}\nexport function broken(\n");
+        std::fs::write(migration_path, edited_source)
+            .map_err(|e| format!("edit applied migration source: {e}"))?;
+
+        let error = run_platform_migrations(&cfg)
+            .await
+            .expect_err("edited migration source must be rejected");
+        let message = error.to_string();
+        match &error {
+            PlatformMigrateError::ChecksumMismatch {
+                file,
+                applied_checksum,
+                current_checksum,
+            } => {
+                if file != EDITED_FILENAME {
+                    return Err(format!(
+                        "checksum error named {file}, expected {EDITED_FILENAME}"
+                    ));
+                }
+                if applied_checksum == current_checksum
+                    || applied_checksum.len() != 64
+                    || current_checksum.len() != 64
+                {
+                    return Err(format!(
+                        "checksum error carried invalid digests: applied={applied_checksum}, \
+                         current={current_checksum}"
+                    ));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "edited migration failed through the wrong error path: {other}"
+                ));
+            }
+        }
+        if !message.contains(EDITED_FILENAME) || !message.contains("checksum") {
+            return Err(format!("checksum error was not clear: {message}"));
+        }
+        if journal_completed_count(&probe).await != rows_before_edit {
+            return Err("edited-file rejection changed the migration journal".to_string());
+        }
+        if ledger_row_count(&probe).await != 1 {
+            return Err("edited-file rejection changed the file ledger".to_string());
+        }
+        if !table_exists(&probe, "edited_source_probe").await {
+            return Err("edited-file probe table disappeared".to_string());
+        }
         Ok(())
     }
 }
