@@ -168,7 +168,8 @@ impl MigrationStore {
             .execute(
                 "UPDATE zeroship.migrated_migrations \
                     SET status = 'applied', applied_at = NOW(), last_error = NULL \
-                  WHERE app_id = $1 AND migration_id = $2",
+                  WHERE app_id = $1 AND migration_id = $2 \
+                    AND status <> 'rejected'",
                 &[&app_id, &migration_id],
             )
             .await
@@ -189,7 +190,8 @@ impl MigrationStore {
             .execute(
                 "UPDATE zeroship.migrated_migrations \
                     SET status = 'rejected', last_error = $3 \
-                  WHERE app_id = $1 AND migration_id = $2",
+                  WHERE app_id = $1 AND migration_id = $2 \
+                    AND status <> 'applied'",
                 &[&app_id, &migration_id, &message],
             )
             .await
@@ -645,5 +647,66 @@ mod tests {
             )
             .await
             .expect("delete transition test user");
+    }
+
+    /// Terminal states are terminal: neither marking may overwrite the other.
+    ///
+    /// `mark_applied` and `mark_rejected` updated purely on
+    /// `(app_id, migration_id)` with no status precondition, so whichever ran
+    /// last won. A migration the engine applied could be flipped to `rejected`
+    /// by a later error path, and an operator reading `status = 'rejected'`
+    /// would believe nothing changed while the engine journal recorded applied
+    /// steps. `revert_to_pending` already guards on the prior status; these two
+    /// did not.
+    #[ntex::test]
+    async fn terminal_status_transitions_do_not_clobber_each_other_pg() {
+        let client = test_client().await;
+        let store = MigrationStore::new(test_dsn());
+        let app_id = Uuid::now_v7();
+        let principal_id = Uuid::new_v4();
+        let applied_id = Uuid::now_v7();
+        let rejected_id = Uuid::now_v7();
+
+        seed_transition_dependencies(&client, app_id, principal_id).await;
+        insert_transition_row(&client, app_id, applied_id, principal_id, "applied").await;
+        insert_transition_row(&client, app_id, rejected_id, principal_id, "rejected").await;
+
+        // An error path firing after a successful apply must not erase it.
+        store
+            .mark_rejected(app_id, applied_id, "late error on an applied migration")
+            .await
+            .expect("call must not error");
+        let row = client
+            .query_one(
+                "SELECT status FROM zeroship.migrated_migrations \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &applied_id],
+            )
+            .await
+            .expect("read the applied row");
+        assert_eq!(
+            row.get::<_, String>("status"),
+            "applied",
+            "a rejected marking must not overwrite an applied migration"
+        );
+
+        // And the converse: a rejected migration must not silently become applied.
+        store
+            .mark_applied(app_id, rejected_id)
+            .await
+            .expect("call must not error");
+        let row = client
+            .query_one(
+                "SELECT status FROM zeroship.migrated_migrations \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &rejected_id],
+            )
+            .await
+            .expect("read the rejected row");
+        assert_eq!(
+            row.get::<_, String>("status"),
+            "rejected",
+            "an applied marking must not overwrite a rejected migration"
+        );
     }
 }
