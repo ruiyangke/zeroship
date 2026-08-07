@@ -295,6 +295,33 @@ pub async fn dispatch(
         }
     };
 
+    // Pin the isolate for the whole dispatch.
+    //
+    // The isolate cache is thread-local and this executor is single-threaded:
+    // every `.await` below (the pending-promise channel, the wall-clock
+    // timeout, `env.db`/fetch round-trips inside user code) hands the thread to
+    // another dispatch. If that dispatch loads a different app while the cache
+    // is at `max_size`, `cache::evict_lru` picks a victim by recency - and the
+    // isolate we are in the middle of driving is a legal candidate. Eviction is
+    // destructive: it closes the isolate's native sockets and fires every
+    // in-flight `AbortController` before dropping the entry.
+    //
+    // The lease is the guard both eviction paths already filter on
+    // (`cache.rs`, `!entry.runtime.is_isolate_leased()`). Holding it here is
+    // what makes those filters reachable in production.
+    //
+    // RAII, deliberately: the guard is bound to a local, so every exit from
+    // this function - `return`, `?`, unwind - releases it. There is no explicit
+    // release call to forget on a new early-return path. It is also taken
+    // AFTER `get_runtime` returned, i.e. after that function's borrow of the
+    // `CACHE` thread-local has ended, so leasing cannot re-enter the borrow.
+    //
+    // Consequence, by design: when the cache is full and every isolate is
+    // leased, `evict_lru` now returns false and the competing load is refused
+    // with "isolate cache full and every isolate is leased; load deferred"
+    // rather than corrupting a running dispatch.
+    let _isolate_lease = runtime.lease_isolate();
+
     metrics::inc(&metrics::DISPATCH_TOTAL);
 
     // Metering auto-counters: start the wall clock now so it spans the whole
@@ -610,6 +637,17 @@ pub async fn workflow_advance_unsigned(
             }));
         }
     };
+
+    // Same pin as the fetch dispatch above, for the same reason: this function
+    // drives user code (`call_workflow_dispatch` enters the isolate) and then
+    // awaits - `recv_with_timeout` on the pending arm, plus the control-plane
+    // round-trip in `apply_workflow_advance_result`. Pinned workflow isolates
+    // live in `cache.workflow_isolates` and are evicted by
+    // `evict_pinned_lru_for_app` when a second deploy hash for the SAME app
+    // exceeds `max_pinned_isolates_per_app`; that path filters on the very
+    // same lease. RAII local, taken after `get_workflow_runtime`'s `CACHE`
+    // borrow has ended.
+    let _isolate_lease = runtime.lease_isolate();
 
     let env: EnvSnapshot = match crate::sync::get_env(&envs, &app_id) {
         Some(entry) => entry.snapshot.clone(),
@@ -3480,6 +3518,201 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     || usage_value(&events, app_id, "egress_bytes").unwrap_or(0) > 0,
                 "stream_wall_us accrues over the stream lifetime"
             );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // In-flight dispatch must pin its isolate against LRU eviction
+    // -----------------------------------------------------------------------
+
+    /// A dispatch that is still awaiting user code makes its isolate
+    /// un-evictable, and a competing load that would have evicted it is
+    /// refused instead.
+    ///
+    /// The bug this pins: the isolate cache is thread-local and this executor
+    /// is single-threaded, so every await inside `dispatch` hands the thread to
+    /// whatever else is queued. If that other work loads a different app while
+    /// the cache is at `max_size`, `evict_lru` picks the least-recently-used
+    /// entry - which can be the isolate the parked dispatch is still driving.
+    /// Eviction closes that isolate's native sockets and fires all of its
+    /// in-flight `AbortController`s, so the running request is destroyed
+    /// underneath itself.
+    ///
+    /// `evict_lru` has always filtered on `Runtime::is_isolate_leased()`, but
+    /// nothing on the dispatch path ever took a lease - the counter was
+    /// incremented only by a cache unit test - so the filter was a permanent
+    /// no-op and this test is RED without the `lease_isolate()` binding in
+    /// `dispatch`. Deleting that one line makes the first assertion below fail
+    /// with "dispatch never took an isolate lease".
+    ///
+    /// It has to run through the real HTTP surface (`configure` + the ntex test
+    /// service) for the same reason `evict_lru`'s own unit test proves nothing:
+    /// what is under test is whether the DISPATCH PATH takes the lease, not
+    /// whether `lease_isolate` increments a counter.
+    ///
+    /// `leased == true` is itself the in-flight proof: the guard is an RAII
+    /// local in `dispatch`, so it exists only between "isolate resolved" and
+    /// "response returned". Observing it set means the request had genuinely
+    /// not finished when the competing load ran.
+    #[test]
+    fn in_flight_dispatch_pins_its_isolate_against_eviction() {
+        let Ok(rt) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        rt.block_on(async {
+            init_runtime();
+
+            let app_a = Uuid::new_v4();
+            let app_b = Uuid::new_v4();
+
+            // max_size = 1: loading app B MUST try to evict app A.
+            crate::cache::init_cache(
+                1,
+                4,
+                crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                },
+            );
+
+            // App A parks on a timer, so its dispatch is demonstrably still in
+            // flight (awaiting the pending-promise channel) while we try to
+            // load app B on the same thread.
+            let slow = br#"
+                export default {
+                  async fetch() {
+                    await new Promise((r) => setTimeout(r, 300));
+                    return new Response("a-finished");
+                  }
+                }
+            "#;
+            let fast = br#"
+                export default { fetch() { return new Response("b"); } }
+            "#;
+
+            crate::cache::load_app(
+                app_a,
+                slow,
+                AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
+                None,
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app A loads");
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            crate::sync::put_env_from_json(
+                &envs,
+                app_a,
+                r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                0,
+            )
+            .expect("insert env A");
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("in-flight-lease");
+            let config = test_worker_config(&blob_root);
+
+            let service = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .configure(configure),
+            )
+            .await;
+
+            // Drive A's dispatch concurrently with this task.
+            let dispatch = compio::runtime::spawn(async move {
+                let req = test::TestRequest::post()
+                    .uri(&format!("/dispatch/{app_a}"))
+                    .set_payload(dispatch_frame("GET", "http://app-a.test/", b""))
+                    .to_request();
+                let resp = test::call_service(&service, req).await;
+                let status = resp.status();
+                let body = test::read_body(resp).await.to_vec();
+                (status, body)
+            });
+
+            // Yield until A's dispatch has entered the handler and parked on
+            // the timer. Bounded: if it never reports leased we fail below
+            // rather than spin forever.
+            let mut leased = false;
+            for _ in 0..2000 {
+                if crate::cache::get_runtime(&app_a)
+                    .is_some_and(|r| r.is_isolate_leased())
+                {
+                    leased = true;
+                    break;
+                }
+                let _ = compio::runtime::spawn(async {}).await;
+            }
+
+            assert!(
+                leased,
+                "dispatch never took an isolate lease: an in-flight request \
+                 leaves its isolate a legal LRU eviction victim, and eviction \
+                 closes its sockets and fires its AbortControllers mid-request"
+            );
+
+            // The competing load. With A leased this must be REFUSED, not
+            // served by destroying A.
+            let load_b = crate::cache::load_app(
+                app_b,
+                fast,
+                AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
+                None,
+                None,
+                &EnvSnapshot::empty(),
+            );
+
+            let err = load_b.expect_err(
+                "loading a second app into a full cache whose only isolate is \
+                 running a request must be deferred, not satisfied by evicting \
+                 the running isolate",
+            );
+            assert!(
+                err.contains("leased"),
+                "the deferral must be the documented 'every isolate is leased' \
+                 refusal, got: {err}"
+            );
+
+            // A is still cached - it was not evicted - and still running.
+            assert!(
+                crate::cache::get_runtime(&app_a).is_some(),
+                "the in-flight app must still be cached after the refused load"
+            );
+
+            // And it completes normally, its sockets and abort signals intact.
+            let (status, body) = dispatch.await.expect("dispatch task did not panic");
+            assert_eq!(
+                status,
+                ntex::http::StatusCode::OK,
+                "in-flight dispatch must finish normally: {}",
+                String::from_utf8_lossy(&body),
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                "a-finished",
+                "the parked promise resolved and its response survived"
+            );
+
+            // Lease released on return: the isolate is evictable again, so the
+            // pin cannot leak and permanently wedge the cache.
+            assert!(
+                crate::cache::get_runtime(&app_a)
+                    .is_some_and(|r| !r.is_isolate_leased()),
+                "the RAII lease must be released when the dispatch returns"
+            );
+
+            let _ = std::fs::remove_dir_all(blob_root);
         });
     }
 }
