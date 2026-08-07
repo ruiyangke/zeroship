@@ -4,19 +4,78 @@
 //! a fresh connection (via the `connect` helper), spawns the connection
 //! driver onto compio's runtime, and exercises one slice of the API.
 //!
+//! Every test works inside a private schema of its own (see `require_pg`), so
+//! the suite runs at full parallelism against one database.
+//!
 //! Run with:
 //!   docker compose up -d postgres
 //!   PG_TEST_URL='postgres://postgres:zeroship@localhost:5440/zeroship' \
-//!       cargo test -p compio-postgres --test integration -- --test-threads=1
+//!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, Error, NoTls, Pool};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 mod common;
 
 fn test_url() -> String {
     std::env::var("PG_TEST_URL")
         .unwrap_or_else(|_| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+}
+
+/// Longest identifier PostgreSQL stores (NAMEDATALEN - 1). It truncates
+/// anything longer without failing, which would quietly map two long test
+/// names onto one schema.
+const MAX_IDENT_LEN: usize = 63;
+
+const SCHEMA_PREFIX: &str = "cpg_";
+
+/// Names the private schema belonging to the calling test.
+///
+/// libtest runs each test on a thread named after the test - at any
+/// `--test-threads` setting, serial runs included - so the thread name is a
+/// per-test identifier that a newly added test gets for free and cannot forget
+/// to declare. The `unnamed` fallback only applies to a thread the test body
+/// spawned itself; such a thread shares the schema of whichever test is
+/// running, so open connections from the test's own thread.
+///
+/// The name is sanitised to `[a-z0-9_]` so it needs no quoting, and carries a
+/// hash of the full test name so that cutting the readable part down to
+/// `MAX_IDENT_LEN` cannot make two schemas collide.
+fn test_schema() -> String {
+    let name = std::thread::current().name().unwrap_or("unnamed").to_owned();
+
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let digest = hasher.finish();
+
+    // Fixed cost of the wrapper: prefix, the separator before the digest, and
+    // the digest's 16 hex characters.
+    let budget = MAX_IDENT_LEN - SCHEMA_PREFIX.len() - 1 - 16;
+    let readable: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .take(budget)
+        .collect();
+
+    format!("{SCHEMA_PREFIX}{readable}_{digest:016x}")
+}
+
+/// Confines every connection opened from `url` to `schema`.
+///
+/// The startup packet carries the `search_path`, so this holds for pooled
+/// connections as well as for plain clients - a pool opens its connections
+/// itself and offers no post-connect hook to run `SET` on.
+fn schema_scoped_url(url: &str, schema: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}options=-c%20search_path%3D{schema}")
 }
 
 /// Open a client and spawn its driver on the compio runtime.
@@ -31,10 +90,32 @@ async fn connect(url: &str) -> Result<Client, Error> {
     Ok(client)
 }
 
+/// Checks that Postgres is reachable and hands back a URL scoped to a schema
+/// this test alone owns.
+///
+/// Tests share fixed object names (`pg_complex_test` and friends) and cargo
+/// runs them concurrently, so in one shared schema they race: two tests
+/// creating the same table collide on `pg_type`'s name index, and one test's
+/// rows land in another's result set. A schema per test keeps the names but
+/// removes the sharing.
+///
+/// The schema is reset here rather than dropped when the test ends: a test
+/// that panics never reaches its own teardown, and reclaiming at the start
+/// makes each run self-healing. The set of schemas is bounded by the set of
+/// test names, so they do not accumulate across runs.
+///
+/// Because the schema name depends only on the test name, two `cargo test`
+/// processes pointed at one database would reset each other's schemas
+/// mid-run. Give each concurrent run its own database via `PG_TEST_URL`.
+///
+/// A schema does not isolate everything: LISTEN/NOTIFY channels, advisory
+/// locks and replication slots are database-wide. A test using one of those
+/// still has to pick a name no other test can be holding - see
+/// `notify_delivered_on_idle_listener`.
 async fn require_pg() -> Option<String> {
     let url = test_url();
-    match connect(&url).await {
-        Ok(_client) => Some(url), // Client dropped -> driver task exits
+    let client = match connect(&url).await {
+        Ok(client) => client,
         Err(e) => {
             // exit(0) here would end the WHOLE binary with a success status the
             // moment any one test can't reach Postgres, discarding every result
@@ -42,10 +123,66 @@ async fn require_pg() -> Option<String> {
             // for earlier tests in this run. Returning None instead lets each
             // caller skip itself while its siblings (and any prior failures)
             // stand.
-            common::skip(&format!("Skipping — Postgres not reachable: {e}"));
-            None
+            common::skip(&format!("Skipping - Postgres not reachable: {e}"));
+            return None;
         }
-    }
+    };
+
+    let schema = test_schema();
+    client
+        .execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    client
+        .execute(&format!("CREATE SCHEMA {schema}"), &[])
+        .await
+        .unwrap();
+
+    // Client dropped -> driver task exits.
+    Some(schema_scoped_url(&url, &schema))
+}
+
+// ---------------------------------------------------------------------------
+// 0. test_isolation_is_per_schema
+//
+// Guards the isolation the rest of the suite depends on. Everything below
+// creates objects under fixed names, so if a connection ever lands somewhere
+// other than this test's own schema the suite goes back to racing itself:
+// concurrent tests collide on `pg_type`'s name index and read each other's
+// rows. Asserting `current_schema()` catches that directly, rather than
+// waiting for the intermittent collision to reappear.
+//
+// Pools are covered too, because they open their own connections and take the
+// `search_path` from the startup packet like any other client.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn test_isolation_is_per_schema() {
+    let Some(url) = require_pg().await else { return };
+    let expected = test_schema();
+
+    let client = connect(&url).await.unwrap();
+    let rows = client
+        .query("SELECT current_schema()::text AS s", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0].get::<_, &str>("s"),
+        expected,
+        "a plain client escaped this test's schema"
+    );
+
+    let pool = Pool::connect(&url, 2).await.unwrap();
+    let conn = pool.get().await.unwrap();
+    let rows = conn
+        .query("SELECT current_schema()::text AS s", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0].get::<_, &str>("s"),
+        expected,
+        "a pooled connection escaped this test's schema"
+    );
 }
 
 // ---------------------------------------------------------------------------
