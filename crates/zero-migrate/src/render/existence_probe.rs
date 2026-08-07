@@ -68,7 +68,7 @@
 //!   catalog stores only the affinity, so a within-text-affinity facet change (live
 //!   `string` vs declared `ref`/`date`) is INVISIBLE — but we do NOT fail closed on
 //!   it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
-//!   documented SQLite divergence, see `docs/reference/sqlite-divergences.md`; on
+//!   documented SQLite divergence; on
 //!   SQLite a `ref` column adds no FK via `ALTER` — it is physically a plain `text`
 //!   column either way, so the blind spot carries no provable physical divergence).
 //!   On PG both sides are the `information_schema` spelling and the raw compare is
@@ -453,7 +453,7 @@ struct ExpectColumnShape<'a> {
 /// recoverable. We do NOT fail closed on that blind spot: an affinity-match is a
 /// `SatisfiedNoop`, exactly as the declarative DIFFER treats it (it compares only
 /// `sqlite_canonical_type` on SQLite — a within-affinity facet change is a documented
-/// SQLite divergence, see `docs/reference/sqlite-divergences.md`). This is what makes
+/// SQLite divergence). This is what makes
 /// a guarded `createTable`/`addColumn ifNotExists` RE-RUN idempotent on SQLite (every
 /// table carries text-affinity system columns; a stand-alone `addColumn` of a `ref`
 /// over a live `string` is physically a no-op anyway — SQLite cannot add an FK via

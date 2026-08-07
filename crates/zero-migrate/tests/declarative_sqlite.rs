@@ -1283,8 +1283,6 @@ async fn golden_sqlite_drops() {
 ///    DIVERGE on the FK — by design. This is the honest contour the report must state:
 ///    the affinity blind spot is real and bounded to the column shape; the FK is the
 ///    differ's job, not the guard's.
-///
-/// See `docs/reference/sqlite-divergences.md` (the within-text-affinity row).
 #[compio::test]
 async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_fk_is_rebuild() {
     let users = CollectionDescriptor {

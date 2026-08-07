@@ -1,5 +1,4 @@
-//! Schema diff engine — A2 of the db proposal
-//! (docs/proposals/db.md, section A2).
+//! Schema diff engine.
 //!
 //! Compares a desired (declared) schema against the live `pg_catalog`
 //! state and classifies each change into **additive** (auto-apply),

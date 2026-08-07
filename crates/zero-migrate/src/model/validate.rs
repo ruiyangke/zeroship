@@ -6206,8 +6206,8 @@ fn validate_default_expr(
 /// 1. **`id_prefix`** — a legacy internal platform-ID prefix, distinct from
 ///    TypeID, which must obey the internal `^[a-z][a-z0-9_]*$`
 ///    charset rule + reserved-prefix deny-list (`usr`, …) the runtime enforces via
-///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth,
-///    mirroring `crates/core/src/typed_id.rs` + `system_fields_pass`'s
+///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth
+///    in this crate, kept in step with `system_fields_pass`'s
 ///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
 ///    hand-authored prefix keeps the compact `<prefix>_<22 base62 UUIDv7>` shape.
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused

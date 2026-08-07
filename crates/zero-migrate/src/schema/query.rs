@@ -1681,8 +1681,7 @@ pub fn build_add_column(
 }
 
 // ---------------------------------------------------------------------------
-// Index builders for registerModel — see the db proposal
-// (docs/proposals/db.md). Materialises `t.string().index()` /
+// Index builders for registerModel. Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.
 // ---------------------------------------------------------------------------
@@ -1722,7 +1721,6 @@ pub struct IndexSpec {
 /// Index shape — the closed sum over the four kinds of indexes
 /// `registerModel` can materialise.
 ///
-/// See `docs/proposals/p4-search-implementation-plan.md`.
 /// The default is [`IndexKind::BTree`] so every existing call site keeps
 /// the same observable behaviour; `Vector` / `Fts` /
 /// `Spatial` dispatch through the `register_model::apply` Pass 2.
@@ -2491,9 +2489,8 @@ fn field_to_column_for_dialect(
     // FLOA/REAL/DOUB substring match), which still accepts BLOB values
     // — same column shape both engines see byte-identical inserts.
     // Sentinel-on-DDL is the same regex-on-DDL pattern used for
-    // vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path
-    // (deferred). See
-    // `docs/proposals/p5-encryption-backup-implementation-plan.md`.
+    // vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path,
+    // not yet built.
     let enc_comment_owned;
     let enc_comment: &str = if let Some(body) = encryption_sentinel_for_field(def) {
         enc_comment_owned = format!(" {body}");

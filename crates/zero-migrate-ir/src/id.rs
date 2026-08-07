@@ -121,15 +121,14 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
 }
 
 /// Parse error for [`parse_with_prefix`]. Distinguishes a wrong-prefix
-/// boundary check from a malformed-id parse error so callers (e.g.
-/// `crates/sandbox/src/db.rs`) can map them onto distinct error
-/// variants without losing the underlying detail.
+/// boundary check from a malformed-id parse error so a caller can map them onto
+/// distinct error variants without losing the underlying detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// The id parsed cleanly but its prefix did not match the expected
     /// entity-type prefix. Used by `parse_with_prefix` as the
-    /// path-traversal-hardening boundary check (Invariant 2 in
-    /// `docs/proposals/sandbox-pg-state.md`).
+    /// path-traversal-hardening boundary check: a caller that asked for one
+    /// entity type must never receive an id minted for another.
     WrongPrefix { expected: String, got: String },
     /// The id failed to parse — wrong shape, invalid base62, missing
     /// underscore, etc. Carries the same string the underlying [`parse`]
@@ -152,12 +151,12 @@ impl std::error::Error for ParseError {}
 
 /// Parse a typed ID and assert its prefix matches `expected_prefix`.
 ///
-/// Layered safety check on top of [`parse`]. Callers that have a
-/// known entity type (e.g. `sandbox.db.insert_sandbox` knows it is
-/// receiving an `sbx_…` id) use this helper to refuse mismatched
-/// prefixes BEFORE the value reaches any downstream wire (SQL,
-/// filesystem path, HTTP header). Mirrors the path-traversal
-/// hardening posture in `crates/sandbox/src/persist.rs:36-40`.
+/// Layered safety check on top of [`parse`]. A caller that knows the entity
+/// type it expects uses this helper to refuse a mismatched prefix BEFORE the
+/// value reaches any downstream wire (SQL, filesystem path, HTTP header), so an
+/// id minted for one entity cannot be walked into another's namespace. Checks
+/// the prefix only: [`parse`] has already proven the shape, and neither call
+/// proves the id names a row that exists.
 ///
 /// Returns the embedded UUID on success.
 pub fn parse_with_prefix(typed_id: &str, expected_prefix: &str) -> Result<uuid::Uuid, ParseError> {

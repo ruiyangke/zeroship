@@ -1406,7 +1406,7 @@
           ]
         },
         {
-          "description": "`DELETE FROM … WHERE …`.\n\nWIRE TAG: the JS DSL's `del()` op-function records this variant as\n`{\"op\":\"delete\"}` (the camelCased variant name), NOT `{\"op\":\"del\"}`. The\nbuilder method is named `del` to avoid the JS reserved word `delete`, but\nthe recorded discriminant is the full `\"delete\"` (pinned here + in the ADR\n`docs/decisions/2026-06-23-op-ir-serde-repr.md`).",
+          "description": "`DELETE FROM … WHERE …`.\n\nWIRE TAG: the JS DSL's `del()` op-function records this variant as\n`{\"op\":\"delete\"}` (the camelCased variant name), NOT `{\"op\":\"del\"}`. The\nbuilder method is named `del` to avoid the JS reserved word `delete`, but\nthe recorded discriminant is the full `\"delete\"`. The variant name here is\nwhat pins it, and the schema golden gate carries it into\n`ir-envelope.schema.json`; renaming this variant to match the builder\nmethod would silently break every recorded history.",
           "type": "object",
           "properties": {
             "table": {

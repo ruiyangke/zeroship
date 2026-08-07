@@ -1,5 +1,6 @@
 //! `zero-migrate` — a versioned DB migration engine for **creator
-//! project databases** (design `docs/proposals/2026-06-16-db-migration-engine-design.md`).
+//! project databases**. The shipped design docs are under `docs/`; start at
+//! `docs/architecture.md`.
 //!
 //! The engine is runtime-free and V8-free. Authoring (the JS DSL to op-IR
 //! envelope) and live Postgres/MySQL execution run in the Node host and reach

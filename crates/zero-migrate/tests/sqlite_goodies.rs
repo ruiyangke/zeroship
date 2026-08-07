@@ -10,12 +10,12 @@
 //!     the engine's `SqliteEmitter::create_index` emits a plain B-tree for every
 //!     index kind — there is NO `vec0` virtual table and NO metric validation on
 //!     this path: sqlite-vec / vec0 vtables are the **plugin-db runtime** data
-//!     plane's concern, created via `ensure_vector_index`, NOT the migrate engine.
-//!     See `crates/plugin-db/tests/sqlite_integration.rs` and the
-//!     `sqlite_*_column_ddl` `register_model` follow-up note there).
+//!     plane's concern, created via `ensure_vector_index`, NOT the migrate
+//!     engine, and covered by that runtime's own suite in a separate
+//!     repository).
 //!   - a `geoPoint` field → a packed `BLOB` column + a plain B-tree index (no
 //!     PostGIS/GIST equivalent; spatial search is a haversine flat-scan in
-//!     plugin-db per `docs/reference/sqlite-divergences.md`).
+//!     plugin-db).
 //!   - an `.fts()` field → an FTS5 **virtual table** (`<coll>__fts`) over the
 //!     source columns + AFTER sync triggers, emitted via the SHARED
 //!     `zero_migrate::schema::fts_sqlite` builders (the SAME structure plugin-db's
@@ -138,8 +138,8 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
             .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
     }
 
-    // REAL end-state: the vector column is a BLOB (sqlite-divergences: vector is a
-    // packed BLOB, no vec0 vtable on the migrate-engine path).
+    // REAL end-state: the vector column is a BLOB: on the migrate-engine path a
+    // vector is a packed BLOB with no vec0 vtable.
     assert_eq!(
         column_type(&be, "docs", "embedding")
             .await
@@ -223,7 +223,7 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
 
 // ===========================================================================
 // GEOPOINT — a `geoPoint` field applies as a packed BLOB column on SQLite
-// (no spatial index AM; haversine flat-scan per sqlite-divergences). Drift
+// (no spatial index AM; the runtime does a haversine flat-scan). Drift
 // round-trips. (PG emits a GIST spatial index; SQLite has none.)
 // ===========================================================================
 #[compio::test]
@@ -393,7 +393,7 @@ async fn fts_field_applies_cleanly_on_sqlite() {
     // has no business running them). So the faithful in-LAYER assertions here are
     // (a) the vtable + triggers exist, and (b) the structure round-trips zero-drift.
     // The end-to-end MATCH-finds-the-mirrored-row queryability is exercised against
-    // the runtime backend in `plugin-db/tests/sqlite_integration.rs` (the data-plane
+    // the runtime backend's own suite in a separate repository (the data-plane
     // connection, which shares these exact FTS5 builders via `zero_migrate::schema`).
 
     // A re-diff against the REAL introspected live snapshot → ZERO drift (the FTS5

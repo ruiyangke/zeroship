@@ -24,9 +24,10 @@
 //!
 //! # Type-mapping provenance (shared-truth-to-extract-later)
 //!
-//! The DSL-type → Postgres-type table here is **replicated** from
-//! `crates/plugin-db/src/query.rs` (`def_to_pg_type` /
-//! `def_to_column_type_for_dialect`). It is duplicated *deliberately*:
+//! The DSL-type → Postgres-type table here is **replicated** from the runtime
+//! plugin's `def_to_pg_type` / `def_to_column_type_for_dialect`, which live in a
+//! separate repository and are not reachable from this tree. It is duplicated
+//! *deliberately*:
 //! `zero-migrate` and `plugin-db` are different trust domains and the migrate
 //! crate must not depend on the runtime plugin. The shared vocabulary should be
 //! lifted into a small shared crate later; until then the
@@ -3437,8 +3438,8 @@ fn build_table_snapshot_impl(
         if let Some(target) = &f.references {
             let target_column = f.reference_column.as_deref().unwrap_or("id");
             // cross-app: a `<otherApp>.<table>` schema-qualified
-            // target is REJECTED here, fail-closed (mirrors
-            // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
+            // target is REJECTED here, fail-closed (the runtime plugin
+            // enforces the same rule): every FK must stay
             // inside the project schema. Surfaced as a dedicated, clearer
             // error for that shape before the generic bare-ident check.
             reject_cross_app_ref(&d.name, target)?;
@@ -4033,9 +4034,9 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
 }
 
 /// - a geoPoint field (`t.geoPoint()`) emits a PostGIS spatial index
-/// (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring plugin-db's
-/// runtime `SpatialIndex::ensure_spatial_index`
-/// (`crates/plugin-db/src/backend/postgres.rs`). The live snapshot carries it as
+/// (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring the
+/// runtime plugin's `SpatialIndex::ensure_spatial_index` (a separate
+/// repository). The live snapshot carries it as
 /// `access_method = 'gist'`, so the desired snapshot must model it identically or
 /// the runtime-created GiST index phantom-drops (and spatial `ST_DWithin` search
 /// falls back to a full table scan). The index name is the same
@@ -4343,9 +4344,9 @@ fn fk_definition_pg(
 }
 
 /// Reject a `ref` whose target is schema-qualified with a `<otherApp>.` prefix —
-/// a cross-app FK, forbidden fail-closed (mirrors
-/// `crates/plugin-db/src/cross_app_fk.rs`: every FK stays inside one app's
-/// namespace). A bare collection name is a same-project ref and is allowed.
+/// a cross-app FK, forbidden fail-closed: every FK stays inside one app's
+/// namespace, the same rule the runtime plugin enforces. A bare collection
+/// name is a same-project ref and is allowed.
 ///
 /// The engine's project-umbrella model puts every member app's tables in ONE
 /// project schema, so a legitimate cross-*app* (same-project) FK is just a bare
@@ -4610,8 +4611,8 @@ pub enum DeclarativeError {
     #[error("failed to author rename expand-contract sequence: {0}")]
     Rename(#[from] ExpandContractError),
     /// A `ref` field's target was a schema-qualified `<otherApp>.<table>` — a
-    /// CROSS-APP foreign key, forbidden fail-closed (mirrors
-    /// `crates/plugin-db/src/cross_app_fk.rs`). Every FK must stay inside the
+    /// CROSS-APP foreign key, forbidden fail-closed (the runtime plugin enforces
+    /// the same rule). Every FK must stay inside the
     /// project schema; a reference to another member app's table is the BARE
     /// collection name (the union puts every app's tables in one schema), never a
     /// dot-qualified one. Caught at the author/plan boundary BEFORE any SQL is

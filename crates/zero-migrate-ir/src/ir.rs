@@ -11,7 +11,10 @@
 //! - **Closed `Op` enum, internally tagged on `"op"`** (`#[serde(tag = "op")]`,
 //!   NO `untagged`, NO `flatten`). The discriminant is a stable top-level
 //!   `"op"` key — a discriminated union schemars can express and the JS builder
-//!   emits directly. See `docs/decisions/2026-06-23-op-ir-serde-repr.md`.
+//!   emits directly. The serde attributes here ARE the contract; the generated
+//!   `ir-envelope.schema.json` is gated against them by
+//!   `crates/zero-migrate/tests/ir_envelope_schema.rs`, so a representation
+//!   change cannot land without the schema moving with it.
 //! - **All identifier fields are plain `String`**: the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
 //!   the apply/render-time structural validator ([`crate::validate`]), not here.
@@ -3214,8 +3217,10 @@ pub enum Op {
     /// WIRE TAG: the JS DSL's `del()` op-function records this variant as
     /// `{"op":"delete"}` (the camelCased variant name), NOT `{"op":"del"}`. The
     /// builder method is named `del` to avoid the JS reserved word `delete`, but
-    /// the recorded discriminant is the full `"delete"` (pinned here + in the ADR
-    /// `docs/decisions/2026-06-23-op-ir-serde-repr.md`).
+    /// the recorded discriminant is the full `"delete"`. The variant name here is
+    /// what pins it, and the schema golden gate carries it into
+    /// `ir-envelope.schema.json`; renaming this variant to match the builder
+    /// method would silently break every recorded history.
     Delete {
         /// Target table.
         table: String,
