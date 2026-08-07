@@ -37,13 +37,19 @@ export interface GenArtifactsSource {
   /** The project schema FK definitions thread; defaults to `"public"`. */
   projectSchema?: string;
   /**
-   * The host `RootCeiling` document (TOML) that drives the confined system-shape
-   * injection. The engine bakes in NO confined preset: the caller supplies the
-   * injection shape. `undefined` injects nothing; gen-types always passes the
-   * bundled {@link ../confined-ceiling.CONFINED_SCHEMA_EMIT_CEILING_TOML}. Applied
-   * identically on the envelope and descriptor sides so the two stay byte-identical.
+   * The ordered charter layers (TOML documents) that drive the confined
+   * system-shape injection. The engine bakes in NO confined preset: the caller
+   * supplies the injection shape, and the engine composes the layers into one
+   * effective policy in the order given.
+   *
+   * gen-types passes exactly one layer, the bundled
+   * {@link ../confined-ceiling.CONFINED_SCHEMA_EMIT_CEILING_TOML}, since it has an
+   * operator ceiling and no creator draft to narrow it. Applied identically on the
+   * envelope and descriptor sides so the two stay byte-identical.
+   *
+   * Required, not optional: the engine rejects a source without it.
    */
-  policyCeilingToml?: string;
+  charterLayers: string[];
 }
 
 /** The two co-emitted artifact strings (or a soft error). */

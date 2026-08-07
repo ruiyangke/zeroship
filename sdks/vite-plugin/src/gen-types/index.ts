@@ -75,7 +75,7 @@ export async function genTypesFromSchemaFile(
     // The engine is preset-free: the CALLER supplies the confined injection shape
     // (the 7 system columns + [id] PK + system indexes). The SAME ceiling on both
     // sources keeps the descriptor + envelope outputs byte-identical.
-    policyCeilingToml: CONFINED_SCHEMA_EMIT_CEILING_TOML,
+    charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
   });
   const runtimeJson = unwrap(reply, "manual schema source");
 
@@ -102,7 +102,7 @@ export async function genTypesFromMigrations(
     // The pure-JS recorder emits RAW author-only ops; this ceiling injects the 7
     // system columns + [id] PK + system indexes at resolve time, matching the
     // descriptor path so both sources stay byte-identical.
-    policyCeilingToml: CONFINED_SCHEMA_EMIT_CEILING_TOML,
+    charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
   });
   const runtimeJson = unwrap(reply, "generated migration source");
   const envDbTs = reply.envDbTs;
