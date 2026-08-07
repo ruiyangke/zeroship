@@ -281,7 +281,10 @@ impl NetRequest {
         if host == "*" {
             return Err("net.requests host cannot be bare '*'".to_string());
         }
-        if star_count > 0 && !host.starts_with("*.") {
+        let valid_wildcard = host
+            .strip_prefix("*.")
+            .is_some_and(|suffix| !suffix.is_empty());
+        if star_count > 0 && (star_count != 1 || !valid_wildcard) {
             return Err(format!(
                 "net.requests host {host:?} must use the '*.example.com' wildcard form"
             ));
@@ -810,6 +813,41 @@ fn is_supported_variant_encoding(s: &str) -> bool {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+#[cfg(test)]
+mod net_request_validation_tests {
+    use super::*;
+
+    fn request(host: &str) -> NetRequest {
+        NetRequest {
+            host: host.to_string(),
+            port: 443,
+            reason: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn net_request_host_validation_accepts_literal_and_single_wildcard() {
+        assert!(request("example.com").validate().is_ok());
+        assert!(request("*.example.com").validate().is_ok());
+    }
+
+    #[test]
+    fn net_request_host_validation_rejects_bare_wildcard_suffix() {
+        assert!(
+            request("*.").validate().is_err(),
+            "bare wildcard suffix must be rejected"
+        );
+    }
+
+    #[test]
+    fn net_request_host_validation_rejects_additional_wildcards() {
+        assert!(
+            request("*.*.example.com").validate().is_err(),
+            "additional wildcards must be rejected"
+        );
+    }
 }
 
 #[cfg(test)]
