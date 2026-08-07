@@ -32,6 +32,8 @@ redis = ["dep:compio-redis"]
 redb = ["dep:redb"]
 
 [dev-dependencies]
+# The metering assertions in the e2e suites read `UsageEvent` off a real Meter.
+zeroship-core = { workspace = true }
 # Per-test temp dir for the embedded redb backend's test suite (each test
 # opens a throwaway database file; no external server needed).
 tempfile = { workspace = true }
