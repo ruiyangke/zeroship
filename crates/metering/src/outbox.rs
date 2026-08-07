@@ -157,15 +157,24 @@ pub fn build_usage_outbox(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let safe: String = producer_source
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect();
-            PathBuf::from(format!(".zeroship/usage-outbox-{safe}.redb"))
-        });
+        .unwrap_or_else(|| default_wal_path(producer_source));
     let outbox = UsageOutbox::new(stream, topic, wal_path).map_err(|e| e.to_string())?;
     Ok(Some((outbox, config)))
+}
+
+/// Where the WAL lives when the caller sets no explicit path.
+///
+/// Extracted so the derivation is testable without building a transport or
+/// writing a redb file into the working directory. The choice of
+/// `producer_source` as the key is what decides whether a restarted process
+/// finds its predecessor's unpublished events - see the module docs and
+/// `restart_with_a_new_boot_source_gets_a_different_wal`.
+fn default_wal_path(producer_source: &str) -> PathBuf {
+    let safe: String = producer_source
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    PathBuf::from(format!(".zeroship/usage-outbox-{safe}.redb"))
 }
 
 #[derive(Debug, Clone)]
@@ -745,6 +754,45 @@ mod tests {
         async fn rewind(&self) -> Result<(), StreamError> {
             Ok(())
         }
+    }
+
+    /// Pins the defect: two boots of the SAME process on the SAME host get
+    /// different WAL files, so a restart never finds its predecessor's
+    /// unpublished events.
+    ///
+    /// This asserts what the code does today, NOT what it should do. It exists
+    /// because the defect was previously visible only in prose, and prose is
+    /// exactly what a green suite does not check. The other restart-shaped test
+    /// in this module hand-passes one path to both opens, so it proves the WAL
+    /// layer replays and says nothing about whether a restart reaches the same
+    /// file - its passing is why this went unnoticed.
+    ///
+    /// WHEN THE WAL IS MADE TO SURVIVE A RESTART, THIS TEST MUST GO RED AND BE
+    /// INVERTED. Its failure is the intended reminder, not a regression.
+    #[test]
+    fn restart_with_a_new_boot_source_gets_a_different_wal() {
+        // What crates/worker/src/main.rs builds: `{hostname}-{uuid-per-boot}`.
+        let boot_a = default_wal_path("worker-host-11111111111111111111111111111111");
+        let boot_b = default_wal_path("worker-host-22222222222222222222222222222222");
+        assert_ne!(
+            boot_a, boot_b,
+            "two boots on one host share a WAL path; if this now holds, the \
+             restart-loses-usage defect is fixed and this test should assert \
+             equality instead"
+        );
+
+        // The host part is not what separates them - only the per-boot suffix
+        // is, which is what makes this a restart problem rather than a
+        // multi-host one.
+        let gate = default_wal_path("gate-worker-host-11111111111111111111111111111111");
+        assert_ne!(gate, boot_a, "a gateway and a worker must not share a file");
+
+        // The same source is stable across calls, so the path is a pure
+        // function of the source and nothing else drifts.
+        assert_eq!(
+            boot_a,
+            default_wal_path("worker-host-11111111111111111111111111111111"),
+        );
     }
 
     #[test]
