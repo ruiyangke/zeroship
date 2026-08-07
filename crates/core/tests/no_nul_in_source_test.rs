@@ -3,11 +3,22 @@
 //! This is not about the compiler - it is about every grep-based sweep in this
 //! repository, and about the ones a reviewer runs by hand.
 //!
-//! The `grep` on this machine is ugrep, which treats a file containing a NUL
-//! byte as binary and REPORTS NO MATCHES IN IT. Not an error, not a warning to
-//! stderr: no output and exit 1, which is byte-identical to the file genuinely
-//! not containing the pattern. Reproduced directly - the same line matched in a
-//! clean file and not in a copy with one NUL appended.
+//! The `grep` on this machine is ugrep 7.5.0. Given a file containing a NUL
+//! byte it PRINTS NOTHING. Measured, both arms, on files made for the run:
+//!
+//!     grep -c needle clean.txt   stdout "1"    exit 0
+//!     grep -c needle nul.txt     stdout EMPTY  exit 1, stderr EMPTY
+//!
+//! Note what the second line is not. It does not print `0`, and it does not
+//! warn. An earlier version of this comment said ugrep "reports no matches",
+//! which is the outcome inferred rather than the output seen - the tool told us
+//! nothing and it got written down as having told us zero. Nothing distinguishes
+//! that from a file genuinely lacking the pattern except the exit code, and
+//! nobody reads the exit code of a grep they expect to succeed.
+//!
+//! The version matters and is why it is named. GNU grep does not behave this
+//! way: it prints "Binary file ... matches", which is loud enough to notice. The
+//! hazard this test guards is specific to the grep in this environment.
 //!
 //! That makes a NUL byte in a source file a silent hole in every audit. A sweep
 //! for dead citations, leftover process markers, or a dangerous call reports
