@@ -1243,11 +1243,7 @@ fn mysql_type_takes_collation(base: &str) -> bool {
 /// overwrite this with their own `ascii_bin` via value-format metadata.
 fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> Option<String> {
     let case_insensitive = matches!(f.case_sensitive, Some(false));
-    let base = if case_insensitive || f.unbounded_text {
-        "text".to_string()
-    } else {
-        mysql_ddl_type(data_type)
-    };
+    let base = mysql_base_column_type(f, data_type);
     if !mysql_type_takes_collation(&base) {
         return None;
     }
@@ -1257,6 +1253,87 @@ fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> O
         "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
     };
     Some(format!("{base} {collation}"))
+}
+
+/// The MySQL base column type a field renders as, before any collation suffix.
+///
+/// This is the ONE MySQL storage decision. The DDL renderer spells columns from
+/// it ([`mysql_type_override_with_collation`]), and the load-and-validate gate
+/// refuses MySQL-fatal column shapes from it
+/// (`crate::model::validate`), so a shape the renderer emits and a shape the
+/// validator judges can never drift apart. A second copy of this decision in the
+/// validator is what let `text NOT NULL DEFAULT 'new'` render and lint green.
+///
+/// A `caseSensitive: false` facet or an unbounded `t.text()` renders a bare
+/// `TEXT`; everything else takes the plain type map. Note that the result keys
+/// on RENDERED storage, not the authored type name: a bounded
+/// `t.string({ length })` marked case-insensitive lands on `text` here.
+pub(crate) fn mysql_base_column_type(f: &FieldDescriptor, data_type: &str) -> String {
+    if matches!(f.case_sensitive, Some(false)) || f.unbounded_text {
+        "text".to_string()
+    } else {
+        mysql_ddl_type(data_type)
+    }
+}
+
+/// The MySQL storage families whose DDL rules differ from every other column.
+///
+/// MySQL 8 refuses a bare literal `DEFAULT` on all four, and refuses a key over
+/// [`Self::Text`] / [`Self::Blob`] with no prefix length (error 1170). Classified
+/// from the spelling [`mysql_base_column_type`] produces, so the classification
+/// follows the renderer rather than the authored type name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MysqlStorage {
+    /// The `TEXT` family.
+    Text,
+    /// The `BLOB` family.
+    Blob,
+    /// `JSON`.
+    Json,
+    /// The spatial family.
+    Geometry,
+    /// Everything else: numeric, temporal, `ENUM`, `CHAR(n)`, `VARCHAR(n)`.
+    Other,
+}
+
+impl MysqlStorage {
+    /// Classify a MySQL base type spelling.
+    pub(crate) fn of(base: &str) -> Self {
+        let upper = base.trim().to_ascii_uppercase();
+        let head = upper
+            .split(|c: char| c == '(' || c.is_ascii_whitespace())
+            .next()
+            .unwrap_or("");
+        match head {
+            "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Self::Text,
+            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => Self::Blob,
+            "JSON" => Self::Json,
+            "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
+            | "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => Self::Geometry,
+            _ => Self::Other,
+        }
+    }
+
+    /// Whether MySQL refuses a bare literal `DEFAULT` on this storage.
+    pub(crate) const fn refuses_literal_default(self) -> bool {
+        matches!(self, Self::Text | Self::Blob | Self::Json | Self::Geometry)
+    }
+
+    /// Whether MySQL refuses a key over this storage with no prefix length.
+    pub(crate) const fn refuses_key_without_prefix_length(self) -> bool {
+        matches!(self, Self::Text | Self::Blob)
+    }
+
+    /// The human-facing name used in a refusal.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "TEXT",
+            Self::Blob => "BLOB",
+            Self::Json => "JSON",
+            Self::Geometry => "GEOMETRY",
+            Self::Other => "other",
+        }
+    }
 }
 
 fn mysql_ddl_type(data_type: &str) -> String {
@@ -2222,7 +2299,7 @@ fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
 /// unrecognised type to text" guarantee, an UNKNOWN token whose shared mapping is
 /// the `TEXT` fallback (and which is not one of the engine's own text-spelled
 /// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
-fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
+pub(crate) fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
     use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
 
     // A bare `literal` with no value is malformed — the SDK never emits it, and
@@ -2701,7 +2778,7 @@ fn generated_column_snapshot(
     })
 }
 
-fn column_snapshot_for_field(
+pub(crate) fn column_snapshot_for_field(
     f: &FieldDescriptor,
     dialect: SqlDialect,
     synth_json_defaults: bool,
@@ -9628,5 +9705,107 @@ mod numeric_default_literal_tests {
             None
         );
         assert_eq!(numeric_default_literal(&json!("now()")), None);
+    }
+}
+
+#[cfg(test)]
+mod mysql_storage_agreement_tests {
+    //! One predicate, two callers. [`mysql_base_column_type`] is the single
+    //! MySQL storage decision: the DDL renderer spells columns from it, and the
+    //! load-and-validate gate refuses MySQL-fatal shapes from it. A second copy
+    //! of that decision in the validator is what produced the defect this rule
+    //! closes, so the two are pinned to each other here.
+    //!
+    //! The table below includes the shape a name-keyed rule misses: a bounded
+    //! `t.string({ length })` marked case-insensitive renders a bare MySQL
+    //! `TEXT` while its authored name says "bounded".
+    use super::{
+        column_snapshot_for_field, column_type_for_render, field_data_type, mysql_base_column_type,
+        FieldDescriptor, MysqlStorage,
+    };
+    use crate::schema::query::SqlDialect;
+
+    fn field(name: &str, ty: &str) -> FieldDescriptor {
+        FieldDescriptor {
+            name: name.to_string(),
+            ty: ty.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn unbounded(name: &str) -> FieldDescriptor {
+        let mut f = field(name, "string");
+        f.unbounded_text = true;
+        f
+    }
+
+    fn bounded(name: &str, length: i64) -> FieldDescriptor {
+        let mut f = field(name, "string");
+        f.max_length = Some(length);
+        f
+    }
+
+    fn case_insensitive(mut f: FieldDescriptor) -> FieldDescriptor {
+        f.case_sensitive = Some(false);
+        f
+    }
+
+    fn fixed_char(name: &str, length: i64) -> FieldDescriptor {
+        let mut f = field(name, "char");
+        f.char_len = Some(length);
+        f
+    }
+
+    fn vector(name: &str, dims: i64) -> FieldDescriptor {
+        let mut f = field(name, "vector");
+        f.vector_dims = Some(dims);
+        f
+    }
+
+    #[test]
+    fn the_shared_predicate_and_the_renderer_agree_on_mysql_storage() {
+        let cases: Vec<(FieldDescriptor, MysqlStorage)> = vec![
+            (unbounded("body"), MysqlStorage::Text),
+            (case_insensitive(unbounded("body_ci")), MysqlStorage::Text),
+            // Authored name says "bounded", rendered storage is a bare TEXT.
+            (
+                case_insensitive(bounded("label_ci", 50)),
+                MysqlStorage::Text,
+            ),
+            (bounded("label", 50), MysqlStorage::Other),
+            (field("brand", "string"), MysqlStorage::Other),
+            (fixed_char("code", 10), MysqlStorage::Other),
+            (field("doc", "json"), MysqlStorage::Json),
+            (field("tags", "textArray"), MysqlStorage::Json),
+            (field("payload", "bytes"), MysqlStorage::Blob),
+            (vector("embedding", 3), MysqlStorage::Blob),
+            (field("where_at", "geoPoint"), MysqlStorage::Geometry),
+            (field("n", "int"), MysqlStorage::Other),
+            (field("big", "bigInt"), MysqlStorage::Other),
+            (field("flag", "boolean"), MysqlStorage::Other),
+            (field("at", "date"), MysqlStorage::Other),
+            (field("host", "inet"), MysqlStorage::Other),
+        ];
+
+        for (f, expected) in cases {
+            let data_type = field_data_type(&f)
+                .unwrap_or_else(|error| panic!("{:?} has a data type: {error}", f.name));
+            let base = mysql_base_column_type(&f, &data_type);
+            assert_eq!(
+                MysqlStorage::of(&base),
+                expected,
+                "{:?} renders {base:?}",
+                f.name
+            );
+
+            let snapshot = column_snapshot_for_field(&f, SqlDialect::Mysql, false)
+                .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
+            let rendered = column_type_for_render(&snapshot, SqlDialect::Mysql, false);
+            assert!(
+                rendered.starts_with(&base),
+                "{:?}: the renderer emits {rendered:?} but the shared predicate says {base:?}",
+                f.name
+            );
+        }
     }
 }

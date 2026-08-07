@@ -142,6 +142,9 @@ pub fn validate_ir_scoped(
     validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
     validate_authored_identifier_lengths(ir, target_dialect, ts_locations)?;
+    // Last, so a reference/foreign-key contract error still reports itself
+    // rather than being masked by the dialect-scoped storage refusal.
+    validate_mysql_key_storage(ir, target_dialect, ts_locations)?;
     Ok(())
 }
 
@@ -382,6 +385,10 @@ pub struct LogicalColumnContract {
     /// bytewise/default comparison behavior; `Some(false)` requests the
     /// portable case-insensitive text shape.
     pub case_sensitive: Option<bool>,
+    /// The legacy internal platform-ID prefix. Carried because it moves the
+    /// column's RENDERED MySQL storage off the unbounded-text arm and onto
+    /// `VARCHAR(191)`, which the MySQL key-prefix rule keys on.
+    pub id_prefix: Option<String>,
     /// Whether this authored column is independently eligible as the target of
     /// a single-column foreign key: a one-column primary key or UNIQUE key.
     /// Composite keys deliberately do not set this bit for their components.
@@ -573,6 +580,7 @@ fn declare_logical_column(
     ty: crate::model::ir::ColType,
     value_format: Option<crate::model::ir::ValueFormat>,
     case_sensitive: Option<bool>,
+    id_prefix: Option<String>,
     candidate_key_sources: CandidateKeySources,
 ) {
     declared.retain(|candidate, _| {
@@ -591,6 +599,7 @@ fn declare_logical_column(
             ty,
             value_format,
             case_sensitive,
+            id_prefix,
             single_column_reference_key: candidate_keys.contains(&vec![column.to_string()]),
             candidate_keys,
             candidate_key_sources,
@@ -1206,6 +1215,7 @@ fn validate_per_row_op(
                     column.ty.clone(),
                     column.value_format.clone(),
                     column.case_sensitive,
+                    column.id_prefix.clone(),
                     reference_keys.clone(),
                 );
             }
@@ -1229,6 +1239,9 @@ fn validate_per_row_op(
                 ty.clone(),
                 value_format.clone(),
                 *case_sensitive,
+                // An added column is never the system PK, so it carries no
+                // legacy platform-ID prefix (`Op::AddColumn` has no slot).
+                None,
                 CandidateKeySources::default(),
             );
         }
@@ -1254,6 +1267,7 @@ fn validate_per_row_op(
                 table,
                 column,
                 to_type.clone(),
+                None,
                 None,
                 None,
                 reference_keys,
@@ -1344,6 +1358,7 @@ fn validate_per_row_op(
                     table,
                     to,
                     ty.clone(),
+                    None,
                     None,
                     None,
                     CandidateKeySources::default(),
@@ -1630,6 +1645,7 @@ fn collect_logical_declarations_op(
                     column.ty.clone(),
                     column.value_format.clone(),
                     column.case_sensitive,
+                    column.id_prefix.clone(),
                     reference_keys.clone(),
                 );
             }
@@ -1653,6 +1669,9 @@ fn collect_logical_declarations_op(
                 ty.clone(),
                 value_format.clone(),
                 *case_sensitive,
+                // An added column is never the system PK, so it carries no
+                // legacy platform-ID prefix (`Op::AddColumn` has no slot).
+                None,
                 CandidateKeySources::default(),
             );
         }
@@ -1678,6 +1697,7 @@ fn collect_logical_declarations_op(
                 table,
                 column,
                 to_type.clone(),
+                None,
                 None,
                 None,
                 reference_keys,
@@ -1768,6 +1788,7 @@ fn collect_logical_declarations_op(
                     table,
                     to,
                     ty.clone(),
+                    None,
                     None,
                     None,
                     CandidateKeySources::default(),
@@ -2171,6 +2192,7 @@ fn validate_column_references_op(
                     ty: column.ty.clone(),
                     value_format: column.value_format.clone(),
                     case_sensitive: column.case_sensitive,
+                    id_prefix: column.id_prefix.clone(),
                     single_column_reference_key: false,
                     candidate_keys: BTreeSet::new(),
                     candidate_key_sources: CandidateKeySources::default(),
@@ -2221,6 +2243,218 @@ fn validate_column_references(
             MissingLogicalDeclaration::DeferToLower,
             CatalogFormatEvidence::none(),
         )?;
+    }
+    Ok(())
+}
+
+/// Refuse a key (index, primary key, or unique constraint) over a column whose
+/// RENDERED MySQL storage is `TEXT` or `BLOB` with no prefix length. MySQL
+/// answers that with error 1170, "BLOB/TEXT column used in key specification
+/// without a key length", and the IR has no prefix-length element to author, so
+/// there is no spelling of this key MySQL will take. The engine already applies
+/// the rule to its own journal tables, where every keyed text column is
+/// `VARCHAR(255)`; this extends it to user tables.
+///
+/// It lives at validate for the same reason the literal-default rule does: the
+/// renderer degrades every lowering error to a `-- [runtime-resolved]` comment,
+/// so only this gate turns `lint` red, and apply runs it too.
+///
+/// SCOPE: the referenced column must be declared in the SAME envelope, which is
+/// what the two-pass declaration walk sees. A column from an earlier ordered
+/// artifact or from an unmanaged table carries no type here and is left alone;
+/// closing that needs the lower-time seed or the live catalog.
+fn validate_mysql_key_storage(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    if !matches!(target_dialect, Dialect::Mysql) {
+        return Ok(());
+    }
+    let schema_mode = LogicalSchemaMode::Authored;
+    let mut declared = LogicalColumnContracts::new();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_mysql_key_storage_op(
+            op,
+            target_dialect,
+            op_index,
+            ts_locations,
+            &declared,
+            schema_mode,
+        )?;
+    }
+    Ok(())
+}
+
+/// The MySQL key-prefix rule for one op. Every keyed column position an op can
+/// carry is checked against the envelope's declarations.
+fn validate_mysql_key_storage_op(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{IndexMethod, IrConstraintKind, Op};
+
+    let check = |position: &str,
+                 schema: Option<&str>,
+                 table: &str,
+                 columns: &[String]|
+     -> Result<(), AuthoringError> {
+        for column in columns {
+            let Some(contract) =
+                logical_column_matches(declared, schema_mode, schema, table, column).pop()
+            else {
+                continue;
+            };
+            let Some(storage) = crate::render::lower::mysql_storage_for_column_facets(
+                &contract.ty,
+                contract.value_format.as_ref(),
+                contract.id_prefix.as_deref(),
+                contract.case_sensitive,
+            ) else {
+                continue;
+            };
+            if !storage.refuses_key_without_prefix_length() {
+                continue;
+            }
+            return Err(AuthoringError {
+                code: CODE_DIALECT_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_locations.get(op_index).cloned().flatten(),
+                dialect: target_dialect,
+                reason: format!(
+                    "{position} keys {table}.{column}, which renders as MySQL {} storage; \
+                     MySQL refuses a key over a TEXT or BLOB column with no prefix length",
+                    storage.label()
+                ),
+                suggested_fix: Some(
+                    "bound the column with t.string({ length }) so it renders VARCHAR, or use a \
+                     dialectal PostgreSQL/SQLite leg"
+                        .to_string(),
+                ),
+            });
+        }
+        Ok(())
+    };
+
+    // A full-text key is the one MySQL key kind a TEXT column takes whole, so a
+    // prefix length is neither required nor spellable there.
+    let keyed_columns =
+        |columns: &[crate::model::ir::IndexElement], using: Option<IndexMethod>| -> Vec<String> {
+            if matches!(using, Some(IndexMethod::Fts5)) {
+                return vec![];
+            }
+            columns
+                .iter()
+                .filter_map(|element| match element {
+                    crate::model::ir::IndexElement::Column { name, .. } => Some(name.clone()),
+                    crate::model::ir::IndexElement::Expr { .. } => None,
+                })
+                .collect()
+        };
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_mysql_key_storage_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                        declared,
+                        schema_mode,
+                    )?;
+                }
+            }
+        }
+        Op::CreateIndex {
+            table,
+            columns,
+            using,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            check(
+                "createIndex",
+                schema.as_deref(),
+                table,
+                &keyed_columns(columns, *using),
+            )?;
+        }
+        Op::CreateTable {
+            name,
+            columns,
+            primary_key,
+            constraints,
+            indexes,
+            schema,
+            ..
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            if let Some(pk) = primary_key {
+                check("createTable.primaryKey", schema.as_deref(), name, pk)?;
+            }
+            let column_uniques = columns
+                .iter()
+                .filter(|column| column.unique == Some(true))
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            check(
+                "createTable column unique",
+                schema.as_deref(),
+                name,
+                &column_uniques,
+            )?;
+            for index in indexes {
+                check(
+                    "createTable.indexes",
+                    schema.as_deref(),
+                    name,
+                    &keyed_columns(&index.columns, index.using),
+                )?;
+            }
+            for constraint in constraints {
+                if let IrConstraintKind::Unique { columns } = &constraint.kind {
+                    check(
+                        "createTable.constraints unique",
+                        schema.as_deref(),
+                        name,
+                        columns,
+                    )?;
+                }
+            }
+        }
+        Op::AddConstraint {
+            table,
+            constraint,
+            schema,
+            ..
+        } => {
+            if let IrConstraintKind::Unique { columns } = &constraint.kind {
+                let schema = schema_mode.resolve(schema.as_deref());
+                check("addConstraint unique", schema.as_deref(), table, columns)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -6094,6 +6328,8 @@ fn validate_column_facets(
         )?;
     }
 
+    validate_mysql_literal_default_storage(col, target_dialect, op_index, ts_location)?;
+
     if matches!(target_dialect, Dialect::Postgres)
         && matches!(col.generated.as_ref(), Some(generated) if !generated.stored)
     {
@@ -6234,6 +6470,78 @@ fn validate_column_facets(
     }
 
     Ok(())
+}
+
+/// Refuse a BARE LITERAL `DEFAULT` on a column whose RENDERED MySQL storage is
+/// `TEXT`/`BLOB`/`JSON`/`GEOMETRY`. MySQL 8 rejects that at DDL time
+/// unconditionally, so `t.text().notNull().default("new")` renders SQL the server
+/// will not take.
+///
+/// The refusal lives here rather than in the renderer because `render_ir_ops`
+/// catches every lowering error and degrades it to a `-- [runtime-resolved]`
+/// comment: a renderer refusal never surfaces and `lint` still prints ok. This
+/// gate feeds lint's verdict directly, and apply runs it too, so one placement
+/// closes both. It mirrors the MySQL deferrable-foreign-key refusal above,
+/// including its "use a dialectal leg" remedy.
+///
+/// Not every default is invalid. MySQL permits an EXPRESSION default on those
+/// storages, and this engine already renders bytes defaults as `(X'..')` and JSON
+/// container/value defaults as `(JSON_OBJECT())` / `(CAST(.. AS JSON))`. The
+/// spelling is taken from the renderer itself
+/// ([`crate::render::lower::mysql_rendered_column_default`]) rather than inferred
+/// from the IR variant, so the two cannot disagree about which form a default
+/// takes; a leading `(` is the parenthesized-expression form MySQL accepts.
+///
+/// The storage comes from the ONE shared predicate the DDL renderer spells
+/// columns from, keyed on RENDERED storage rather than the authored type name: a
+/// `caseSensitive: false` text column renders a bare `TEXT`, while a `t.text()`
+/// carrying a value format or a legacy id prefix renders `VARCHAR(191)` and takes
+/// a literal default happily.
+fn validate_mysql_literal_default_storage(
+    col: &crate::model::ir::IrColumn,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    if !matches!(target_dialect, Dialect::Mysql) || col.default.is_none() {
+        return Ok(());
+    }
+    let Some(storage) = crate::render::lower::mysql_storage_for_column_facets(
+        &col.ty,
+        col.value_format.as_ref(),
+        col.id_prefix.as_deref(),
+        col.case_sensitive,
+    ) else {
+        return Ok(());
+    };
+    if !storage.refuses_literal_default() {
+        return Ok(());
+    }
+    let Some(rendered) = crate::render::lower::mysql_rendered_column_default(col) else {
+        return Ok(());
+    };
+    if rendered.trim_start().starts_with('(') {
+        return Ok(());
+    }
+
+    Err(AuthoringError {
+        code: CODE_DIALECT_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "column {:?} declares the literal default {rendered} but renders as MySQL {} \
+             storage; MySQL refuses a literal DEFAULT on TEXT, BLOB, JSON, and GEOMETRY columns",
+            col.name,
+            storage.label()
+        ),
+        suggested_fix: Some(
+            "drop the default for MySQL, bound the column with t.string({ length }) so it renders \
+             VARCHAR, or use a dialectal PostgreSQL/SQLite leg"
+                .to_string(),
+        ),
+    })
 }
 
 fn validate_col_type_position(

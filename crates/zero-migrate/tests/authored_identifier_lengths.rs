@@ -86,10 +86,13 @@ fn multi_byte_name() -> String {
     format!("c{}", "\u{e9}".repeat(32))
 }
 
+// Bounded rather than `t.text()` so the column is keyable on every dialect:
+// MySQL refuses a key over a bare TEXT column with no prefix length, and these
+// fixtures key `c` from a primary key, an index, and a unique constraint.
 fn column() -> IrColumn {
     IrColumn {
         name: "c".into(),
-        ty: ColType::Text,
+        ty: ColType::String { length: 64 },
         nullable: Some(false),
         default: None,
         unique: None,

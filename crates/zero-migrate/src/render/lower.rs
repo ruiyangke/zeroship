@@ -8924,6 +8924,71 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
     ir_column_to_field(c)
 }
 
+/// The MySQL storage the declared facets of an authored column render into.
+///
+/// The IR-side entry to the ONE storage decision
+/// ([`crate::render::declarative::mysql_base_column_type`]): the facets are
+/// routed through the SAME [`ir_column_to_field`] translation the lower uses, so
+/// the `unbounded_text` marker and the type map are computed exactly once and
+/// the load-and-validate gate can never disagree with the DDL the renderer will
+/// emit. `None` for a column whose type token has no data type at all, which the
+/// type-position validation refuses on its own.
+///
+/// Only the four facets that move the storage are taken; nullability, defaults,
+/// keys, and generation do not change the rendered type.
+pub(crate) fn mysql_storage_for_column_facets(
+    ty: &ColType,
+    value_format: Option<&crate::model::ir::ValueFormat>,
+    id_prefix: Option<&str>,
+    case_sensitive: Option<bool>,
+) -> Option<crate::render::declarative::MysqlStorage> {
+    let column = IrColumn {
+        name: String::new(),
+        ty: ty.clone(),
+        nullable: None,
+        default: None,
+        unique: None,
+        value_format: value_format.cloned(),
+        references: None,
+        id_prefix: id_prefix.map(str::to_string),
+        vector_metric: None,
+        case_sensitive,
+        mask: None,
+        generated: None,
+        identity: None,
+    };
+    let field = ir_column_to_field(&column);
+    let data_type = crate::render::declarative::field_data_type(&field).ok()?;
+    Some(crate::render::declarative::MysqlStorage::of(
+        &crate::render::declarative::mysql_base_column_type(&field, &data_type),
+    ))
+}
+
+/// The `DEFAULT` clause body an authored column renders on MySQL, or `None` when
+/// it renders no `DEFAULT` at all.
+///
+/// Built from the SAME descriptor snapshot plus structured-default overlay the
+/// `createTable` lower runs, so the load-and-validate gate reads the exact
+/// spelling the DDL will carry, including the parenthesized forms MySQL accepts
+/// on `TEXT`/`BLOB`/`JSON` storage (`(X'..')`, `(JSON_OBJECT())`,
+/// `(CAST(.. AS JSON))`) and the defaults the descriptor bridge drops entirely.
+pub(crate) fn mysql_rendered_column_default(c: &IrColumn) -> Option<String> {
+    let field = ir_column_to_field(c);
+    let mut snapshot =
+        crate::render::declarative::column_snapshot_for_field(&field, SqlDialect::Mysql, false)
+            .ok()?;
+    apply_structured_default_to_column(
+        "",
+        &c.name,
+        &c.ty,
+        c.default.as_ref(),
+        &mut snapshot,
+        SqlDialect::Mysql,
+    )
+    .ok()?;
+    snapshot.default
+}
+
 /// The `wraps` token (`"string"` | `"number"` | `"bytes"`) an encrypted column's
 /// inner [`ColType`] maps to — the SDK's `t.encrypted({ wraps })` domain (only those
 /// three are admissible; everything else folds to `"string"`, the kernel default).

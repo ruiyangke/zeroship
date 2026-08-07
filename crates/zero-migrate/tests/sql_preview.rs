@@ -676,7 +676,7 @@ fn mysql_constraint_requoting_escapes_hostile_identifiers() {
   "name": "hostile",
   "ops": [
     {"op":"createTable","name":"t","columns":[
-      {"name":"COLNAME","type":"text"}
+      {"name":"COLNAME","type":{"string":{"length":64}}}
     ],"constraints":[
       {"name":"u1","kind":{"kind":"unique","columns":["COLNAME"]}}
     ]}
