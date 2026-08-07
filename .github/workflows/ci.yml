@@ -18,6 +18,33 @@ jobs:
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
       - run: cargo test --workspace --no-fail-fast
+      # --no-fail-fast fixes the STOPPING; this fixes the COUNTING. Nothing
+      # anywhere records how many test targets there are supposed to be, so a
+      # suite that quietly stops being built - a new `required-features` gate, a
+      # dropped `[[test]]`, a crate removed from the workspace - produces a
+      # smaller run, and a smaller run is indistinguishable from a smaller
+      # project. Count the built test executables and fail if the number falls.
+      #
+      # Deliberately a floor, not an equality: adding targets needs no edit,
+      # removing one needs a deliberate edit here. That asymmetry is the point -
+      # losing coverage should cost a reviewed change, gaining it should be free.
+      # It catches disappearance, not substitution.
+      - name: Test-target enumeration floor
+        run: |
+          count=$(cargo test --workspace --no-run --message-format=json 2>/dev/null \
+            | grep -o '"executable":"[^"]*"' \
+            | grep -v '"executable":null' \
+            | sort -u | wc -l)
+          # Floor set below a local measurement of 306 because the count is
+          # environment-sensitive (feature resolution, optional deps) and the CI
+          # number has never been observed. The step prints the real count: once a
+          # run has shown it, raise this to that number to make the check tight.
+          floor=290
+          echo "test targets built: $count (floor $floor)"
+          if [ "$count" -lt "$floor" ]; then
+            echo "::error::built test targets ($count) fell below the floor ($floor); a suite stopped being built"
+            exit 1
+          fi
       # `cargo test --workspace` SKIPS any target whose `required-features` are
       # not enabled, and skips it silently - the target is never built, so it
       # contributes no test count and no failure. plugin-db puts three suites
@@ -144,7 +171,7 @@ jobs:
   # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`
   # `@ts-expect-error` structural-safety / names-stay-strings suite) and its
   # node:test suite, so the tsc-as-assertion structural proof can no longer
-  # silently rot — the assertion is now gated, not human-run-only.
+  # silently rot - the assertion is now gated, not human-run-only.
   sdk:
     runs-on: ubuntu-latest
     steps:
