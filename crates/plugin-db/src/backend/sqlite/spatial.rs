@@ -1,7 +1,7 @@
 //! SQLite spatial helpers — haversine within-radius math + `geoPoint`
 //! BLOB packing.
 //!
-//! See `docs/proposals/p4-search-implementation-plan.md` §4.3 + §8.
+//! See `docs/archive/p4-search-implementation-plan.md` §4.3 + §8.
 //! This module owns the cryptography-of-math: the
 //! haversine distance function (great-circle metres on a spherical
 //! Earth approximation), the `(lat, lng)` ↔ `BLOB` round-trip

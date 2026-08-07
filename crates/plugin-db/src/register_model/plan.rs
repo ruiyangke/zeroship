@@ -37,7 +37,7 @@ pub(crate) struct Plan {
 /// Plan only does live-schema introspection + row-count estimation —
 /// the carved capability trait expresses exactly that. See
 /// `docs/archive/p0-implementation-plan.md` §"PR 2" and
-/// `docs/proposals/db-system-design.md` §7.
+/// `docs/archive/db-system-design.md` §7.
 pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema> + DialectBuilder>(
     backend: &B,
     ctx: &RegisterContext,

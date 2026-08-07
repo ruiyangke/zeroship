@@ -11,7 +11,7 @@
 //! That shared need is *why* this is a leaf crate rather than two files
 //! moved into the engine: the data plane and the engine both depend on the
 //! schema-description layer, so it must sit below both. See
-//! `docs/proposals/2026-06-18-schema-authority-drizzle-model-design.md` §5.
+//! `docs/archive/proposals/2026-06-18-schema-authority-drizzle-model-design.md` §5.
 //!
 //! ## What lives here (the *describe/shape* layer)
 //!

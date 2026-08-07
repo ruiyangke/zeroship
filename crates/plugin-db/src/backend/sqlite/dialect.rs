@@ -2,7 +2,7 @@
 //!
 //! Fills in the six hooks declared by
 //! [`crate::backend::DialectBuilder`] (see
-//! `docs/proposals/p1-sqlite-implementation-plan.md` §5 for the hook
+//! `docs/archive/p1-sqlite-implementation-plan.md` §5 for the hook
 //! set rationale and §7.2 of the design doc for the engine-divergence
 //! table). The shape is a Zero-Sized Type — every hook is a pure
 //! function of its inputs, so there is no per-instance state.

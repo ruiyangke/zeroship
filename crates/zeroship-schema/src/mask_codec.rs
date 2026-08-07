@@ -3,7 +3,7 @@
 //! *reads* it back at runtime to drive the mask read-pass).
 //!
 //! Relocated out of `zeroship_plugin_db::crud::mask_backfill` per the
-//! schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-model-design.md`
+//! schema-authority split (`docs/archive/proposals/2026-06-18-schema-authority-drizzle-model-design.md`
 //! §5): the *codec* (build/parse the `__zsmask:` sentinel string) is a
 //! schema-shape concern and lives here; the backfill *runner*
 //! (`run_mask_backfill` / `run_mask_rewrite`, which execute UPDATE

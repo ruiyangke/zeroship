@@ -770,7 +770,7 @@ fn create_unique_index_fails_on_duplicate_with_envelope() {
             .await
             .expect_err("UNIQUE index on duplicate column values must reject");
 
-        // Wire-compatible envelope per `docs/proposals/p1-sqlite-implementation-plan.md`
+        // Wire-compatible envelope per `docs/archive/p1-sqlite-implementation-plan.md`
         // §3.5: code = "validation_refused" with structured `code:
         // "unique_violation"` (via the inner `constraint: "unique"`
         // field — the PG arm's envelope shape) inside the JSON body.
@@ -2457,7 +2457,7 @@ fn session_canonical_payload_byte_pin() {
 // integration tests.
 //
 // Supersedes the earlier pure-Rust flat scan tests at the same point
-// in this file (see `docs/proposals/p4-search-implementation-plan.md`
+// in this file (see `docs/archive/p4-search-implementation-plan.md`
 // §10 2026-05-24 reassessment). The membership-set assertions are
 // preserved byte-for-byte; only the underlying storage layer changed.
 //

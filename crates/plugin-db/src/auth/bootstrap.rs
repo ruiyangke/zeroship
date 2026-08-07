@@ -4,7 +4,7 @@
 //!
 //! Part of the always-compiled `auth/*` subtree — see the `lib.rs` mod
 //! declarations and the converged design at
-//! `docs/proposals/db-system-design.md` §12.
+//! `docs/archive/db-system-design.md` §12.
 //!
 //! Designed so re-running `ensure_admin_schema` on a fully-set-up
 //! cluster is a cheap no-op: every `CREATE ROLE` is wrapped in a

@@ -10,7 +10,7 @@
 //! - **Write path** ([`encrypt_row_on_write`]): serialise the typed
 //!   plaintext (per `wraps`), build the canonical AAD (Camp A — row_pk
 //!   bound for Randomised, omitted for Deterministic; see
-//!   `docs/proposals/p5-encryption-backup-implementation-plan.md` §13),
+//!   `docs/archive/p5-encryption-backup-implementation-plan.md` §13),
 //!   call `EncryptedColumn::encrypt`, swap the JSON Value to a base64
 //!   string of the ciphertext blob. The SQL build layer then recognises
 //!   the column and emits `decode($N, 'base64')::bytea` at the

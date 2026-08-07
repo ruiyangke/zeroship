@@ -113,7 +113,7 @@ pub(crate) mod v8_bridge;
 // compiled (not gated to `pg` / `sqlite`) because both backends
 // consume it. The pure-Rust crypto module + trait surface underpin
 // the backend impls and CRUD call sites for both PG and SQLite. See
-// `docs/proposals/p5-encryption-backup-implementation-plan.md` §9.
+// `docs/archive/p5-encryption-backup-implementation-plan.md` §9.
 //
 // Visibility: crate-private in release builds; `pub` under
 // `test-helpers` so `tests/integration.rs` can reach

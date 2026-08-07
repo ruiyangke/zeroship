@@ -1,7 +1,7 @@
 //! SQLite vector helpers — `sqlite-vec` `vec0` virtual-table SQL
 //! composition + base-table mirror triggers.
 //!
-//! This implementation (`docs/proposals/p4-search-implementation-plan.md` §10,
+//! This implementation (`docs/archive/p4-search-implementation-plan.md` §10,
 //! 2026-05-24 reassessment) swapped from a pure-Rust flat scan
 //! shipped previously. The `sqlite-vec` Rust crate
 //! compiles the C `vec0` extension statically

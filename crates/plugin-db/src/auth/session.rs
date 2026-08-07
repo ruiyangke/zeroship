@@ -2,7 +2,7 @@
 //! anchor.
 //!
 //! Part of the always-compiled `auth/*` subtree. See
-//! `docs/proposals/db-system-design.md` §12 for the threat-model
+//! `docs/archive/db-system-design.md` §12 for the threat-model
 //! discussion of the PG-side SECURITY DEFINER design vs the SQLite-side
 //! Rust HMAC alternative.
 //!

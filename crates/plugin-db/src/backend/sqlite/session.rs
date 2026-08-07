@@ -9,7 +9,7 @@
 //! design §18 Q8's "1 writer + 4 readers" split is not yet
 //! implemented).
 //!
-//! **Bootstrap PRAGMAs** (`docs/proposals/p1-sqlite-implementation-plan.md`
+//! **Bootstrap PRAGMAs** (`docs/archive/p1-sqlite-implementation-plan.md`
 //! §2.2 + design §6.2.1): on `open` the worker runs
 //!
 //! ```sql

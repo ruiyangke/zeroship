@@ -18,7 +18,7 @@
 //! [`decrypt`] is mode-agnostic: the wire format carries the nonce,
 //! and AES-GCM verifies the tag regardless of how the nonce was
 //! produced. The caller still has to reconstruct the right AAD —
-//! see `docs/proposals/p5-encryption-backup-implementation-plan.md`
+//! see `docs/archive/p5-encryption-backup-implementation-plan.md`
 //! §13 for the (mode, AAD-shape) pairing.
 
 use aes_gcm::aead::{Aead, OsRng, Payload};
