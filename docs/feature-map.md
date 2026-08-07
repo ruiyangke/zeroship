@@ -871,7 +871,7 @@ snapshots are shared across threads via a process-wide RwLock.
 | Config validation dry-run | 🟢 | --check-config [--format] | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
 | Secret reference resolution | 🟢 | CONTROL_KEY / WORKER_KEY / ... | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | urn:zeroship:env/file; [secrets] overlay. |
 | Unix domain socket listener | 🟢 | --socket / WORKER_SOCKET | `crates/worker/src/main.rs` | — | — | Stale socket removed at startup. |
-| Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/worker/src/main.rs` | — | — | 0 = wait forever. |
+| Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
 | mimalloc global allocator | 🟢 | internal | `crates/worker/src/main.rs` | — | — | #[global_allocator]. |
 | Deleted-app cleanup | 🟢 | internal | `crates/worker/src/sync.rs` | — | — | reconcile evict + version-poller env GC. |
 | LoadedMeta tracking | 🟢 | internal | `crates/worker/src/cache.rs` | — | — | deploy hash + env version per isolate. |
