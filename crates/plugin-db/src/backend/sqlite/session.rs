@@ -66,9 +66,9 @@ use crate::error::DbError;
 /// is `int (*)(sqlite3*, char**, const sqlite3_api_routines*)` and we
 /// cast `sqlite3_vec_init` (whose signature matches the C contract per
 /// the upstream `sqlite-vec` crate) through `std::mem::transmute`. The
-/// cast is documented in the upstream Rust example at
+/// cast is documented in the upstream `sqlite-vec` crate's own
 /// `examples/simple-rust/demo.rs` and is the canonical integration
-/// pattern.
+/// pattern. (That path is in the sqlite-vec repository, not this one.)
 static VEC_INIT: Once = Once::new();
 
 #[allow(unsafe_code)]
@@ -311,8 +311,9 @@ impl SqliteSession {
     ) -> Result<Self, DbError> {
         // Bound the queue at 64 in-flight commands. The single-writer
         // actor means there is no parallelism downstream; a bigger
-        // queue just delays backpressure. 64 is the same default
-        // `crates/sandbox/src/db.rs` uses for its worker queue.
+        // queue just delays backpressure without buying any
+        // throughput, so the depth is picked to surface overload
+        // early rather than to absorb it.
         let (tx, rx) = flume::bounded::<Command>(64);
 
         // One-shot startup channel so the spawning task surfaces

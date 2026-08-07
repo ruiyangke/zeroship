@@ -673,7 +673,7 @@ export function streamCall<TOut = unknown>(
 // ── Subscriptions ────────────────────────────────────────────────────────
 //
 // Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and the
-// runtime's `_zsAcceptSubscription` (`crates/runtime/src/init.rs`).
+// runtime's `_zsAcceptSubscription` (`crates/runtime/src/core/init.rs`).
 //
 //   GET wss://.../__zeroship/v1/<id>
 //   Sec-WebSocket-Protocol: zs.v1

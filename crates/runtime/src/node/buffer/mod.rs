@@ -29,9 +29,9 @@
 //! ## Encodings
 //!
 //! `utf8` (default), `utf-8`, `utf16le` / `utf-16le` / `ucs2` / `ucs-2`,
-//! `latin1` / `binary`, `ascii`, `hex`, `base64`, `base64url`. Mirrors
-//! `node/crypto/encoding.rs` — same alias table, same case-insensitive
-//! match.
+//! `latin1` / `binary`, `ascii`, `hex`, `base64`, `base64url`. The alias
+//! table and its case-insensitive match live in
+//! `node/buffer/encoding.rs`.
 //!
 //! ## Deferred
 //!
@@ -175,7 +175,7 @@ pub fn install_global<'s>(
 /// Encoding semantics: utf8 (default), utf-8 (alias), utf16le / utf-16le
 /// / ucs2 / ucs-2, latin1 / binary, ascii (high bit stripped per Node),
 /// hex (tolerant of odd length / whitespace), base64 (forgiving),
-/// base64url. Matches `node/crypto/encoding.rs`.
+/// base64url. Matches the alias table in `node/buffer/encoding.rs`.
 ///
 /// Read*/write* numerics are generated via a tiny in-script DataView
 /// loop so the file stays under 500 lines without macro pyrotechnics.

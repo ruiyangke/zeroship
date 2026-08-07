@@ -12,7 +12,7 @@
  *   handle.unsubscribe();   // or controller.abort()
  *
  * Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and
- * `crates/runtime/src/init.rs::_zsAcceptSubscription`.
+ * `crates/runtime/src/core/init.rs::_zsAcceptSubscription`.
  */
 
 import { test, describe } from "node:test";

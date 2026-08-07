@@ -1,9 +1,9 @@
 //! Native URL + URLSearchParams per WHATWG URL Living Standard
 //! (https://url.spec.whatwg.org/).
 //!
-//! Replaces `crates/runtime/src/embed/url.js` (127 LOC of JS polyfill on
-//! top of the `__urlParse` callback) with two `#[v8_class]` types backed
-//! by the same `ada-url::Url` parser.
+//! Replaces a 127-LOC JS polyfill layered on the `__urlParse` callback
+//! (since deleted) with two `#[v8_class]` types backed by the same
+//! `ada-url::Url` parser.
 //!
 //! The polyfill had three main spec gaps that motivate this rewrite:
 //!

@@ -7,8 +7,9 @@
 //! threads — which means a `Pool` cannot live in `GateState`.
 //!
 //! We solve this the same way the sandbox controller handles its
-//! per-compio-worker pool (`crates/sandbox/src/db.rs`): the shared state
-//! carries only the `Send + Sync` connection *parameters* ([`DbConfig`]),
+//! per-compio-worker pool (that service now lives in its own repository,
+//! so the code is not readable from this tree): the shared state carries
+//! only the `Send + Sync` connection *parameters* ([`DbConfig`]),
 //! and the actual [`Pool`] is built lazily **per worker thread**, wrapped
 //! in an [`Rc`], and stashed in a thread-local. The first DB touch on a
 //! given thread opens the pool's warm connections and starts its
@@ -71,7 +72,7 @@ thread_local! {
     /// before either installs — drops cleanly instead of being orphaned
     /// for the process lifetime. The DSN tiebreaker lets a test fixture
     /// that rotates DSNs mid-process evict a stale pool rather than
-    /// return it. Mirrors `crates/sandbox/src/db.rs`.
+    /// return it.
     static POOL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
 }
 
@@ -116,10 +117,9 @@ fn install_pool(dsn: String, pool: Rc<Pool>) -> Rc<Pool> {
 /// and keep the `Rc<Pool>` in scope for as long as the `PooledClient`
 /// borrows it.
 ///
-/// The `Rc<Pool>` shape (no leak-to-`'static`) mirrors the sandbox
-/// controller (`crates/sandbox/src/db.rs`): a race-loser pool drops
-/// cleanly, and the pool's housekeeper handles idle eviction /
-/// `max_lifetime` rotation / `min_idle` refill.
+/// The `Rc<Pool>` shape (no leak-to-`'static`) is what makes the lifecycle
+/// safe: a race-loser pool drops cleanly, and the pool's housekeeper
+/// handles idle eviction / `max_lifetime` rotation / `min_idle` refill.
 ///
 /// # Errors
 ///
@@ -135,7 +135,7 @@ pub async fn checkout(cfg: &DbConfig) -> Result<Rc<Pool>, Error> {
     // `min_idle` is refilled. Without the housekeeper the pool retains
     // connections unbounded up to `max_size` per worker and never detects
     // PG-side idle timeouts / failover until the next checkout — see
-    // `crates/compio-postgres/src/pool.rs` ("Without the housekeeper, the
+    // `libs/compio-postgres/src/pool.rs` ("Without the housekeeper, the
     // pool still works but connections are never proactively evicted").
     // Called on the locally-built pool before `install_pool` so the
     // (rare) race-loser pool also gets a housekeeper that self-terminates

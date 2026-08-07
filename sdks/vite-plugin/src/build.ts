@@ -196,7 +196,7 @@ function getCompilerId(): string {
  * Strip the leading `"use server"` directive from the rolled-up SSR
  * bundle. The Node-globals shim (`Buffer`, `setImmediate`, etc.) is
  * installed on every isolate by the Rust runtime before any user
- * module evaluates (see `crates/runtime/src/embed/node-globals.js`),
+ * module evaluates (see `crates/runtime/src/core/init.rs`),
  * so the vite-plugin no longer needs to prepend a prelude.
  *
  * The directive itself is just a string expression at the top of the
@@ -461,7 +461,7 @@ export function buildPlugin(
     // expression that is a no-op but pollutes the output). Node-shaped
     // globals (process, Buffer, setImmediate, etc.) are installed by
     // the Rust runtime on every isolate before any user module
-    // evaluates — see `crates/runtime/src/embed/node-globals.js`.
+    // evaluates — see `crates/runtime/src/core/init.rs`.
     const bundlePath = resolve(root, "dist/server/index.js");
     try {
       const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));

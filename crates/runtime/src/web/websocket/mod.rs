@@ -200,7 +200,8 @@ pub struct WebSocketImpl {
     ///     dispatch (added in step 5);
     ///   - the WebSocketPair peer-link map (step 6);
     ///   - the gateway's existing 101-response-extraction path
-    ///     (`crates/runtime/src/http.rs:171-179`).
+    ///     (`crates/runtime/src/transport/handler.rs`, the status-101 +
+    ///     `webSocket` property arm).
     pub ws_id: Cell<u32>,
 
     /// Cached V8 handles for fast event dispatch. Lazy.

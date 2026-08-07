@@ -141,7 +141,7 @@ pub async fn tick(dsn: &str) -> Result<()> {
 /// transaction: it auto-reverts at COMMIT/ROLLBACK (and, since the connection
 /// is dedicated and dropped after the tick, nothing else ever observes it).
 /// See the `zeroship.audit_events_block_tamper()` trigger in
-/// `db/changelog/changesets/0002_auth.sql`.
+/// `db/migrations-ts/20260702000700_functions_triggers_comments.ts`.
 ///
 /// Exposed (under `#[doc(hidden)]`) so the live-PG regression test can drive
 /// the REAL sweep on a connection it owns and then assert the privileged GUC

@@ -1,12 +1,12 @@
 // The engine-embedded recorder bundle entry (DSL redesign S0.5).
 //
 // This module is compiled by `tsup` into ONE self-contained ESM artifact
-// (`dist/embedded-recorder.js`) that the `zeroship-migrate` crate `include_str!`s
-// as the `@zeroship/migrate` module inside its V8 recorder isolate
-// (`crates/zeroship-migrate/src/frontend/embedding.rs`). It replaces the former
-// hand-kept twin `crates/zeroship-migrate/src/frontend/migrate_ops.js`: the SDK
-// recorder (`src/ops.ts`) and the engine-embedded recorder are now
-// the SAME build output (design P7 — "one compiled recorder artifact").
+// (`dist/embedded-recorder.js`) — the bundle a V8 recorder isolate maps as the
+// `@zeroship/migrate` module when it authors an IR envelope from a creator
+// migration. It replaces a hand-kept twin that used to be maintained separately
+// inside the engine's Rust recorder front-end: the SDK recorder (`src/ops.ts`)
+// and the engine-embedded recorder are now the SAME build output (design P7 —
+// "one compiled recorder artifact"), so there is no second copy to drift.
 //
 // Why a dedicated entry (not the package `.` entry `index.ts`): the engine needs
 // the FULL recorder surface — the internal recorder seam (`__begin`/`__drain`),

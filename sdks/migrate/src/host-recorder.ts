@@ -1,7 +1,7 @@
 // Host recorder (design §D.1) — the pure-JS half of authoring a `.ir.json`.
 //
-// The in-Rust V8 recorder (`crates/zeroship-migrate/src/frontend/op_recorder.js`)
-// imports a creator migration + `{ __begin, __drain }` from `@zeroship/migrate`,
+// The in-V8 recorder glue the engine drives imports a creator migration plus
+// `{ __begin, __drain }` from `@zeroship/migrate`,
 // runs `up()` under a fresh ambient recorder, drains the op list, and emits the
 // `{ ir_version, name, ops }` ENVELOPE for the Rust host to read back. The in-V8
 // isolate was only ever a *sandbox* for untrusted `up()`, never an authoring
@@ -18,8 +18,8 @@
 // `CURRENT_IR_VERSION` is a SINGLE SOURCE OF TRUTH across the boundary (§D.1 point
 // 2): the addon's `irVersion()` is the floor the Rust core validates against; this
 // module reads it from the addon at envelope-build time rather than hardcoding `6`
-// (which both `op_recorder.js` and `model/ir.rs` did). A host that authors without a
-// loaded addon may pass the version explicitly.
+// (which both the in-V8 recorder and the Rust IR model used to do). A host that
+// authors without a loaded addon may pass the version explicitly.
 
 // FRAMEWORK-INTERNAL recorder seam: import `__begin`/`__drain` DIRECTLY from the
 // recorder module (`./ops.js`) — NOT re-exported through the public `.` entry

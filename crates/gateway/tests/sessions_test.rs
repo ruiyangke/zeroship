@@ -1,7 +1,7 @@
 //! Live-PG smoke test for `gateway::sessions`.
 //!
-//! Skipped silently when `AUTH_DB_URL` is unset (same convention as
-//! `crates/auth/tests/migrations_smoke.rs`).
+//! Skipped silently when `AUTH_DB_URL` is unset (the same convention every
+//! live-PG test under `crates/auth/tests/` uses).
 //!
 //! Runs the full CRUD round-trip: create → validate (positive) →
 //! validate w/ wrong `app_id` (negative) → revoke (per-app) → validate

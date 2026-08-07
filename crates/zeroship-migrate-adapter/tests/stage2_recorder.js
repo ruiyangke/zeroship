@@ -2,8 +2,8 @@
 // recorder inside zeroship-runtime's V8 isolate to emit an `ir_version:1` IR
 // envelope.
 //
-// This is the v1 twin of the in-tree `crates/zeroship-migrate/src/frontend/
-// op_recorder.js` (which authors v6): the mechanism is identical — import the
+// This is the v1 twin of the v6 recorder the monorepo used to embed (that
+// front-end has since been retired): the mechanism is identical — import the
 // creator migration under the fixed specifier `__migration__.js`, import the
 // recorder seam `{ __begin, __drain }` from `@zeroship/migrate`, run `up()` under
 // a fresh ambient recorder, drain the op list, and emit the envelope on a global

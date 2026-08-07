@@ -3,7 +3,7 @@
 // Virtual `zeroship` module resolver for the server (zeroship) environment.
 //
 // The kernel synthesizes a real `zeroship` module in the V8 isolate
-// (see ZEROSHIP_MODULE_JS in crates/runtime/src/init.rs) that wires
+// (see ZEROSHIP_MODULE_JS in crates/runtime/src/core/init.rs) that wires
 // env/waitUntil/getRequest to the native `__zs_env` / `__zs_wait_until`
 // / `__zs_get_request` callbacks. That module doesn't go through Node's
 // resolver, so in dev mode Vite falls back to the node `zeroship-stub`

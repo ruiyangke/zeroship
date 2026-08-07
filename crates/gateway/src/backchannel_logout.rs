@@ -8,8 +8,8 @@
 //! The endpoint is registered at the gateway-host level (not per
 //! creator-app subdomain) because the URI must be stable for every
 //! `backchannel_logout_uri` registered with op. In production that
-//! lives at `https://api.zeroship.ai/oidc/backchannel-logout` — see
-//! `ops/auth-clients.example.toml`.
+//! lives at `https://api.zeroship.ai/oidc/backchannel-logout`, and every
+//! registered client must carry exactly that URI.
 //!
 //! Response contract:
 //! - 200 + `cache-control: no-store` on success or already-processed replay

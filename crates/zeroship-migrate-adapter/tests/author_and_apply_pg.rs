@@ -86,9 +86,11 @@ indexes = [
 ]
 "#;
 
-// ── The V8 authoring front-end (mechanism mirrors the in-tree ────────────────
-//    `crates/zeroship-migrate/src/frontend/record.rs`, but wires the STANDALONE
-//    v1 recorder and emits ir_version:1).
+// ── The V8 authoring front-end ───────────────────────────────────────────────
+//    Mechanism: build a module graph that maps `@zeroship/migrate` to a recorder
+//    bundle and `__migration__.js` to the creator migration, run `up()` under a
+//    fresh ambient recorder, and read the drained envelope back off a global.
+//    Here that graph wires the STANDALONE v1 recorder and emits ir_version:1.
 
 /// The Stage-2 authoring glue (imports the migration + the recorder seam, runs
 /// `up()`, emits the v1 envelope on `globalThis.__zsStage2IR`).

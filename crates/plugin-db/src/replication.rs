@@ -45,7 +45,7 @@
 //!   owner role, HMAC-signed session init) is deferred.
 //! - It does not co-ordinate slot creation across multiple control-plane
 //!   replicas. This module assumes a single writer; the leader-election guard
-//!   lives in `crates/control/src/replication_setup.rs` (future).
+//!   belongs in the control plane and has not been built.
 
 use compio_postgres::Pool;
 

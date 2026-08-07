@@ -1,11 +1,11 @@
 //! Native W3C WebCryptoAPI Level 2.
 //!
-//! Replaces `crates/runtime/src/embed/crypto.js` (313 LOC JS shim) and
-//! the algorithm dispatch ops in `crates/runtime/src/crypto.rs`. Lives
-//! beside the existing `crypto.rs` (which keeps the
+//! Replaces a 313-LOC JS shim and the standalone algorithm-dispatch ops
+//! that preceded it (both since deleted). The pre-existing non-SubtleCrypto
+//! surface survives alongside this module in `sync_helpers.rs`: the
 //! `crypto_random_uuid_callback` / `crypto_get_random_values_callback`
 //! ops + the `__cryptoHashSync` / `__cryptoHmacSync` node-compat
-//! helpers used by the node:crypto polyfill).
+//! helpers used by the node:crypto polyfill.
 //!
 //! See `docs/archive/webcrypto-native.md` for the full design.
 //!

@@ -12,9 +12,9 @@
 //     },
 //   };
 //
-// It is the typed peer of the engine-embedded recorder
-// (`crates/zeroship-migrate/src/frontend/migrate_ops.js`, which the Rust runtime
-// `include_str!`s into V8 at build/record time). Both emit the IDENTICAL
+// It is the typed peer of the engine-embedded recorder — the bundle the Rust
+// host loads into V8 at build/record time (`src/embedded-recorder.ts` is the
+// entry both are built from). Both emit the IDENTICAL
 // dialect-neutral op objects the closed Rust `Op` enum / `ir-envelope.schema.json`
 // deserialize — the `.ir.json` wire shape is frozen (byte-identical to the
 // pre-redesign flat surface except the C1 FK-actions delta), and the golden

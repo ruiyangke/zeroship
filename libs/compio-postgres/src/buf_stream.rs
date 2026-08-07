@@ -4,9 +4,9 @@
 //! userspace read buffer so one Postgres message (1-byte tag + 4-byte
 //! length + payload) doesn't translate into 3 separate io_uring SQEs.
 //!
-//! Ported from the hardened `crates/pg/src/stream.rs`. Preserves the 64 MB
-//! length cap (to stop a malformed server from OOM-ing the driver) and the
-//! zero-copy `BytesMut::split` flush path.
+//! Two hardening properties are load-bearing and must survive any rewrite:
+//! the 64 MB length cap (which stops a malformed server from OOM-ing the
+//! driver) and the zero-copy `BytesMut::split` flush path.
 
 use crate::Error;
 use bytes::BytesMut;
