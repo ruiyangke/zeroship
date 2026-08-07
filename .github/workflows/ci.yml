@@ -73,8 +73,12 @@ jobs:
             fi
           done
           echo "doc citations checked: $found, unresolvable: $missing"
-          if [ "$found" -lt 20 ]; then
-            echo "::error::only $found doc citations found; the scan is not reaching the tree it claims to cover, so a clean result would mean nothing"
+          # Floor with headroom, not equality - the count moves with ordinary
+          # edits. 30 against a measured 37 is the same 6 percent slack the
+          # test-target floor carries, deliberately: a floor loose enough to
+          # absorb a real coverage loss is the defect it exists to prevent.
+          if [ "$found" -lt 30 ]; then
+            echo "::error::only $found doc citations found (expected ~37); the scan is not reaching the tree it claims to cover, so a clean result would mean nothing"
             exit 1
           fi
           [ "$missing" -eq 0 ]
