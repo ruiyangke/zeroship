@@ -210,7 +210,7 @@ async fn wrong_master_key_fails_decrypt() {
     // ...but merged_env fails on decrypt rather than silently returning
     // garbage or the plaintext.
     let err = reader.merged_env(app).await.unwrap_err();
-    assert!(matches!(err, zeroship_control::env_store::EnvError::Crypto(_)));
+    assert!(matches!(err, zeroship_control::env_store::EnvError::SecretDecrypt { .. }));
 
     registry.delete_app(&app).await.ok();
 }
@@ -241,7 +241,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     let err = store.merged_env(app_b).await.unwrap_err();
     assert!(
-        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        matches!(err, zeroship_control::env_store::EnvError::SecretDecrypt { .. }),
         "cross-app ciphertext transplant must fail, got {err:?}"
     );
 
@@ -260,7 +260,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     let err = store.merged_env(app_a).await.unwrap_err();
     assert!(
-        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        matches!(err, zeroship_control::env_store::EnvError::SecretDecrypt { .. }),
         "cross-key ciphertext transplant must fail, got {err:?}"
     );
 
@@ -570,6 +570,55 @@ async fn long_value_roundtrip() {
     store.set_secret(app, "BIG_TOKEN", &big).await.unwrap();
     let merged = store.merged_env(app).await.unwrap();
     assert_eq!(merged.get("BIG_TOKEN").and_then(|v| v.as_str()), Some(big.as_str()));
+
+    registry.delete_app(&app).await.ok();
+}
+
+/// A secret that cannot be decrypted must name itself in the error.
+///
+/// `merged_env` fails closed on an undecryptable ciphertext, which is right for
+/// confidentiality: an app must not boot with a silently-missing secret. But the
+/// failure is total - one poisoned row takes down every deploy of that app - and
+/// the error carried no indication of WHICH row, so the operator log said only
+/// that decryption failed. That is the difference between a five-minute fix and
+/// an audit of every secret the app owns.
+///
+/// Reachable through operator error rather than attack: a key dropped from the
+/// rotation set before `rotate_app` drained it, or storage corruption.
+#[compio::test]
+async fn undecryptable_secret_names_the_key_in_the_error() {
+    let url = db_url();
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let app = create_test_app(&registry).await;
+
+    store.set_secret(app, "GOOD_KEY", "fine").await.unwrap();
+    store.set_secret(app, "POISONED_KEY", "also fine").await.unwrap();
+
+    // Corrupt one ciphertext in place: valid row, undecryptable bytes. This is
+    // what a dropped rotation key looks like from the reader's side.
+    let conn = raw_conn(&url).await;
+    conn.execute(
+        "UPDATE zeroship.app_secrets SET ciphertext = $1 \
+         WHERE app_id = $2 AND key_name = 'POISONED_KEY'",
+        &[&b"\x01not-a-valid-ciphertext".to_vec(), &app],
+    )
+    .await
+    .expect("corrupt the row");
+
+    let err = store
+        .merged_env(app)
+        .await
+        .expect_err("an undecryptable secret must fail closed, not be skipped");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("POISONED_KEY"),
+        "the error must name the key that failed; got: {msg}"
+    );
+    assert!(
+        !msg.contains("also fine"),
+        "the error must not carry the plaintext; got: {msg}"
+    );
 
     registry.delete_app(&app).await.ok();
 }
