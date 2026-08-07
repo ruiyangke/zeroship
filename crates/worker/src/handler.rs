@@ -1509,23 +1509,36 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         )
         .await
         .expect("upsert worker workflow test plan");
+        // The app name has to vary with the id. `apps.name` is UNIQUE, and every
+        // caller seeds a fresh `Uuid::new_v4()`, so a fixed name means the
+        // ON CONFLICT (id) arm never fires and the insert collides on
+        // `apps_name_key` instead. These tests run concurrently, so a shared name
+        // makes all but the first fail on contact.
+        let app_name = format!("worker-workflow-test-app-{app_id}");
         conn.execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
-             VALUES ($1, 'worker-workflow-test-app', $2, 'worker-test-key', '', true) \
+             VALUES ($1, $3, $2, 'worker-test-key', '', true) \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
-            &[app_id, &WORKFLOW_TEST_PLAN],
+            &[app_id, &WORKFLOW_TEST_PLAN, &app_name],
         )
         .await
         .expect("upsert worker workflow test app");
-        let deploy_id = format!("dep_{run_id}");
-        conn.execute(
-            "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
-             VALUES ($1, $2, $3, '{}', now()) \
-             ON CONFLICT (id) DO UPDATE SET deploy_hash = EXCLUDED.deploy_hash, activated_at = now()",
-            &[&deploy_id, app_id, &deploy_hash],
-        )
-        .await
-        .expect("upsert worker workflow test deploy");
+        // A deploy is identified by (app_id, deploy_hash), which is UNIQUE. Tests
+        // deliberately seed several runs against one hash to exercise redeploy and
+        // deploy pinning, so conflicting on `id` would miss and collide on
+        // `app_deploys_app_id_deploy_hash_key` instead. Upsert on the real key and
+        // take back whichever id won, so every run points at the row that exists.
+        let deploy_id: String = conn
+            .query_one(
+                "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
+                 VALUES ($1, $2, $3, '{}', now()) \
+                 ON CONFLICT (app_id, deploy_hash) DO UPDATE SET activated_at = now() \
+                 RETURNING id",
+                &[&format!("dep_{app_id}_{run_id}"), app_id, &deploy_hash],
+            )
+            .await
+            .expect("upsert worker workflow test deploy")
+            .get(0);
         let tables = WorkflowTables::for_app_id(app_id);
         conn.execute(
             &format!(
@@ -1577,7 +1590,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                   WHERE id = $1",
                 tables.runs
             ),
-            &[&run_id, &lease_expires_ms],
+            &[&run_id, &(lease_expires_ms as f64)],
         )
         .await
         .expect("steal workflow claim");
