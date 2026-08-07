@@ -2,7 +2,7 @@
 //! impl. Source: https://github.com/web-platform-tests/wpt/tree/master/WebCryptoAPI.
 //! Files are vendored under `crates/runtime/tests/wpt/WebCryptoAPI/`.
 //!
-//! Per `docs/proposals/webcrypto-native.md` §X.2 / §X.3.
+//! Per `docs/archive/webcrypto-native.md` §X.2 / §X.3.
 //!
 //! Each WPT file is run in a fresh V8 isolate with:
 //!   1. Native Crypto / SubtleCrypto / CryptoKey installed.

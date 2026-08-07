@@ -7,7 +7,7 @@
 //! ops + the `__cryptoHashSync` / `__cryptoHmacSync` node-compat
 //! helpers used by the node:crypto polyfill).
 //!
-//! See `docs/proposals/webcrypto-native.md` for the full design.
+//! See `docs/archive/webcrypto-native.md` for the full design.
 //!
 //! # Module layout
 //!

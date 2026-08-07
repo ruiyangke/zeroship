@@ -83,4 +83,4 @@ pub(crate) fn fast_random(out: &mut [u8]) {
 // (The `__cryptoHashSync` / `__cryptoHmacSync` ad-hoc V8 callbacks
 // were removed alongside the JS shim that consumed them; the native
 // `node::crypto::Hash` / `Hmac` classes own these paths now per Stage B
-// of `docs/proposals/node-crypto-native.md`.)
+// of `docs/archive/node-crypto-native.md`.)

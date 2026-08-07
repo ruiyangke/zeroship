@@ -4,7 +4,7 @@
 //! isolated V8 context. No Runtime, no Vite synthetic module — those
 //! land on top of this surface.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §XVI test plan.
+//! Per `docs/archive/node-crypto-native.md` §XVI test plan.
 
 #![allow(unsafe_code, missing_debug_implementations)]
 

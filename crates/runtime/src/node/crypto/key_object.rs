@@ -1,7 +1,7 @@
 //! `KeyObject` + `PublicKeyObject` / `PrivateKeyObject` /
 //! `SecretKeyObject`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §IV.
+//! See `docs/archive/node-crypto-native.md` §IV.
 //!
 //! Architecture: the WebCrypto surface already shipped a complete
 //! `KeyMaterial` enum + DER/JWK parsers via `web::crypto::{rsa, ec, okp,

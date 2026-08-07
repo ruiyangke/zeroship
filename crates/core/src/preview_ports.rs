@@ -5,7 +5,7 @@
 //! The agent (`zeroship-sandbox-agent`) uses the EXACT same constants
 //! before dialing `127.0.0.1:{port}` inside the VM. Sharing them via
 //! this module is the defense-in-depth invariant from § II.1 / I9 of
-//! `docs/proposals/sandbox-preview-urls.md`: a controller bug that
+//! `docs/archive/sandbox-preview-urls.md`: a controller bug that
 //! lets a denied port through still bounces at the agent.
 //!
 //! ## What lives here

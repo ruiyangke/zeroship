@@ -2,7 +2,7 @@
 //! `[[extractable]]`, `[[algorithm]]`, `[[usages]]`, `[[handle]]`
 //! internal slots, modelled as Rust enums and plain fields.
 //!
-//! Per `docs/proposals/webcrypto-native.md` §V.3.
+//! Per `docs/archive/webcrypto-native.md` §V.3.
 
 #![allow(dead_code)]
 

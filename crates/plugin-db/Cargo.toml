@@ -148,14 +148,19 @@ harness = false
 name = "bench_row_to_json"
 harness = false
 
-# `find().first()` lowering microbench — perf r13 forcing function for
-# the deferred [C3] redesign (`docs/reviews/plugin-db-deferred.md`).
-# Measures the full `&[Row] → JSON-string` path the SDK sees on a
-# single-row read (`find` with `LIMIT 1`):
-# `v8_bridge::rows_to_json_value` composed with `crud::first_row_or_null`.
-# The downstream V8 `JSON.parse` cost is the structural piece [C3] would
-# have to redesign away; it lives in `zeroship-runtime` and is NOT part
-# of this microbench.
+# `find().first()` lowering microbench. Measures the full
+# `&[Row] → JSON-string` path the SDK sees on a single-row read (`find`
+# with `LIMIT 1`): `v8_bridge::rows_to_json_value` composed with
+# `crud::first_row_or_null`.
+#
+# It exists as the forcing function for a redesign that is still open:
+# threading `Vec<Value>` straight through to V8 as a new `ResolveValue`
+# shape, so the read path stops paying a `.to_string()` here and a
+# matching `JSON.parse` on the other side. That boundary cost is
+# structural for `ResolveValue::Json` and cannot be measured from this
+# crate, because the parse half lives in `zeroship-runtime` - which is
+# why this microbench covers the Rust side only, and why the redesign
+# is a cross-crate change rather than a local one.
 [[bench]]
 name = "bench_first_row_or_null"
 harness = false

@@ -1,6 +1,6 @@
 //! Native `node:crypto` ESM module.
 //!
-//! See `docs/proposals/node-crypto-native.md` §XI.
+//! See `docs/archive/node-crypto-native.md` §XI.
 //!
 //! The runtime resolves `import { createHash } from "node:crypto"` to a
 //! V8 `SyntheticModule` whose exports are populated lazily by

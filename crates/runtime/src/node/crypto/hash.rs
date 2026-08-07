@@ -1,6 +1,6 @@
 //! `Hash` class — `crypto.createHash(algorithm, options?)`.
 //!
-//! See `docs/proposals/node-crypto-native.md` §V.2. Exposes:
+//! See `docs/archive/node-crypto-native.md` §V.2. Exposes:
 //! - `update(data, inputEncoding?)` returns `this` for chaining
 //! - `digest(outputEncoding?)` returns Buffer or string per encoding
 //! - `copy(options?)` returns a fresh Hash with the same in-progress

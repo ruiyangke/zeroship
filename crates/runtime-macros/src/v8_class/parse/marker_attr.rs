@@ -1,5 +1,5 @@
 //! `MarkerAttr` trait + driver — closes F5 / H5-H7 (design
-//! `docs/proposals/runtime-macros-refactor.md` §3.2).
+//! `docs/archive/runtime-macros-refactor.md` §3.2).
 //!
 //! Earlier versions had 12 `extract_*` helpers, each with subtly
 //! different return shapes (`bool` / `Option<T>` / `Result<Option<T>>` /

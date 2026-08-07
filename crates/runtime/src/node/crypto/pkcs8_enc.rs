@@ -1,6 +1,6 @@
 //! Encrypted PKCS#8 import/export (PBES2 / PBKDF2).
 //!
-//! See `docs/proposals/node-crypto-native.md` §IV.4a.
+//! See `docs/archive/node-crypto-native.md` §IV.4a.
 //!
 //! **Current status:** placeholder. The full PBES2 raw-FFI path is
 //! still deferred — it requires `aws-lc-sys` raw FFI to

@@ -9,7 +9,7 @@
 //! pushes a frame onto the local outbox; the helper here moves it
 //! straight onto the peer's `events` queue and notifies the pump.
 //!
-//! Filled in step 6 — see `docs/proposals/websocket-native.md §VI`.
+//! Filled in step 6 — see `docs/archive/websocket-native.md §VI`.
 
 #![cfg(feature = "runtime_native_websocket")]
 

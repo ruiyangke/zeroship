@@ -1,6 +1,6 @@
 //! Shared brand-check + External-recovery preamble.
 //!
-//! Closes design `docs/proposals/runtime-macros-refactor.md` §3.8's
+//! Closes design `docs/archive/runtime-macros-refactor.md` §3.8's
 //! 7-site duplication of the same ~10-LOC prologue across
 //! `gen_method_callback`, `gen_setter_callback`,
 //! `gen_same_object_getter_callback`, `gen_async_method_callback`,

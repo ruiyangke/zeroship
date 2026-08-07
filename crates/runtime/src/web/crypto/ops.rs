@@ -1,6 +1,6 @@
 //! Per-operation dispatchers — `encrypt`, `decrypt`, `sign`, `verify`,
 //! `generateKey`, `importKey`, `exportKey`, `deriveBits`, `deriveKey`,
-//! `wrapKey`, `unwrapKey`. Per `docs/proposals/webcrypto-native.md`
+//! `wrapKey`, `unwrapKey`. Per `docs/archive/webcrypto-native.md`
 //! §IV.
 //!
 //! Each function:

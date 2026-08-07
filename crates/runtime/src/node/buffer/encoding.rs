@@ -1,6 +1,6 @@
 //! Node `Buffer` / encoding registry.
 //!
-//! See `docs/proposals/node-crypto-native.md` §I.6. The 7 named
+//! See `docs/archive/node-crypto-native.md` §I.6. The 7 named
 //! encodings Node accepts on hash/hmac digest output and string input:
 //!
 //! - `utf8` / `utf-8`           UTF-8 (default)

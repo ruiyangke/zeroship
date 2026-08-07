@@ -3,7 +3,7 @@
 //! box (so the macro's `&self` cast lines up with the storage we
 //! produce in `build`).
 //!
-//! See `docs/proposals/webcrypto-native.md` §V.
+//! See `docs/archive/webcrypto-native.md` §V.
 //!
 //! The class is platform-constructed per spec §13 — the constructor
 //! throws if called from JS; real instances come from

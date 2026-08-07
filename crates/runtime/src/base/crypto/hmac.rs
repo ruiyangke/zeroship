@@ -1,6 +1,6 @@
 //! Streaming HMAC.
 //!
-//! See `docs/proposals/node-crypto-native.md` §V.3. Wraps
+//! See `docs/archive/node-crypto-native.md` §V.3. Wraps
 //! `aws_lc_rs::hmac::Context` for incremental update; `hmac_one_shot`
 //! is the WebCrypto path.
 //!

@@ -1,5 +1,5 @@
 //! `Crypto` (the global `crypto`) — `getRandomValues`, `randomUUID`,
-//! `subtle` getter. Per `docs/proposals/webcrypto-native.md` §II.
+//! `subtle` getter. Per `docs/archive/webcrypto-native.md` §II.
 
 #![allow(unsafe_code)]
 
