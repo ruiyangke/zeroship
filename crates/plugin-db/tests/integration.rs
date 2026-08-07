@@ -7820,10 +7820,22 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
 ///
 /// Sound as a text check because these are CONSTRUCTION sites: a constructor has
 /// to be written literally to be called, so it cannot hide behind indirection the
-/// way an execution can. Verified when this was written: no aliased `Pool` import
-/// and no indirect use of the constructor anywhere in this tree. An alias would
-/// evade it, which is why the message says to keep the pairing rather than to
-/// satisfy the number.
+/// way an execution can. Verified when this was written: no aliased `Pool` import,
+/// no indirect use of the constructor, and no shared helper wrapping it - every
+/// site sits directly in a test body. An alias would evade it, which is why the
+/// message says to keep the pairing rather than to satisfy the number.
+///
+/// THIS TEST HAS AN EXPIRY, and it expires by SUCCEEDING. It counts sites, not
+/// pools opened. A shared helper that opens a pool is one site whatever number of
+/// tests call it - so the day a setup helper lands, this count collapses toward
+/// one, every new test routes through the helper without touching it, and the
+/// assertion passes forever while measuring nothing. Nothing will have broken;
+/// the codebase will have moved and left the check enumerating an empty space.
+///
+/// So when a pool-owning helper is introduced, REPLACE this test rather than
+/// lowering PINNED to match. What it should become is a check over the helper -
+/// that it is the only thing constructing a pool, or that its own teardown runs -
+/// because at that point the helper is the property worth guarding.
 #[test]
 fn direct_pool_construction_sites_do_not_grow() {
     // Split so this test's own needle is not part of what it counts.
@@ -7838,6 +7850,10 @@ fn direct_pool_construction_sites_do_not_grow() {
         sites <= PINNED,
         "this file now opens {sites} pools directly, up from {PINNED}. A pool opened \
          without a `release_pg`/`drain_pg` teardown outlives its runtime and leaks a \
-         server connection. Pair the new one with a teardown, then raise PINNED."
+         server connection. Pair the new one with a teardown, then raise PINNED. \
+         If you are adding a shared pool-owning helper instead, do not lower PINNED \
+         to match - this test counts sites and a helper is one site however many \
+         tests call it, so it would pass forever without checking anything. Replace \
+         it with a check over the helper."
     );
 }
