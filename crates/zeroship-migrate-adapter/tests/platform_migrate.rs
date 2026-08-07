@@ -518,13 +518,25 @@ mod platform_cli {
         // truncated one.
         if !scalar_bool(
             &probe,
+            // octet_length, NOT length. PostgreSQL's budget is 63 BYTES while
+            // `length` counts CHARACTERS, so a name carrying any multi-byte
+            // character reads as shorter than it is: 61 'a' plus one two-byte
+            // character is 62 characters and 63 bytes, and a character-counting
+            // predicate waves it through.
+            //
+            // The clip itself lands on a character boundary - a trailing
+            // multi-byte character that does not fit is dropped whole rather than
+            // split - so a truncated name can come back at 62 bytes. That only
+            // matters for a check that derives the truncated spelling; this one
+            // asks whether the budget was reached at all, which the byte count
+            // answers directly.
             "SELECT NOT EXISTS ( \
                SELECT 1 FROM pg_indexes \
-                WHERE schemaname = 'zeroship' AND length(indexname) >= 63 \
+                WHERE schemaname = 'zeroship' AND octet_length(indexname) >= 63 \
                UNION ALL \
                SELECT 1 FROM pg_constraint c \
                  JOIN pg_namespace n ON n.oid = c.connamespace \
-                WHERE n.nspname = 'zeroship' AND length(c.conname) >= 63 \
+                WHERE n.nspname = 'zeroship' AND octet_length(c.conname) >= 63 \
              )",
         )
         .await
