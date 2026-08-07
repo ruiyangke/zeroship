@@ -815,15 +815,31 @@ pub(crate) struct RuntimeInner {
     #[cfg(target_os = "linux")]
     cpu_timer_active: bool,
 
-    /// Cumulative CPU time consumed by this Runtime's async pump work
-    /// (op resolves, timer callbacks, stream pushes) since the last budget
-    /// window reset. Compared against wall time to detect apps that
-    /// monopolize the thread via long-running `setInterval` callbacks or
+    /// Cumulative wall time this Runtime spent in the pump's event-handling
+    /// window (op resolves, timer callbacks, stream pushes) since the last
+    /// budget window reset. Compared against elapsed wall time to detect apps
+    /// that monopolize the thread via long-running `setInterval` callbacks or
     /// promise chains — situations the per-REQUEST cpu timer doesn't catch
     /// because the work isn't attributed to any single request.
+    ///
+    /// ENFORCEMENT ONLY. Billing reads none of this; see `pump_cpu_unmetered`
+    /// and `bill_pump_cpu`, which run on the thread CPU clock and additionally
+    /// cover the pump's PHASE 1 window that this counter never sees.
     pump_cpu_accumulated: Duration,
     /// Wall-clock start of the current budget window.
     pump_wall_start: Instant,
+
+    /// Sub-microsecond remainder of pump CPU not yet handed to the meter.
+    ///
+    /// The `cpu_us` metric is integral microseconds, so a pump slice shorter
+    /// than 1 us would truncate to zero and vanish. Carrying the remainder
+    /// forward makes the billed total exact to the microsecond no matter how
+    /// the work is sliced — an app that resolves ten thousand sub-microsecond
+    /// promise continuations is billed the same as one that does the identical
+    /// work in a single slice. Distinct from `pump_cpu_accumulated`, which is
+    /// the enforcement window's counter and is reset wholesale every 10 s;
+    /// nothing is ever read back out of this one, it only holds the change.
+    pump_cpu_unmetered: Duration,
 
     /// Captured error message if `ensure_initialized` failed to load the
     /// user's module graph (e.g. parse error, evaluation throw). Surfaced
@@ -1068,6 +1084,7 @@ impl RuntimeInner {
 
             pump_cpu_accumulated: Duration::ZERO,
             pump_wall_start: Instant::now(),
+            pump_cpu_unmetered: Duration::ZERO,
             init_error: None,
             app_id,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
@@ -1260,12 +1277,29 @@ impl RuntimeInner {
                 };
 
                 if needs_drain {
+                    // This window runs real app JS, not just bookkeeping:
+                    // `drain_new_tasks_into` fires zero-delay timers inline
+                    // (`setTimeout(fn, 0)` lands in `ready_timers`, never in
+                    // `pending_timers`), and the forwarder/JS-driver services
+                    // enter V8 too. Its CPU has to be billed like any other
+                    // app CPU. It is deliberately NOT fed to
+                    // `record_pump_cpu`: that budget is a safety mechanism
+                    // with its own calibration, and widening what it polices
+                    // is a behaviour change to make on its own terms, not a
+                    // side effect of a billing fix. Consequence worth knowing:
+                    // a `setTimeout(fn, 0)` self-rescheduling loop burns its
+                    // CPU here, so it is billed but escapes the 80%-of-wall
+                    // budget, which only ever sees the PHASE 2 window.
+                    let cpu_start = crate::core::init::thread_cpu_time();
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     rt.drain_new_tasks_into(&mut work);
                     rt.service_forwarder_resumes();
                     rt.service_js_driver_commands(&mut work);
                     rt.exit_isolate();
+                    rt.bill_pump_cpu(
+                        crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
+                    );
                 }
                 // `runtime` (strong Rc) dropped here — not held across the
                 // event await below.
@@ -1358,6 +1392,12 @@ impl RuntimeInner {
                     // batched results have nowhere to go.
                     let Some(runtime) = runtime.upgrade() else { return; };
                     let v8_start = Instant::now();
+                    // Thread CPU clock, sampled alongside the wall clock: the
+                    // wall delta polices the app's share of the machine, the
+                    // CPU delta is what gets billed. Same clock the worker
+                    // samples around synchronous dispatch, so both halves of
+                    // an app's CPU land on `cpu_us` on one consistent basis.
+                    let cpu_start = crate::core::init::thread_cpu_time();
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     for ev in batch {
@@ -1365,11 +1405,23 @@ impl RuntimeInner {
                     }
                     rt.exit_isolate();
 
-                    // Per-app pump CPU budget: if this app's async
-                    // continuations (timer callbacks, microtask chains)
-                    // consume >80% of wall time over a 10 s window,
-                    // terminate the isolate. The per-request CPU timer
-                    // doesn't catch pump-side work — this does.
+                    // Two independent things happen on this one window:
+                    //
+                    // 1. BILLING — the CPU this app's async continuations
+                    //    burned is emitted to its `cpu_us` meter. It is not
+                    //    attributable to any single request, but the meter is
+                    //    keyed by app and this Runtime is one app's isolate,
+                    //    so the attribution billing needs is already exact.
+                    // 2. ENFORCEMENT — if those continuations (timer
+                    //    callbacks, microtask chains) consume >80% of WALL
+                    //    time over a 10 s window, terminate the isolate. The
+                    //    per-request CPU timer doesn't catch pump-side work.
+                    //
+                    // Different clocks on purpose: money is charged on CPU,
+                    // share-of-the-machine is policed on wall.
+                    rt.bill_pump_cpu(
+                        crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
+                    );
                     if rt.record_pump_cpu(v8_start.elapsed()) {
                         // Isolate is terminated — all pending requests
                         // will get "CPU limit exceeded" on the next
@@ -3117,6 +3169,11 @@ impl RuntimeInner {
     /// Returns `true` if the cumulative budget is exceeded (the caller
     /// should terminate the isolate).
     ///
+    /// ENFORCEMENT ONLY. Billing is [`Self::bill_pump_cpu`], which the pump
+    /// calls separately around every V8 window — including the PHASE 1 window
+    /// this budget does not see. Keep the two apart: this one is a safety
+    /// mechanism whose inputs and thresholds must not drift to suit billing.
+    ///
     /// Budget: an app may consume at most 80% of real wall time over any
     /// 10-second window. A `setInterval(() => { while(...) {} }, 100)`
     /// loop that burns 99 ms of every 100 ms would cross this in ~10 s.
@@ -3148,6 +3205,54 @@ impl RuntimeInner {
         self.pump_cpu_accumulated = Duration::ZERO;
         self.pump_wall_start = Instant::now();
         false
+    }
+
+    /// Bill one pump V8 window's CPU to this app's `cpu_us` meter.
+    ///
+    /// `cpu` is thread CPU time (`CLOCK_THREAD_CPUTIME_ID`) — the same clock
+    /// the worker samples around the synchronous dispatch entry, so both
+    /// halves of an app's CPU land on `cpu_us` on one consistent basis and
+    /// time the thread spent descheduled is not charged to the creator.
+    /// (Contrast [`Self::record_pump_cpu`], which is fed WALL time because a
+    /// share-of-the-machine budget has to be denominated in real time.)
+    ///
+    /// The meter is keyed by APP, not by request, and a Runtime is one isolate
+    /// per (app, live deploy) — so pump CPU is already measured at exactly the
+    /// granularity billing consumes, even though it cannot be attributed to
+    /// any single in-flight request. Each window is emitted as it arrives, so
+    /// it is counted exactly once and the enforcement window's periodic reset
+    /// of `pump_cpu_accumulated` is irrelevant here: nothing is read back out.
+    ///
+    /// Borrow discipline: `state` is a different `RefCell` from the
+    /// `RuntimeInner` cell the pump call sites hold, and no `state` borrow is
+    /// live at either — the `needs_drain` probe borrow is taken and dropped in
+    /// its own block, and every borrow inside `drain_new_tasks_into` /
+    /// `handle_async_event` / `enter_isolate` / `exit_isolate` is released
+    /// when those calls return. The handle is still cloned out and the borrow
+    /// dropped before `record` runs, so the window is a single field read.
+    /// Deliberately NOT a `try_borrow` + silent skip: dropping the metric on
+    /// contention would quietly recreate the under-billing this fixes.
+    fn bill_pump_cpu(&mut self, cpu: Duration) {
+        if cpu.is_zero() {
+            return;
+        }
+        let meter = { self.state.borrow().meter.clone() };
+        let Some(meter) = meter else {
+            // Meter-less harness (CLI `zeroship serve`, unit tests). Skip the
+            // carry too, so it cannot accumulate against a meter that will
+            // never exist — the handle is stamped at Runtime construction and
+            // never appears later.
+            return;
+        };
+
+        self.pump_cpu_unmetered += cpu;
+        let micros = u64::try_from(self.pump_cpu_unmetered.as_micros()).unwrap_or(u64::MAX);
+        if micros == 0 {
+            // Window was sub-microsecond; it stays in the carry for next time.
+            return;
+        }
+        meter.record("cpu_us", micros);
+        self.pump_cpu_unmetered -= Duration::from_micros(micros);
     }
 
     /// Get a clone of the shared state handle.
