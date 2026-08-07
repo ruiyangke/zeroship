@@ -6,6 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
@@ -43,6 +45,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install psql client
@@ -74,6 +78,42 @@ jobs:
           PG_USER: postgres
           PG_PASS: zeroship
           REDPANDA_BROKERS: 127.0.0.1:19092
+
+  # The auth tests resolve their database from AUTH_DB_URL and return early when
+  # it is unset, which cargo reports as a pass. `cargo test --workspace` above
+  # therefore proves nothing about them. tests/run_auth_suite.sh provisions an
+  # isolated database, runs the suite against it, and fails if any test reports
+  # that it skipped, so a missing database cannot masquerade as a pass.
+  auth-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: zeroship
+        ports:
+          - 5440:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run the auth live-database gate
+        run: tests/run_auth_suite.sh
+        env:
+          PG_HOST: localhost
+          PG_PORT: 5440
+          PG_USER: postgres
+          PG_PASS: zeroship
 
   # Gate the SDK type-level + unit suites. In particular this runs
   # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`
