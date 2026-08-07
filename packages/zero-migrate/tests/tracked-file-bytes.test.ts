@@ -63,7 +63,7 @@ function trackedFiles(): string[] {
   return out.split("\0").filter((path) => path !== "");
 }
 
-test("no tracked file contains a NUL byte", () => {
+test("no tracked file contains a NUL byte", (t) => {
   const files = trackedFiles();
   assert.ok(
     files.length >= MIN_TRACKED_FILES,
@@ -123,4 +123,11 @@ test("no tracked file contains a NUL byte", () => {
       "rather than embedding it (see 301ac74). If the file is genuinely binary, it " +
       "does not belong in this tree without a decision recorded in this test.",
   );
+
+  // Report coverage on SUCCESS, not only inside the failure strings above. A gate
+  // that reports its numbers only when it fails withholds them in the one case
+  // nobody investigates: the green run. These two counts are what separate a real
+  // pass from a pass produced by scanning nothing, and a reader should not have to
+  // break the plumbing on purpose to see them.
+  t.diagnostic(`scanned ${scanned} of ${files.length} tracked files, 0 carry a NUL byte`);
 });
