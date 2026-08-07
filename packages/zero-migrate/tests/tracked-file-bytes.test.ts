@@ -40,9 +40,16 @@ const repoRoot = resolve(here, "../../..");
 /** The lower bound exists so a broken invocation cannot pass as a clean tree.
  *  This gate's failure mode is a FALSE GREEN: a scan that reads nothing and a
  *  scan that reads everything and finds nothing look identical from the outside.
- *  406 files tracked when this was written; 300 leaves room to delete without
- *  the bound becoming the thing that fails. */
-const MIN_TRACKED_FILES = 300;
+ *
+ *  THIS BOUND IS AN IRREDUCIBLE TOLERANCE, unlike the read check below. The read
+ *  check is proportional because it has a denominator - what git enumerated. An
+ *  enumeration check has none, so a truncated listing that is fully read cannot
+ *  be distinguished from a smaller repository, and everything above this floor is
+ *  invisible. Measured: with the floor at 300 against 408 tracked files, feeding
+ *  the gate 301 paths that all read cleanly PASSED, leaving 107 files unscanned
+ *  and the tree reported clean. Keep it close to the real count for that reason,
+ *  and expect to raise it as the repository grows rather than leaving slack. */
+const MIN_TRACKED_FILES = 380;
 
 /** Tracked paths, read through git so the scope matches what CI would clone.
  *  `-z` separates with NUL, which is the byte this test is about - the separator
