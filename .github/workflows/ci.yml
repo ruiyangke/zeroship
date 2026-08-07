@@ -12,6 +12,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
       - run: cargo test --workspace
+      # `cargo test --workspace` SKIPS any target whose `required-features` are
+      # not enabled, and skips it silently - the target is never built, so it
+      # contributes no test count and no failure. plugin-db puts three suites
+      # behind `test-helpers`, which is why none of them have ever run here.
+      #
+      # Only the SQLite one is listed: it needs no server and passes 124 tests
+      # in about 20 seconds, so it is real coverage this job was missing. Its
+      # two siblings (`integration`, `native_transaction`) need a live
+      # PostgreSQL that this job does not provision, and they belong with the
+      # other live-database gates rather than here.
+      - run: cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
       # The lint policy lives in the root Cargo.toml `[workspace.lints]` table:
       # `clippy::all` is deny, `pedantic` and `nursery` are warn. Passing
       # `-D warnings` here would flatten that grading and promote every pedantic
