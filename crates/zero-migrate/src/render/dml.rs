@@ -3492,6 +3492,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let expr = render_expr_inline(&Expr::UuidV4, SqlDialect::Sqlite).unwrap();
         let sql = format!("SELECT {expr}");
+        let mut values = Vec::with_capacity(128);
 
         for _ in 0..128 {
             let value: String = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
@@ -3517,7 +3518,21 @@ mod tests {
                 "UUID must contain only hexadecimal digits and separators: {value}"
             );
             assert_eq!(value, value.to_ascii_lowercase());
+            values.push(value);
         }
+
+        // Every assertion above holds for an expression that returns one constant
+        // well-formed v4 UUID 128 times, so none of them proves the rendered
+        // expression generates anything. This one does: 128 evaluations must
+        // yield 128 distinct values. It catches a constant or near-constant
+        // generator and nothing more - 128 samples cannot detect bias, low
+        // entropy, or a long repeat period.
+        let distinct: std::collections::HashSet<&String> = values.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            values.len(),
+            "128 evaluations of the rendered UUIDv4 expression must all differ"
+        );
     }
 
     #[test]
