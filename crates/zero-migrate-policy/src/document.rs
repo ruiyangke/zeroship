@@ -4,7 +4,7 @@
 //! II.4.2). This is a SECURITY CORE: strict parsing (`deny_unknown_fields`),
 //! fail-closed, registry-validated, name-normalized at the scope boundary.
 //!
-//! What this module does NOT do (Phase 1b-ii): composition (`admit`/
+//! What this module does NOT do: composition (`admit`/
 //! `restrict`), `EffectivePolicy`, seal verification. A loaded [`PolicyDoc`]
 //! is a single validated layer, not a composed effective policy.
 

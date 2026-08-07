@@ -1,5 +1,5 @@
-//! Namespace-authority conservative-deny suite (Phase 2 Step 2b — II.2.5 raw-SQL
-//! classification / II.2.6 creation-gating + injected-shape immutability).
+//! Namespace-authority conservative-deny suite: raw-SQL create/rename
+//! classification, creation gating, and injected-shape immutability.
 //!
 //! Each rule the policy redesign introduces is a fail-closed decision with the
 //! design's named error code. These tests drive the guard's PUBLIC API

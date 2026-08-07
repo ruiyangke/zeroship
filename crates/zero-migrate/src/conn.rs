@@ -277,7 +277,7 @@ impl ExecutorConfig {
     /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
     /// sole Trusted producer was retired into the `zero-migrate-cli` TS CLI.
     /// The token stays the in-crate enforcement primitive.
-    // `#[allow(dead_code)]`: the sole in-crate consumer (the Track-A live-Postgres
+    // `#[allow(dead_code)]`: the sole in-crate consumer (the live-Postgres
     // Trusted-apply tests) is gated behind a running DB and currently absent, but
     // this `pub(crate)` ctor stays as the pinned in-crate Trusted-config primitive
     // (a separate integration crate cannot construct one — see the T8 trybuild

@@ -131,11 +131,11 @@ pub enum GuardMode {
 /// policy from a named posture.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
-    /// PRIVATE (PHASE 4). The target SQL dialect this guard config is for.
+    /// PRIVATE. The target SQL dialect this guard config is for.
     ///
     /// - `Postgres` (the default) — the `libpg_query` line-1 guard runs
-    ///   ([`SqlGuard::check`] parses + deny-walks the SQL). Every pre-PHASE-4
-    ///   call site keeps this dialect, byte-identical.
+    ///   ([`SqlGuard::check`] parses + deny-walks the SQL). A config keeps this
+    ///   dialect unless [`GuardConfig::for_dialect`] selects another.
     /// - `Sqlite` - the descriptor-diff-only path. `libpg_query` cannot parse
     ///   SQLite, so there is no line-1 parse guard; the line-2 defense is the
     ///   backend's runtime authorizer. An untrusted raw SQL string presented to
@@ -215,7 +215,7 @@ impl GuardConfig {
         self
     }
 
-    /// PHASE 4 — the target SQL dialect this guard config vets.
+    /// The target SQL dialect this guard config vets.
     #[must_use]
     pub(crate) const fn dialect(&self) -> SqlDialect {
         self.dialect
@@ -278,7 +278,7 @@ impl GuardConfig {
         self.effective_destructive_ops()
     }
 
-    // ── PDP decision-query helpers (Phase 2 Step 2a) ───────────────────────────
+    // --- PDP decision-query helpers ------------------------------------------
     // The guard's capability + data-security gate asks these instead of reading a
     // raw `VendorCapabilities` bit / `require_rls` / `destructive_ops` field. All
     // scope resolution lives inside the `EffectivePolicy`; the guard passes a
@@ -378,7 +378,8 @@ impl GuardConfig {
         }
     }
 
-    // ── namespace-authority decision queries (Phase 2 Step 2b, II.2.5/II.2.6) ───
+    // --- namespace-authority decision queries: pinned schema, creation grants,
+    // covering inject shapes, and cross-schema admission ----------------------
 
     /// The project schema an UNQUALIFIED relation resolves to under this config's
     /// cross-schema pin — the sole schema owned by the effective policy's
@@ -708,7 +709,7 @@ pub enum GuardError {
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
-    /// PHASE 4 — a raw SQL string was presented to [`SqlGuard::check`] on the
+    /// A raw SQL string was presented to [`SqlGuard::check`] on the
     /// Confined **`SQLite`** path, which accepts ONLY descriptor-diff-generated DDL.
     /// `libpg_query` cannot vet `SQLite`, so there is no line-1
     /// parse guard for raw `SQLite` SQL; the only safe `SQLite` DDL comes from the
@@ -1138,8 +1139,8 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// NAMESPACE-authority STRUCTURAL gate (Phase 2 Step 2b — II.2.5 raw create/
-    /// rename classification + II.2.6 creation-gating / injected-shape immutability).
+    /// NAMESPACE-authority STRUCTURAL gate: it classifies a raw create/rename,
+    /// gates creation on the target grant, and holds injected shapes immutable.
     /// The scoped-raw-SQL refusals (`SET search_path` / opaque body / unqualified
     /// name) are a SEPARATE method ([`Self::check_scoped_raw_sql`]) run earlier, only
     /// under a Scoped `sql.raw` grant.

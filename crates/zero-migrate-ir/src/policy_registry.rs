@@ -1,5 +1,5 @@
 //! The zero-migrate ENGINE BUILTIN policy registry + the statement-class → knob-key
-//! map (Phase 2 Step 2a).
+//! map.
 //!
 //! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
 //! the composition algebra, the unforgeable

@@ -1,7 +1,7 @@
-//! Document-loader legality-gate suite (Phase 1b-i). Per gate: one ACCEPT + one
+//! Document-loader legality-gate suite. Per gate: one ACCEPT + one
 //! REJECT asserting the exact `LoadError` variant. Plus registry-digest stability,
 //! the doc's II.3 example TOML loading legally as a root charter, and the II.2.7
-//! name-normalization cases. No composition (Phase 1b-ii).
+//! name-normalization cases. Composition is not exercised here.
 
 use zero_migrate_policy::{
     Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError, LoadWarning,

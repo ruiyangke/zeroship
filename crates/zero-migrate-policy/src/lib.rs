@@ -5,7 +5,7 @@
 //! dependency on the engine. It ships the policy *machine*; every piece of policy
 //! *content* is injected by the consumer.
 //!
-//! # Phase 1a — the scope lattice
+//! # The scope lattice
 //!
 //! The first module is [`scope`]: the security-core primitive. `Scope { Nothing |
 //! All | Of{include, exclude} }` over one/two-segment identifier globs, with the
@@ -15,10 +15,10 @@
 //! oracle is the correctness proof: where prose review of the glob algebra could
 //! not be trusted, the oracle-green code is authoritative.
 
-//! # Phase 1b-i — the knob / rule / document model
+//! # The knob / rule / document model
 //!
-//! On top of the scope lattice this cut adds the policy *content model* and its
-//! strict loader:
+//! On top of the scope lattice the crate layers the policy *content model* and
+//! its strict loader:
 //!
 //! - [`knob`] — [`KnobDef`], [`KnobKey`], [`KnobKind`], [`KnobValue`], [`Polarity`],
 //!   [`Enforcement`], [`ObjectModel`], and the canonical byte encoding the registry
@@ -32,9 +32,9 @@
 //!   load-time legality gate (`deny_unknown_fields`, registry-validated,
 //!   fail-closed, name-normalized).
 //!
-//! # Phase 1b-ii — the composition algebra, unforgeable `EffectivePolicy`, and seal
+//! # The composition algebra, unforgeable `EffectivePolicy`, and seal
 //!
-//! On top of the value order this cut adds the SECURITY CROWN JEWEL:
+//! On top of the value order sits the SECURITY CROWN JEWEL:
 //!
 //! - [`value_order`] — the per-knob VALUE lattice (`⊑_value`/`⊔_value`/`⊓_value`),
 //!   derived from each [`knob::KnobKind`] so no facet-specific meet can drift.
