@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import {
   loadZeroMigrateConfig,
   resolveCliConfig,
 } from "../../src/config.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 import {
   currentIrVersion,
   previewSql,
@@ -155,9 +156,100 @@ test("CLI value-taking flags reject a following flag as their value", () => {
     assert.match(result.stderr, /needs a value, but the next argument is the flag/);
   }
 
-  // The inline form still passes a literal dash-leading value.
-  const inline = runCli("new", "add_users", "--dir=--json");
-  assert.doesNotMatch(inline.stderr, /needs a value/);
+  // `--dir=--json` is the documented inline escape hatch for a dash-leading path:
+  // the value after `=` is taken literally instead of being parsed as a flag. Assert
+  // the scaffold actually landed under a directory named `--json` so the arm proves
+  // the literal value reached `--dir`, rather than only proving one error message was
+  // absent. Runs in a throwaway cwd because `new` resolves `--dir` relative to cwd and
+  // would otherwise write into the package root.
+  //
+  // Does NOT cover: whether `new` accepts or honors `--json` itself, dash-leading
+  // values for any flag other than `--dir`, or the space-separated form, which the
+  // loop above rejects.
+  const inlineCwd = temporaryDirectory(".cli-inline-dash-value-");
+  try {
+    const inline = spawnCli(["new", "add_users", "--dir=--json"], { cwd: inlineCwd });
+    assert.equal(inline.status, 0, inline.stderr);
+    const scaffolded = join(inlineCwd, "--json");
+    assert.ok(existsSync(scaffolded), "--dir=--json must scaffold into ./--json");
+    assert.deepEqual(
+      readdirSync(scaffolded).map((entry) => entry.replace(/^\d{14}_/, "<stamp>_")),
+      ["<stamp>_add_users.ts"],
+    );
+  } finally {
+    rmSync(inlineCwd, { recursive: true, force: true });
+  }
+});
+
+// The live continuation of the inline dash-leading `--dir` arm above: prove the file
+// `--dir=--json` scaffolded is a real migration by applying it to PostgreSQL and
+// reading the journal back out of the catalog instead of trusting rendered SQL or the
+// file's text. `apply` is pointed at the same `--dir=--json`, so a parser that stops
+// routing the literal value leaves apply with no migration to run and the journal
+// read below finds no row.
+//
+// `new` emits a zero-op stub, so what a correct apply lands in the catalog is the
+// journal row, not a user table, and the assertions say exactly that. Authoring ops
+// into the file first would test authored ops rather than what the CLI scaffolds.
+//
+// The arm above stays ungated so the escape hatch keeps a guard on a machine with no
+// database; this one adds the database half where PostgreSQL is available.
+//
+// Does NOT cover: MySQL, which has no scaffold-to-apply arm here; the space-separated
+// `--dir --json` form, which the loop above rejects; `--json` as a flag on any verb;
+// or any scaffold content beyond the stub.
+//
+// If the apply throws, the finally still drops both schemas, so a failure does not
+// leak. Only a crash of the test process itself would leave `<schema>_migrations`
+// behind, which is the exposure every live arm in this suite already carries.
+test("CLI scaffold under an inline dash-leading --dir applies to live PostgreSQL", async (t) => {
+  const client = await connectLivePg(t);
+  if (client === null) return;
+  const cwd = temporaryDirectory(".cli-inline-dash-live-");
+  const schema = `zm_inline_dash_${Date.now().toString(36)}`;
+  try {
+    writePolicy(cwd);
+    const scaffolded = spawnCli(["new", "add_users", "--dir=--json"], { cwd });
+    assert.equal(scaffolded.status, 0, scaffolded.stderr);
+
+    const applied = spawnCli(
+      [
+        "apply",
+        "--dir=--json",
+        `--database-url=${pgUrl()}`,
+        `--schema=${schema}`,
+        "--policy=policy.toml",
+        "--approve",
+      ],
+      { cwd },
+    );
+    assert.equal(applied.status, 0, applied.stderr);
+
+    const journal = await client.query(
+      `SELECT event_kind, name FROM "${schema}_migrations".schema_migrations
+        ORDER BY event_seq`,
+    );
+    assert.deepEqual(
+      journal.rows.map((row) => [row.event_kind, row.name]),
+      [["applied", "add_users"]],
+    );
+
+    // The stub declares no ops, so the project schema itself is never created.
+    const created = await client.query(
+      `SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname = $1`,
+      [schema],
+    );
+    assert.deepEqual(created.rows, []);
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${schema}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("CLI resolve parses commit and rollback and enforces its guards", () => {
