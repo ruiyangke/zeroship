@@ -117,7 +117,6 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
-        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,
