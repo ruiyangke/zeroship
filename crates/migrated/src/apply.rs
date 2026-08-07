@@ -830,7 +830,15 @@ fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError
             ir_files.push(path);
         }
     }
-    ir_files.sort();
+    // Sort on the FILE NAME, which is what the ordering means: migrations apply
+    // in filename order, and the leading version is what makes that meaningful.
+    //
+    // Sorting the full path gives the same answer today only because every entry
+    // shares one tempdir parent (`write_ir_documents`). That is true, and it is
+    // an accident of the current layout rather than a property of the ordering -
+    // a nested or differently-rooted directory would silently sort by prefix and
+    // apply migrations out of order, which is the one thing this must not do.
+    ir_files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     Ok(ir_files)
 }
 
