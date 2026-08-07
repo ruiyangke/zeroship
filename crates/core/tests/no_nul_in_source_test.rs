@@ -23,6 +23,7 @@
 //! ignored; only the extensions a sweep would plausibly grep are checked.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -124,6 +125,29 @@ fn no_tracked_source_file_contains_a_nul_byte() {
         "only {read} of {} enumerated files were actually opened and read - a scan \
          that reads nothing must not report a clean tree",
         files.len(),
+    );
+
+    // Report the coverage on the SUCCESS path, not only inside a panic message.
+    // Every number this test knows lived in its assertions, which means it was
+    // only ever visible on the one run where nobody needed it. A gate that says
+    // how much it covered lets a reader notice the count sagging without anyone
+    // first breaking the plumbing on purpose to find out.
+    //
+    // The direct handle write is load-bearing and `println!` would not do. The
+    // test harness captures output by swapping the thread-local target that the
+    // `print!`/`eprint!` machinery writes through, and it only replays that
+    // buffer for a FAILING test. A write straight to the `Stderr` handle never
+    // enters the buffer. Measured: in one passing test with no `--nocapture`,
+    // `println!` and `eprintln!` vanished while `stderr().write_all` and
+    // `stdout().write_all` both appeared.
+    let _ = std::io::stderr().write_all(
+        format!(
+            "no_nul_in_source_test: read {read} of {} enumerated source files, \
+             {} carry a NUL byte\n",
+            files.len(),
+            offenders.len(),
+        )
+        .as_bytes(),
     );
 
     assert!(
