@@ -129,9 +129,30 @@ fi
 
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 
+# The skip check above counts problems and requires none, so it succeeds when it
+# finds nothing - including when there was nothing it COULD find. It only sees a
+# test that prints the word "skipping", and 7 of the OIDC suites do not: they
+# gate on `let Some(fx) = Fixture::boot(...).await else { return; };` and return
+# in silence. Measured with no database: 75 tests across
+# oidc_{refresh_token,authorization_code,userinfo,brokered_login,login_consent,
+# backchannel_logout}_test and device_grant_test all report "ok" in ~0.00s, and
+# the grep above finds zero. The gate would print "0 skipped" and exit 0.
+#
+# So require a MINIMUM instead of forbidding a maximum. 505 against 543 measured
+# on 2026-08-07 is the same ~7 percent headroom the CI test-target floor carries.
+# Raise it as the suite grows; a fixed floor gets looser with every test added,
+# which is the wrong direction for a guard against coverage loss.
+AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-505}"
+if [ "$passed" -lt "$AUTH_MIN_PASSED" ]; then
+  echo "FAIL: only ${passed} auth tests passed, fewer than the ${AUTH_MIN_PASSED} this gate expects." >&2
+  echo "A suite that silently stopped running is indistinguishable from a suite that passed." >&2
+  echo "If the suite really did shrink, lower AUTH_MIN_PASSED deliberately; do not treat the gap as slack." >&2
+  status=1
+fi
+
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  echo "AUTH SUITE: ${passed} tests passed, 0 skipped"
+  echo "AUTH SUITE: ${passed} tests passed, 0 skipped (floor ${AUTH_MIN_PASSED})"
 else
   echo "AUTH SUITE: FAILED"
 fi
