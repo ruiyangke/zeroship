@@ -613,10 +613,22 @@ fn is_zship_content_type(value: &str) -> bool {
 }
 
 fn has_legacy_deploy_migration_query(query: &str) -> bool {
-    query.split('&').any(|pair| {
-        let key = pair.split('=').next().unwrap_or("").trim();
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| {
+        let key = key.trim();
         key == "approved_versions" || key == "expected_manifest"
     })
+}
+
+#[cfg(test)]
+mod deploy_query_tests {
+    use super::has_legacy_deploy_migration_query;
+
+    #[test]
+    fn legacy_migration_query_keys_are_decoded_before_matching() {
+        assert!(has_legacy_deploy_migration_query("approved_versions=1"));
+        assert!(!has_legacy_deploy_migration_query("unrelated=value"));
+        assert!(has_legacy_deploy_migration_query("approved%5Fversions=1"));
+    }
 }
 
 /// Map the structured ingest error to an HTTP response.
