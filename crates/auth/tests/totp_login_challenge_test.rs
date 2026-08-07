@@ -68,7 +68,7 @@ async fn only_confirmed_credential_gates_login() {
 
     // Pending enrollment → still not gated (login must NOT be blocked yet).
     let secret = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap())
+    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap(), false)
         .await
         .unwrap();
     assert!(
@@ -142,7 +142,7 @@ async fn second_factor_accepts_totp_then_backup_code_once() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap())
+    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap(), false)
         .await
         .unwrap();
     let (plain, hashes) = totp::generate_backup_codes().unwrap();
