@@ -56,7 +56,7 @@ pub fn load_ir_document(
     // 3. structural validation — the authoritative gate over every Expr slot, plus
     //    the schema-confinement + guard-direction gate threaded with the active
     //    [`SchemaScope`]: a Confined cross-schema op is REFUSED here, fail-closed,
-    //    BEFORE lower. (Cut 3: the author-PK CONFORMANCE re-check is no longer
+    //    BEFORE lower. (The author-PK CONFORMANCE re-check is no longer
     //    threaded through a `PolicyProfile` here — that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)

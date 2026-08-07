@@ -1030,7 +1030,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// returns canned rows for the reads (`GET_LOCK → 1`, trigger-existence → empty),
 /// so a full lock + `ensure_journal` + apply sweep runs generically over a
 /// non-compio driver and every emitted statement is inspected. The live-MySQL e2e
-/// is the separate cut 4e.
+/// lives in the host CLI suite, gated on the `ZERO_MIGRATE_MYSQL_URL` env var.
 #[cfg(test)]
 mod render_tests {
     use super::*;

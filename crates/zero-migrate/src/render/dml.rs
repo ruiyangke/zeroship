@@ -2733,8 +2733,8 @@ mod tests {
     #[test]
     fn like_renders_same_syntax_on_all_three_dialects() {
         // `(operand LIKE pattern)` — same syntax on PG, SQLite, MySQL. (Per-dialect
-        // case-sensitivity semantics differ; the parity PROOF is a Phase-4 claim,
-        // not this slice — see the Expr::Like doc comment.)
+        // case-sensitivity semantics differ; this test proves the rendered SYNTAX
+        // only, not semantic parity; see the Expr::Like doc comment.)
         let expr = Expr::Like {
             operand: Box::new(Expr::col("name")),
             pattern: Box::new(Expr::lit(IrScalar::Str("A%".to_string()))),

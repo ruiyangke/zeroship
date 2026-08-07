@@ -46,7 +46,7 @@ const watchdog = setTimeout(() => {
   process.exit(1);
 }, 10000);
 
-// Typed verb boundary (redesign step 5a): `status` takes a `StatusRequest` object
+// Typed verb boundary: `status` takes a `StatusRequest` object
 // and RESOLVES a typed `StatusReply` — no JSON string, `currentVersion` camelCase.
 const status = await addon.status(hostDriver, {
   projectId: 'prj_js',

@@ -4639,9 +4639,9 @@ fn validate_create_table_primary_key_policy(
         }
     }
 
-    // NOTE (Cut 3 — de-thread PolicyProfile): the author-PK CONFORMANCE re-check
-    // (does the resolved table carry the operator's injected system shape / PK?) is
-    // no longer a hardcoded confined-profile gate here. That conformance is owned by
+    // NOTE: the author-PK CONFORMANCE re-check (does the resolved table carry the
+    // operator's injected system shape / PK?) is not a hardcoded confined-profile
+    // gate here. That conformance is owned by
     // the injection resolver ([`crate::model::table_shape::resolve_create_table_policy`]),
     // which is the `EffectivePolicy`/`injects_for` evaluator: a `createTable` in a
     // mandatory-inject scope whose author declares its own PK is refused there with
@@ -8984,7 +8984,7 @@ mod tests {
             .expect("platform profile accepts no primary key");
     }
 
-    // Cut 3 — the author-PK CONFORMANCE refusal is now owned by the injection
+    // The author-PK CONFORMANCE refusal is owned by the injection
     // resolver (`resolve_create_table_policy` over the operator's `EffectivePolicy`),
     // NOT a hardcoded confined-profile gate in `validate_ir_scoped`. A createTable in
     // a mandatory-inject scope (author_primary_key = "forbid") that declares its own

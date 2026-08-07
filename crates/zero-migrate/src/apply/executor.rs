@@ -2508,7 +2508,7 @@ pub fn plan_rollback<'a>(
 }
 
 // ===========================================================================
-// Track A — the Trusted profile applies arbitrary SQL on a REAL Postgres.
+// The Trusted profile applies arbitrary SQL on a REAL Postgres.
 //
 // These MUST be in-crate: `ExecutorConfig::trusted` + `OperatorCapability::for_test`
 // are `pub(crate)` (the external boundary is pinned by `tests/trybuild_*`, T8), so

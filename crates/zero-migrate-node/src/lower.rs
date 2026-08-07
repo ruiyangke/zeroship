@@ -199,7 +199,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     // sees those injected columns.
     //
     // Injection and guard share this one composed `EffectivePolicy`; the load gate
-    // no longer takes a separate `PolicyProfile` (retired in Cut 3).
+    // takes no separate `PolicyProfile`.
     let effective = effective_policy_from_charter_layers(charter_layers)?;
     let raw_ir: MigrationIr = serde_json::from_str(envelope_json)
         .map_err(|e| format!("envelope is not a MigrationIr document: {e}"))?;

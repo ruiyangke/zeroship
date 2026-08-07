@@ -111,7 +111,7 @@ pub mod data_security_rule {
 ///
 /// - `Enforced` (the default) — the full belt runs: the deny-list, cross-schema
 ///   confinement, and body walks. Confined and Platform both run `Enforced`.
-/// - `Off` — the public dbmate-like Trusted posture (Track A): the operator owns the
+/// - `Off` - the public dbmate-like Trusted posture: the operator owns the
 ///   DB, so there is NO untrusted boundary and the whole belt is skipped (arbitrary
 ///   SQL applies as the connecting role). Raw islands embedded in structured IR still
 ///   run their deny-list backstop.
@@ -988,7 +988,7 @@ impl SqlGuard {
             self.walker().check_node(node, &json, &raw)?;
         }
 
-        // TRUSTED early-return — the public dbmate-like posture (Track A). The
+        // TRUSTED early-return for the public dbmate-like posture. The
         // operator owns the database, so there is NO untrusted boundary: skip the
         // deny-list, cross-schema confinement, and body walks ENTIRELY and apply
         // arbitrary SQL. We still derive the report from `classify` (above) +

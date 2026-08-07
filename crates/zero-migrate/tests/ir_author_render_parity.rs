@@ -1113,8 +1113,9 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     // UNIQUE has no stand-alone differ counterpart (the differ renders single-col
     // UNIQUE as an index), so this compares the IR lower against the shared
-    // `lower_add_constraint` render seam directly. User PK is support-refused at
-    // validate-time in Slice 5 because the platform owns the primary key.
+    // `lower_add_constraint` render seam directly. There is no addConstraint PK
+    // case: `IrConstraintKind` has no primary-key variant, so a PK change is only
+    // expressible as `Op::AlterPrimaryKey`.
     let mut live = BTreeSet::new();
     live.insert("widgets".to_string());
 

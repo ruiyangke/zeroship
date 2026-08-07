@@ -1314,7 +1314,7 @@ fn schema_scope_permits_is_case_insensitive() {
     assert!(!SchemaScope::Single("zero_migrate".into()).permits("control"));
 }
 
-// ---- Track A: the Trusted profile (public dbmate-like posture) ---------
+// ---- The Trusted profile: the public dbmate-like posture ---------------
 
 /// A Trusted guard, minted via the same `for_test` operator-token seam.
 fn trusted_guard() -> SqlGuard {

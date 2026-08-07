@@ -1356,8 +1356,8 @@ fn sequence_owned_by_foreign_schema_column_is_cross_schema() {
 
 // ---------------------------------------------------------------------------
 // CREATE DOMAIN / ALTER DOMAIN — plain schema DDL (constrained base type),
-// safe under BOTH profiles (Phase-4 port gap: the billing changesets 0037/
-// 0046/0048/0049/0052/0053/0054/0056 define + alter domains). Still
+// safe under BOTH profiles (real billing changesets 0037/0046/0048/0049/0052/
+// 0053/0054/0056 define + alter domains). Still
 // target-schema-confined for Confined, and CREATE OPERATOR (also a privileged
 // DefineStmt-family construct) stays denied.
 // ---------------------------------------------------------------------------
@@ -1394,8 +1394,8 @@ fn create_domain_with_dangerous_check_is_still_denied() {
     // the kind-independent full-tree walks: a domain's CHECK / DEFAULT expression
     // is traversed by check_dangerous_functions + check_cross_schema exactly like a
     // column CHECK/DEFAULT. A domain CHECK that reaches a file/network builtin or a
-    // foreign schema is STILL denied under Confined — pins that the Phase-4
-    // widening opened no hole.
+    // foreign schema is STILL denied under Confined: pins that admitting the
+    // domain statement kinds at the KIND gate opened no hole.
     assert_denied(
         "CREATE DOMAIN project_acme.evil AS text CHECK (pg_read_file('/etc/passwd') IS NOT NULL)",
     );

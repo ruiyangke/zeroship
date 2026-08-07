@@ -42,7 +42,7 @@ pub enum Scope {
     /// ⊤ — every object. Identity of `⊓`, annihilator of `⊔`. The canonical loud
     /// token for "everything"; `Of{include:["*"]}` is *semantically* equal but is
     /// NOT this token (the two loud legality gates in II.2.5 use the syntactic
-    /// `== All` test — out of scope for phase 1a, which is the lattice only).
+    /// `== All` test, which this lattice does not model).
     All,
     /// A proper scope: `include` non-empty, `exclude` subtracts (exclude-wins).
     /// Patterns are stored in NORMALIZED two-segment form (schema→`P.*`).
@@ -193,7 +193,7 @@ impl Scope {
             // `All ⊑ C` iff C denotes the universe. `Of{include:["*"]}` is
             // semantically `All` (II.2.3), so the lattice `⊑` — defined over
             // `Objects` — must accept it, even though the security legality gates
-            // (out of scope for phase 1a) use the syntactic `== All` test.
+            // (which this lattice does not model) use the syntactic `== All` test.
             (Scope::All, _) => other.denotes_universe(),
             // `self ⊑ Nothing` iff `Objects(self) = ∅`. Every normalized scope
             // with an empty object set IS `Nothing` (the constructor/normalize

@@ -2,7 +2,7 @@
 //!
 //! The composition algebra (`admit`/`restrict`/`overlay`/`finalize_charter`) is what
 //! prevents privilege escalation. Prose review of it cannot be trusted (exactly as
-//! with the scope lattice, which the Phase-1a oracle settled). So this suite proves it
+//! with the scope lattice, which its own oracle settled). So this suite proves it
 //! by brute force over a bounded universe of concrete object names, with GROUND-TRUTH
 //! value maps computed DIRECTLY from the rule lists (never via the code under test):
 //!

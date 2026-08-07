@@ -68,7 +68,7 @@ impl Pattern {
     /// Parse `"app_*"` (schema→`app_*.*`) or `"app_*.events"` (two segments).
     /// Returns `None` if the text has more than two dot-segments or a bad glob.
     ///
-    /// NOTE: this is the blunt phase-1a parser over the alphabet the oracle uses;
+    /// NOTE: this is the blunt parser over the alphabet the scope oracle uses;
     /// it splits on EVERY `.` and applies no identifier folding. The oracle proves
     /// the lattice over globs built by this parser, so it stays byte-exact — do not
     /// route it through [`normalize_pg_identifier`]. The document loader uses
