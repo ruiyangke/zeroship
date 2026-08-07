@@ -35,9 +35,40 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
+
+/// The transaction state the server reported in the most recent
+/// `ReadyForQuery`.
+///
+/// Postgres appends this byte to every `ReadyForQuery`, so it is an exact,
+/// already-paid-for answer to "is this session inside a transaction block?" -
+/// no probe query required. The pool reads it on release to decide whether a
+/// connection needs a rollback before the next borrower sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// Not inside a transaction block.
+    Idle,
+    /// Inside a transaction block.
+    InTransaction,
+    /// Inside a failed transaction block: the server rejects every statement
+    /// with `25P02` until the block is rolled back.
+    Failed,
+}
+
+impl TransactionStatus {
+    /// Decode the `ReadyForQuery` status byte. An unknown byte reads as
+    /// `Failed`, the conservative answer: it makes callers clear the session
+    /// rather than assume it is reusable.
+    const fn from_byte(byte: u8) -> Self {
+        match byte {
+            b'I' => Self::Idle,
+            b'T' => Self::InTransaction,
+            _ => Self::Failed,
+        }
+    }
+}
 
 /// A stream of backend messages for a single in-flight request.
 ///
@@ -49,14 +80,44 @@ use std::time::Duration;
 pub struct Responses {
     receiver: mpsc::Receiver<BackendMessages>,
     cur: BackendMessages,
+    /// Shared with the [`InnerClient`] that issued the request: every
+    /// `ReadyForQuery` seen here writes its transaction-status byte back, so
+    /// the client always carries the server's own answer for the last
+    /// completed exchange.
+    ///
+    /// This is the one place worth recording it. `query.rs`, `simple_query.rs`,
+    /// `copy_in.rs` and `copy_out.rs` all read their responses through this
+    /// stream, so covering it covers every statement the client can run - and
+    /// a path added later gets it without having to remember to.
+    tx_status: Arc<AtomicU8>,
 }
 
 impl Responses {
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Message, Error>> {
         loop {
             match self.cur.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(body)) => return Poll::Ready(Err(Error::db(body))),
-                Some(message) => return Poll::Ready(Ok(message)),
+                Some(Message::ErrorResponse(body)) => {
+                    // The server follows an ErrorResponse with a
+                    // `ReadyForQuery` this stream never reaches: the caller
+                    // gets the error and drops the stream. Record what that
+                    // byte would have said. A statement that fails inside a
+                    // transaction block aborts the whole block (`T` -> `E`);
+                    // one that fails outside a block leaves the session idle,
+                    // and a block already aborted stays aborted.
+                    let _ = self.tx_status.compare_exchange(
+                        b'T',
+                        b'E',
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                    return Poll::Ready(Err(Error::db(body)));
+                }
+                Some(message) => {
+                    if let Message::ReadyForQuery(body) = &message {
+                        self.tx_status.store(body.status(), Ordering::Relaxed);
+                    }
+                    return Poll::Ready(Ok(message));
+                }
                 None => {}
             }
 
@@ -111,6 +172,12 @@ pub struct InnerClient {
     /// nominally `Send`, so an atomic keeps the bound clean without
     /// invoking UB on a future cross-thread move.
     dirty: AtomicBool,
+
+    /// Transaction-status byte from the last `ReadyForQuery` this client
+    /// observed (`I`/`T`/`E`), starting at `I` because a session that has just
+    /// finished startup is idle. Written by every [`Responses`] stream this
+    /// client hands out; read by the pool on release.
+    tx_status: Arc<AtomicU8>,
 }
 
 impl InnerClient {
@@ -130,7 +197,13 @@ impl InnerClient {
         Ok(Responses {
             receiver,
             cur: BackendMessages::empty(),
+            tx_status: Arc::clone(&self.tx_status),
         })
+    }
+
+    /// The transaction state the server reported in the last `ReadyForQuery`.
+    pub(crate) fn transaction_status(&self) -> TransactionStatus {
+        TransactionStatus::from_byte(self.tx_status.load(Ordering::Relaxed))
     }
 
     pub(crate) fn typeinfo(&self) -> Option<Statement> {
@@ -255,6 +328,7 @@ impl Client {
                 cached_typeinfo: Default::default(),
                 buffer: Default::default(),
                 dirty: AtomicBool::new(false),
+                tx_status: Arc::new(AtomicU8::new(b'I')),
             }),
             socket_config: None,
             ssl_mode,
@@ -687,6 +761,19 @@ impl Client {
     /// In that case, all future queries will fail.
     pub fn is_closed(&self) -> bool {
         self.inner.sender.is_closed()
+    }
+
+    /// The transaction state the server reported in the last `ReadyForQuery`
+    /// on this connection.
+    ///
+    /// The answer covers statements this client awaited to completion. A
+    /// fire-and-forget command whose response was never read - the ROLLBACK
+    /// `Transaction::drop` queues is the only one the driver itself issues -
+    /// is not reflected until something reads a later `ReadyForQuery`;
+    /// [`Client::is_dirty`] reports that a command is outstanding.
+    #[must_use]
+    pub fn transaction_status(&self) -> TransactionStatus {
+        self.inner.transaction_status()
     }
 
     /// Is a fire-and-forget command (e.g. ROLLBACK from `Transaction::drop`)

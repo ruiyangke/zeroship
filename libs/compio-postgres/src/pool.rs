@@ -25,9 +25,17 @@
 //! receiver observes `None`, and the task terminates gracefully.
 //!
 //! On [`PooledClient::drop`], the entry is returned to the pool (or evicted
-//! if the connection is closed or past `max_lifetime`). There is no separate
-//! `needs_rollback` flag — tokio-postgres's [`Transaction`] handles rollback
-//! via Drop without any pool assistance.
+//! if the connection is closed or past `max_lifetime`). A connection released
+//! with a transaction still open on the wire gets a fire-and-forget ROLLBACK
+//! first, so the next borrower never inherits it; see `Pool::return_client`
+//! for why that is a ROLLBACK and not a `DISCARD ALL`.
+//!
+//! Transport
+//! ---------
+//! The pool opens its connections with [`NoTls`], so it cannot satisfy a
+//! connection string that requires encryption. Rather than let that surface
+//! as a server-dependent handshake error several hundred milliseconds into a
+//! retry loop, [`Pool::connect_with_config`] rejects such a URL outright.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -39,8 +47,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use crate::config::{SslMode, SslNegotiation};
 use crate::tls::NoTls;
-use crate::{Client, Connection, Error, Socket};
+use crate::{Client, Config, Connection, Error, Socket, TransactionStatus};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -212,6 +221,49 @@ fn pool_error(msg: impl Into<String>) -> Error {
     Error::connect(io::Error::other(msg.into()))
 }
 
+/// Reject a connection string whose TLS settings this pool can never satisfy.
+///
+/// The pool builds its connections with [`NoTls`], so `sslmode=require` and
+/// `sslnegotiation=direct` have no way to succeed against any server. The
+/// driver already fails closed on both - `connect_tls` errors rather than
+/// falling back to plaintext, so nothing is silently downgraded - but the
+/// error it raises describes the server ("server does not support TLS" when
+/// the server answers `N`) rather than the real, permanent cause, and it
+/// arrives only after `connect_with_config`'s three-attempt backoff has spent
+/// about two seconds on a URL that could never have worked. Answering here
+/// names the cause and answers immediately.
+///
+/// `sslmode=prefer` (libpq's default, and therefore the default here) is not
+/// rejected: it asks for encryption where available and permits plaintext
+/// otherwise, which is exactly what it gets.
+fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
+    let config: Config = url.parse()?;
+
+    if config.get_ssl_mode() == SslMode::Require {
+        return Err(pool_error(
+            "sslmode=require cannot be satisfied: the connection pool connects with NoTls \
+             and has no TLS connector. Use compio_postgres::connect with a TLS connector, \
+             or drop to sslmode=prefer if plaintext is acceptable.",
+        ));
+    }
+
+    // `sslmode=disable` ignores `sslnegotiation` entirely, so only a mode that
+    // would have negotiated is worth rejecting here. With `require` already
+    // handled above, this leaves `prefer` - which `connect_tls` refuses to pair
+    // with direct negotiation anyway, on the grounds that a mode permitting
+    // plaintext must not drive a TLS-only handshake.
+    if config.get_ssl_negotiation() == SslNegotiation::Direct
+        && config.get_ssl_mode() != SslMode::Disable
+    {
+        return Err(pool_error(
+            "sslnegotiation=direct cannot be satisfied: the connection pool connects with \
+             NoTls and has no TLS connector.",
+        ));
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Pool
 // ---------------------------------------------------------------------------
@@ -268,6 +320,8 @@ impl Pool {
     /// is retried with exponential backoff (3 attempts: 100ms, 400ms, 1.6s)
     /// to survive Docker ordering, DNS blips, and brief PG restarts.
     pub async fn connect_with_config(url: &str, config: PoolConfig) -> Result<Self, Error> {
+        reject_unsatisfiable_tls(url)?;
+
         let warm = config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
@@ -537,10 +591,6 @@ impl Pool {
         // Eviction criteria:
         //   - expired (max_lifetime reached)
         //   - closed: Client::is_closed() indicates the connection task exited
-        //
-        // tokio-postgres's Transaction handles ROLLBACK-on-drop internally
-        // via its own Drop impl — no `needs_rollback` flag is needed at the
-        // pool layer.
         if entry.is_expired() || entry.client.is_closed() {
             self.total.set(self.total.get().saturating_sub(1));
             self.metrics.inc_evictions();
@@ -550,6 +600,45 @@ impl Pool {
             // is a pure capacity wake (the woken waiter resolves with `None`).
             self.wake_one_waiter();
             return;
+        }
+
+        // Clear any transaction still open on the wire before anyone else can
+        // see this connection.
+        //
+        // `Transaction` borrows the client mutably, so a `PooledClient` cannot
+        // be released while one is alive and its Drop already queues the
+        // ROLLBACK. A transaction opened as raw SQL (`BEGIN` through
+        // `execute`/`batch_execute`) has no such guard, and without this the
+        // next borrower silently continues it: its writes join a transaction it
+        // never began, and it can read rows the previous borrower never
+        // committed. An aborted block (`E`) is worse still - the next borrower
+        // gets `25P02` for every statement.
+        //
+        // ROLLBACK, not `DISCARD ALL`. The transaction is the only thing the
+        // next borrower must not inherit; session state is something callers
+        // are entitled to hand across a release. `DISCARD ALL` would take out
+        // session-scoped advisory locks (crates/plugin-db's LockGuard holds one
+        // on a pooled client), every prepared statement (this driver's own
+        // type-info cache holds those for the life of the Client, so the next
+        // use of a cached entry would fail), and every session GUC. It also
+        // cannot run inside a transaction block at all - the server rejects it
+        // with `25001` - which is precisely the state this code addresses.
+        //
+        // Fire-and-forget, exactly as `Transaction::drop` does: release is a
+        // `Drop` and cannot await. The message is queued on the same FIFO
+        // channel as every other request, so it is on the wire ahead of
+        // anything the next borrower sends - including a borrower the entry is
+        // handed to directly below. `__private_api_rollback` marks the client
+        // dirty, which makes the next checkout run its barrier and drain the
+        // ROLLBACK (evicting the connection if it failed).
+        //
+        // Skipped when the client is already dirty: a ROLLBACK is queued and
+        // has not been observed yet, so the status byte is stale by
+        // construction and a second one would be pure noise on the wire.
+        if !entry.client.is_dirty()
+            && entry.client.transaction_status() != TransactionStatus::Idle
+        {
+            entry.client.__private_api_rollback(None);
         }
 
         // Live connection. Hand it DIRECTLY to the longest-queued waiter if one
