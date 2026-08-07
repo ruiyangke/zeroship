@@ -31,13 +31,19 @@ async fn connect(url: &str) -> Result<Client, Error> {
     Ok(client)
 }
 
-async fn require_pg() -> String {
+async fn require_pg() -> Option<String> {
     let url = test_url();
     match connect(&url).await {
-        Ok(_client) => url, // Client dropped -> driver task exits
+        Ok(_client) => Some(url), // Client dropped -> driver task exits
         Err(e) => {
+            // exit(0) here would end the WHOLE binary with a success status the
+            // moment any one test can't reach Postgres, discarding every result
+            // already produced -- including failures already reported by cargo
+            // for earlier tests in this run. Returning None instead lets each
+            // caller skip itself while its siblings (and any prior failures)
+            // stand.
             common::skip(&format!("Skipping — Postgres not reachable: {e}"));
-            std::process::exit(0);
+            None
         }
     }
 }
@@ -48,7 +54,7 @@ async fn require_pg() -> String {
 
 #[compio::test]
 async fn connect_and_close() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
     // Verify the client is alive and usable.
     assert!(!client.is_closed());
@@ -64,7 +70,7 @@ async fn connect_and_close() {
 
 #[compio::test]
 async fn simple_query() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     let rows = client
@@ -86,7 +92,7 @@ async fn simple_query() {
 
 #[compio::test]
 async fn parameterized_query() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     let val: i32 = 42;
@@ -106,7 +112,7 @@ async fn parameterized_query() {
 
 #[compio::test]
 async fn create_table_insert_select_drop() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     // Clean up from any prior failed run
@@ -159,7 +165,7 @@ async fn create_table_insert_select_drop() {
 
 #[compio::test]
 async fn transaction_commit() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let mut client = connect(&url).await.unwrap();
 
     client
@@ -206,7 +212,7 @@ async fn transaction_commit() {
 
 #[compio::test]
 async fn transaction_rollback_on_drop() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let mut client = connect(&url).await.unwrap();
 
     client
@@ -254,7 +260,7 @@ async fn transaction_rollback_on_drop() {
 
 #[compio::test]
 async fn error_handling() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     // Query a nonexistent table
@@ -279,7 +285,7 @@ async fn error_handling() {
 
 #[compio::test]
 async fn pool_basic() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let pool = Pool::connect(&url, 4).await.unwrap();
 
     let rows = pool.query("SELECT 42 as answer", &[]).await.unwrap();
@@ -296,7 +302,7 @@ async fn pool_basic() {
 
 #[compio::test]
 async fn pool_reuse() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let pool = Pool::connect(&url, 2).await.unwrap();
 
     // Use the pool 5 times — should reuse connections, not create new ones each time
@@ -316,7 +322,7 @@ async fn pool_reuse() {
 
 #[compio::test]
 async fn null_values() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     let rows = client
@@ -406,7 +412,7 @@ async fn drop_complex_table(client: &Client) {
 
 #[compio::test]
 async fn large_result_set() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -450,7 +456,7 @@ async fn large_result_set() {
 
 #[compio::test]
 async fn concurrent_connections() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let pool = Pool::connect(&url, 5).await.unwrap();
 
     // Acquire 5 connections, run a query on each, verify all succeed
@@ -474,7 +480,7 @@ async fn concurrent_connections() {
 
 #[compio::test]
 async fn text_types() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -542,7 +548,7 @@ async fn text_types() {
 
 #[compio::test]
 async fn numeric_types() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -602,7 +608,7 @@ async fn numeric_types() {
 
 #[compio::test]
 async fn binary_data() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -642,7 +648,7 @@ async fn binary_data() {
 
 #[compio::test]
 async fn multiple_statements_sequential() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -683,7 +689,7 @@ async fn multiple_statements_sequential() {
 
 #[compio::test]
 async fn transaction_rollback_explicit() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let mut client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -722,7 +728,7 @@ async fn transaction_rollback_explicit() {
 
 #[compio::test]
 async fn error_recovery_in_transaction() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -778,7 +784,7 @@ async fn error_recovery_in_transaction() {
 
 #[compio::test]
 async fn null_in_params() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     let rows = client
@@ -797,7 +803,7 @@ async fn null_in_params() {
 
 #[compio::test]
 async fn pool_exhaustion() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     // Custom config: max_size=2, very short connection_timeout so the test
     // doesn't wait 30 s for the exhaustion error.
     let config = compio_postgres::PoolConfig {
@@ -835,7 +841,7 @@ async fn pool_exhaustion() {
 
 #[compio::test]
 async fn returning_clause() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -866,7 +872,7 @@ async fn returning_clause() {
 
 #[compio::test]
 async fn update_with_returning() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     create_complex_table(&client).await;
@@ -924,7 +930,7 @@ async fn update_with_returning() {
 async fn get_cancellation_during_connect_does_not_leak_permits() {
     use futures_util::poll;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let config = compio_postgres::PoolConfig {
         max_size: 4,
         min_idle: 0,
@@ -1079,7 +1085,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
 
     // Single slot so "the freed connection" is unambiguous, and the only way a
     // fresh caller can get one is by intercepting the entry freed for waiter A.
@@ -1196,7 +1202,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
 async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     use std::rc::Rc;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
 
     let config = compio_postgres::PoolConfig {
         max_size: 1,
@@ -1309,7 +1315,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
 async fn notify_delivered_on_idle_listener() {
     use futures_util::StreamExt;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
 
     // Listener connection A. Register the async-message sink BEFORE spawning
     // run(), then LISTEN on a channel.
@@ -1378,7 +1384,7 @@ async fn copy_in_error_does_not_deadlock() {
     use futures_util::SinkExt;
     use std::pin::pin;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     client
@@ -1494,7 +1500,7 @@ async fn copy_in_error_does_not_deadlock() {
 async fn concurrent_queries_are_pipelined() {
     use futures_util::future::join_all;
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     // 32 distinct queries, each returning its own index, all issued at once.
@@ -1561,7 +1567,7 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
     const ROWS: i32 = 3; // result ~= 48 MB, fanned over 3 frames of ~16 MB
     const N: usize = 16; // concurrent in-flight queries on one connection
 
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
     let client = connect(&url).await.unwrap();
 
     // Distinct payloads so a misrouted/corrupted response is caught, not just
@@ -1637,7 +1643,7 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 
 #[compio::test]
 async fn multiplexed_clean_shutdown_completes_without_hang() {
-    let url = require_pg().await;
+    let Some(url) = require_pg().await else { return };
 
     let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
     // Retain the handle so we can await the driver's own clean exit.
