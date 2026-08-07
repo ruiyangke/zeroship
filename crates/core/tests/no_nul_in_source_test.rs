@@ -70,15 +70,35 @@ fn no_tracked_source_file_contains_a_nul_byte() {
 
     let files = tracked_source_files(&root);
 
-    // The walk is the thing most likely to break silently: a wrong root or an
-    // over-broad skip list yields an empty scan, and an empty scan passes. The
-    // tree held well over a thousand such files when this was written.
+    // The enumeration is the thing most likely to break silently: a wrong root
+    // or an over-broad skip list yields a short list, and a short list that is
+    // fully read passes every downstream check.
+    //
+    // This floor is a TOLERANCE, not a degenerate-case guard, and the read check
+    // below does not redeem it. That check is proportional to whatever the
+    // enumeration produced, so it cannot see enumeration loss at all: enumerate
+    // 501 files and read all 501 and it reports 100 percent. Measured, not
+    // reasoned - truncating the list to 501 of 2397 left this test green, and
+    // the only tell was the clock (0.01s against 0.22s).
+    //
+    // The tolerance is irreducible. A proportional bound needs a denominator,
+    // and every count available here comes from the same `git ls-files`, so a
+    // truncated listing is indistinguishable from a smaller repository. Only the
+    // SIZE is a choice, and it is set to the same ~7 percent headroom the CI
+    // test-target floor carries, against 2397 measured on 2026-08-07. Raise it
+    // when the tree grows; a fixed floor gets looser every time a file is added,
+    // which is the wrong direction for a guard against coverage loss.
+    const MIN_ENUMERATED: usize = 2230;
     assert!(
-        files.len() > 500,
-        "scanned only {} source files under {} - the walk is not reaching the \
-         tree it claims to cover, so a pass would mean nothing",
+        files.len() >= MIN_ENUMERATED,
+        "git ls-files returned {} source files under {}, fewer than the {} this \
+         gate expects to scan - the enumeration is not reaching the tree it \
+         claims to cover, so a pass would mean nothing. If the repository really \
+         did shrink, lower MIN_ENUMERATED deliberately; do not treat the gap as \
+         slack.",
         files.len(),
         root.display(),
+        MIN_ENUMERATED,
     );
 
     let mut offenders = Vec::new();

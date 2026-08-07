@@ -73,10 +73,16 @@ jobs:
             fi
           done
           echo "doc citations checked: $found, unresolvable: $missing"
-          # Floor with headroom, not equality - the count moves with ordinary
-          # edits. 30 against a measured 37 is the same 6 percent slack the
-          # test-target floor carries, deliberately: a floor loose enough to
-          # absorb a real coverage loss is the defect it exists to prevent.
+          # 30 against a measured 37. That is 19 percent of headroom, looser than
+          # the 7 percent the two enumeration floors carry, and the difference is
+          # deliberate rather than sloppy: those guard a count that can be
+          # PARTIALLY lost (a truncated file list reads fine and looks clean),
+          # whereas this one guards against the extraction breaking, which is an
+          # all-or-nothing failure - a wrong pattern or a wrong directory list
+          # yields zero or a handful, never 80 percent. The floor only has to
+          # separate "clean tree" from "scanned nothing", and the count moves
+          # with ordinary comment edits, so a tight floor here buys churn and no
+          # coverage.
           if [ "$found" -lt 30 ]; then
             echo "::error::only $found doc citations found (expected ~37); the scan is not reaching the tree it claims to cover, so a clean result would mean nothing"
             exit 1
