@@ -19,9 +19,9 @@
 //! bare `impl SqlSession for compio_postgres::Client` is disallowed. The newtype
 //! is the clean, allowed carrier.
 //!
-//! The mapping is a near-mechanical port of the monorepo's in-tree
-//! `crates/zeroship-migrate/src/apply/backend/postgres/session.rs` `PgSession`
-//! impl (whose neutral `Seam*` types are the SAME shape as the standalone's
+//! The mapping is a near-mechanical port of the engine's own
+//! `third_party/zero-migrate/crates/zero-migrate/src/apply/backend/postgres/session.rs`
+//! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
 //! `driver::*` types, renamed): `batch_execute → batch`, `execute → exec`,
 //! `execute_text_params → exec_text`, `query`/`query_one` unchanged; the
 //! `SeamBind → Value`/`SeamRow`/`SeamError` decode paths carry over byte-for-byte
@@ -91,7 +91,8 @@ impl CompioPgSession {
 
 // ---------------------------------------------------------------------------
 // Neutral-type mapping — the FIRST monorepo producer of every `driver::*` type.
-// Ported from `zeroship-migrate/src/apply/backend/postgres/session.rs`.
+// Ported from
+// `third_party/zero-migrate/crates/zero-migrate/src/apply/backend/postgres/session.rs`.
 // ---------------------------------------------------------------------------
 
 /// `compio_postgres::Error → driver::DbError`. The engine treats the error

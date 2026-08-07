@@ -5,7 +5,7 @@
 //! ## Why this bench exists
 //!
 //! The JSON-string + V8 `JSON.parse` tail in `crud::first_row_or_null`
-//! (`crates/plugin-db/src/crud.rs:106-109`) is the next bottleneck after
+//! (`crates/plugin-db/src/crud/mod.rs`) is the next bottleneck after
 //! the index-lookup fix. With `bench_row_to_json` covering the row-decode
 //! half, this harness covers the composed path so a cross-crate redesign
 //! of the JSON tail can be justified if the wide-row number crosses the

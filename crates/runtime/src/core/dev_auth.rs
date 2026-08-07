@@ -4,7 +4,7 @@
 //!
 //! In production the **gateway** is the BFF: it owns the `__Host-zeroship_app_session`
 //! cookie, resolves the authenticated user, and HMAC-signs that identity into
-//! the request-bound `ZeroShip-User` header (`crates/core/src/auth.rs`,
+//! the request-bound `ZeroShip-User` header (`crates/core/src/auth/mod.rs`,
 //! `crates/gateway/src/oidc_rp.rs`). The worker verifies + decodes that header
 //! and threads the resulting `user_json` into
 //! [`Runtime::call_fetch_handler_with_user`], which feeds BOTH the
@@ -107,7 +107,7 @@ fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 ///
 /// This is a deliberately tiny, dev-only HMAC envelope — NOT the
 /// request-bound, time-bound prod `ZeroShip-User` format
-/// (`crates/core/src/auth.rs`). It only needs to bind the cookie to the
+/// (`crates/core/src/auth/mod.rs`). It only needs to bind the cookie to the
 /// per-dev-server secret so an unrelated process cannot forge an identity into
 /// the dev runtime; there is no replay surface worth time-binding in
 /// single-developer dev.

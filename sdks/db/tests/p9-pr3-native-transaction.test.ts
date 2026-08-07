@@ -2,7 +2,7 @@
  * P9 PR 3 — `env.db.transaction(fn)` rides the native orchestrator.
  *
  * Transaction begin/commit/rollback/nested-savepoint moved into Rust
- * (`crates/plugin-db/src/orchestrator/transaction.rs`). The
+ * (`crates/plugin-db/src/transaction/mod.rs`). The
  * `@zeroship/bootstrap` `transactionImpl` is now a thin `Result`-wrapping
  * shim over the native `env.db.transaction(callback, opts)` v8_method,
  * keeping only the JS-only concerns (DataLoader drain + `_txDepth`

@@ -307,8 +307,9 @@ async fn pg_admin_lookup_root(
                      // `std::env::{set_var, remove_var}` (unsafe in
                      // 2024-edition stdlib). Each test uses a
                      // uniquely-named env var so calls don't race with
-                     // each other or with other crates. Mirrors the
-                     // pattern in `crates/sandbox/src/db.rs::tests`.
+                     // each other or with other crates — that unique
+                     // name is what makes the unsafe calls sound here,
+                     // not any ordering guarantee from the harness.
 mod tests {
     use super::*;
 

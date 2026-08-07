@@ -119,7 +119,7 @@ pub struct GateState {
     /// (DSN + max size, both `Send + Sync`); the actual `Pool` is built
     /// lazily **per worker thread**, wrapped in an `Rc`, and stashed in a
     /// thread-local — the same pattern the sandbox controller uses for
-    /// its per-compio-worker pool (`crates/sandbox/src/db.rs`). Handlers
+    /// its per-compio-worker pool. Handlers
     /// reach a checked-out connection via
     /// [`db::checkout`](crate::db::checkout); each checkout covers ONE
     /// operation and releases on drop, so no single shared connection

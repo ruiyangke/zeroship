@@ -290,7 +290,7 @@ function isFieldDef(value: unknown): value is FieldDef {
 
 /**
  * **P7 PR 1** — SDK-side mirror of the Rust-side `SYSTEM_FIELD_NAMES`
- * constant (`crates/plugin-db/src/query.rs`). The seven names are
+ * constant (`crates/zeroship-schema/src/query.rs`). The seven names are
  * platform-managed system fields; creator schemas cannot declare
  * fields with these names. Fences at schema-declaration time so the
  * failure shows up immediately in `pnpm dev` (not at the first DB
@@ -1326,7 +1326,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   //
   // The native `env.db.transaction(callback, opts)` v8_method owns
   // begin / commit / rollback / nested-savepoint (see
-  // `crates/plugin-db/src/orchestrator/transaction.rs`). It calls
+  // `crates/plugin-db/src/transaction/mod.rs`). It calls
   // `callback(rawTxView)` once BEGIN/SAVEPOINT succeeds and returns a
   // promise that resolves with the callback's result on commit (callback
   // resolved) or rejects with the callback's error on rollback (callback

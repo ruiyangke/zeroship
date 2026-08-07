@@ -101,8 +101,11 @@ pub fn init_v8() {
 /// exists when the lockdown runs. The multi-threaded default platform spawns such
 /// threads at init; a single-threaded platform spawns NONE, so the in-process
 /// lockdown covers the only thread (landlock has no TSYNC equivalent, so this is the
-/// sound way to give it full coverage). See
-/// `crates/zeroship-migrate/src/frontend/sandbox.rs`.
+/// sound way to give it full coverage).
+///
+/// The contract for any such caller: apply the kernel lockdown on the SAME thread
+/// that will run V8, and get here before a single V8 background thread has been
+/// spawned. That ordering is the whole reason this variant exists.
 ///
 /// MUST be chosen INSTEAD of [`init_v8`] for the whole process: both share one `Once`,
 /// so a process must call this BEFORE any path that calls `init_v8` (e.g.
@@ -378,8 +381,8 @@ fn zs_db_platform_callback(
 /// Source of truth: `sdks/bootstrap/src/runtime-entry.ts` — compiled by
 /// the bootstrap package's `pnpm build` (which strips the `export {};`
 /// module marker so the file is splice-safe). Stage 7 of the refactor
-/// moved this out of `crates/runtime/src/bootstrap/db_init.js` so dev
-/// and prod share a single implementation.
+/// moved this out of a runtime-owned JS file (since deleted) so dev and
+/// prod share a single implementation.
 ///
 /// Build ordering: `pnpm -F @zeroship/bootstrap build` MUST run before
 /// `cargo build -p zeroship-runtime`. The workspace's root `pnpm build`

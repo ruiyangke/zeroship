@@ -15,8 +15,9 @@
 // `ColType` space. There is exactly one mapping, defined once here.
 //
 // NOTE: this is NOT the inverse of the engine's Rust `col_type_to_token`
-// (`crates/zeroship-migrate/src/ir_author.rs`). That function emits engine-
-// internal masked-sibling descriptor tokens (`"int"` for `Int|BigInt`,
+// (`third_party/zero-migrate/crates/zero-migrate/src/render/lower.rs`). That
+// function emits engine-internal masked-sibling descriptor tokens
+// (`"int"` for `Int|BigInt`,
 // `"number"` for `Float|Decimal`, `"string"` for `Uuid|Text`, …) — a different,
 // overlapping token set from the `@zeroship/db` `FieldDef` discriminants this
 // bridge consumes (the db `FieldDef` union emits `"number"`/`"id"`/… and never

@@ -64,7 +64,7 @@ pub enum OpErrorKind {
     /// A Node.js-style error code (e.g. `"ERR_CRYPTO_HASH_FINALIZED"`,
     /// `"ERR_INVALID_ARG_TYPE"`). The macro's `gen_throw_error` arm
     /// constructs a JS `Error`, `TypeError`, or `RangeError` per the
-    /// per-code class table (see `core/error.rs::node_error_class_for`)
+    /// per-code class table (see `core/node_error.rs::class_for`)
     /// and assigns the `code` property as a static string. npm packages
     /// branch on `e.code === "ERR_..."`.
     NodeError(&'static str),

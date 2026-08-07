@@ -1,9 +1,11 @@
 // Drift guard for the generated dialect table (DSL redesign Phase 0, S0.1).
 //
-// The single source is `crates/zeroship-migrate/dialect-support.toml`; the
+// The single source is
+// `third_party/zero-migrate/crates/zero-migrate/dialect-support.toml`; the
 // generator (`scripts/gen-dialect-table.mjs`) emits BOTH the committed TS mirror
 // (`src/generated/dialect-table.ts`) and the committed Rust table
-// (`crates/zeroship-migrate/src/model/dialect_table.rs`). This test is the
+// (`third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs`).
+// This test is the
 // "regenerate + diff" freshness gate (the same shape as ir-types-drift's enums
 // gate): re-run the generator into temp files and assert byte-equality with both
 // committed artifacts, so neither can silently go stale vs the sidecar. It also

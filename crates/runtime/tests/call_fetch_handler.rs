@@ -196,8 +196,8 @@ fn async_response() {
 
     // call_fetch_handler must return Pending for async handlers. The pump
     // then drives the promise to completion and delivers the final
-    // SettledFetch via the receiver. This mirrors the idiom used in
-    // crates/runtime/tests/http.rs ~line 198 for dispatch_http.
+    // SettledFetch via the receiver. This mirrors the idiom `dispatch_http`
+    // uses in crates/runtime/tests/common/mod.rs.
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
         let runtime = Runtime::builder().modules(modules).build();
@@ -725,7 +725,7 @@ fn streaming_async_closes_cleanly() {
 //
 // These lock in the three exports of the user-facing `zeroship` module:
 // `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
-// alongside the bootstrap (see crates/runtime/src/init.rs::ZEROSHIP_MODULE_JS).
+// alongside the bootstrap (see crates/runtime/src/core/init.rs::ZEROSHIP_MODULE_JS).
 
 #[test]
 fn zeroship_module_env_import() {

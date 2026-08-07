@@ -107,7 +107,7 @@ describe("P7 PR 1 — t.actor() builder", () => {
 describe("P7 PR 1 — reserved-name validator (SDK side)", () => {
   // The seven names must be refused at schema-declaration time.
   // Mirrors the Rust-side `SYSTEM_FIELD_NAMES` in
-  // `crates/plugin-db/src/query.rs`.
+  // `crates/zeroship-schema/src/query.rs`.
   const SYSTEM_FIELDS = [
     "id",
     "created_at",

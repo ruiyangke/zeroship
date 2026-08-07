@@ -22,7 +22,7 @@ type AnyRec = Record<string, unknown>;
 // mock's `transaction(callback)` runs the callback (begin succeeded),
 // then simulates a COMMIT that fails — rejecting with the
 // `COMMIT_FAILED_INDETERMINATE`-coded error the Rust orchestrator emits
-// (`crates/plugin-db/src/orchestrator/transaction.rs::exec_settle_top_level`).
+// (`crates/plugin-db/src/transaction/mod.rs::exec_settle_top_level`).
 // The `.cause` is preserved on the rejection so the SDK's `result.error`
 // keeps the cause chain the pre-PR3 JS `transactionImpl` produced.
 function makeCommitFailingNative(commitErr: Error) {

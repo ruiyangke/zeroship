@@ -118,9 +118,10 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
 }
 
 /// Parse error for [`parse_with_prefix`]. Distinguishes a wrong-prefix
-/// boundary check from a malformed-id parse error so callers (e.g.
-/// `crates/sandbox/src/db.rs`) can map them onto distinct error
-/// variants without losing the underlying detail.
+/// boundary check from a malformed-id parse error so a caller can map
+/// the two onto distinct error variants — a prefix mismatch is a
+/// rejected boundary crossing, a malformed id is bad input — without
+/// losing the underlying detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// The id parsed cleanly but its prefix did not match the expected
@@ -153,8 +154,10 @@ impl std::error::Error for ParseError {}
 /// known entity type (e.g. `sandbox.db.insert_sandbox` knows it is
 /// receiving an `sbx_…` id) use this helper to refuse mismatched
 /// prefixes BEFORE the value reaches any downstream wire (SQL,
-/// filesystem path, HTTP header). Mirrors the path-traversal
-/// hardening posture in `crates/sandbox/src/persist.rs:36-40`.
+/// filesystem path, HTTP header). The path-traversal hardening rule
+/// this encodes: an id-shaped parameter is never trusted as a path
+/// segment until its prefix has been checked, so a caller cannot
+/// smuggle `..` — or another entity type's id — through it.
 ///
 /// Returns the embedded UUID on success.
 pub fn parse_with_prefix(

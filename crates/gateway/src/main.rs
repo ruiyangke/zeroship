@@ -634,9 +634,9 @@ fn main() -> std::io::Result<()> {
     };
 
     // OIDC RP — services every `{app}.zeroship.ai` host. The
-    // `client_id` matches the entry registered in
-    // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
-    // built at the dispatch site.
+    // `client_id` must match the client this gateway host is registered
+    // as with the OP; `redirect_uri` is per-app and built at the
+    // dispatch site.
     let stash_signing_key_bytes = stash_signing_key.into_bytes();
 
     // AES-256-GCM key for the server-held refresh family at rest in
@@ -877,8 +877,8 @@ fn main() -> std::io::Result<()> {
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the
-            // URI is stable across every `backchannel_logout_uri`
-            // entry in `ops/auth-clients.example.toml`. Must be
+            // URI is stable across every registered client's
+            // `backchannel_logout_uri`. Must be
             // mounted BEFORE the subdomain catch-all below — ntex's
             // path routing is registration-order-sensitive for
             // overlapping patterns.
