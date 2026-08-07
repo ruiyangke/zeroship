@@ -25,7 +25,7 @@ import {
   type MigrationModule,
 } from "zero-migrate-cli";
 import { ids, table, t } from "zero-migrate";
-import { NO_INJECT_POLICY } from "./policy.js";
+import { noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -106,7 +106,7 @@ async function applyInitial(
     projectSchema,
     driver,
     registry: {},
-    policy: [NO_INJECT_POLICY],
+    policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "id-lifecycle-e2e",
     nameFallback: migration.name,
@@ -128,7 +128,7 @@ async function applyAfter(
     projectSchema,
     driver,
     registry,
-    policy: [NO_INJECT_POLICY],
+    policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "id-lifecycle-e2e",
     nameFallback: migration.name,
@@ -146,7 +146,7 @@ async function assertCleanStatus(
     projectSchema,
     driver,
     registry,
-    policy: [NO_INJECT_POLICY],
+    policy: [noInjectPolicy(projectSchema)],
     migrations: [migration],
     nameFallbacks: [migration.name],
   });

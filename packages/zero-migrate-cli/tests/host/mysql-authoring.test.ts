@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-cli";
 import { byteValue, decimal, ids, table, t, uuidV4 } from "zero-migrate";
-import { NO_INJECT_POLICY } from "./policy.js";
+import { noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -152,7 +152,7 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
       registry: {},
-      policy: [NO_INJECT_POLICY],
+      policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",
@@ -263,7 +263,7 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
       registry: {},
-      policy: [NO_INJECT_POLICY],
+      policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "type-id-test",
     });
@@ -335,7 +335,7 @@ test("Live MySQL ULID CHECK enforces canonical uppercase spelling and bounds", a
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
       registry: {},
-      policy: [NO_INJECT_POLICY],
+      policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "ulid-test",
     });
@@ -403,7 +403,7 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
       registry: {},
-      policy: [NO_INJECT_POLICY],
+      policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "uuid-test",
     });
@@ -520,7 +520,7 @@ test("Live MySQL onConflict updates only the authored target and journals only c
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
         registry: {},
-        policy: [NO_INJECT_POLICY],
+        policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-test",
         nameFallback: migration.name,
@@ -629,7 +629,7 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
         registry: {},
-        policy: [NO_INJECT_POLICY],
+        policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-target-proof",
         nameFallback: migration.name,

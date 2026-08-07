@@ -29,7 +29,7 @@ import {
   type HostDriver,
 } from "../../src/driver-pg.js";
 import { apply } from "zero-migrate-cli";
-import { NO_INJECT_POLICY } from "./policy.js";
+import { noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -359,7 +359,7 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
       registry: {},
-      policy: [NO_INJECT_POLICY],
+      policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "deploy",
       nameFallback: "create_widgets",
