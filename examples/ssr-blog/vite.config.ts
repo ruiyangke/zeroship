@@ -23,7 +23,7 @@ const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
 const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
 const RUNTIME_ORIGIN = "http://localhost:3001";
 export const SSR_DEV_PROXY_PATTERN =
-  "^/(?!(@vite/|@react-refresh|@id/|@fs/|__vite_ping|__open-in-editor|src/|node_modules/|assets/|_zs/|__zeroship_|.*\\.[\\w]+(?:[?#].*)?$)).*";
+  "^/(?!(@vite/|@react-refresh|@id/|@fs/|__vite_ping|__open-in-editor|src/|node_modules/|assets/|_zs/|__zeroship|.*\\.[\\w]+(?:[?#].*)?$)).*";
 const SSR_DEV_PROXY_RE = new RegExp(SSR_DEV_PROXY_PATTERN);
 
 export function shouldProxySsrDevPath(path: string): boolean {
