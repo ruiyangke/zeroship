@@ -17,11 +17,13 @@
 //      target row is exact. (Exercised via the create-first apply's system-field
 //      DML text params; a dedicated text→timestamptz case is noted.)
 //   3. `status()`/`history()` over the host driver.
-//   5. `pg` type-parser POISON: a global setTypeParser(20 -> Number) plus raw-string
-//      overrides for oid 16/18/23/1009 BEFORE apply; the journal `event_seq`/`version`
-//      stay exact and the applied catalog facts are unchanged (connection-scoped
-//      parsers win). Oid 16 is the load-bearing one: `valueToCell` classifies bool by
-//      OID and `Boolean("f")` is `true`, so an unpinned bool inverts every `false`.
+//   5. `pg` type-parser POISON: EVERY oid in the global `pg.types` map leaks its raw
+//      wire string BEFORE apply: one unconditional branch, not a list of oids, so a
+//      parser borrowed out of that map cannot pass for a pin. The journal
+//      `event_seq`/`version` stay exact and the applied catalog facts are unchanged
+//      (connection-scoped parsers win). Oid 16 is the load-bearing one: `valueToCell`
+//      classifies bool by OID and `Boolean("f")` is `true`, so an unpinned bool
+//      inverts every `false`.
 //   7. Checksum: the host journal `Checksum::of_ir` anchor is one stable value
 //      across all DDL steps of the IR envelope.
 //   + ShadowUnsupported honesty: no `dryRun` verb (shadow deferred).
@@ -141,20 +143,27 @@ async function main() {
   await adm.query(`CREATE SCHEMA "${hostSchema}"`);
 
   // ---- Oracle 5 (setup): POISON the global type parsers BEFORE the host apply ----
-  // A host app's footgun: override oid 20 (int8) to return a truncating JS number.
-  // The connection-scoped parsers in driver-pg MUST win, keeping event_seq exact.
-  pg.types.setTypeParser(20, (v: string) => Number(v));
-  // The same footgun on the other OIDs the seam decodes. `(v) => v` leaks the raw
-  // wire string, the worst case for any decode inferred from the column OID:
-  //   16   bool  - `valueToCell` classifies by OID and coerces with `Boolean(value)`,
-  //                so a leaked `"f"` would read as `true` and every `false` in the
-  //                live catalog (attnotnull, indisunique, ...) would invert silently.
-  //   18   "char" and 23 int4 - expected to be immune already: the apply path
-  //                `::text`-casts `"char"` and the int arm re-coerces with `Number`.
-  //   1009 text[] - the array framing the seam's TextArray decode needs.
-  for (const oid of [16, 18, 23, 1009]) {
-    pg.types.setTypeParser(oid, (v: string) => v);
-  }
+  // A host app's footgun: `pg.types.setTypeParser` rewrites the process-wide decoder
+  // for an OID, and every later `pg` query inherits it. `setTypeParser` writes into
+  // the map `getTypeParser` reads, so replacing the read with ONE unconditional
+  // branch puts the map in the state a host app would leave it in after poisoning
+  // EVERY oid. It is one branch on purpose: a list of oids reads as the thing being
+  // asserted and is then only ever as wide as the list, which is exactly how a
+  // parser BORROWED out of `pg.types` passes for a pin.
+  //
+  // The stand-in leaks the raw wire string, the worst case for a decode inferred from
+  // the column OID: `valueToCell` classifies bool by OID and coerces with
+  // `Boolean(value)`, so a leaked `"f"` would read as `true` and every `false` in the
+  // live catalog (attnotnull, indisunique, ...) would invert silently; a leaked
+  // `{a,b}` would arrive as a text cell and fail the seam's TextArray decode.
+  //
+  // The connection-scoped parsers in driver-pg MUST win. That no pinned parser is
+  // REACHABLE here at all is proven directly, without a database, by the property
+  // arms in `tests/host/driver-pg.test.ts`.
+  const poisonedTypes = pg.types as unknown as { getTypeParser: unknown; setTypeParser: unknown };
+  const leakRawWireText = (value: string): string => value;
+  poisonedTypes.getTypeParser = () => leakRawWireText;
+  poisonedTypes.setTypeParser = () => {};
 
   // ---- Oracle 1/2/5: the HOST apply over driver-pg ----
   let hostApplyOk = true;
@@ -258,7 +267,7 @@ async function main() {
       nullability.rows.map((r) => [r.column_name as string, r.is_nullable as string]),
     );
     record(
-      "oracle-5 poison-parser: catalog nullability facts unchanged (bool/char/int4/text[] pins won)",
+      "oracle-5 poison-parser: catalog nullability facts unchanged (every global oid poisoned; the pins won)",
       nullMap.label === "NO" && nullMap.status === "NO" && nullMap.qty === "YES",
       `is_nullable=${JSON.stringify(nullMap)}`,
     );

@@ -3,12 +3,18 @@
 // `pg.types.setTypeParser` is GLOBAL and MUTABLE: any module in the host process
 // can rewrite the decoder for an OID and every later `pg` query in the process
 // inherits it. `driver-pg.ts` answers that with a connection-scoped `types` object
-// whose `getTypeParser` shadows the OIDs whose decode the seam depends on. These
-// tests poison the global parsers BEFORE opening a session and assert the pinned
-// decode still wins, mirroring the shape of the oid-20 poison in `tests/host/oracle.ts`.
+// whose `getTypeParser` pins the OIDs whose decode the seam depends on.
+//
+// These tests assert a PROPERTY, not a list of oids: no parser the driver relies on
+// is reachable through `pg.types`. Every poison here is unconditional over all oids,
+// because an enumerated poison is only ever as wide as its list, and a shadow that
+// BORROWS its parser from `pg.types` passes an enumerated poison while pinning
+// nothing (it only moves which oid has to be poisoned). Widening such a list later
+// also READS as widening the check when it is not.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL` (the same var the rest of the host suite uses).
-// Auto-skips cleanly when the test Postgres is unreachable, so DB-free CI stays green.
+// The property arms need no database; the live arms auto-skip cleanly when the test
+// Postgres is unreachable, so DB-free CI stays green.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,7 +22,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import type { JsCell, JsReply, JsRequest } from "../../src/addon.js";
-import { openPgSession, type HostDriver } from "../../src/driver-pg.js";
+import {
+  openPgSession,
+  connectionScopedTypes,
+  PINNED_OIDS,
+  type HostDriver,
+} from "../../src/driver-pg.js";
 import { apply } from "zero-migrate-cli";
 import { NO_INJECT_POLICY } from "./policy.js";
 
@@ -74,19 +85,166 @@ function query(sql: string): JsRequest {
 }
 
 /**
- * Overwrite the GLOBAL text parsers for `oids` and return a restore function.
- * `poison` stands in for a host app (or a transitive dependency) that called
- * `pg.types.setTypeParser` for its own reasons: the raw wire string flows through
- * undecoded, which is the worst case for any decode the seam infers from the OID.
+ * Poison EVERY oid in the global `pg.types` map and return a restore function.
+ *
+ * `setTypeParser(oid, fn)` writes into the very map `getTypeParser(oid)` reads, so
+ * replacing the read with ONE unconditional branch puts the map in exactly the state
+ * a host app would leave it in after poisoning every oid. It is written as one branch
+ * on purpose: a list of oids reads as the thing being asserted, and then the
+ * assertion is only ever as wide as the list, which is how a borrowed parser passes
+ * for a pin. The stand-in leaks the raw wire string, the worst case for any decode
+ * the seam infers from a column OID.
  */
-async function poisonGlobalParsers(oids: number[]): Promise<() => void> {
+async function poisonEveryGlobalParser(): Promise<() => void> {
   const pg = (await import("pg")).default;
-  const saved = oids.map((oid) => [oid, pg.types.getTypeParser(oid)] as const);
-  for (const oid of oids) pg.types.setTypeParser(oid, (v: string) => v);
+  const types = pg.types as unknown as {
+    getTypeParser: unknown;
+    setTypeParser: unknown;
+  };
+  const savedGet = types.getTypeParser;
+  const savedSet = types.setTypeParser;
+  const leakRawWireText = (value: string): string => value;
+  types.getTypeParser = () => leakRawWireText;
+  // A poisoned map cannot be un-poisoned from inside the process either.
+  types.setTypeParser = () => {};
   return () => {
-    for (const [oid, parser] of saved) pg.types.setTypeParser(oid, parser as never);
+    types.getTypeParser = savedGet;
+    types.setTypeParser = savedSet;
   };
 }
+
+// ---------------------------------------------------------------------------
+// The pin PROPERTY, with no database: no parser `driver-pg` relies on is reachable
+// through `pg.types`.
+//
+// The stand-in below answers EVERY oid, unconditionally, with a parser that throws,
+// and records which oids were asked for. The driver's scoped `getTypeParser` must
+// neither ask for nor call any of them for an oid it claims to pin. A shadow that
+// borrows `defaults.getTypeParser(...)` fails both halves, which is the whole point:
+// borrowing does not pin, it only moves which oid has to be poisoned.
+// ---------------------------------------------------------------------------
+
+interface PoisonedPg {
+  types: {
+    getTypeParser: (oid: number, format?: unknown) => (value: string) => unknown;
+    setTypeParser: () => void;
+  };
+}
+
+function poisonEveryOid(): { pg: PoisonedPg; reached: number[] } {
+  const reached: number[] = [];
+  return {
+    reached,
+    pg: {
+      types: {
+        getTypeParser(oid: number) {
+          reached.push(oid);
+          return () => {
+            throw new Error(`pg.types parser for oid ${oid} was reached`);
+          };
+        },
+        setTypeParser() {},
+      },
+    },
+  };
+}
+
+/** Parse one wire value through the scoped types built over a fully poisoned `pg`. */
+function scopedParse(oid: number, wire: string): unknown {
+  const { pg } = poisonEveryOid();
+  return connectionScopedTypes(pg as never).getTypeParser(oid)(wire);
+}
+
+// One wire sample per pinned oid, spelled exactly as PostgreSQL's `*_out` writes it.
+// The test below asserts the key set EQUALS `PINNED_OIDS`, so pinning a new oid in
+// the driver fails this suite until the sample is supplied: the driver owns the list,
+// the test cannot drift behind it.
+const WIRE_SAMPLE: Record<number, string> = {
+  16: "f",
+  20: "9223372036854775807",
+  1003: "{id,created_at}",
+  1009: "{a,b}",
+  1016: "{9223372036854775807}",
+  1700: "0.10",
+};
+
+const ascending = (a: number, b: number): number => a - b;
+
+test("no parser the pg driver pins is reachable through pg.types", () => {
+  const { pg, reached } = poisonEveryOid();
+  const scoped = connectionScopedTypes(pg as never);
+
+  assert.deepEqual(
+    Object.keys(WIRE_SAMPLE).map(Number).sort(ascending),
+    [...PINNED_OIDS].sort(ascending),
+    "every oid the driver pins needs a wire sample in WIRE_SAMPLE",
+  );
+
+  for (const oid of PINNED_OIDS) {
+    // Throws if the parser for this oid came from the poisoned map.
+    scoped.getTypeParser(oid)(WIRE_SAMPLE[oid]);
+  }
+
+  assert.deepEqual(
+    reached,
+    [],
+    "a pinned oid must be decoded by the driver itself, never looked up in pg.types",
+  );
+});
+
+test("the poison stand-in is wired in: an unpinned oid still delegates to pg.types", () => {
+  const UNPINNED_INT4 = 23;
+  assert.ok(
+    !PINNED_OIDS.includes(UNPINNED_INT4),
+    "oid 23 must stay unpinned for this control to mean anything",
+  );
+
+  const { pg, reached } = poisonEveryOid();
+  connectionScopedTypes(pg as never).getTypeParser(UNPINNED_INT4);
+
+  assert.deepEqual(
+    reached,
+    [UNPINNED_INT4],
+    "the scoped types must still defer unpinned oids to node-pg's defaults",
+  );
+});
+
+test("the pinned array parser decodes the PostgreSQL array literal itself", () => {
+  assert.deepEqual(scopedParse(1009, "{}"), [], "empty array");
+  assert.deepEqual(scopedParse(1009, "{a,b}"), ["a", "b"], "bare elements");
+  assert.deepEqual(scopedParse(1009, "{NULL}"), [null], "an unquoted NULL is a null element");
+  assert.deepEqual(
+    scopedParse(1009, '{"NULL"}'),
+    ["NULL"],
+    "a quoted NULL is the four-character string",
+  );
+  assert.deepEqual(scopedParse(1009, '{"",x}'), ["", "x"], "an empty element is quoted");
+  assert.deepEqual(
+    scopedParse(1009, '{"a,b","c\\"d","e\\\\f"}'),
+    ["a,b", 'c"d', "e\\f"],
+    "a quoted element keeps its comma, its escaped quote and its escaped backslash",
+  );
+  assert.deepEqual(
+    scopedParse(1003, "{id,created_at}"),
+    ["id", "created_at"],
+    "name[] shares text[]'s array-literal syntax",
+  );
+});
+
+test("int8[] elements cross as exact strings, never Number", () => {
+  const parsed = scopedParse(1016, "{9223372036854775807,-9223372036854775808,NULL}");
+  assert.deepEqual(parsed, ["9223372036854775807", "-9223372036854775808", null]);
+  for (const element of parsed as unknown[]) {
+    if (element !== null) assert.equal(typeof element, "string");
+  }
+});
+
+test("an array literal the seam cannot represent is a loud error, not a truncation", () => {
+  assert.throws(() => scopedParse(1009, "{{a,b},{c,d}}"), /nested/i, "nested braces");
+  assert.throws(() => scopedParse(1009, "[0:1]={a,b}"), /array literal/i, "dimension prefix");
+  assert.throws(() => scopedParse(1009, "{a,b"), /array literal/i, "unterminated array");
+  assert.throws(() => scopedParse(1009, '{"a}'), /array literal/i, "unterminated quote");
+});
 
 // ---------------------------------------------------------------------------
 // oid 16 (bool): a poisoned global bool parser must not flip `false` to `true`.
@@ -103,7 +261,7 @@ test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", as
     return;
   }
 
-  const restore = await poisonGlobalParsers([16]);
+  const restore = await poisonEveryGlobalParser();
   let session: Awaited<ReturnType<typeof openPgSession>> | null = null;
   try {
     session = await openPgSession(PG_URL);
@@ -130,12 +288,53 @@ test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", as
 });
 
 // ---------------------------------------------------------------------------
-// The rest of the OIDs a host is plausibly tempted to override. int4 re-coerces
-// with `Number(value)` and the apply path `::text`-casts `"char"`, so these are
-// expected to survive a poisoned global unchanged; the assertion is that a full
-// apply still produces the same catalog facts and the same exact journal.
+// The array OIDs, against a live server. Under a fully poisoned global map the
+// borrowed shadows hand back the raw `{a,b}` wire text, which `valueToCell`
+// classifies as a `text` cell and the seam's `Vec<String>` (TextArray) decode then
+// rejects. The pinned parser must produce the array itself.
 // ---------------------------------------------------------------------------
-test("apply survives poisoned global parsers for bool/char/int4/int8/text[]", async (t) => {
+test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw text", async (t) => {
+  const unreachable = await pgUnreachable();
+  if (unreachable !== null) {
+    t.skip(`test Postgres unreachable at ${PG_URL}: ${unreachable}`);
+    return;
+  }
+
+  const restore = await poisonEveryGlobalParser();
+  let session: Awaited<ReturnType<typeof openPgSession>> | null = null;
+  try {
+    session = await openPgSession(PG_URL);
+    const reply = await runVerb(
+      session.hostDriver,
+      query(
+        `SELECT ARRAY['a','b']::text[] AS t,
+                ARRAY['id','created_at']::name[] AS n,
+                ARRAY[9223372036854775807, -9223372036854775808]::int8[] AS i8,
+                ARRAY['x', NULL, 'NULL', 'a,b', 'q"z']::text[] AS mixed,
+                ARRAY[]::text[] AS empty`,
+      ),
+    );
+
+    assert.equal(reply.rows.length, 1);
+    assert.deepEqual(reply.rows[0].cells as JsCell[], [
+      { kind: "textArray", textArray: ["a", "b"] },
+      { kind: "textArray", textArray: ["id", "created_at"] },
+      { kind: "textArray", textArray: ["9223372036854775807", "-9223372036854775808"] },
+      { kind: "textArray", textArray: ["x", null, "NULL", "a,b", 'q"z'] },
+      { kind: "textArray", textArray: [] },
+    ]);
+  } finally {
+    await session?.close().catch(() => {});
+    restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A full apply against a fully poisoned global map: the catalog facts and the
+// exact journal are unchanged, so nothing the apply path reads depends on a
+// parser a host app can rewrite.
+// ---------------------------------------------------------------------------
+test("apply survives a fully poisoned global pg.types map", async (t) => {
   const unreachable = await pgUnreachable();
   if (unreachable !== null) {
     t.skip(`test Postgres unreachable at ${PG_URL}: ${unreachable}`);
@@ -143,8 +342,7 @@ test("apply survives poisoned global parsers for bool/char/int4/int8/text[]", as
   }
 
   const pg = (await import("pg")).default;
-  //   16 = bool, 18 = "char", 20 = int8, 23 = int4, 1009 = text[]
-  const restore = await poisonGlobalParsers([16, 18, 20, 23, 1009]);
+  const restore = await poisonEveryGlobalParser();
 
   const schema = uniqueSchema("poison_apply");
   const meta = `${schema}_migrations`;
