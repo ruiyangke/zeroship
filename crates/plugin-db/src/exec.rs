@@ -22,10 +22,10 @@
 //! Every fallible helper here returns [`crate::error::DbError`] — the
 //! `dispatch_*` layer in `crate::crud` calls
 //! [`crate::error::DbError::to_op_error`] at the V8 boundary so each
-//! throw carries `.code` for the SDK to branch on (replaces the
-//! pre-stage-8b `Result<_, String>` rail).
+//! throw carries `.code` for the SDK to branch on (replacing the
+//! earlier `Result<_, String>` rail).
 //!
-//! The transaction-emit deferral (Gap B closure) lives here:
+//! The transaction-emit deferral lives here:
 //! `queue_or_emit` decides between immediate emit and TX-pending
 //! queueing; `drain_pending_emits_on_commit` fires the queue on
 //! COMMIT; `clear_pending_emits` discards it on ROLLBACK.
@@ -107,7 +107,7 @@ pub(crate) async fn run_sql(
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     // Check if there's an active transaction *owned by this app*.
-    // SEC-1: a tx parked by a co-resident app must NOT capture this
+    // A tx parked by a co-resident app must NOT capture this
     // app's SQL — `has_tx_for(app_id)` reads `false` for another app's
     // slot, so we fall through to this app's own autocommit path.
     let has_tx = context::with(|c| c.has_tx_for(app_id));
@@ -221,7 +221,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
 
-    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
+    // Run the per-app role + timeout guards via `SET LOCAL`
     // inside an explicit transaction, exactly like the explicit-tx path
     // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
     // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
@@ -278,7 +278,7 @@ async fn exec_sqlite_json(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    // SEC-1: only this app's parked tx routes its SQL through the tx
+    // Only this app's parked tx routes its SQL through the tx
     // client; a co-resident app's tx is invisible here and we use the
     // shared autocommit path instead.
     let has_tx = context::with(|c| c.has_tx_for(app_id));
@@ -306,7 +306,7 @@ async fn exec_sqlite_json(
 /// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
 /// event into the in-process broker on success.
 ///
-/// This is the P8a coarse-grained reactive-query bridge: every
+/// This is the coarse-grained reactive-query bridge: every
 /// successful INSERT/UPDATE/DELETE produces one or more events on
 /// `(app_id, collection)` that wake any matching subscribers in the
 /// same isolate.
@@ -318,10 +318,10 @@ async fn exec_sqlite_json(
 /// the caller knows whether it called `build_insert`, `build_update_one`,
 /// `build_delete_one`, etc. so we don't try to infer it from the SQL.
 ///
-/// Future read-set narrowing (P8b) extends this helper to populate
-/// `changed_columns` from the SET clause and the logical `id` from the
-/// RETURNING row. For P8a we collect what's already in the result
-/// `Value`.
+/// A future read-set narrowing pass could extend this helper to
+/// populate `changed_columns` from the SET clause and the logical `id`
+/// from the RETURNING row. For now this collects what's already in
+/// the result `Value`.
 pub(crate) async fn exec_mutation_with_emit(
     bq: BuiltQuery,
     app_id: &str,
@@ -350,10 +350,9 @@ fn backend_publishes_committed_changes() -> bool {
 /// fetched `Vec<Value>` and we run the same gate + per-row build the
 /// production path runs.
 ///
-/// Perf CRITICAL N3-C1 (mirrors `wal_consumer::emit_for_tuple`'s R2 N-C1
-/// fix on the cross-worker path): short-circuit the per-row
-/// `(columns, tuple)` build before allocating anything the broker will
-/// discard.
+/// Mirrors `wal_consumer::emit_for_tuple`'s fix on the cross-worker
+/// path: short-circuit the per-row `(columns, tuple)` build before
+/// allocating anything the broker will discard.
 ///
 /// Two gates, both cheap:
 ///
@@ -413,8 +412,8 @@ fn emit_for_rows(
         // INSERT this is "every declared column" — for UPDATE it's
         // the post-image, which is a superset of what changed.
         // Filtering down to "what changed" requires a before/after
-        // diff that we don't have here; P8b will compute it from the
-        // mutation's SET clause directly.
+        // diff that we don't have here; a future pass could compute it
+        // from the mutation's SET clause directly.
         let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
             Value::Object(m) => {
                 let cols = m
@@ -422,7 +421,7 @@ fn emit_for_rows(
                     .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
                     .cloned()
                     .collect();
-                // P8b: render the full RETURNING row into a
+                // Render the full RETURNING row into a
                 // `column → text` map for the broker's predicate
                 // evaluation. Numbers / bools are stringified to
                 // match the WAL-consumer path's text encoding so the
@@ -452,8 +451,7 @@ fn emit_for_rows(
 /// If a transaction is active on this thread, queue the event in
 /// the per-isolate context's `pending_emits` slot for the settle
 /// path to drain on COMMIT. Otherwise (autocommit), fire it
-/// immediately. Closes Gap B — subscribers no longer observe
-/// pre-commit state.
+/// immediately. Subscribers no longer observe pre-commit state.
 fn queue_or_emit(
     app_id: &str,
     collection: &str,
@@ -462,7 +460,7 @@ fn queue_or_emit(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    // SEC-1: queue only while THIS app's tx is open. If a co-resident
+    // Queue only while THIS app's tx is open. If a co-resident
     // app holds the only parked tx, this app is effectively in
     // autocommit and must emit immediately (its event would otherwise
     // sit unfired — there is no settle path for it).
@@ -493,7 +491,7 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 
 /// Drain `app_id`'s `pending_emits` queue and fire every queued event
 /// through the broker. Called by the transaction settle path on COMMIT.
-/// SEC-1: scoped to the committing app so one app's COMMIT can never
+/// Scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
 pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<crate::broker::ChangeEvent> =
@@ -513,7 +511,7 @@ pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
 /// Clear `app_id`'s `pending_emits` queue without firing any events.
 /// Called by the transaction settle path on ROLLBACK (and by
 /// `exec_begin` to drop any stale residue from an interrupted prior
-/// run). SEC-1: scoped to the app so a ROLLBACK never drops a
+/// run). Scoped to the app so a ROLLBACK never drops a
 /// co-resident app's queued events.
 pub(crate) fn clear_pending_emits(app_id: &str) {
     context::with_mut(|c| c.clear_pending_emits_for(app_id));
@@ -709,7 +707,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // I13 — queue_or_emit / drain_pending_emits_on_commit / clear_pending_emits
+    // queue_or_emit / drain_pending_emits_on_commit / clear_pending_emits
     // -------------------------------------------------------------------
     //
     // The in-tx branch of `queue_or_emit` is gated on
@@ -1029,7 +1027,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Metering-as-infrastructure (Refactor A) — the exec boundary emits a
+    // Metering-as-infrastructure — the exec boundary emits a
     // raw usage metric in the SUCCESS arm, scoped to app_id, and emits
     // NOTHING on a failed op. Faithful: drives the REAL `exec_query` /
     // `exec_mutation` / `exec_count` path against a live SqliteBackend with
@@ -1145,7 +1143,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // SEC-1 — cross-tenant transaction hijack via the thread-shared slot
+    // Cross-tenant transaction hijack via the thread-shared slot
     // -------------------------------------------------------------------
     //
     // The worker multiplexes ~200 isolates (apps) per OS thread. When
@@ -1315,7 +1313,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // P2-C1 — non-tx (autocommit) path must NOT leak role/timeout on a
+    // The non-tx (autocommit) path must NOT leak role/timeout on a
     // cancelled query.
     // -------------------------------------------------------------------
     //

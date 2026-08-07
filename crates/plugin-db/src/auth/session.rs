@@ -237,7 +237,7 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), Db
 /// Like [`init_session`], but lets the caller pass the explicit
 /// `p_pid` the SECURITY DEFINER uses for HMAC verification.
 ///
-/// **Why this exists** (P3 PR 2, Q-P3-A — the riskiest decision in
+/// **Why this exists** (Q-P3-A -- the riskiest decision in
 /// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §10): the
 /// new `SessionMinter` trait separates `mint_session_token` from
 /// `init_session`. Trait callers acquire a fresh pool client per
@@ -299,15 +299,14 @@ pub async fn init_session_with_pid(
             // DETAIL token (set in auth/bootstrap.rs's CREATE FUNCTION
             // body) — discriminate on DETAIL via
             // [`classify_p0001_detail`], not on free-text message
-            // substrings (MAJOR-R5-1: substring matching was fragile
-            // against RAISE additions, formatter changes, locale).
+            // substrings -- substring matching is fragile
+            // against RAISE additions, formatter changes, locale.
             //
-            // Anything else — SQLSTATE class 23, transient connection
-            // failures, unknown P0001 detail, etc. — flows through
-            // [`coded_sql`] verbatim. (perf r7 N7-M0: the prior
-            // implementation built `format!("{e}")` + walked the
-            // source chain even though `classify_p0001_detail` reads
-            // detail() borrow-only; removed the dead allocation.)
+            // Anything else -- SQLSTATE class 23, transient connection
+            // failures, unknown P0001 detail, etc. -- flows through
+            // [`coded_sql`] verbatim. `classify_p0001_detail` reads
+            // `detail()` borrow-only, so this path avoids building
+            // `format!("{e}")` or walking the source chain.
             match classify_p0001_detail(&e) {
                 Some((code, op_msg)) => DbError::validation(code, op_msg),
                 None => coded_sql("init_session", e),
@@ -348,10 +347,10 @@ pub async fn mint_and_init_via_pool(
 // PostgresBackend impl of the cross-backend `SessionMinter` trait
 // ---------------------------------------------------------------------------
 //
-// P3 PR 2: declares `impl crate::backend::SessionMinter for
+// Declares `impl crate::backend::SessionMinter for
 // crate::backend::PostgresBackend` so the PG arm of the
 // `BackendHandle::as_postgres()` / `as_sqlite()` accessors carries
-// the same surface the SQLite impl (PR 3) will. The impl bodies
+// the same surface the SQLite impl will. The impl bodies
 // translate the cross-backend `crate::backend::{SessionInit,
 // MintedToken}` shape (carries `pid: Option<String>`) into the
 // legacy local `auth::session::{SessionInit, MintedToken}` shape
@@ -456,7 +455,7 @@ impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
 //
 // TTL default, getrandom fallback, ISO timestamp formatter, and hex
 // codec used to live here. They were relocated to `crate::auth::util`
-// in P3 PR 1 so the SQLite `SessionMinter` impl (gated only by the
+// so the SQLite `SessionMinter` impl (gated only by the
 // `sqlite` feature) can reuse them without dragging in the rest of the
 // PG-only `auth::*` surface. See
 // `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
@@ -471,7 +470,7 @@ mod tests {
 
     // Helper-level tests (hex_roundtrip, iso_format_*,
     // nonce_random_bytes_are_not_all_zero, etc.) moved to
-    // `crate::auth::util::tests` alongside the helper bodies in P3 PR 1.
+    // `crate::auth::util::tests` alongside the helper bodies.
 
     #[test]
     fn token_struct_shape_has_required_fields() {
@@ -489,9 +488,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Typed-error sweep [I28]
+    // Typed-error sweep
     //
-    // The signature of `mint_session_token` / `init_session` is now
+    // The signature of `mint_session_token` / `init_session` is
     // `Result<_, DbError>`. The wire-shape promotion (`P0001` RAISE →
     // `ValidationFailed { code: "session_*"}`) happens inside
     // `init_session` and is exercised end-to-end by
@@ -554,7 +553,7 @@ mod tests {
         let _ = (_mint as fn(_) -> _, _init as fn(_, _) -> _, _mi as fn(_) -> _, _mip as fn(_) -> _);
     }
 
-    // ----- classify_detail_token contract (MAJOR-R5-1; test-coverage r8) -----
+    // ----- classify_detail_token contract -----
     //
     // The 5 DETAIL tokens are the SDK-facing contract. Any change to
     // a token name on the PG side (auth/bootstrap.rs's CREATE

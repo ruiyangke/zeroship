@@ -3,17 +3,16 @@
 //!
 //! ## Why this bench exists
 //!
-//! Performance review r12 recommended this harness as the next-cycle
-//! forcing function for the [I35] index-lookup fix (commit `251d53b4`),
-//! which dropped `row_to_json`'s per-column resolution from O(N²)
-//! (linear `position` over `row.columns()` keyed on column NAME) to
-//! O(N) (direct `usize` index). The pre-existing `bench_query_build`
-//! harness covers SQL construction only — it never enters
-//! `v8_bridge::row_to_json` at all, so the I35 win was invisible.
+//! This harness measures the index-lookup fix that dropped
+//! `row_to_json`'s per-column resolution from O(N²) (linear `position`
+//! over `row.columns()` keyed on column NAME) to O(N) (direct `usize`
+//! index). The pre-existing `bench_query_build` harness covers SQL
+//! construction only — it never enters `v8_bridge::row_to_json` at all,
+//! so that win was otherwise invisible to benchmarking.
 //!
 //! This file unblocks measurement by synthesising rows from outside the
 //! crate. The blocker was that `compio_postgres::Row::new` is
-//! `pub(crate)`; r12 Option A landed alongside this commit as
+//! `pub(crate)`; this is worked around with
 //! `compio_postgres::test_utils::row_for_test` (gated behind the
 //! `test-utils` Cargo feature, which `plugin-db` enables in
 //! `[dev-dependencies]`).

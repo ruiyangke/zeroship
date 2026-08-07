@@ -1,11 +1,10 @@
-//! P8c — SECURITY DEFINER trust anchor + HMAC-signed session init
+//! SECURITY DEFINER trust anchor + HMAC-signed session init
 //! for the C1 reactive-query subsystem.
 //!
 //! ## What this module ships
 //!
-//! Per the zeroship-db proposal (R5-R8 of the review loop, line 285
-//! onward), the C1 replication-slot owner and audit-table writer must
-//! be a **platform service role** (`__zeroship_platform_role`), not the
+//! Per the zeroship-db proposal, the C1 replication-slot owner and
+//! audit-table writer must be a **platform service role** (`__zeroship_platform_role`), not the
 //! per-app role. App roles get USAGE on a privileged admin schema and
 //! EXECUTE on SECURITY DEFINER wrappers — never direct DML on slots,
 //! publications, or audit tables.
@@ -36,9 +35,8 @@
 //!    retired_at)`; `__zeroship_admin.rotate_session_keys()` retires
 //!    `current` to `previous` and inserts a fresh one; verification
 //!    function accepts both within the grace window. The maintenance
-//!    cron that drives daily rotation is **deferred** (Stage 4
-//!    partial — Rust primitives shipped, scheduling is the control
-//!    plane's job).
+//!    cron that drives daily rotation is **deferred** (Rust primitives
+//!    shipped, scheduling is the control plane's job).
 //!
 //! ## Bootstrap ceremony
 //!
@@ -97,5 +95,5 @@ pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
 /// USAGE on `__zeroship_admin` + EXECUTE on the safe-to-call wrapper
 /// functions. Per-app roles (`app_<id>_role`) are created downstream
 /// by the control plane during app provisioning — they're outside
-/// P8c's scope.
+/// this module's scope.
 pub const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";

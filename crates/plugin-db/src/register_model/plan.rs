@@ -32,8 +32,8 @@ pub(crate) struct Plan {
 /// engine's [`LiveSchema`] so the orchestrator can hand the snapshot
 /// straight to `compute_diff` without an adapter.
 ///
-/// **P0 PR 2**: bound narrowed to
-/// [`SchemaIntrospect<LiveSchema = LiveSchema>`] (was `Backend<…>`).
+/// The bound is narrowed to
+/// [`SchemaIntrospect<LiveSchema = LiveSchema>`] (rather than `Backend<…>`).
 /// Plan only does live-schema introspection + row-count estimation —
 /// the carved capability trait expresses exactly that. See
 /// `docs/proposals/p0-implementation-plan.md` §"PR 2" and

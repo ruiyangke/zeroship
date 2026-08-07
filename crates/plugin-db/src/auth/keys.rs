@@ -186,9 +186,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Typed-error sweep [I28]
+    // Typed-error sweep
     //
-    // The end-to-end SQLSTATE → DbError promotion is exercised by the
+    // The end-to-end SQLSTATE -> DbError promotion is exercised by the
     // `tests/integration.rs::b8c_*_key_*` tests against pg-test. The
     // unit-level guard below pins the *signature* — a future regression
     // that accidentally flattens `rotate_session_keys` /

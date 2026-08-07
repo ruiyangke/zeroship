@@ -11,7 +11,7 @@
 //! backends so the data-isolation invariant is identical regardless of
 //! which storage engine an app is running on.
 //!
-//! **Why not under `backend/sqlite/`?** P1 PR 5 lifted this module out
+//! **Why not under `backend/sqlite/`?** This module was lifted out
 //! of the old SQLite-only subtree: the rule applies on
 //! the PG build too (where the orchestrator's `register_model` pipeline
 //! enforces it for every deploy), so gating the file behind the

@@ -3,7 +3,8 @@
 //! ONE schema implementation, reused by two consumers:
 //!
 //! - the **migration engine** (`zeroship-migrate`) — write / diff / generate
-//!   (adopted in P2; this crate is engine-free in P1);
+//!   (engine adoption is not yet wired up; this crate is currently
+//!   engine-free);
 //! - **plugin-db's data plane** — read / introspect, which needs the same
 //!   sentinel codec + metadata types to learn column behaviour at runtime.
 //!
@@ -47,12 +48,12 @@
 //! (aes/hkdf/hmac), no `zeroship-metering`.** The trust domain is preserved:
 //! nothing in this crate can touch a key, an isolate, or a usage counter.
 
-// **Schema-authority P1 — inherited lint posture.** `query.rs` and `diff.rs`
+// **Inherited lint posture.** `query.rs` and `diff.rs`
 // were relocated *verbatim* out of `zeroship-plugin-db` (a pure refactor: the
 // logic is byte-for-byte unchanged). plugin-db was authored under a regime
 // where these specific `clippy::all` style lints were not enforced, so the
 // moved code trips them here. Suppressing them at the crate level keeps this
-// phase a faithful relocation — tightening the moved code's style is a
+// relocation faithful — tightening the moved code's style is a
 // separate cleanup pass, NOT part of extracting the crate (editing the moved
 // logic to satisfy a style lint would dilute the "behaviour-identical"
 // guarantee this refactor is judged on). The list is exactly the deny-level

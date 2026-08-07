@@ -25,7 +25,7 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
-            // Stage 8e-R2: the orchestrator's bootstrap stage opens a
+            // The orchestrator's bootstrap stage opens a
             // dedicated client via the Backend trait's
             // `acquire_dedicated_client`, which reads the URL from the
             // per-isolate context. Tests that drive the orchestrator
@@ -97,9 +97,9 @@ async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -
     rows.iter().map(|r| row_to_json(r)).collect()
 }
 
-/// Stamp a unique text `id` onto a seed insert document. **P7 convergence**:
-/// the platform `id` system field is now `TEXT PRIMARY KEY` with NO DB default
-/// — production stamps a typed id via the system-fields pass before
+/// Stamp a unique text `id` onto a seed insert document. The platform `id`
+/// system field is `TEXT PRIMARY KEY` with NO DB default
+/// -- production stamps a typed id via the system-fields pass before
 /// `build_insert`. Tests that bypass that pass (calling `build_insert` directly)
 /// must supply the `id` themselves, otherwise the row trips the `id` NOT-NULL.
 fn with_seed_id(mut doc: Value) -> Value {
@@ -1174,22 +1174,21 @@ async fn a3_audit_table_created_and_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// 23b. F2 (NEW-R14-1) — pre-existing audit table with the OLD 7-status
-// CHECK constraint (pre-`6afab751`, no `validation_refused`) gets widened
+// A pre-existing audit table with the OLD 7-status
+// CHECK constraint (no `validation_refused`) gets widened
 // by `ensure_audit_table_exists`. The "fresh-table" branch was covered by
 // the test above; this closes the **upgrade path** every existing-app
 // deploy hits.
 //
-// Pre-cycle 15:47 r14 surfaced this as a MEDIUM untested gap: the prior
-// "two consecutive ensure_audit_table_exists calls" check only exercises
-// the no-op rewrite branch (table created with the NEW CHECK, then
-// re-ALTERed to the same body). This test forces the DROP-old / ADD-new
-// path and asserts the post-state accepts `'validation_refused'`.
+// The prior "two consecutive ensure_audit_table_exists calls" check only
+// exercises the no-op rewrite branch (table created with the NEW CHECK,
+// then re-ALTERed to the same body). This test forces the DROP-old /
+// ADD-new path and asserts the post-state accepts `'validation_refused'`.
 // ---------------------------------------------------------------------------
 
-/// F2 CHECK ALTER upgrade path — closes NEW-R14-1 (MEDIUM).
+/// CHECK ALTER upgrade path.
 ///
-/// Seeds the audit table with the pre-`6afab751` OLD CHECK constraint
+/// Seeds the audit table with the OLD CHECK constraint
 /// (7 statuses, no `validation_refused`), runs `ensure_audit_table_exists`,
 /// and asserts the constraint was widened and now accepts the new value.
 #[compio::test]
@@ -1205,7 +1204,7 @@ async fn a3_audit_table_check_alter_upgrades_existing_constraint() {
         .await
         .unwrap();
 
-    // Seed the table with the OLD CHECK body — the pre-`6afab751`
+    // Seed the table with the OLD CHECK body -- the
     // 7-status list without `validation_refused`. The DDL otherwise
     // matches the current shape so `ensure_audit_table_exists`'s
     // CREATE-IF-NOT-EXISTS is a no-op and only the DROP+ADD path runs.
@@ -1451,9 +1450,9 @@ async fn a2_destructive_drop_column_refused_strict() {
     assert_eq!(pending[0]["field"], "legacy_score");
 
     // The audit table should show the refused op as 'validation_refused'
-    // (migration-pipeline r13: INSERT-direct terminal — no orphan-Pending
-    // window). Distinguishes "platform refused this DDL" from "DDL ran
-    // and failed" without parsing `error`.
+    // (an INSERT-direct terminal status - no orphan-Pending window).
+    // Distinguishes "platform refused this DDL" from "DDL ran and
+    // failed" without parsing `error`.
     let rows = pool
         .query_text_params(
             &format!(
@@ -1884,7 +1883,7 @@ async fn b2_ref_blocks_orphan_insert() {
     b2_setup_users_posts(&pool, app).await;
 
     // Insert into posts with non-existent authorId; must fail with FK violation.
-    // **P7 convergence**: `id` is `TEXT PRIMARY KEY` (no DB default) — supply one
+    // `id` is `TEXT PRIMARY KEY` (no DB default) -- supply one
     // so the row reaches FK validation rather than tripping the id NOT NULL.
     let result = pool
         .query_text_params(
@@ -1912,8 +1911,8 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let app = "b2_restrict_delete";
     b2_setup_users_posts(&pool, app).await;
 
-    // Insert one user + one post that references it. **P7 convergence**: `id`
-    // is now `TEXT PRIMARY KEY` (no DB default — production stamps a typed id via
+    // Insert one user + one post that references it. `id`
+    // is `TEXT PRIMARY KEY` (no DB default -- production stamps a typed id via
     // the system-fields pass), so the seed INSERT must supply it and read it as
     // text. A `posts` row also needs its own `id`.
     let user_id = "usr_b2_restrict_1";
@@ -1977,7 +1976,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     .await
     .unwrap();
 
-    // Insert user + 3 posts that reference it. **P7 convergence**: `id` is now
+    // Insert user + 3 posts that reference it. `id` is
     // `TEXT PRIMARY KEY` (no DB default), so seed inserts must supply text ids.
     let user_id = "usr_b2_cascade_1";
     let user_rows = pool
@@ -2165,10 +2164,9 @@ async fn b2_adding_fk_to_existing_data_validates() {
         std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
-    // **P7 convergence**: `id` is now `TEXT PRIMARY KEY`, so the FK target
-    // (`users.id`) is text — `authorId` must be a text-shaped column to later
-    // become a `t.ref("users")`. (Pre-convergence `id` was SERIAL/INTEGER and
-    // this used `number`.)
+    // `id` is `TEXT PRIMARY KEY`, so the FK target
+    // (`users.id`) is text -- `authorId` must be a text-shaped column to later
+    // become a `t.ref("users")`.
     let posts_schema_v1 = json!({
         "title": {"type": "string", "required": true},
         "authorId": {"type": "string"},
@@ -2233,7 +2231,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
 }
 
 // ===========================================================================
-// C1 / P8a — replication slot + publication setup, watchdog, broker plumb
+// Replication slot + publication setup, watchdog, broker plumbing.
 //
 // These tests exercise the Rust-side primitives that the V8 layer
 // exposes as `zeroship.db.replicationSetup` / `replicationWatchdog` /
@@ -2476,7 +2474,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
 
 #[compio::test]
 async fn c1_broker_event_delivered_for_insert_via_emit() {
-    // End-to-end of the P8a local-emit path: the broker, attached
+    // End-to-end of the local-emit path: the broker, attached
     // on the same thread the test runs on, receives an insert event
     // when `emit_local` is called. No Postgres needed — the broker
     // is in-process.
@@ -2654,7 +2652,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 }
 
 // ---------------------------------------------------------------------------
-// P8a.2 — cross-worker WAL propagation
+// Cross-worker WAL propagation
 // ---------------------------------------------------------------------------
 //
 // These tests prove the streaming-replication path:
@@ -2671,7 +2669,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 /// End-to-end: write a row via the regular pool, the WAL consumer
 /// running concurrently picks it up and the broker delivers the event.
 ///
-/// Asserts the cross-worker case for P8a.2: even if the writer never
+/// Asserts the cross-worker case: even if the writer never
 /// called `emit_local` (we explicitly suppress that path), the
 /// subscriber still sees the event because it was decoded from WAL.
 #[compio::test]
@@ -2783,7 +2781,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 }
 
 // ===========================================================================
-// P8c — SECURITY DEFINER trust anchor + HMAC-signed session init
+// SECURITY DEFINER trust anchor + HMAC-signed session init.
 //
 // These tests verify the hardened C1 path:
 //
@@ -3076,7 +3074,7 @@ async fn b8c_init_session_rejects_expired_token() {
         body.contains("expired"),
         "expected 'expired' in error, got: {body}"
     );
-    // Typed error sweep [I28]: the SQL function raises P0001 with the
+    // The SQL function raises P0001 with the
     // structured "signature expired" message; init_session promotes it
     // to a ValidationFailed with a stable `.code`.
     match err {
@@ -3122,7 +3120,7 @@ async fn b8c_init_session_rejects_replay_nonce() {
         body.contains("replay"),
         "expected 'replay' in error, got: {body}"
     );
-    // Typed error sweep [I28]: init_session promotes the nonce-replay
+    // init_session promotes the nonce-replay
     // SQL refusal to a ValidationFailed with a stable `.code`.
     match err {
         zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
@@ -3164,7 +3162,7 @@ async fn b8c_init_session_rejects_tampered_signature() {
         body.contains("invalid signature") || body.contains("invalid"),
         "expected invalid-signature error, got: {body}"
     );
-    // Typed error sweep [I28]: tampered signatures surface a stable
+    // Tampered signatures surface a stable
     // ValidationFailed code so the SDK can branch without substring
     // matching.
     match err {
@@ -3408,11 +3406,11 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
 }
 
 // -----------------------------------------------------------------------
-// P3 PR 2 — additive `p_pid` SECURITY DEFINER parameter + SessionMinter
+// The additive `p_pid` SECURITY DEFINER parameter + SessionMinter
 // trait impl on PostgresBackend.
 //
-// The two tests below exercise BOTH paths of the new `p_pid` parameter
-// per the plan §10 (Q-P3-A — the riskiest decision):
+// The two tests below exercise BOTH paths of the `p_pid` parameter
+// per the plan §10 (Q-P3-A -- the riskiest decision):
 //   - `b8c_init_session_p_pid_null_uses_pg_backend_pid` — p_pid = NULL
 //     path: the existing free fn `init_session` passes None, and the
 //     SECURITY DEFINER falls back to `pg_backend_pid()`. Byte-for-byte
@@ -3555,11 +3553,11 @@ async fn b8c_session_minter_trait_init_succeeds_on_different_pool_client() {
 
 #[compio::test]
 async fn b8c_session_minter_trait_rejects_tampered_signature() {
-    // Defensive: even on the new `p_pid` path, the SECURITY DEFINER
+    // Defensive: even on the `p_pid` path, the SECURITY DEFINER
     // must still reject a tampered signature with the typed
     // `session_invalid_signature` ValidationFailed code. Ensures the
-    // P3 PR 2 additive change didn't accidentally weaken the
-    // cryptographic verifier — only the PID-source-of-truth changed.
+    // additive change didn't accidentally weaken the
+    // cryptographic verifier -- only the PID-source-of-truth changed.
     use zeroship_plugin_db::backend::{PostgresBackend, SessionInit as BeSessionInit, SessionMinter};
 
     let url = require_pg().await;
@@ -3715,7 +3713,7 @@ async fn b8c_consumer_runs_under_platform_role_grants() {
 }
 
 // ===========================================================================
-// P8a.2 finish-up — supervisor reconnect, fatal-error exit, per-app emit
+// Supervisor reconnect, fatal-error exit, per-app emit.
 // ===========================================================================
 
 /// The supervised consumer recovers when its replication connection is
@@ -4132,16 +4130,16 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// P1 PR 5 — cross-app FK parse-time check (PG arm mirror).
+// Cross-app FK parse-time check (PG arm mirror).
 //
 // The validator lives at `crate::cross_app_fk::reject_cross_app_fk`
-// and runs on BOTH backends — the SQLite-side mirror is at
+// and runs on BOTH backends -- the SQLite-side mirror is at
 // `tests/sqlite_integration.rs::cross_app_fk_rejected_at_parse`. The
 // hook is wired into `register_model/bootstrap.rs`, so
 // any future drift in the rejection contract would surface here AND
 // in the SQLite target. We exercise the validator directly (rather
 // than driving it through the full `run_pipeline`) so the test has
-// no DB dependency — the check is pure-Rust JSON walk.
+// no DB dependency -- the check is pure-Rust JSON walk.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -4171,7 +4169,7 @@ fn cross_app_fk_rejected_at_parse() {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 2 — VectorIndex / vector_search / typed errors
+// VectorIndex / vector_search / typed errors.
 //
 // These tests exercise the pgvector adapter end-to-end. The harness
 // attempts `CREATE EXTENSION vector;` first; if the extension isn't
@@ -4200,11 +4198,11 @@ async fn pgvector_available(pool: &Pool) -> bool {
     !rows.is_empty()
 }
 
-/// **P4 PR 2 test gate** — `vector_search_returns_k_nearest`.
+/// Test gate for `vector_search_returns_k_nearest`.
 ///
-/// Insert 100 rows × 128-d random unit vectors; query with a known
+/// Insert 100 rows x 128-d random unit vectors; query with a known
 /// vector and assert the top-10 closest by cosine distance form the
-/// expected SET (membership, not strict order — FP determinism not
+/// expected SET (membership, not strict order -- FP determinism not
 /// promised across pgvector versions).
 ///
 /// **Marked `#[ignore]`** in the default test environment because the
@@ -4321,7 +4319,7 @@ async fn vector_search_returns_k_nearest() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 2 test gate** — `pgvector_extension_missing_reports_typed_error`.
+/// Test gate for `pgvector_extension_missing_reports_typed_error`.
 ///
 /// Drops the `vector` extension (if present), constructs a fresh
 /// backend so the probe cache starts empty, and asserts that calling
@@ -4418,7 +4416,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 2 test gate** — `vector_dimension_mismatch_rejected_at_insert`.
+/// Test gate for `vector_dimension_mismatch_rejected_at_insert`.
 ///
 /// pgvector enforces the declared dim at INSERT time (the `vector(N)`
 /// column type rejects a literal whose dim ≠ N at parse-cast). This
@@ -4484,7 +4482,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 3 — FullTextIndex + SpatialIndex (PG arm) test gates.
+// FullTextIndex + SpatialIndex (PG arm) test gates.
 //
 // FTS tests run unconditionally: tsvector / GIN / plainto_tsquery /
 // tsvector_update_trigger are all core PG (no extension needed).
@@ -4511,7 +4509,7 @@ async fn postgis_extension_available(pool: &Pool) -> bool {
     !rows.is_empty()
 }
 
-/// **P4 PR 3 test gate** — `fts_search_matches_substring`.
+/// Test gate for `fts_search_matches_substring`.
 ///
 /// Inserts 5 rows whose `bio` column matches different keyword sets;
 /// asserts `fts_search("rust")` returns the membership set we expect
@@ -4626,7 +4624,7 @@ async fn fts_search_matches_substring() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 3 test gate** — `fts_and_filter_compose`.
+/// Test gate for `fts_and_filter_compose`.
 ///
 /// FTS `MATCH` composed via `AND` with a regular column filter must
 /// intersect — assert the final set is exactly the rows matching both
@@ -4726,7 +4724,7 @@ async fn fts_and_filter_compose() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 3 test gate (bonus)** — `fts_trigger_keeps_index_in_sync_after_update`.
+/// Test gate for `fts_trigger_keeps_index_in_sync_after_update`.
 ///
 /// Insert a row, search for token "alpha" — must hit. Update the row to
 /// replace "alpha" with "beta" and search for "alpha" again — must
@@ -4843,7 +4841,7 @@ async fn fts_trigger_keeps_index_in_sync_after_update() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 3 test gate** — `near_returns_within_radius`.
+/// Test gate for `near_returns_within_radius`.
 ///
 /// 10 points around London at varying distances from the centre
 /// `(51.5074, -0.1278)`. `near()` with a 1km radius returns only the
@@ -4951,7 +4949,7 @@ async fn near_returns_within_radius() {
     release_pg(pool).await;
 }
 
-/// **P4 PR 3 test gate** — `postgis_extension_missing_reports_typed_error`.
+/// Test gate for `postgis_extension_missing_reports_typed_error`.
 ///
 /// When the database has no PostGIS, both `ensure_spatial_index` and
 /// `spatial_near` must surface `DbError::Configuration { code:
@@ -5021,22 +5019,23 @@ async fn postgis_extension_missing_reports_typed_error() {
 }
 
 // ===========================================================================
-// P5 PR 2 — Encrypted column integration (gated `hardening`)
+// Encrypted column integration (gated `hardening`)
 // ===========================================================================
 //
 // These tests exercise the full PG round-trip for `t.encrypted(...)`-
 // declared columns: BYTEA emit on DDL, decode($N, 'base64')::bytea on
 // insert, encode-as-hex on read, AAD-bound decrypt. The Camp A fence
 // (row_pk in AAD for Randomised) is the load-bearing assertion in
-// `encrypted_randomised_row_swap_rejected` — copying ciphertext from
+// `encrypted_randomised_row_swap_rejected` -- copying ciphertext from
 // row A into row B's slot must surface `encryption_aead_failed` rather
 // than leak row A's plaintext through row B's read API.
 
-// Imports are local to this section. Earlier P4 test modules import
-// `PostgresBackend` + `DbError` per-fn via `use ...` inside the test
-// body; we surface them at module scope here so the four P5 tests can
-// share one `use` block. The `as _` on `EncryptedColumn` brings the
-// trait methods into scope without aliasing the trait name itself.
+// Imports are local to this section. Other test modules in this file
+// import `PostgresBackend` + `DbError` per-fn via `use ...` inside the
+// test body; here they are surfaced at module scope so the four tests
+// below can share one `use` block. The `as _` on `EncryptedColumn`
+// brings the trait methods into scope without aliasing the trait name
+// itself.
 use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode, PostgresBackend};
 use zeroship_plugin_db::encryption;
 use zeroship_plugin_db::error::DbError;
@@ -5075,7 +5074,7 @@ impl Drop for WithEnv {
     }
 }
 
-/// **P5 PR 2 — gate #1**: round-trip an encrypted string column. Insert a
+/// Gate #1: round-trip an encrypted string column. Insert a
 /// row with `ssn` declared `t.encrypted({ mode: "randomised" })`,
 /// read it back via the PG path, expect the plaintext to recover.
 #[compio::test]
@@ -5154,7 +5153,7 @@ async fn encrypted_column_round_trip_randomised() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 2 — Camp A fence**: copying ciphertext from row A into row
+/// Camp A fence: copying ciphertext from row A into row
 /// B's slot must surface `encryption_aead_failed` (row_pk in AAD
 /// defeats the ciphertext-oracle attack on randomised columns).
 #[compio::test]
@@ -5255,7 +5254,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 2 — gate #2**: deterministic mode produces identical
+/// Gate #2: deterministic mode produces identical
 /// ciphertext for identical plaintext under the same `(collection,
 /// column)` regardless of row_pk. This is what makes equality lookups
 /// on the ciphertext sound; the deterministic-encrypted column gets an
@@ -5342,15 +5341,15 @@ async fn encrypted_deterministic_equality_lookup() {
     release_pg(pool).await;
 }
 
-/// **P4 ROUND-TRIP e2e** — the proof both halves cohere: a collection with an
-/// `encrypted` + a `masked` + a `vector` field, schema CREATED via the real
-/// `registerModel` (HALF A: it writes the `zsenc`/`__zsmask` sentinels), then
-/// CRUD driven ENTIRELY by the introspection-sourced metadata (HALF B):
-///   - insert through the REAL write pipeline → AEAD-encrypts the encrypted
+/// Round-trip e2e proof that schema creation and CRUD cohere: a collection
+/// with an `encrypted` + a `masked` + a `vector` field, schema CREATED via
+/// the real `registerModel` (which writes the `zsenc`/`__zsmask` sentinels),
+/// then CRUD driven ENTIRELY by the introspection-sourced metadata:
+///   - insert through the REAL write pipeline -> AEAD-encrypts the encrypted
 ///     column and populates the masked sibling (metadata from introspection);
-///   - read raw rows back, finalize through the REAL read pipeline → decrypts
+///   - read raw rows back, finalize through the REAL read pipeline -> decrypts
 ///     the encrypted column to plaintext and wraps the masked column.
-/// Nothing here consults the declared schema for the crypto/mask decisions —
+/// Nothing here consults the declared schema for the crypto/mask decisions --
 /// the seam is `crud::introspect_schema::runtime_schema_for`, exercised faithfully.
 #[allow(unsafe_code)]
 #[compio::test]
@@ -5378,7 +5377,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         "embedding": {"type": "vector", "vectorDims": 3, "vectorMetric": "cosine"},
     });
 
-    // HALF A path: registerModel creates the table AND writes the sentinels
+    // registerModel creates the table AND writes the sentinels
     // (zsenc COMMENT on `ssn`, __zsmask COMMENT on `phone_masked`).
     zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
@@ -5391,7 +5390,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
     .await
     .unwrap_or_else(|e| panic!("registerModel failed: {e}"));
 
-    // Install the pool into the per-isolate context so HALF B's
+    // Install the pool into the per-isolate context so
     // `runtime_schema_for` can introspect, and mark the model registered (the
     // cold-schema gate) — exactly what the production register path does.
     zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
@@ -5503,26 +5502,26 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
 }
 
 // ---------------------------------------------------------------------------
-// P5 — THE CUTOVER. On the PG dialect, `registerModel` STOPS being a schema
+// THE CUTOVER. On the PG dialect, `registerModel` STOPS being a schema
 // authority: it issues NO runtime DDL (the engine creates/migrates the schema
-// at DEPLOY, P6). It only ensures readiness + the declared cache so the P4
+// at deploy time). It only ensures readiness + the declared cache so the
 // introspection path keeps working. SQLite dev is UNCHANGED (it still
 // auto-migrates from the declared schema). These three tests are the faithful
 // behaviour-identical + no-runtime-DDL proof:
-//   (c) p5_pg_register_model_issues_no_runtime_ddl — the cutover proof: the PG
+//   (c) p5_pg_register_model_issues_no_runtime_ddl -- the cutover proof: the PG
 //       dispatch never CREATEs/ALTERs (no table, no schema, no audit row).
-//   (a) p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl — a collection
+//   (a) p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl -- a collection
 //       whose schema was created the way the engine/deploy-apply does (sentinels
-//       and all) → PG registerModel no-ops the apply, yet CRUD + encryption +
+//       and all) -> PG registerModel no-ops the apply, yet CRUD + encryption +
 //       mask round-trip via the INTROSPECTED metadata.
-//   (b) p5_sqlite_register_model_still_auto_migrates — SQLite registerModel is
+//   (b) p5_sqlite_register_model_still_auto_migrates -- SQLite registerModel is
 //       unchanged: it still creates the table from the declared schema.
 // ---------------------------------------------------------------------------
 
 /// Count rows in the per-app audit journal (`__zeroship_migrations`), or `None`
 /// when the table is absent. The OLD PG `registerModel` wrote one audit row per
-/// applied DDL op; the P5 PG path applies nothing, so this stays put across a
-/// dispatch call — a direct, faithful "no DDL was issued" probe.
+/// applied DDL op; the current PG path applies nothing, so this stays put across a
+/// dispatch call -- a direct, faithful "no DDL was issued" probe.
 async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
     let exists = pool
         .query_text_params(
@@ -5557,15 +5556,15 @@ async fn pg_table_exists(pool: &std::rc::Rc<Pool>, app: &str, table: &str) -> bo
     .unwrap_or(false)
 }
 
-/// **P5 (c) — the cutover proof.** On the PG dialect, the production
+/// The cutover proof (c). On the PG dialect, the production
 /// `registerModel` dispatch issues NO schema DDL. We install a PG backend into
 /// the per-isolate context, call the EXACT production dispatch
-/// (`exec_register_model_via_dispatch_for_tests` → `exec_register_model`'s PG
+/// (`exec_register_model_via_dispatch_for_tests` -> `exec_register_model`'s PG
 /// arm) against a schema whose table does NOT yet exist, and assert that:
 ///   * no table was created (the old path would `CREATE TABLE`),
 ///   * no per-app schema/audit journal was created (the old `bootstrap` did),
-/// proving the runtime is no longer a PG schema applier. The engine (P6
-/// deploy-apply) is the sole PG authority.
+/// proving the runtime is no longer a PG schema applier. The engine's
+/// deploy-apply is the sole PG authority.
 #[allow(unsafe_code)]
 #[compio::test]
 async fn p5_pg_register_model_issues_no_runtime_ddl() {
@@ -5617,12 +5616,12 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
     release_pg(pool).await;
 }
 
-/// **P5 (a) — behaviour-identical CRUD with NO runtime DDL.** The engine creates
+/// Behaviour-identical CRUD with NO runtime DDL (a). The engine creates
 /// the schema at deploy (here simulated by a one-shot pipeline build that emits
 /// the same DDL + `zsenc`/`__zsmask` sentinels the relocated engine produces).
 /// Then the production PG dispatch runs and must NOT touch the schema (audit row
 /// count is unchanged), yet encryption + mask CRUD still round-trip end-to-end
-/// driven by the INTROSPECTED metadata (the P4 path) — proving the data plane is
+/// driven by the INTROSPECTED metadata -- proving the data plane is
 /// intact while the runtime applied nothing.
 #[allow(unsafe_code)]
 #[compio::test]
@@ -5649,7 +5648,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     });
 
     // === Simulate the engine/deploy-apply: create the table + sentinels. ===
-    // This is the SAME DDL/sentinel emission the relocated engine uses (P2/P4);
+    // This is the SAME DDL/sentinel emission the relocated engine uses;
     // we drive it once via the pipeline to stand in for the deploy-time apply.
     zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
@@ -5691,7 +5690,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
 
     // Readiness contract: mark the model (the dispatch caller does this in prod;
     // the via-dispatch seam stops at `exec_register_model`, so mirror it here),
-    // exactly like the P4 round-trip test does.
+    // exactly like the round-trip test above does.
     zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
 
     // The introspected runtime schema recovers BOTH goodies from the live catalog
@@ -5787,7 +5786,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
+/// When `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
 /// var AND the `__zeroship_admin.column_keys` row is missing), the
 /// PG resolver surfaces a typed `column_key_not_configured`
 /// Configuration error rather than panicking or returning Internal.
@@ -5921,13 +5920,13 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 }
 
 // ===========================================================================
-// P5 PR 4 — PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
+// PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
 // placeholder)
 // ===========================================================================
 //
-// Four tests covering the deliverables in plan §9 PR 4:
+// Four tests covering the deliverables in plan §9:
 //
-//   1. `snapshot_restore_round_trip_pg` — P5 gate #4. Insert N rows;
+//   1. `snapshot_restore_round_trip_pg` — gate #4. Insert N rows;
 //      `snapshot()` to a tempfile-backed `file://` URI; truncate via
 //      raw `DROP/CREATE`; `restore()`; assert rows recovered.
 //      `#[ignore]`-d when `pg_dump` / `pg_restore` are not on PATH
@@ -5960,9 +5959,9 @@ fn pg_dump_on_path() -> bool {
         .unwrap_or(false)
 }
 
-/// **P5 PR 4 — gate #2**: `pitr_replay` records the target row in
+/// Gate #2: `pitr_replay` records the target row in
 /// `__zeroship_admin.pitr_targets`. The actual WAL recovery is
-/// operator-driven (PR 4 ships the API surface only); this test
+/// operator-driven (this ships the API surface only); this test
 /// pins the placeholder shape: `INSERT … ON CONFLICT (app_id) DO
 /// UPDATE …` upserts the latest target.
 #[compio::test]
@@ -6033,7 +6032,7 @@ async fn pitr_pg_records_target() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 4 — fence**: when the per-app `register_model` advisory
+/// Fence: when the per-app `register_model` advisory
 /// lock is held by another caller, `snapshot()` surfaces a typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
 /// indefinitely or returning an opaque LockContention. Pins the
@@ -6113,7 +6112,7 @@ async fn snapshot_during_migration_returns_typed_error() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 4 — gate #1**: round-trip snapshot+restore. Insert rows
+/// Gate #1: round-trip snapshot+restore. Insert rows
 /// into a per-app schema, snapshot to a `file://` URI, drop the
 /// schema's table contents, restore, assert the rows are back.
 ///
@@ -6234,7 +6233,7 @@ async fn snapshot_restore_round_trip_pg() {
     release_pg(pool).await;
 }
 
-/// **P5 PR 4 — fence**: the `SnapshotHandle.content_hash` returned by
+/// Fence: the `SnapshotHandle.content_hash` returned by
 /// `snapshot()` must equal the SHA-256 of the on-disk dump bytes.
 /// This is the integrity contract the `restore()` path relies on —
 /// any drift here would let a corrupt dump pass restore's hash
@@ -6307,7 +6306,7 @@ async fn snapshot_uri_content_hash_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// P5.5 PR 1 — reserved-name refusal at register_model time.
+// Reserved-name refusal at register_model time.
 //
 // Two PG-integration tests pin that the reserved-name validator
 // (`query::validate_field_name`) reaches the orchestrator's CREATE
@@ -6318,7 +6317,7 @@ async fn snapshot_uri_content_hash_round_trip() {
 
 /// A schema declaring a column whose name ends in `_masked` must be
 /// refused at `register_model` time. The reserved suffix is owned by
-/// Path B's sibling-column emission (PR 2+); creators cannot collide
+/// the Path B sibling-column emission; creators cannot collide
 /// with it.
 #[compio::test]
 async fn p55_pr1_register_model_refuses_masked_suffix_field() {
@@ -6374,7 +6373,7 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
     let schema = json!({
         "name": {"type": "string"},
         // creator-declared `pii` would collide with the platform's
-        // classification taxonomy used by PR 4 authorization + audit.
+        // classification taxonomy used by authorization + audit.
         "pii": {"type": "string"},
     });
 
@@ -6398,7 +6397,7 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
 }
 
 // ---------------------------------------------------------------------------
-// P6a-2 — Per-app PG role hardening (§17.5).
+// Per-app PG role hardening (§17.5).
 //
 // The per-app role (`app_<id>_role`) owns ONLY its schema and is
 // NOREPLICATION — slot ownership stays platform-side. These tests
@@ -7341,7 +7340,7 @@ async fn wal_connection_stays_platform_role() {
 }
 
 // ---------------------------------------------------------------------------
-// P6a-3 — Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
+// Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
 //
 // `drop_namespace` runs the §17.7 PG teardown: subscription
 // gate → broker drain → slot/publication teardown (via
@@ -7682,7 +7681,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// T6 — the deploy-keyed introspection cache invalidates on a REAL deploy bump.
+// The deploy-keyed introspection cache invalidates on a REAL deploy bump.
 //
 // Regression for `deploy-id-never-set-cache-invalidation-inert`: the
 // introspected-schema cache was keyed on `std::env::var("ZEROSHIP_DEPLOY_ID")`,

@@ -101,7 +101,7 @@ pub fn register_model_dispatch<'s>(
         {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
-                // **P5 PR 2** — cache the schema so the CRUD encryption
+                // Cache the schema so the CRUD encryption
                 // pass can find `t.encrypted(...)` columns at dispatch
                 // time. Cloned because the closure captures `schema` by
                 // move; the cache is per-isolate and lives for the
@@ -146,24 +146,24 @@ async fn exec_register_model(
     let backend = context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("backend_not_initialized", "db: backend not initialized"))?;
 
-    // **P5 — the cutover (dialect-conditional; do NOT brick SQLite dev).** The
+    // The cutover (dialect-conditional; do NOT brick SQLite dev). The
     // schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-
-    // model-design.md` §6/§9/§12 P5) makes `zeroship-migrate` the SOLE PG schema
+    // model-design.md` §6/§9/§12) makes `zeroship-migrate` the SOLE PG schema
     // applier: the `zeroship-migrated` service creates/migrates the per-app PG
     // schema (and provisions the migration/runtime roles) before go-live via
     // `POST /v1/apps/{id}/migrations/apply`. So on the PG dialect
     // `registerModel` STOPS being a schema authority — it issues NO runtime DDL
     // (no `bootstrap` create-schema / `plan` / `validate` / `apply`). This is what
     // eliminates the two-applier overlap (plugin-db + engine both running DDL
-    // under disjoint advisory-lock namespaces — the prior design's CRITICAL #1).
+    // under disjoint advisory-lock namespaces).
     //
     // What the PG no-DDL path STILL guarantees — the "schema-ready + metadata-
-    // available" contract the P4 introspection cache depends on (design §6):
+    // available" contract the introspection cache depends on (design §6):
     //   * readiness — the dispatch caller (`register_model_dispatch`) marks
     //     `is_model_registered` on this `Ok(())`, which is the gate
     //     `crud::introspect_schema::runtime_schema_for` checks before sourcing
     //     per-collection metadata from LIVE introspection + the engine's sentinels
-    //     (the P4 `runtime_schema_for` path). Introspection itself is lazy +
+    //     (the `runtime_schema_for` path). Introspection itself is lazy +
     //     deploy-keyed and runs on the first CRUD op, so marking readiness here is
     //     sufficient — we deliberately do NOT introspect (no catalog reads) at
     //     register time, matching the old fast/cheap registration boundary.
@@ -179,7 +179,7 @@ async fn exec_register_model(
     // auto-migrate fallback.
     //
     // On the SQLite dialect (dev tier) `registerModel` drives the SAME hardened
-    // zeroship-migrate engine the PG deploy path uses (P6b): it routes through
+    // zeroship-migrate engine the PG deploy path uses: it routes through
     // `sqlite_engine::run_sqlite_via_engine` (journal / versioning / drift /
     // 12-step rebuild / baseline adoption / dev auto-approve), NOT a bespoke
     // runtime auto-migrate — the retired `run_sqlite_pipeline` is gone. The split
@@ -189,13 +189,13 @@ async fn exec_register_model(
     // comes from introspection) but remains SQLite-CONSUMED right here as the
     // descriptor source the engine diffs against live state.
     match (backend.as_postgres(), backend.as_sqlite()) {
-        // PG: NO runtime DDL — the engine (P6 deploy-apply) is the PG schema
+        // PG: NO runtime DDL — the engine (deploy-apply) is the PG schema
         // authority. This path no-ops the apply; the dispatch caller stamps
         // readiness (`mark_model_registered`) + the declared cache (`cache_schema`)
         // on the returned `Ok(())`, preserving the metadata-readiness contract
         // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
         //
-        // **Migration-first cutover (P4b/P5 S2).** The `schema` value this arm
+        // **Migration-first cutover.** The `schema` value this arm
         // receives (and that the dispatch caller stamps into `cache_schema`)
         // now originates from the bundled `RuntimeSchemaDescriptor` (the
         // migration fold's runtime descriptor), not the old declared t.* object:
@@ -208,7 +208,7 @@ async fn exec_register_model(
         // descriptor path is PG/`.zship`-only; SQLite dev (below) still receives
         // the declared schema and diffs it against live state.
         (Some(_pg), _) => Ok(()),
-        // SQLite dev tier (P6b): drive the security-hardened migration engine
+        // SQLite dev tier: drive the security-hardened migration engine
         // (journal / versioning / drift / 12-step rebuild / baseline / dev
         // auto-approve), NOT the retired bespoke `run_sqlite_pipeline`. `sqlite`
         // is the data-plane backend A; `run_sqlite_via_engine` constructs the
@@ -251,7 +251,7 @@ async fn exec_register_model(
 /// from `bootstrap` lives until `apply` releases the lock between
 /// passes.
 ///
-/// **P0 PR 3**: generic over [`RegisterBackend`] (was concrete
+/// Generic over [`RegisterBackend`] (was concrete
 /// `&PostgresBackend`). The PG pool's `get()` lives behind
 /// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
 /// now, so the `PooledClient<'p>` lifetime still threads through to
@@ -351,7 +351,7 @@ pub async fn exec_register_model_with_pool(
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
 }
 
-/// **P5 test seam** — drive the PRODUCTION dialect dispatch
+/// Test seam that drives the PRODUCTION dialect dispatch
 /// ([`exec_register_model`]) without the V8 lifecycle. The backend is read
 /// from the per-isolate context (install it first via
 /// `set_postgres_pool_for_tests` / `set_sqlite_backend_for_tests`), so this
@@ -367,8 +367,9 @@ pub async fn exec_register_model_via_dispatch_for_tests(
 ) -> Result<(), DbError> {
     // No declared-set hint from this seam — pass empty, which makes the dev
     // SQLite drop pass treat every non-desired live table as a real drop
-    // candidate (the pre-H1 single-collection behaviour). Tests that exercise
-    // the warm multi-collection drop-suppression path call
+    // candidate (the single-collection-only behaviour, before the warm
+    // multi-collection fix below). Tests that exercise the warm
+    // multi-collection drop-suppression path call
     // `run_sqlite_via_engine` directly with an explicit declared set.
     exec_register_model(app_id, collection, schema, indexes, &[]).await
 }
@@ -406,7 +407,7 @@ mod tests {
         panic!("timed out waiting for broker change event");
     }
 
-    /// **P6b CDC-bridge regression (rewritten for the engine path).** After a
+    /// CDC-bridge regression test (rewritten for the engine path). After a
     /// SQLite ADD COLUMN through `run_sqlite_via_engine`, connection A's CDC
     /// name cache must reflect the new column (the engine ran the DDL on the
     /// hardened backend B; the bridge invalidates A's cache). Pre-bridge a stale
@@ -518,7 +519,7 @@ mod tests {
         !rows.is_empty()
     }
 
-    /// **H1 regression — warm multi-collection boot must NOT fail closed.**
+    /// **Regression guard — warm multi-collection boot must NOT fail closed.**
     ///
     /// A warm app file already holds tables `c1` + `c2` (registered by a prior
     /// isolate). A FRESH isolate then registers them one at a time (the
@@ -587,13 +588,13 @@ mod tests {
         });
     }
 
-    /// **H1 over-suppression guard — a GENUINELY-removed collection still drops.**
+    /// **Over-suppression guard — a GENUINELY-removed collection still drops.**
     ///
     /// Warm file holds `c1` + `c2`. The app's schema is then edited to declare
     /// ONLY `c1` (c2 removed). A fresh isolate registers `c1` with the FULL
     /// declared set `[c1]` (c2 is NOT in it). The drop pass must now author the
-    /// owned drop of `c2` — confirming the H1 fix did not over-suppress real
-    /// removals.
+    /// owned drop of `c2` — confirming the warm-boot fix above did not
+    /// over-suppress real removals.
     ///
     /// RED before the fix: pre-fix `c2` had no `live_ownership` entry, so this
     /// path raised `DropOfUnownedTable` instead of dropping (`.expect` panics);

@@ -1,4 +1,4 @@
-//! **P5.5 PR 5** — per-app mask policy storage + `setMaskPolicy`
+//! Per-app mask policy storage + `setMaskPolicy`
 //! dispatcher + in-process cache.
 //!
 //! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
@@ -10,7 +10,7 @@
 //!   table; read via the SECURITY DEFINER `get_mask_policy(app_id)`
 //!   helper, written via the SECURITY DEFINER `set_mask_policy(app_id,
 //!   policy)` helper. The admin schema mirrors the `column_keys`
-//!   pattern from P5 PR 2.
+//!   pattern used for column encryption.
 //!
 //! - **SQLite** (`feature = "sqlite"`): a sidecar JSON file at
 //!   `<db_dir>/mask_policies.json`. Reads/writes run off-thread via
@@ -55,14 +55,14 @@ pub const VALID_CLASSIFICATIONS: &[&str] = &[
     "public", "pii", "spi", "phi", "pci", "internal",
 ];
 
-/// **P5.5 PR 5** — per-app mask policy. Maps actor-role string → set
+/// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
 ///
 /// Stored on [`crate::context::IsolateDbContext::mask_policy`] for the
 /// life of the isolate; refreshed write-through when `setMaskPolicy`
 /// fires. A `None` cache slot means "no policy declared for this app
 /// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
-/// then falls back to PR 4's default-deny stub (only `auto` allowed).
+/// then falls back to the default-deny rule (only `auto` allowed).
 #[derive(Debug, Clone, Default)]
 pub struct MaskPolicy {
     /// `role -> set of classifications`. Roles missing from the map
@@ -204,7 +204,7 @@ impl MaskPolicy {
 // `setMaskPolicy` dispatcher — write through storage + refresh cache.
 // ---------------------------------------------------------------------------
 
-/// **P5.5 PR 5** — public dispatch entry for `zeroship.db.setMaskPolicy`.
+/// Public dispatch entry for `zeroship.db.setMaskPolicy`.
 ///
 /// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
 ///    + classification taxonomy).
@@ -251,7 +251,7 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
 // PG persistence
 // ---------------------------------------------------------------------------
 
-/// **P5.5 PR 5** — PG storage write through the SECURITY DEFINER
+/// PG storage write through the SECURITY DEFINER
 /// `__zeroship_admin.set_mask_policy(app_id, policy)`. The policy
 /// arrives as canonical JSON; PG receives it as JSONB via a text
 /// parameter (`::jsonb` cast inside the function body — the wire is
@@ -271,7 +271,7 @@ async fn persist_pg(
     Ok(())
 }
 
-/// **P5.5 PR 5** — PG storage read through the SECURITY DEFINER
+/// PG storage read through the SECURITY DEFINER
 /// `__zeroship_admin.get_mask_policy(app_id)`. Returns `None` when
 /// the app has no policy row.
 pub async fn load_pg(
@@ -305,7 +305,7 @@ pub async fn load_pg(
 // SQLite persistence
 // ---------------------------------------------------------------------------
 
-/// **P5.5 PR 5** — SQLite sidecar file path. Lives next to the per-app
+/// SQLite sidecar file path. Lives next to the per-app
 /// SQLite files at `<db_dir>/mask_policies.json`. Single global file
 /// keyed by `app_id` — mirrors the in-process structure most closely
 /// and avoids per-app I/O multipliers (a 50-app worker would otherwise
@@ -331,7 +331,7 @@ fn sqlite_policy_file_lock(path: &Path) -> Result<std::sync::MutexGuard<'static,
         .map_err(|_| DbError::internal("mask_policies.json: per-file lock poisoned"))
 }
 
-/// **P5.5 PR 5** — SQLite atomic write. Strategy:
+/// SQLite atomic write. Strategy:
 ///
 /// 1. Read existing `<dir>/mask_policies.json` (treat ENOENT as empty
 ///    `{}`).
@@ -414,7 +414,7 @@ fn persist_sqlite_blocking(path: PathBuf, app_id: String, policy: MaskPolicy) ->
     Ok(())
 }
 
-/// **P5.5 PR 5** — load the policy for a single app from the sidecar
+/// Load the policy for a single app from the sidecar
 /// file. Returns `None` when the file is absent or has no entry for
 /// the app.
 pub async fn load_sqlite(
@@ -737,12 +737,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 8 — §11 closeout: `mask_policy_per_app_isolated`
+    // §11 closeout: `mask_policy_per_app_isolated`
     //
     // The proposal asserts that a `defineMaskPolicy()` write under
     // app A's isolate-context entry must NOT be visible from app B's
     // entry. The cache is keyed by app_id on
-    // `IsolateDbContext.mask_policies` (PR 5); this test pins that
+    // `IsolateDbContext.mask_policies`; this test pins that
     // invariant directly through the public surface so a future
     // refactor that accidentally widens the key (e.g. to a shared
     // singleton) trips the gate.

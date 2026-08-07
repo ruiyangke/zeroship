@@ -2,7 +2,7 @@
 //! (reactive queries via Postgres WAL fanout) of the @zeroship/db
 //! proposal (docs/proposals/zeroship-db.md, section C1).
 //!
-//! This module ships the **P8a-reduced** scope: it provisions and
+//! This module ships a reduced scope: it provisions and
 //! manages the Postgres-side objects that the broker depends on — the
 //! per-app `PUBLICATION` and the per-app logical-decoding `REPLICATION
 //! SLOT` — and the operational sweepers (watchdog + abandoned-slot GC).
@@ -11,7 +11,7 @@
 //! `pg_drop_replication_slot()`.
 //!
 //! The streaming-protocol WAL consumer (CopyBoth, XLogData, pgoutput
-//! frame parser) is **deferred** to P8a.2 — it requires
+//! frame parser) is **deferred** — it requires
 //! `compio-postgres` to learn the streaming-replication protocol
 //! handshake (`replication=database` startup parameter,
 //! `START_REPLICATION` command, CopyBoth message framing). See the
@@ -20,7 +20,7 @@
 //!
 //! ## Naming convention
 //!
-//! Per the proposal (R3-R4), both the slot and the publication carry a
+//! Per the proposal, both the slot and the publication carry a
 //! stable `__zs_*` prefix so the watchdog can find them with a single
 //! `LIKE '__zs_%'` predicate without parsing app_id out of the name.
 //!
@@ -40,11 +40,11 @@
 //!   magnitude slower than streaming and reorders concurrency in a way
 //!   that's awkward for a broker driving thousands of subscriptions.
 //!   We defer the consumer rather than ship a degraded mode.
-//! - It does not GRANT the slot's owner role. The proposal's R5-R8
+//! - It does not GRANT the slot's owner role. The proposal's
 //!   security-hardening (SECURITY DEFINER trust anchor for the slot
-//!   owner role, HMAC-signed session init) is deferred to P8c.
+//!   owner role, HMAC-signed session init) is deferred.
 //! - It does not co-ordinate slot creation across multiple control-plane
-//!   replicas. P8a assumes a single writer; the leader-election guard
+//!   replicas. This module assumes a single writer; the leader-election guard
 //!   lives in `crates/control/src/replication_setup.rs` (future).
 
 use compio_postgres::Pool;
@@ -85,7 +85,7 @@ pub fn sanitise_app_id(app_id: &str) -> Result<String, DbError> {
             "replication: app_id must not be empty",
         ));
     }
-    // DB-17: REJECT uppercase rather than silently lowercasing. PG replication
+    // REJECT uppercase rather than silently lowercasing. PG replication
     // slot/publication names must be lowercase, but schema names (quote_ident)
     // preserve case and typed_ids are case-SENSITIVE base62 — so lowercasing
     // here would map two distinct app_ids that differ only in case onto the
@@ -169,7 +169,7 @@ pub(crate) fn slot_name_like_prefix(app_id: &str) -> Result<String, DbError> {
 ///
 /// On Postgres < 15 `FOR ALL TABLES IN SCHEMA` is unsupported; we
 /// fall back to listing tables explicitly via
-/// `pg_class JOIN pg_namespace`. For P8a we target 15+ and surface a
+/// `pg_class JOIN pg_namespace`. We target Postgres 15+ and surface a
 /// `replication: server too old` error otherwise — the proposal
 /// version-pins at 16+.
 pub async fn ensure_publication_and_slot(
@@ -184,8 +184,8 @@ pub async fn ensure_publication_and_slot(
     // *original* app_id via `quote_ident`, so `FOR TABLES IN SCHEMA` must
     // reference it with the same original-case quoted identifier. Using the
     // lowercased form here silently produces an empty publication for any
-    // app_id with uppercase characters — the CRITICAL C1 silent WAL delivery
-    // failure. `quote_ident` double-quotes the name so Postgres preserves case.
+    // app_id with uppercase characters — a silent WAL delivery failure.
+    // `quote_ident` double-quotes the name so Postgres preserves case.
     let schema_ref = crate::query::quote_ident(app_id);
 
     // ---- 1. publication ----
@@ -218,8 +218,8 @@ pub async fn ensure_publication_and_slot(
         // with the operator-facing prefix. Reads the SQLSTATE via
         // `as_db_error()?.code()` against `SqlState::DUPLICATE_OBJECT`;
         // substring-matching the message body was the same fragility
-        // class fixed in `auth/session.rs::classify_p0001_detail`
-        // (MAJOR-R5-1, cycle 06:55) — locale- and formatter-agnostic.
+        // class fixed in `auth/session.rs::classify_p0001_detail` —
+        // locale- and formatter-agnostic.
         if let Err(e) = pool.execute(&pub_sql, &[]).await {
             let is_duplicate_object = e
                 .as_db_error()
@@ -393,9 +393,9 @@ pub struct SlotHealth {
 /// The `WHERE slot_name LIKE $1` filter binds the per-app prefix
 /// (`slot_name(app_id)`, terminated with `%`) so a tenant invocation
 /// only ever sees its own slots. Cluster-wide enumeration from inside
-/// a tenant isolate is a cross-tenant info-disclosure vector — the
-/// sibling vulnerability to the cross-app `setup` hijack closed at
-/// commit `309ed52f`. Operator-shaped cluster sweeps belong in the
+/// a tenant isolate is a cross-tenant info-disclosure vector - the
+/// sibling vulnerability to the cross-app `setup` hijack that is
+/// closed elsewhere. Operator-shaped cluster sweeps belong in the
 /// control plane, not here.
 ///
 /// The query is in the proposal verbatim (R3) — kept as a single SQL
@@ -483,9 +483,9 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 ///
 /// The candidate filter is bound via a `slot_name LIKE $1` parameter
 /// against `slot_name(app_id) + '%'` (not interpolated). Cluster-wide
-/// DROP from inside a tenant isolate is a cross-tenant DoS vector —
-/// the sibling vulnerability to the cross-app `setup` hijack closed
-/// at commit `309ed52f`.
+/// DROP from inside a tenant isolate is a cross-tenant DoS vector -
+/// the sibling vulnerability to the cross-app `setup` hijack that is
+/// closed elsewhere.
 ///
 /// Returns the list of dropped slot names (for logging / metrics).
 ///
@@ -525,11 +525,11 @@ pub async fn drop_abandoned_slots(
     // Postgres allows) to more than `inactive_seconds` of WAL, the
     // slot is plainly abandoned.
     //
-    // For P8a we use the simpler proxy that the proposal accepts: any
+    // We use the simpler proxy that the proposal accepts: any
     // `active=false` slot is a candidate. The watchdog still warns on
     // lag separately. Callers wanting time-based reaping should query
     // `pg_stat_replication_slots.stats_reset` (PG 16+) to track when a
-    // slot last had decoder activity — added in P8b alongside metrics.
+    // slot last had decoder activity (tracked alongside the replication metrics).
     //
     // We DO use `inactive_seconds` as a SAFETY THRESHOLD: a slot that
     // was newly created but hasn't been started yet has `active=false`
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn sanitise_app_id_rejects_uppercase_for_slot_injectivity_db17() {
-        // DB-17: uppercase must be REJECTED, not lowercased — otherwise two
+        // Uppercase must be REJECTED, not lowercased — otherwise two
         // case-distinct app_ids would collide onto one slot/publication while
         // keeping different (case-preserving) schemas. Lowercase passes through
         // unchanged (no lossy transform).
@@ -793,19 +793,19 @@ mod tests {
         assert_eq!(DROP_TERMINATE_GRACE_SECS, 5);
     }
 
-    /// C1 regression guard: the publication SQL must reference the schema with
+    /// Regression guard: the publication SQL must reference the schema with
     /// the *original* case using a quoted identifier (`"MyApp"`), not the
     /// lowercased slot-safe form (`myapp`). An unquoted or lowercased schema
     /// reference folds to lowercase in Postgres, leaving the publication empty
-    /// for any app_id with uppercase characters — the silent WAL delivery
-    /// failure described in CRITICAL C1.
+    /// for any app_id with uppercase characters — a silent WAL delivery
+    /// failure.
     #[test]
     fn publication_sql_uses_quoted_original_case_schema() {
-        // DB-17: a mixed-case app_id is now REJECTED at sanitise_app_id, so the
-        // lowercased-slot-vs-case-preserving-schema mismatch that CRITICAL C1
-        // guarded against can no longer arise (the stronger fix supersedes the
-        // C1 lowercasing path). A lowercase (production-shape) app_id is accepted
-        // and flows through to the slot/publication names unchanged.
+        // A mixed-case app_id is now REJECTED at sanitise_app_id, so the
+        // lowercased-slot-vs-case-preserving-schema mismatch this guard
+        // protects against can no longer arise (the stronger fix supersedes the
+        // original lowercasing path). A lowercase (production-shape) app_id is
+        // accepted and flows through to the slot/publication names unchanged.
         assert!(publication_name("MyApp").is_err());
         assert!(slot_name("MyApp").is_err());
         assert_eq!(publication_name("myapp").unwrap(), "__zs_pub_myapp");
@@ -873,8 +873,8 @@ mod tests {
         }
     }
 
-    /// Wire-shape regression guard. The post-[I28] sweep changed
-    /// `ensure_publication_and_slot` to return `Result<_, DbError>`
+    /// Wire-shape regression guard. `ensure_publication_and_slot`
+    /// returns `Result<_, DbError>`
     /// directly, so the runtime path no longer calls `.into_string()`
     /// — but the operator-facing message must still carry the
     /// `replication:` prefix (so log scrapers route it) and the
@@ -928,7 +928,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Typed-error sweep [I28]
+    // Typed-error tests
     //
     // These pin the `.code` the SDK branches on for the validation paths
     // through `sanitise_app_id`, `publication_name`, and `slot_name`.
@@ -1035,7 +1035,7 @@ mod tests {
         assert_ne!(p, p_b);
         assert_eq!(p_b, "__zs_slot_app_b%");
 
-        // DB-17: a mixed-case app_id is rejected (not lowercased), so the
+        // A mixed-case app_id is rejected (not lowercased), so the
         // slot-name prefix stays injective over app_ids. A lowercase id passes.
         assert!(slot_name_like_prefix("MyApp").is_err());
         assert_eq!(

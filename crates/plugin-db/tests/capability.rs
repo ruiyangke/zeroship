@@ -129,9 +129,9 @@ const _procedures = { getStuff };
 /// ised over each entry point — keeps the assertion shape simple.
 #[test]
 fn b3_runtime_query_refuses_every_db_write_op() {
-    // P9 PR 1 renamed the native `updateOne`/`deleteOne` → `update`/`delete`
+    // The native `updateOne`/`deleteOne` methods are named `update`/`delete`
     // (singular-default convention); the capability-gate violation labels
-    // follow the new method names.
+    // follow those method names.
     let ops = [
         ("insert", r#"env.db.collection("n").insert({ t: "x" })"#, "ctx.db.insert"),
         ("update", r#"env.db.collection("n").update({ id: 1 }, { t: "x" })"#, "ctx.db.update"),

@@ -119,7 +119,7 @@ impl ChangeClass {
     }
 }
 
-// **Schema-authority P1** — map the schema layer's classification
+// Map the schema layer's classification
 // (`zeroship_schema::diff::ChangeClass`) onto this audit-row enum. The
 // conversion used to live as `diff::ChangeClass::as_audit()`, but the diff
 // classifier was relocated into the leaf crate `zeroship-schema`, which must
@@ -614,9 +614,8 @@ fn validate_app_id(name: &str) -> Result<(), DbError> {
     {
         // Name the allowed alphabet inline so SDK-facing error messages
         // tell creators what's permitted. Mirrors the `validate_field_name`
-        // shape landed at `403b3891` (cycle 11:17 [I12]) and the twin
-        // alphabet-naming pattern in `replication.rs:91-97`. Closes the
-        // 5-cycle error-ux carry on audit.rs:818.
+        // shape and the twin alphabet-naming pattern in
+        // `replication.rs:91-97`.
         return Err(DbError::validation(
             "invalid_app_id",
             format!(

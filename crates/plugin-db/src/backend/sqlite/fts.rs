@@ -1,8 +1,8 @@
 //! SQLite full-text search helpers — FTS5 external-content virtual
 //! tables + AFTER-trigger mirror lifecycle.
 //!
-//! **P4 PR 5** (`docs/proposals/p4-search-implementation-plan.md` §4.2
-//! + §8 PR 5). This module owns the SQL-shape primitives — the five
+//! (`docs/proposals/p4-search-implementation-plan.md` §4.2
+//! + §8). This module owns the SQL-shape primitives — the five
 //! idempotent DDL statements (`CREATE VIRTUAL TABLE`, initial
 //! population `INSERT … SELECT`, three AFTER triggers) and the
 //! search SQL composition (`SELECT … JOIN … MATCH … ORDER BY bm25`).
@@ -28,7 +28,7 @@
 //!
 //! ## Trigger-vs-preupdate-hook ordering (Q-P4-F)
 //!
-//! The P2 CDC adapter installs a `preupdate_hook` on the rusqlite
+//! The CDC adapter installs a `preupdate_hook` on the rusqlite
 //! connection. SQLite's documented hook order is:
 //!
 //! 1. `preupdate_hook` fires BEFORE the row mutation (carrying the
@@ -105,7 +105,7 @@ pub(crate) fn build_create_fts_table_sql(
 /// vtable presence is checked by `sqlite_master` lookup; if it's already
 /// there, the create is a no-op and we skip the population).
 ///
-/// **PR 5 ensures the population runs only once** by gating it on
+/// **The population runs only once**, gated on
 /// "did we just create the vtable" — the impl block in `mod.rs` performs
 /// a `SELECT 1 FROM sqlite_master WHERE name = '<coll>__fts'` probe
 /// before running this statement.
@@ -263,7 +263,7 @@ pub(crate) fn build_update_trigger_sql(
 /// the sign flipped. The synthetic `_rank` column the caller sees
 /// carries the engine value verbatim (caller transformations like
 /// `Math.abs` happen SDK-side, not here).
-/// DB-16: normalize a user FTS query to LITERAL terms so SQLite FTS5 treats it
+/// Normalize a user FTS query to LITERAL terms so SQLite FTS5 treats it
 /// the same way Postgres' `plainto_tsquery` does — as words to AND together,
 /// NOT as MATCH query syntax (phrase / prefix `foo*` / `NEAR`/`AND`/`OR`
 /// boolean). Two reasons: (1) dev↔prod parity — without this, `db.x.search(q)`

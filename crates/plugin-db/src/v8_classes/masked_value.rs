@@ -1,8 +1,7 @@
 //! `MaskedValue` — the V8 wrapper minted directly by the row
-//! serializer for every masked column on a row crossing back to JS
-//! (P9 PR 2).
+//! serializer for every masked column on a row crossing back to JS.
 //!
-//! Before P9 PR 2 the runtime emitted a `{sentinel: "__zsmask__", ...}`
+//! Previously the runtime emitted a `{sentinel: "__zsmask__", ...}`
 //! JSON sentinel and the SDK's `mapResultDoc` re-hydrated it into a
 //! TypeScript `MaskedValue` instance on every row. The sentinel
 //! round-trip + JS rehydration is gone — Rust now mints native
@@ -117,8 +116,8 @@ impl MaskedValue {
     /// `mv._meta` — frozen `{ collection, row_pk, column }` object.
     ///
     /// Per §4.1, the three native flat fields (`collection`, `row_pk`,
-    /// `column`) are re-nested into the `_meta` shape the SDK consumed
-    /// before P9 PR 2. `app_id` stays internal — it never enters the
+    /// `column`) are re-nested into the `_meta` shape the SDK consumes.
+    /// `app_id` stays internal — it never enters the
     /// type, never shows in creator hover.
     #[v8_getter]
     #[v8_name = "_meta"]
@@ -186,8 +185,7 @@ impl MaskedValue {
     /// (resolves with the bare plaintext string) or
     /// `Promise<Record<col, string>>` on the multi-column path. Both
     /// shapes match the SDK ambient `declare class MaskedValue` directly
-    /// — there is no JS wrapper unwrapping a `{ plaintext }` envelope
-    /// after P9 PR 2.
+    /// — there is no JS wrapper unwrapping a `{ plaintext }` envelope.
     #[v8_method]
     fn unmask<'s>(
         &self,
@@ -243,7 +241,7 @@ impl MaskedValue {
     }
 
     /// `mv.toString()` — yields the masked string. Same coercion-safe
-    /// behaviour as the pre-PR-2 TS class.
+    /// behaviour as the original TS class.
     #[v8_method]
     #[v8_name = "toString"]
     fn to_string_js(&self) -> String {
@@ -282,7 +280,7 @@ impl MaskedValue {
         let state = runtime_state(scope);
         let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-        // DB-3: app JS must not be able to claim the reserved `auto` system
+        // App JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
         let actor = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
@@ -312,7 +310,7 @@ impl MaskedValue {
                             request_id,
                         }
                     } else {
-                        // **P9 PR 2** — resolve with the BARE plaintext
+                        // Resolve with the BARE plaintext
                         // string. The SDK `MaskedValue` is now an ambient
                         // `declare class` (no JS body), so this native
                         // method IS the implementation of `unmask(): Promise<T>`
@@ -389,7 +387,7 @@ impl MaskedValue {
             })
             .unwrap_or_default();
 
-        // DB-3: app JS must not be able to claim the reserved `auto` system
+        // App JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
         let actor = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
@@ -609,7 +607,7 @@ impl RehydrateWalker {
         let sentinel_key = str_key(scope, "sentinel")?;
         if let Some(sentinel_v) = obj.get(scope, sentinel_key) {
             if sentinel_v.is_string() && sentinel_v.to_rust_string_lossy(scope) == "__zsmask__" {
-                // DB-7: only mint from a sentinel carrying the unforgeable
+                // Only mint from a sentinel carrying the unforgeable
                 // per-process signature the read pipeline stamps. A `__zsmask__`
                 // object fabricated by app JS (e.g. read back from a JSONB column
                 // it wrote) lacks it and is left untouched — it cannot be turned
@@ -750,7 +748,7 @@ fn str_key<'s, 'a>(
 #[cfg(test)]
 mod tests {
     //! Brand / construction / serializer round-trip coverage for the
-    //! P9 PR 2 MaskedValue v8_class. Network / SQL paths are exercised
+    //! MaskedValue v8_class. Network / SQL paths are exercised
     //! by the SDK suite and the SQLite integration target; these unit
     //! tests pin the V8-side invariants that don't need a backend.
     use super::*;
@@ -815,7 +813,7 @@ mod tests {
 
     #[test]
     fn rehydrate_refuses_forged_sentinel_db7() {
-        // DB-7: a `__zsmask__` object app JS fabricated (e.g. read back from a
+        // A `__zsmask__` object app JS fabricated (e.g. read back from a
         // JSONB column it wrote) lacks the per-process `_sig` the read pipeline
         // stamps, so the decoder must NOT mint it into a MaskedValue (which
         // could then `.unmask()` an attacker-chosen cell). A correctly-signed

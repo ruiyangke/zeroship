@@ -15,14 +15,14 @@
 //! ```
 //!
 //! The salt-by-app step closes cross-tenant ciphertext replay even if
-//! the root key is shared across apps (which is the P5 platform
+//! the root key is shared across apps (which is the platform
 //! model — one root per `key_id`, many apps).
 //!
 //! ## Key sources
 //!
-//! P5 PR 1 ships one [`KeySource`] variant — env-var lookup. That
+//! [`KeySource`] has two variants: env-var lookup, which
 //! covers SQLite (where there's no admin-schema sidecar) and the PG
-//! dev-parity case. PR 2 adds a `PgAdminTable` variant that reads from
+//! dev-parity case; and `PgAdminTable`, which reads from
 //! `__zeroship_admin.column_keys` via a SECURITY DEFINER getter so
 //! the raw bytes never reach app code.
 //!
@@ -32,8 +32,8 @@
 //! — every isolate is bound to one compio thread, so we don't need
 //! `Mutex` / `Arc`. The cache invariant is simple: once a `(app_id,
 //! key_id)` entry is inserted, it stays for the lifetime of the
-//! [`KeyStore`]. Rotation lands in P6b and rewires the cache to
-//! track key versions; PR 1 has no rotation surface to worry about.
+//! [`KeyStore`]. There is no rotation surface today; adding one will
+//! require rewiring the cache to track key versions.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -47,8 +47,8 @@ use crate::error::DbError;
 
 /// Source of root key material.
 ///
-/// PR 1 shipped only [`Self::EnvVar`]. PR 2 adds
-/// [`Self::PgAdminTable`] — the production PG path. The PG path:
+/// [`Self::EnvVar`] is the SQLite / dev-parity path.
+/// [`Self::PgAdminTable`] is the production PG path:
 ///   1. Calls `__zeroship_admin.get_column_key($1)` (SECURITY DEFINER).
 ///   2. If the getter returns NULL (table empty / key id missing),
 ///      **falls back to the env-var path** so apps that haven't yet
@@ -62,7 +62,7 @@ pub enum KeySource {
     /// Read 32-byte root keys from `ZEROSHIP_COLUMN_KEY_<KEYID>` env
     /// vars (hex-encoded). SQLite tier + PG dev parity.
     EnvVar,
-    /// **P5 PR 2** — PG production source. Reads
+    /// PG production source. Reads
     /// `__zeroship_admin.column_keys` via the SECURITY DEFINER getter
     /// installed by `crate::auth::bootstrap::ensure_admin_schema`.
     /// Falls through to `EnvVar` when the getter returns NULL (covers
@@ -74,11 +74,11 @@ pub enum KeySource {
 /// keyed by `(app_id, key_id)`.
 ///
 /// Construct one per [`crate::backend`] impl; clear on backend drop.
-/// PR 2 wires the PG impl through this.
+/// The PG impl wires through this.
 pub struct KeyStore {
     cache: RefCell<HashMap<(String, String), AeadKey>>,
     sourcing: KeySource,
-    /// **P5.5 PR 8** — process-local hit/miss counter for the Path-B
+    /// Process-local hit/miss counter for the
     /// "default-read does not load a column key" closeout gate
     /// (§11). Every call to [`KeyStore::resolve`] bumps this; a hit
     /// vs. miss is irrelevant for the gate (the proposal asserts that
@@ -114,7 +114,7 @@ impl KeyStore {
         }
     }
 
-    /// **P5.5 PR 8** — total resolve-call count since this `KeyStore`
+    /// Total resolve-call count since this `KeyStore`
     /// was constructed. Used by the §11 closeout gate
     /// `default_read_does_not_load_column_key` to assert that a
     /// default masked read serves rows through the `<col>_masked`
@@ -129,12 +129,12 @@ impl KeyStore {
     }
 
     /// Look up or derive the [`AeadKey`] for `(app_id, key_id)`.
-    /// Async signature for parity with the PR 2 `PgAdminTable` variant
-    /// (which has to `.await` a SECURITY DEFINER round-trip); PR 1's
+    /// Async signature for parity with the `PgAdminTable` variant
+    /// (which has to `.await` a SECURITY DEFINER round-trip); the
     /// `EnvVar` source is sync internally and the body never `.await`s.
-    #[allow(clippy::unused_async)] // PR 2's PgAdminTable variant awaits.
+    #[allow(clippy::unused_async)] // The PgAdminTable variant awaits.
     pub async fn resolve(&self, app_id: &str, key_id: &str) -> Result<AeadKey, DbError> {
-        // **P5.5 PR 8** — increment BEFORE the cache lookup so a
+        // Increment BEFORE the cache lookup so a
         // resolve-attempt is counted regardless of cache hit/miss.
         // The §11 closeout gate asserts this stays at zero on
         // default-read paths.
@@ -158,7 +158,7 @@ impl KeyStore {
                 match pg_admin_lookup_root(pool, key_id).await {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => env_lookup_root(key_id)?,
-                    // DB-10: a GENUINE getter fault (permission denied, connection
+                    // A GENUINE getter fault (permission denied, connection
                     // error, SQL failure) must SURFACE — not silently downgrade to
                     // whatever `ZEROSHIP_COLUMN_KEY_<id>` happens to hold, which
                     // could be a stale/test key and would produce wrong-key
@@ -247,7 +247,7 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
     }
 }
 
-/// **P5 PR 2** — PG production root-key fetcher.
+/// PG production root-key fetcher.
 ///
 /// Calls `__zeroship_admin.get_column_key($1)` (the SECURITY DEFINER
 /// getter installed by `crate::auth::bootstrap::ensure_admin_schema`).
@@ -533,8 +533,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 8 — §11 closeout: `default_read_does_not_load_column_key`
-    // (Path B fence). The proposal asserts that a default masked read
+    // §11 closeout: `default_read_does_not_load_column_key`.
+    // The proposal asserts that a default masked read
     // serves rows through the `<col>_masked AS <col>` alias so the
     // ciphertext column never leaves Postgres and the column key is
     // never consulted. The `KeyStore::lookups_count()` counter is the

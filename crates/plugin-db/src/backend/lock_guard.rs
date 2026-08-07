@@ -1,14 +1,14 @@
 //! RAII-ish guard returned by [`crate::backend::LockManager`] for
 //! session-scoped advisory locks.
 //!
-//! **P0 PR 6** (`docs/proposals/p0-implementation-plan.md` §"PR 6"):
-//! renamed from the prior orchestrator-internal guard type and
-//! moved out of the old orchestration wrapper into `backend/` — the guard is the
+//! Renamed from the prior orchestrator-internal guard type and
+//! moved out of the old orchestration wrapper into `backend/` (see
+//! `docs/proposals/p0-implementation-plan.md` §"PR 6") — the guard is the
 //! canonical RAII return shape for the
 //! [`crate::backend::LockManager`] capability, not an
 //! orchestrator-internal detail. Construction goes through
 //! [`LockGuard::acquire`] taking a [`crate::backend::LockScope`] (the
-//! typed classifier introduced by the same PR).
+//! typed classifier introduced alongside it).
 //!
 //! The four-phase register-model pipeline holds a session-scoped
 //! `pg_advisory_lock(hashtext('<app_id>:register_model'),
@@ -20,9 +20,8 @@
 //! ownership of the still-locked client to the next stage that will
 //! release it.
 //!
-//! Before this guard, three commits in two days (`b4e533e2`,
-//! `37a0ef76`, `3bb41fa1`) plugged that invariant inline at three
-//! different stages of the pipeline:
+//! Before this guard existed, that invariant was plugged in inline at
+//! three different stages of the pipeline:
 //!
 //! - `bootstrap.rs` — release on Err, hand off the locked client on Ok
 //!   to `apply()`.
@@ -60,26 +59,6 @@
 //! `mem::replace` / `ManuallyDrop` gymnastics. After either call, the
 //! `Option` is `None` and `released` is `true`, so subsequent `Drop`
 //! is a no-op (idempotent).
-//!
-//! # Hardening history
-//!
-//! The lifecycle invariant lives in one type now, but several rounds
-//! of review surfaced edge cases the initial extraction missed.
-//! Listed so a future reader can trace the design:
-//!
-//! - `cbd12944` (cycle 02:05) — extract the guard from 3 open-coded
-//!   `pg_advisory_unlock` sites (bootstrap.rs / apply.rs / mod.rs).
-//! - `bd1e7ce1` ([I42], cycle 04:00) — defer `released = true` flip
-//!   until AFTER the unlock-SQL await completes; a mid-await
-//!   cancellation/panic now triggers Drop's catastrophic-path log
-//!   instead of silently leaking the lock.
-//! - `808a32af` ([I39], cycle 04:35) — annotate `#[must_use]` so
-//!   accidental drops surface as compile-time warnings; strengthen
-//!   Drop log with "leak:" prefix + operator-facing consequence +
-//!   diagnostic checklist.
-//! - `ffb1e101` ([I44], cycle 04:35) — replace `let _ =` on the
-//!   unlock-SQL await with `if let Err(e) =` + `tracing::warn!` so
-//!   an unlock-SQL runtime failure is observable rather than silent.
 
 use compio_postgres::PooledClient;
 
@@ -130,28 +109,25 @@ impl<'p> LockGuard<'p> {
     /// exit) or `into_held()` (hand off to a downstream stage that
     /// will release later).
     ///
-    /// **P0 PR 6**: takes a [`LockScope`] instead of the previous
+    /// Takes a [`LockScope`] rather than a raw
     /// `(key: String, tag: &'static str)` pair. The
     /// [`LockManager::acquire`] default impl derives the underlying
     /// `(key1, key2)` strings via [`LockScope::to_keys`] (§7.2 /
     /// §10.5); we cache the derived pair locally so `release()`'s
     /// `pg_advisory_unlock` matches the acquisition exactly even if
-    /// `LockScope::to_keys` ever changed shape.
+    /// `LockScope::to_keys` ever changed shape. It takes `&LockScope`
+    /// (not by value) so the caller can keep a single binding (and
+    /// reuse it if it ever needs to release outside the guard).
     ///
-    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so the
-    /// caller can keep a single binding (and reuse it if it ever
-    /// needs to release outside the guard). The local `(key, tag)`
-    /// cache below is still derived via [`LockScope::to_keys`].
-    ///
-    /// **Security [I43]** (cycle 18:17): the underlying acquisition
-    /// is now bounded — `LockManager::acquire`'s default impl loops
-    /// on `pg_try_advisory_lock` with a 0/50/200/500/1000ms schedule
+    /// The underlying acquisition is bounded —
+    /// `LockManager::acquire`'s default impl loops on
+    /// `pg_try_advisory_lock` with a 0/50/200/500/1000ms schedule
     /// (~1.75s worst case) and surfaces `DbError::LockContention`
-    /// on exhaustion. The previous direct call to
-    /// `acquire_advisory_lock` could stall indefinitely waiting on
-    /// `pg_advisory_lock`, giving any app that held its own lock
-    /// a within-app DoS lever against its own subsequent
-    /// `register_model` invocations. The guard's lifecycle invariants
+    /// on exhaustion, rather than calling `acquire_advisory_lock`
+    /// directly and stalling indefinitely on `pg_advisory_lock`,
+    /// which would give any app that held its own lock a within-app
+    /// DoS lever against its own subsequent `register_model`
+    /// invocations. The guard's lifecycle invariants
     /// are unaffected: on `Ok` the lock is held by `self.client` and
     /// will be released via [`Self::release`] / [`Self::into_held`];
     /// on `Err` no lock is held and `client` drops back to the pool.
@@ -162,7 +138,7 @@ impl<'p> LockGuard<'p> {
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
         // Route through the typed `LockManager::acquire` surface,
-        // which (post-[I43]) dispatches to `try_acquire_with_backoff`
+        // which dispatches to `try_acquire_with_backoff`
         // — bounded retry instead of the legacy blocking
         // `acquire_advisory_lock` primitive. Construction shape is
         // otherwise unchanged: on Err the lock was never held and
@@ -200,18 +176,17 @@ impl<'p> LockGuard<'p> {
         // pool with the session lock still held — best we can do
         // without a runtime handle (Drop can't await an unlock SQL).
         //
-        // [I42] (concurrency r5 M-NEW-r5-1): the prior version flipped
-        // `released = true` BEFORE the await, so a cancellation here
-        // silently leaked the lock with no Drop log. Defer the state
-        // flip to AFTER the await completes.
+        // Flipping `released = true` BEFORE the await would mean a
+        // cancellation here silently leaks the lock with no Drop log.
+        // Defer the state flip to AFTER the await completes.
         if let Some(client) = self.client.as_ref() {
             let unlock_sql =
                 "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-            // [I44] (code-critique r5 MAJOR-R5-5): a bare `let _ =`
-            // silently swallows runtime errors from the unlock SQL —
-            // operator never sees that the lock might still be held.
-            // Log warnings on error so a leak is visible; the lock
-            // also auto-releases when the PG session ends.
+            // A bare `let _ =` here would silently swallow runtime
+            // errors from the unlock SQL — the operator would never
+            // see that the lock might still be held. Log warnings on
+            // error so a leak is visible; the lock also auto-releases
+            // when the PG session ends.
             if let Err(e) = client
                 .query_text_params(unlock_sql, &[self.key.as_str(), self.tag.as_str()])
                 .await
@@ -376,7 +351,7 @@ mod tests {
         assert_eq!(guard.tag, "register_model");
     }
 
-    /// Structural invariant pin for [I42] (bd1e7ce1 fix order):
+    /// Structural invariant pin:
     /// `self.released = true` MUST appear AFTER the unlock-SQL
     /// `.await` in the `release()` function body. Otherwise a
     /// cancellation mid-await silently leaks the lock with no Drop
@@ -388,9 +363,9 @@ mod tests {
     /// — invariant lives in the source layout, not in observable
     /// runtime state, so we pin it via include_str! + index search.
     ///
-    /// A future contributor restoring the pre-bd1e7ce1 order (flip
-    /// `released = true` BEFORE awaiting the unlock SQL) trips this
-    /// test at compile-time without needing a live PG fixture.
+    /// A future contributor who reorders the flip to happen BEFORE
+    /// awaiting the unlock SQL trips this test at compile-time
+    /// without needing a live PG fixture.
     #[test]
     fn release_flips_flag_after_unlock_await_structural() {
         let src = include_str!("lock_guard.rs");

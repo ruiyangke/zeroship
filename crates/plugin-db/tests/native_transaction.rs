@@ -1,4 +1,4 @@
-//! P9 PR 3 — end-to-end tests for the native `Db.transaction(fn)`
+//! End-to-end tests for the native `Db.transaction(fn)`
 //! orchestrator against real Postgres.
 //!
 //! These dispatch through a real `Runtime` + the `DbPlugin` and call
@@ -77,13 +77,11 @@ fn require_pg_or_skip() -> Option<String> {
 const APP_SCHEMA: &str = "default";
 
 /// Drop the app schema, then PROVISION the `notes` table the way the engine /
-/// deploy-apply now does (P5 cutover).
+/// deploy-apply does.
 ///
-/// **P5 cutover.** Before the cutover these tests relied on the in-handler
-/// `setup` → `registerModel("notes", …)` to CREATE the `notes` table at
-/// runtime. Post-cutover, `registerModel` on the PG dialect issues NO runtime
+/// `registerModel` on the PG dialect issues NO runtime
 /// DDL — `zeroship-migrate` is the sole PG schema authority and creates the
-/// schema at DEPLOY (P6), before the app serves. So the table must already
+/// schema at deploy time, before the app serves. So the table must already
 /// exist when the handlers run. We stand in for the deploy-time engine apply by
 /// building the schema via `exec_register_model_with_pool` (the same DDL +
 /// sentinel emission the relocated engine produces), then the handlers'
@@ -224,7 +222,7 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
 /// `_procedures` declaring `setup` (registerModel) plus the per-test
 /// handlers `body`.
 ///
-/// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+/// `registerModel` lives off `env.db`, on the `__platform`
 /// capability handle (reached via `globalThis.__zsDbPlatform`, which the
 /// production runtime-entry DELETES before request handlers run). This
 /// test module's top-level evaluates BEFORE that deletion (ESM import

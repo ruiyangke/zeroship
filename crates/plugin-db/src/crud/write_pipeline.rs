@@ -25,7 +25,7 @@ pub(crate) fn inspect_update(
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
-/// DB-8: validate every top-level field key of a plain write document
+/// Validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
 /// any system/encryption/mask pass adds its own (legitimately reserved) keys.
@@ -38,7 +38,7 @@ fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
     Ok(())
 }
 
-/// DB-8 (update patch): an update patch's top-level keys are either field names
+/// For an update patch, its top-level keys are either field names
 /// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
 /// operators whose nested keys are field names. Validate the field-name keys
 /// (skipping `$`-prefixed operator keys, whose own nested fields are checked).
@@ -79,7 +79,7 @@ pub(crate) async fn apply(
     payload: &mut Value,
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
-    // DB-8: validate every USER-supplied document field key BEFORE the system /
+    // Validate every USER-supplied document field key BEFORE the system /
     // encryption / mask passes below add their own (reserved-suffix / `__zsenc__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
     // they skipped the `validate_field_name` fence the read/filter path enforces,
@@ -98,7 +98,7 @@ pub(crate) async fn apply(
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
-    // **P4 HALF B** — the encrypt/mask write transforms are driven by metadata
+    // The encrypt/mask write transforms are driven by metadata
     // from LIVE introspection + the engine's sentinels (design §6), not the
     // in-memory declared schema. Cached per (app, collection, deploy).
     let schema = super::introspect_schema::runtime_schema_for(app_id, collection).await?;
@@ -310,7 +310,7 @@ pub(crate) async fn update_requires_per_row_encryption(
     collection: &str,
     patch: &Value,
 ) -> Result<bool, DbError> {
-    // **P4 HALF B** — sourced from introspection (cached), not the declared
+    // Sourced from introspection (cached), not the declared
     // schema. A failed introspection propagates rather than silently returning
     // `false` (which would skip the per-row randomised-encryption path).
     let Some(schema) = super::introspect_schema::runtime_schema_for(app_id, collection).await?

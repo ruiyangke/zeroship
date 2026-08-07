@@ -1,4 +1,4 @@
-//! P9 PR 4 — end-to-end `__platform` capability fence (§8).
+//! End-to-end `__platform` capability fence (§8).
 //!
 //! `db_v8_class.rs` covers the unit-level fence (a directly-minted `Db`
 //! object: reflection invisibility, string-access refusal, private-slot

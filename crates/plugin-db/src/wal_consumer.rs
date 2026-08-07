@@ -1,4 +1,4 @@
-//! Streaming WAL consumer — P8a.2.
+//! Streaming WAL consumer.
 //!
 //! This module owns the long-running task that bridges Postgres
 //! logical-decoding output (`pgoutput` over the streaming-replication
@@ -7,15 +7,15 @@
 //! reaches a subscriber on worker B because both workers consume the
 //! same WAL slot.
 //!
-//! ## What changed from P8a
+//! ## Design
 //!
-//! P8a shipped only the local-emit fast path: mutation callbacks
-//! published directly to the same-isolate broker on success. That
-//! works for the single-worker case (the platform routes per-app
-//! traffic via CHWBL so it's the common case) but offers nothing when
-//! the writer and subscriber happen to land on different workers.
+//! The local-emit fast path publishes directly to the same-isolate
+//! broker on success. That works for the single-worker case (the
+//! platform routes per-app traffic via CHWBL so it's the common case)
+//! but offers nothing when the writer and subscriber happen to land on
+//! different workers.
 //!
-//! P8a.2 adds:
+//! This module adds:
 //!
 //! 1. [`WalConsumer`] — a compio task that opens a
 //!    `replication=database` connection (via
@@ -33,7 +33,7 @@
 //!    `Insert { rel_id, tuple }` back to a `(collection, pk,
 //!    changed_columns)` broker event.
 //!
-//! ## What's NOT in this commit
+//! ## Known limitations
 //!
 //! - **Per-subscription LSN tracking** — when the consumer is
 //!   suppressed (i.e. fast-path local-emit is firing) AND the
@@ -42,8 +42,8 @@
 //!   thread-local mode toggle. A future change can add per-event
 //!   `wal_lsn` + per-subscription `seen_local_lsn` dedup so that BOTH
 //!   paths can fire concurrently with the broker filtering duplicates.
-//!   The proposal accepts the cleaner-but-slower (WAL-only) semantics
-//!   for P8a.2; the dual-path optimisation is P8a.3.
+//!   The design accepts the cleaner-but-slower (WAL-only) semantics
+//!   for now; the dual-path optimisation is future work.
 //! - **Boot-time auto-spawn** — the consumer struct is exposed and
 //!   tested, but the V8 callback that spawns it is opt-in:
 //!   apps call `db.startReplicationConsumer()` (the `#[v8_method]`
@@ -51,10 +51,11 @@
 //!   to enable cross-worker propagation. Spawning automatically on
 //!   isolate boot would just inline the same dispatch helper in the
 //!   isolate init path; left out so the first ship of this code doesn't
-//!   change the boot path for apps that have never enabled C1.
+//!   change the boot path for apps that have never enabled cross-worker
+//!   propagation.
 //! - **Reconnection / fault-tolerance** — the consumer's `run` loop
 //!   returns on first I/O error. A supervising task (`watchdog.rs` in
-//!   a future commit) restarts it with exponential backoff. For P8a.2
+//!   a future commit) restarts it with exponential backoff. Until then
 //!   the caller is responsible for re-spawning. The slot's WAL
 //!   retention is the safety net: even if the consumer is offline for
 //!   minutes, no events are lost.
@@ -153,7 +154,7 @@ impl Drop for SuppressGuard {
     }
 }
 
-// --- Back-compat shims for the pre-P8a.2-finish API. The single-app
+// --- Back-compat shims for the prior thread-wide API. The single-app
 //     case used a thread-wide bool; tests against that surface keep
 //     working by mapping it onto the per-app set under a stable
 //     "sentinel" key. New callers should use the per-app API above.
@@ -191,7 +192,7 @@ pub(crate) fn local_emit_suppressed() -> bool {
 /// consumer is publishing the same event on the cross-worker path and
 /// emitting locally too would double-deliver.
 ///
-/// P8b: the `new_tuple` is the row's post-image (or pre-image for
+/// The `new_tuple` is the row's post-image (or pre-image for
 /// DELETE) — used by the broker's read-set narrowing to test each
 /// subscriber's predicate. May be empty when the caller doesn't have a
 /// tuple snapshot to hand; predicate evaluation treats missing columns
@@ -276,8 +277,8 @@ struct RelationEntry {
     /// Column metadata in declaration order. Used to:
     /// 1. Extract `pk` — we look for the first column flagged as
     ///    replica-identity-key.
-    /// 2. Surface `changed_columns` to the broker event (P8b will
-    ///    use this for read-set filtering).
+    /// 2. Surface `changed_columns` to the broker event (used for
+    ///    read-set filtering).
     columns: Vec<pgoutput::RelationColumn>,
 }
 
@@ -352,9 +353,9 @@ impl WalConsumer {
             });
         }
         // slot_name / publication_name already return Result<String,
-        // DbError> after the [I28] sweep — propagate the typed error
-        // so the SDK sees `.code = "invalid_app_id"` for sanitise
-        // failures and not an opaque `"not_provisioned"` re-stamp.
+        // DbError> — propagate the typed error so the SDK sees
+        // `.code = "invalid_app_id"` for sanitise failures and not
+        // an opaque `"not_provisioned"` re-stamp.
         let slot_name = crate::replication::slot_name(app_id)?;
         let publication_name = crate::replication::publication_name(app_id)?;
         Ok(Self {
@@ -525,8 +526,8 @@ impl WalConsumer {
                 self.emit_for_tuple(relations, *rel_id, ChangeOp::Delete, old_tuple, None);
             }
             // Begin/Commit/Origin/Type/Truncate/Message: not surfaced
-            // to subscribers in P8a.2. Truncate could fan out to all
-            // subscribers as Resync — left for P8a.3 alongside per-
+            // to subscribers. Truncate could fan out to all
+            // subscribers as Resync — left as future work alongside per-
             // subscription LSN tracking.
             _ => {}
         }
@@ -540,7 +541,7 @@ impl WalConsumer {
     /// publication that happens to be in scope, but we explicitly
     /// scope to this app for tenant isolation.
     ///
-    /// P8b: the relation's column declarations are zipped with the
+    /// The relation's column declarations are zipped with the
     /// tuple's text values to populate `new_tuple` (and `old_tuple`
     /// for UPDATE) — these maps drive the broker's predicate
     /// evaluation on the subscriber-narrowing path.
@@ -564,7 +565,7 @@ impl WalConsumer {
             return;
         }
 
-        // Perf CRITICAL N-C1: short-circuit before the
+        // Performance-critical: short-circuit before the
         // (column-name-clone) `changed_columns` Vec and the two
         // `tuple_to_map` HashMaps. On a table with no reactive
         // subscribers — the majority of tables in typical apps — the
@@ -953,7 +954,7 @@ mod tests {
         ));
     }
 
-    /// MAJOR-R5-4: invalid app ids must surface a typed
+    /// Invalid app ids must surface a typed
     /// `ValidationFailed { code: "invalid_app_id" }` so the SDK can
     /// distinguish "developer passed a bad app_id" from "operator
     /// hasn't configured the database". Prior code collapsed both
@@ -979,8 +980,8 @@ mod tests {
     /// The genuine "operator forgot to set DB_URL" path must still
     /// surface as `Configuration { code: "not_provisioned" }` — that
     /// `.code` is what the SDK branches on to surface the right
-    /// remediation. This pins the second leg of the
-    /// MAJOR-R5-4 split.
+    /// remediation. This pins the distinction between the two error
+    /// classes.
     #[test]
     fn wal_consumer_new_missing_db_url_returns_configuration() {
         let err = WalConsumer::new("alpha", "").unwrap_err();
@@ -1223,7 +1224,7 @@ mod tests {
         crate::broker::drop_app(None);
     }
 
-    // -------- Per-app emit suppression (P8a.2 finish-up) --------
+    // -------- Per-app emit suppression --------
 
     /// A consumer suppresses local-emit ONLY for the app it's bound to.
     /// A different app on the same thread is unaffected.

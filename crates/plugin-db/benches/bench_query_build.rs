@@ -2,16 +2,15 @@
 //!
 //! ## Why this bench exists
 //!
-//! Performance review r9 (cycle 09:30) recommended r10 should NOT run
-//! without a `cargo bench` harness landing under `crates/plugin-db/benches/`.
-//! This file is the seed of that harness. Future perf cycles will extend it
-//! with more paths as findings warrant.
+//! A `cargo bench` harness is needed under `crates/plugin-db/benches/`
+//! before further performance work proceeds. This file is the seed of
+//! that harness; future benches can extend it with more paths.
 //!
 //! ## What this bench targets
 //!
-//! Originally the highest-leverage candidate was `row_to_json` — it
-//! exercises the N4-I3/N9-I1 O(N²) column lookup that is the largest
-//! remaining structural cost. However `row_to_json` takes a
+//! The highest-leverage candidate is `row_to_json` — it exercises the
+//! O(N²) column lookup that is the largest remaining structural cost.
+//! However `row_to_json` takes a
 //! `&compio_postgres::Row`, and `Row::new` is `pub(crate)` inside
 //! `compio-postgres`, so a Row cannot be synthesised from outside the
 //! crate without (a) a live Postgres or (b) modifying production code
@@ -21,8 +20,8 @@
 //! edits, no live Postgres). We instead bench `build_find` and
 //! `build_insert` — both `pub` — which:
 //!
-//! 1. exercise `validate_collection` (the byte-prefix check perf r1
-//!    closed) transitively on the hot path, so a future regression in
+//! 1. exercise `validate_collection` (the byte-prefix check) transitively
+//!    on the hot path, so a future regression in
 //!    `validate_collection` will show up here as a slowdown;
 //! 2. cover the realistic query-build cost the SDK pays on every CRUD
 //!    call (filter parsing, identifier quoting, parameter binding).

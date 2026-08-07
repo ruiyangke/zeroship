@@ -2,12 +2,12 @@
 //!
 //! ## Why this file exists
 //!
-//! Under P2 these helpers (TTL default, `/dev/urandom` fallback, ISO
+//! These helpers (TTL default, `/dev/urandom` fallback, ISO
 //! timestamp formatting, hex codec, civil-from-days arithmetic) were
 //! private to `auth/session.rs` because only the PG `mint_session_token`
 //! / `init_session` free fns used them.
 //!
-//! P3 introduces a SQLite `SessionMinter` impl in
+//! A SQLite `SessionMinter` impl lives in
 //! `backend/sqlite/session_minter.rs`. Both impls must produce
 //! byte-identical canonical payloads + token shapes for the same
 //! `(secret, init, nonce, expires_at)`. The helpers therefore have to
@@ -22,7 +22,7 @@
 //!
 //! ## Stability
 //!
-//! Bodies were moved verbatim from `auth/session.rs` in P3 PR 1; no
+//! Bodies were moved verbatim from `auth/session.rs`; no
 //! signature change. The PG `b8c_*` integration tests pass byte-for-byte
 //! because the free fns in `session.rs` now call into these helpers
 //! under their original names.

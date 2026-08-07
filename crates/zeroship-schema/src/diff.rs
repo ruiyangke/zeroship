@@ -1,5 +1,5 @@
-//! Schema diff engine — A2 of the @zeroship/db proposal
-//! (docs/proposals/zeroship-db.md, section A2).
+//! Schema diff engine for @zeroship/db (design: `docs/archive/zeroship-db.md`,
+//! section A2).
 //!
 //! Compares a desired (declared) schema against the live `pg_catalog`
 //! state and classifies each change into **additive** (auto-apply),
@@ -14,7 +14,7 @@
 //!
 //! ## Volatile-default trap
 //!
-//! Proposal A2 line 120: Postgres' fast-path `ALTER TABLE ADD COLUMN
+//! Per design doc section A2: Postgres' fast-path `ALTER TABLE ADD COLUMN
 //! NOT NULL DEFAULT 'literal'` is metadata-only, but a volatile or
 //! stable default (`DEFAULT NOW()`, `DEFAULT gen_random_uuid()`) forces
 //! a full table rewrite under `ACCESS EXCLUSIVE`. The classifier inspects
@@ -45,7 +45,7 @@ fn coded_sql(context: &str, e: compio_postgres::Error) -> SchemaError {
     SchemaError::new(context, e)
 }
 
-/// Classification per the proposal A2 three-bucket split.
+/// Classification per design doc section A2's three-bucket split.
 ///
 /// The `as_audit()` conversion to plugin-db's audit-row enum lives in
 /// plugin-db (`impl From<ChangeClass> for audit::ChangeClass`), not here:
@@ -99,14 +99,15 @@ pub enum ChangeKind {
     /// `DROP INDEX` for an index no longer in the declared schema.
     #[allow(dead_code, reason = "DropIndex remains part of the diff model for strictness tests even though the default release build does not construct it.")]
     DropIndex,
-    /// B2 — `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`. Emitted when a
-    /// column already exists but no FK constraint is attached, or when
-    /// the table was created with FK emission deferred (cross-table
-    /// declaration order).
+    /// Design doc section B2 - `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`.
+    /// Emitted when a column already exists but no FK constraint is
+    /// attached, or when the table was created with FK emission deferred
+    /// (cross-table declaration order).
     AddForeignKey,
-    /// B2 — `ALTER TABLE … DROP CONSTRAINT` for a FK no longer declared.
+    /// Design doc section B2 - `ALTER TABLE … DROP CONSTRAINT` for a FK
+    /// no longer declared.
     DropForeignKey,
-    /// **P5.5 PR 6a** — backfill the sibling `<col>_masked` column for
+    /// Backfill the sibling `<col>_masked` column for
     /// every row of an existing column that just gained a
     /// `.mask({...})` declaration. The accompanying
     /// `ALTER TABLE … ADD COLUMN <col>_masked TEXT NULL` op is emitted
@@ -123,7 +124,7 @@ pub enum ChangeKind {
         kind: MaskKind,
         classification: Classification,
     },
-    /// **P5.5 PR 6b** — rewrite the sibling `<col>_masked` column when
+    /// Rewrite the sibling `<col>_masked` column when
     /// an existing masked column's `.mask({...})` kind or classification
     /// changes. Touches every row (no IS NULL filter); the sibling
     /// column already exists + is NOT NULL so no schema mutation is
@@ -137,7 +138,7 @@ pub enum ChangeKind {
         new_kind: MaskKind,
         classification: Classification,
     },
-    /// **P5.5 PR 6c** — drop the sibling `<col>_masked` column when an
+    /// Drop the sibling `<col>_masked` column when an
     /// existing masked column loses its `.mask({...})` declaration (or
     /// switches to `kind: "none"`). Classified `Destructive`; the
     /// validate stage refuses it under `strictness == "strict"` and
@@ -177,8 +178,9 @@ pub enum ChangeKind {
 }
 
 impl ChangeKind {
-    /// Stringly representation written to `change_kind` column. Matches
-    /// the values listed in proposal A3 section.
+    /// Stringly representation written to the `change_kind` column of
+    /// the migration audit log. Matches the values listed in the
+    /// proposal A3 section.
     pub fn as_sql(&self) -> &'static str {
         match self {
             Self::CreateTable => "create_table",
@@ -210,8 +212,8 @@ pub struct LiveSchema {
     /// fast-path additive vs. compatible paths). 0 means empty, which
     /// is sound for the "ADD NOT NULL on empty table is safe" rule.
     pub row_counts: std::collections::HashMap<String, i64>,
-    /// B2 — per-table foreign-key set, keyed by the local column name.
-    /// `foreign_keys[<table>][<column>] = ForeignKeyInfo`.
+    /// Design doc section B2 - per-table foreign-key set, keyed by the
+    /// local column name. `foreign_keys[<table>][<column>] = ForeignKeyInfo`.
     pub foreign_keys:
         std::collections::HashMap<String, std::collections::HashMap<String, ForeignKeyInfo>>,
 }
@@ -229,17 +231,17 @@ pub struct ColumnInfo {
     /// is a plain literal.
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub default_volatility: Option<char>,
-    /// **P4 PR 1** — vector dimensionality observed from the live
+    /// Vector dimensionality observed from the live
     /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
     /// BLOB column with a `length("col") = 4 * N` CHECK constraint
-    /// (SQLite); `None` otherwise (the default — every existing
-    /// non-vector column). PR 4/5 populate this from
-    /// `information_schema` / `sqlite_master.sql` introspection
-    /// (Q-P4-A — regex on DDL today, sidecar `__zs_schema_meta` is
-    /// the upgrade path).
+    /// (SQLite); `None` otherwise (the default -- every existing
+    /// non-vector column, and every column live-schema introspection
+    /// hasn't populated yet from `information_schema` /
+    /// `sqlite_master.sql` (Q-P4-A -- regex on DDL today, a sidecar
+    /// `__zs_schema_meta` table is the upgrade path).
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub vector_dims: Option<i32>,
-    /// **P4 PR 1** — whether this column is enrolled in the
+    /// Whether this column is enrolled in the
     /// collection's composite FTS index (one composite index per
     /// collection, per Q-P4-B). PG: presence of the column in the
     /// `tsvector_update_trigger(__fts, ...)` arg list. SQLite:
@@ -247,52 +249,52 @@ pub struct ColumnInfo {
     /// column list. `false` for every existing column at HEAD.
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub is_fts_source: bool,
-    /// **P4 PR 1** — whether this column is a `geography(POINT,
+    /// Whether this column is a `geography(POINT,
     /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
     /// CHECK constraint (SQLite). `false` for every existing column
-    /// at HEAD; PR 4/5 populate this from live-schema introspection.
+    /// until live-schema introspection populates it.
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub is_geopoint: bool,
-    /// **P5 PR 1** — column-encryption metadata when the SDK
+    /// Column-encryption metadata when the SDK
     /// declared the column with `t.encrypted(...)`. `None` for every
-    /// existing column (the default at HEAD); PR 2 populates the PG
-    /// side from `__zeroship_meta.encrypted_columns`; PR 3 populates
-    /// the SQLite side via regex on `sqlite_master.sql` for the
+    /// existing column (the default at HEAD); the PG side populates
+    /// from `__zeroship_meta.encrypted_columns`, and the SQLite side
+    /// populates via regex on `sqlite_master.sql` for the
     /// sentinel CHECK comment. Stays `None` in the default-feature
     /// build because no consumer wires the field yet.
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub encryption: Option<EncryptionMeta>,
-    /// **P5.5 PR 1** — column-mask metadata when the SDK declared the
+    /// Column-mask metadata when the SDK declared the
     /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
     /// latter auto-populating `mask = { kind: "full", classification:
     /// "pii" }` at schema-normalisation time when no explicit `.mask()`
     /// is chained). `None` for every existing column at HEAD.
     ///
-    /// Path B (sibling-column-based, resolved 2026-05-24): when
+    /// Sibling-column-based: when
     /// `mask` is `Some(_)`, the platform emits a hidden
-    /// `<col>_masked` sibling column at CREATE TABLE time (PR 2),
-    /// reads route through `<col>_masked AS <col>` aliasing (PR 3),
-    /// and writes dual-bind both columns atomically (PR 2). The
+    /// `<col>_masked` sibling column at CREATE TABLE time,
+    /// reads route through `<col>_masked AS <col>` aliasing,
+    /// and writes dual-bind both columns atomically. The
     /// sibling column is NEVER part of the creator-visible SDK
-    /// surface — `Row<S>` only contains the parent column wrapped
+    /// surface -- `Row<S>` only contains the parent column wrapped
     /// in `MaskedValue<T>`.
     ///
     /// Live-schema introspection on PG/SQLite does NOT yet populate
-    /// this from existing tables in PR 1; the sibling-column-existence
-    /// check + sentinel-comment parse lands in PR 2. For now `mask`
-    /// always reads as `None` from live introspection — the diff
+    /// this from existing tables; the sibling-column-existence
+    /// check + sentinel-comment parse is still outstanding. For now `mask`
+    /// always reads as `None` from live introspection -- the diff
     /// classifier treats schema-mask vs live-no-mask as Recoverable
-    /// Additive (PR 6a backfill is safe to apply).
+    /// Additive (a `MaskBackfill` is safe to apply).
     pub mask: Option<MaskMeta>,
 }
 
 impl Default for ColumnInfo {
-    /// **P4 PR 1** — `Default` impl so call sites can use
-    /// `..Default::default()` for the new vector/FTS/geopoint fields
-    /// without restating the pre-P4 field defaults. The B-tree column
+    /// `Default` impl so call sites can use
+    /// `..Default::default()` for the vector/FTS/geopoint fields
+    /// without restating the base field defaults. The B-tree column
     /// shape is: empty type string, nullable, no default, no
     /// volatility, no vector dimension, not an FTS source, not a
-    /// geopoint, **no encryption** (P5 PR 1 addition). Every existing
+    /// geopoint, **no encryption**. Every existing
     /// introspection / test site overrides `pg_type` + `not_null`
     /// explicitly.
     fn default() -> Self {
@@ -305,26 +307,26 @@ impl Default for ColumnInfo {
             is_fts_source: false,
             is_geopoint: false,
             encryption: None,
-            // **P5.5 PR 1** — mask defaults to None. Every existing
+            // Mask defaults to None. Every existing
             // column gets `mask: None`; only NEW `.mask(...)`
-            // declarations populate `Some(_)`. PR 2 onwards populates
-            // from schema-meta introspection (PG sidecar /
+            // declarations populate `Some(_)`, from
+            // schema-meta introspection (PG sidecar /
             // SQLite sentinel comment).
             mask: None,
         }
     }
 }
 
-/// **P5 PR 1** — encryption metadata attached to a [`ColumnInfo`] when
+/// Encryption metadata attached to a [`ColumnInfo`] when
 /// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
 ///
 /// Populated by schema introspection:
-/// - **PG** (PR 2): from `__zeroship_meta.encrypted_columns` rows the
+/// - **PG**: from `__zeroship_meta.encrypted_columns` rows the
 ///   `register_model` DDL emitter writes alongside the table create.
-/// - **SQLite** (PR 3): from a sentinel CHECK comment
+/// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern P4 uses for
-///   vector dims; sidecar `__zs_schema_meta` is the upgrade path).
+///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
+///   vector dims; a sidecar `__zs_schema_meta` table is the upgrade path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
     /// Encryption mode declared by the SDK.
@@ -342,11 +344,12 @@ pub struct EncryptionMeta {
     pub wraps: WrappedType,
 }
 
-/// **P5 PR 1** — the inner type wrapped by a `t.encrypted(...)` builder.
+/// The inner type wrapped by a `t.encrypted(...)` builder.
 ///
-/// Per Q-P5-B: P5 ships only string / number / bytes. Arbitrary JSON
-/// (object / array) wraps deferred — adds a serialisation round-trip
-/// on every read/write that isn't needed for the v1 surface.
+/// Per Q-P5-B: only string / number / bytes are supported. Arbitrary
+/// JSON (object / array) wraps are deferred -- they'd add a
+/// serialisation round-trip on every read/write that isn't needed for
+/// the current surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrappedType {
     String,
@@ -354,32 +357,32 @@ pub enum WrappedType {
     Bytes,
 }
 
-/// **P5.5 PR 1** — column-mask metadata attached to a [`ColumnInfo`]
+/// Column-mask metadata attached to a [`ColumnInfo`]
 /// when the SDK declares the column with `.mask({ kind, classification })`
 /// or, for `t.encrypted()` columns, when the schema-normaliser
 /// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
 ///
-/// Path B: when present, the platform emits a sibling `<col>_masked`
-/// physical column alongside the parent at CREATE TABLE time (PR 2),
+/// Sibling-column-based: when present, the platform emits a sibling `<col>_masked`
+/// physical column alongside the parent at CREATE TABLE time,
 /// default reads pull the masked sibling and alias it back to the
-/// schema-declared name (PR 3), and writes dual-bind both columns
-/// atomically (PR 2). The sibling column is HIDDEN from the SDK
-/// surface — `Row<S>` only contains the parent column wrapped in
+/// schema-declared name, and writes dual-bind both columns
+/// atomically. The sibling column is HIDDEN from the SDK
+/// surface -- `Row<S>` only contains the parent column wrapped in
 /// `MaskedValue<T>`.
 ///
-/// Population path (PR 2 onwards):
+/// Population path:
 /// - **PG**: from `__zeroship_meta.mask_columns` rows the DDL
 ///   emitter writes alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zsmask:{kind}:{classification} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern P4 / P5 use).
+///   `sqlite_master.sql` (the same regex-on-DDL pattern used for encryption).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskMeta {
     /// Mask transform applied at write time to compute the sibling
     /// column's value from the plaintext. See [`MaskKind`].
     pub kind: MaskKind,
-    /// Classification of the source field — drives unmask
-    /// authorization (PR 4) and audit-row tagging (PR 4).
+    /// Classification of the source field -- drives unmask
+    /// authorization and audit-row tagging.
     pub classification: Classification,
     /// Name of the physical sibling column emitted alongside the
     /// parent. Always `format!("{parent}_masked")`. Stored explicitly
@@ -388,19 +391,19 @@ pub struct MaskMeta {
     pub sibling_column: String,
 }
 
-/// **P5.5 PR 1** — built-in mask transform applied at write time.
+/// Built-in mask transform applied at write time.
 ///
 /// Mirrors the SDK's `MaskKind` union (`sdks/db/src/types.ts`).
 /// `None` is the explicit opt-out variant for encrypted columns
-/// where the creator genuinely wants plaintext-on-read; PR 2 / PR 3
-/// branch on `kind == None` to skip sibling emission and use the
-/// P5 decrypt-on-read path. Every other variant produces a
+/// where the creator genuinely wants plaintext-on-read; introspection
+/// branches on `kind == None` to skip sibling emission and use the
+/// decrypt-on-read path. Every other variant produces a
 /// pre-computed masked string stored in the sibling column.
 ///
 /// **No raw user-defined JS functions for masking.** Creator-supplied
 /// mask functions are a security risk (an AI-generated `mask: v => v`
-/// defeats the purpose). Only named built-in strategies — adding a
-/// new strategy is a platform PR, not creator config.
+/// defeats the purpose). Only named built-in strategies -- adding a
+/// new strategy is a platform code change, not creator config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskKind {
     /// `"***"` — maximum redaction. Default for encrypted columns.
@@ -424,7 +427,7 @@ pub enum MaskKind {
 }
 
 impl MaskKind {
-    /// **P5.5 PR 6** — canonical SDK-wire string for this kind. Mirrors
+    /// Canonical SDK-wire string for this kind. Mirrors
     /// the discriminator the SDK emits in `def.mask.kind` (see
     /// `sdks/db/src/types.ts`). Used by the diff layer to round-trip
     /// the live-introspection sentinel through `pg_description` (PG) /
@@ -443,7 +446,7 @@ impl MaskKind {
         }
     }
 
-    /// **P5.5 PR 6** — parse a kind string back into [`MaskKind`].
+    /// Parse a kind string back into [`MaskKind`].
     /// Returns `None` for any unrecognised input; the introspection
     /// layer surfaces that as `mask_sentinel_malformed` so a future
     /// SDK kind landing on an old worker (or a hand-edited sentinel)
@@ -469,8 +472,8 @@ impl MaskKind {
     }
 }
 
-/// **P5.5 PR 1** — taxonomy of sensitivity classes used to drive
-/// unmask authorization (PR 4) and audit-row tagging (PR 4).
+/// Taxonomy of sensitivity classes used to drive
+/// unmask authorization and audit-row tagging.
 ///
 /// Mirrors the SDK's `Classification` union. The taxonomy is
 /// deliberately small — six classes covering the standard regulatory
@@ -500,7 +503,7 @@ pub enum Classification {
 }
 
 impl Classification {
-    /// **P5.5 PR 6** — canonical SDK-wire string. Lower-snake to match
+    /// Canonical SDK-wire string. Lower-snake to match
     /// `VALID_CLASSIFICATIONS` in `crate::crud::mask_policy`.
     #[must_use]
     pub fn as_sql(self) -> &'static str {
@@ -514,7 +517,7 @@ impl Classification {
         }
     }
 
-    /// **P5.5 PR 6** — parse a classification string back into
+    /// Parse a classification string back into
     /// [`Classification`]. Returns `None` for any unrecognised input
     /// (surfaced as `mask_sentinel_malformed` by the introspection
     /// layer).
@@ -545,7 +548,7 @@ pub struct IndexInfo {
     pub is_valid: bool,
 }
 
-/// B2 — observed FK constraint read from `pg_constraint`.
+/// Design doc section B2 - observed FK constraint read from `pg_constraint`.
 #[derive(Debug, Clone)]
 pub struct ForeignKeyInfo {
     /// Postgres constraint name (e.g. `"author_id_fkey"`).
@@ -607,7 +610,7 @@ pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, S
 
     // ----- columns -----
     //
-    // **P5.5 PR 6** — the LEFT JOIN against `pg_description` pulls the
+    // The LEFT JOIN against `pg_description` pulls the
     // per-column comment populated by the
     // `COMMENT ON COLUMN <coll>.<sibling> IS '__zsmask:...'`
     // statements the DDL emitter writes alongside CREATE TABLE +
@@ -663,7 +666,7 @@ SELECT c.relname AS table_name,
             .ok()
             .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
-        // **P4 HALF A** — column comments carry TWO sentinel families:
+        // Column comments carry TWO sentinel families:
         //   - `__zsmask:…` on a `<col>_masked` sibling → deferred to the second
         //     pass (stamps `MaskMeta` on the PARENT);
         //   - `zsenc:…` on the encrypted column itself → parsed inline here into
@@ -706,17 +709,17 @@ SELECT c.relname AS table_name,
                 default_expr,
                 default_volatility,
                 encryption,
-                // P4 PR 1: remaining fields default; PR 4/5 populate vector/fts/
-                // geo from `information_schema` + `pg_indexes` introspection.
+                // Remaining fields default; vector/fts/geo are populated
+                // from `information_schema` + `pg_indexes` introspection.
                 ..Default::default()
             },
         );
     }
-    // **P5.5 PR 6** — second pass: for every sibling carrying a
+    // Second pass: for every sibling carrying a
     // `__zsmask:…` sentinel, parse the kind+classification and stamp
     // `MaskMeta` onto the PARENT column. The diff classifier reads
-    // `parent.mask` to decide whether to emit a 6a backfill /
-    // 6b rewrite / 6c removal op.
+    // `parent.mask` to decide whether to emit a backfill,
+    // rewrite, or removal op.
     for ((table, sibling), sentinel) in sibling_sentinels {
         let Some(parent_name) = sibling.strip_suffix("_masked") else {
             continue;
@@ -935,7 +938,7 @@ pub fn compute_diff(
     // ----- column additions -----
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
-            // **P5.5 PR 1** — skip top-level metadata keys (`_meta`,
+            // Skip top-level metadata keys (`_meta`,
             // `_indexes`). The runtime reads these out-of-band; they
             // are NOT column declarations and must not reach the
             // `field_name` validator (which now reserves the `_`
@@ -1003,7 +1006,7 @@ pub fn compute_diff(
         });
     }
 
-    // ----- foreign-key additions (B2) -----
+    // ----- foreign-key additions (design doc section B2) -----
     //
     // Walk the declared schema and emit an AddForeignKey op for every
     // `t.ref("target")` field that doesn't already have a matching FK
@@ -1157,20 +1160,20 @@ pub fn compute_diff(
         }
     }
 
-    // ----- P5.5 PR 6 — mask transitions on existing columns -----
+    // ----- mask transitions on existing columns -----
     //
     // For every column that EXISTS on both sides, compare the live
     // `mask` field (populated from sentinels by the PG / SQLite
     // introspectors) against the declared `mask` block. Three
     // transitions:
     //
-    //   - 6a: live=None,         declared=Some(_)            → MaskBackfill
-    //   - 6b: live=Some(a),      declared=Some(b) where a≠b  → MaskRewrite
-    //   - 6c: live=Some(_),      declared=None or kind=none  → MaskRemove
+    //   - live=None,         declared=Some(_)            -> MaskBackfill
+    //   - live=Some(a),      declared=Some(b) where a!=b  -> MaskRewrite
+    //   - live=Some(_),      declared=None or kind=none   -> MaskRemove
     //
-    // 6a additionally emits an `AddColumn` for the sibling BEFORE the
+    // MaskBackfill additionally emits an `AddColumn` for the sibling BEFORE the
     // `MaskBackfill` op so the column exists when the backfill writes
-    // to it. The sibling ADD is nullable on purpose — backfill flips
+    // to it. The sibling ADD is nullable on purpose -- backfill flips
     // it to NOT NULL after the last batch (see
     // `crate::crud::mask_backfill::run_mask_backfill`).
     //
@@ -1196,7 +1199,7 @@ pub fn compute_diff(
                 // No mask on either side — nothing to do.
                 (None, None) => {}
 
-                // 6a — new mask declaration on existing column.
+                // New mask declaration on existing column.
                 (None, Some(new_meta)) => {
                     // (1) ALTER ADD COLUMN <col>_masked TEXT NULL +
                     //     `COMMENT ON COLUMN` sentinel attachment —
@@ -1266,7 +1269,7 @@ pub fn compute_diff(
                     });
                 }
 
-                // 6b — mask-kind change on existing masked column.
+                // Mask-kind change on existing masked column.
                 (Some(old_meta), Some(new_meta))
                     if old_meta.kind != new_meta.kind
                         || old_meta.classification != new_meta.classification =>
@@ -1294,10 +1297,10 @@ pub fn compute_diff(
                     });
                 }
 
-                // 6b no-op — same kind + classification.
+                // No-op -- same kind + classification.
                 (Some(_), Some(_)) => {}
 
-                // 6c — mask removal (destructive).
+                // Mask removal (destructive).
                 (Some(_), None) => {
                     ops.push(DiffOp {
                         collection: collection.to_string(),
@@ -1435,7 +1438,7 @@ pub fn compute_diff(
     ops
 }
 
-/// **P5.5 PR 6** — extract a [`MaskMeta`] from a declared schema field
+/// Extract a [`MaskMeta`] from a declared schema field
 /// definition, IFF the field carries a `.mask({...})` block AND the
 /// kind is not the explicit opt-out (`"none"`). Returns `None` for
 /// fields without a mask block, with `kind: "none"`, or with a
@@ -1458,7 +1461,7 @@ pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
     // The sibling is always `<field>_masked` — the schema_def doesn't
     // carry the field name, so the helper returns `String::new()` here
     // and callers that need the sibling name format it from the field
-    // name themselves. We keep the field on `MaskMeta` (PR 1 shape) so
+    // name themselves. We keep the field on `MaskMeta` so
     // the live-introspection round-trip carries the same shape.
     Some(MaskMeta {
         kind,
@@ -1476,7 +1479,7 @@ pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
 /// - Adding a NOT NULL column to a non-empty table with an *immutable*
 ///   default → compatible (Postgres fast-path).
 /// - Adding a column with a volatile/stable default → destructive
-///   (forces table rewrite under ACCESS EXCLUSIVE — proposal A2 line 120).
+///   (forces table rewrite under ACCESS EXCLUSIVE - design doc section A2).
 fn classify_add_column(def: &Value, live: &LiveSchema, collection: &str) -> ChangeClass {
     let required = def
         .get("required")
@@ -1834,7 +1837,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // B2 — typed cross-table relations: diff classification
+    // Design doc section B2 - typed cross-table relations: diff
+    // classification
     // -----------------------------------------------------------------
 
     #[test]
@@ -1979,7 +1983,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // C2 — discriminated unions: diff against flat-expanded columns
+    // Design doc section C2 - discriminated unions: diff against
+    // flat-expanded columns
     //
     // The SDK pre-expands `t.union(...)` into a flat schema before the
     // diff engine sees it (each variant field becomes a top-level
@@ -1990,7 +1995,7 @@ mod tests {
     //
     // SCOPE NOTE: CHECK-constraint evolution (extending the
     // discriminator's IN-list, adding per-variant integrity CHECKs)
-    // is NOT yet diffed — the proposal section §C2 calls it out as
+    // is NOT yet diffed - design doc section C2 calls it out as
     // additive-by-construction. Re-running registerModel today does
     // not amend existing CHECK constraints. This is a known follow-up.
     // -----------------------------------------------------------------
@@ -2104,7 +2109,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 6 — mask transition diff classification
+    // Mask transition diff classification
     // -----------------------------------------------------------------
 
     fn live_with_column(coll: &str, col: &str, mask: Option<MaskMeta>) -> LiveSchema {
@@ -2132,7 +2137,7 @@ mod tests {
         live
     }
 
-    /// **PR 6a**: live has no mask, schema declares one → emit the
+    /// Live has no mask, schema declares one -> emit the
     /// sibling `AddColumn` + `MaskBackfill` ops.
     #[test]
     fn mask_backfill_emits_alter_then_backfill_ops() {
@@ -2187,8 +2192,8 @@ mod tests {
         );
     }
 
-    /// **PR 6b**: live has mask kind=Full, schema declares kind=Last4
-    /// → emit MaskRewrite op, no AddColumn.
+    /// Live has mask kind=Full, schema declares kind=Last4
+    /// -> emit MaskRewrite op, no AddColumn.
     #[test]
     fn mask_rewrite_emits_when_kind_changes() {
         let live_mask = MaskMeta {
@@ -2219,7 +2224,7 @@ mod tests {
         assert!(add_sib.is_empty(), "no ALTER ADD when sibling exists: {ops:?}");
     }
 
-    /// **PR 6b — no-op**: same kind + classification both sides →
+    /// No-op: same kind + classification both sides ->
     /// neither MaskRewrite nor MaskBackfill is emitted.
     #[test]
     fn mask_no_op_when_unchanged() {
@@ -2244,7 +2249,7 @@ mod tests {
         );
     }
 
-    /// **PR 6c**: live has mask, schema removes it → MaskRemove op
+    /// Live has mask, schema removes it -> MaskRemove op
     /// classified Destructive.
     #[test]
     fn mask_remove_emits_destructive_op() {
@@ -2266,7 +2271,7 @@ mod tests {
         assert_eq!(removes[0].class, ChangeClass::Destructive);
     }
 
-    /// **PR 6c**: live has mask, schema sets `kind: "none"` → also
+    /// Live has mask, schema sets `kind: "none"` -> also
     /// MaskRemove (since `none` opts the sibling out entirely).
     #[test]
     fn mask_kind_none_is_treated_as_removal() {
@@ -2291,7 +2296,7 @@ mod tests {
         assert_eq!(removes[0].class, ChangeClass::Destructive);
     }
 
-    /// **PR 6 — sibling kept out of DropColumn loop**: a `_masked`
+    /// Sibling kept out of DropColumn loop: a `_masked`
     /// sibling that exists in the live schema MUST NOT generate a
     /// spurious DropColumn just because the user-declared schema
     /// doesn't list `ssn_masked`. The sibling is platform-managed.
@@ -2348,7 +2353,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 6 — MaskKind / Classification serialiser round-trip
+    // MaskKind / Classification serialiser round-trip
     // -----------------------------------------------------------------
 
     #[test]

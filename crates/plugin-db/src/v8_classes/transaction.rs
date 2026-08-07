@@ -1,7 +1,7 @@
 //! `mint_tx_view` — the collections-only object handed to a
-//! `Db.transaction(fn)` callback (P9 PR 3).
+//! `Db.transaction(fn)` callback.
 //!
-//! ## What changed in P9 PR 3
+//! ## Design
 //!
 //! The `Transaction` `#[v8_class]` (with its `commit`/`rollback`/
 //! `collection` methods and GC-driven auto-rollback finalizer) is
@@ -27,7 +27,7 @@
 //!
 //! A `tx` object that exposed `commit` / `rollback` / `collection` would
 //! re-introduce a JS-reachable transaction primitive — exactly the
-//! capability surface P9 set out to remove. By minting a bare object with
+//! capability surface this redesign set out to remove. By minting a bare object with
 //! only collection properties, there is no method for creator (or
 //! escaped) code to call: the transaction lifecycle is owned by Rust end
 //! to end. The bootstrap layer wraps each native collection prop in a

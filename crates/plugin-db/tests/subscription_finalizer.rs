@@ -1,6 +1,6 @@
-//! Stage 3 — Subscription v8_class GC finalizer test.
+//! Subscription v8_class GC finalizer test.
 //!
-//! Closes the P8a handle-leak: when a JS caller drops the wrapper
+//! Closes a handle-leak: when a JS caller drops the wrapper
 //! without calling `.close()`, the Weak finalizer registered by
 //! `mint_subscription` must still close the broker handle so the
 //! broker slot is reclaimed on the next GC cycle.

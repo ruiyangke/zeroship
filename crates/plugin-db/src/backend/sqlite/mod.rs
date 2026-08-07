@@ -1,29 +1,26 @@
-//! SQLite backend — skeleton.
+//! SQLite backend.
 //!
-//! **P1 PR 1**: this module re-introduces the [`SqliteBackend`] type
-//! and the five sub-modules (`session`, `dialect`, `lock`, `error`,
-//! `fk_parse`) the plan calls out, but every capability-trait method
-//! body is a stub. The intent is to lock the field set + the trait
-//! impls + the `BackendHandle::Sqlite(Rc<SqliteBackend>)` arm at
-//! compile time, so PR 2-5 only edit method bodies — they don't
-//! re-shape the surface.
+//! This module defines the [`SqliteBackend`] type and its five
+//! sub-modules (`session`, `dialect`, `lock`, `error`, `fk_parse`).
+//! The field set, the trait impls, and the
+//! `BackendHandle::Sqlite(Rc<SqliteBackend>)` arm are fixed at
+//! compile time; method bodies can change without re-shaping the
+//! surface.
 //!
-//! - **PR 2**: `SqliteSession` actor + `SqlExecutor` impl + PRAGMA
-//!   bootstrap + `error::from_sqlite` switch.
-//! - **PR 3**: `NamespaceManager` (ATTACH) + `DialectBuilder` impl
-//!   (both PG and SQLite sides, 6 hooks).
-//! - **PR 4**: `LockManager` (in-process HashMap) + `SchemaIntrospect`
+//! - `SqliteSession` actor + `SqlExecutor` impl + PRAGMA bootstrap +
+//!   `error::from_sqlite` switch.
+//! - `NamespaceManager` (ATTACH) + `DialectBuilder` impl (both PG
+//!   and SQLite sides, 6 hooks).
+//! - `LockManager` (in-process HashMap) + `SchemaIntrospect`
 //!   (PRAGMA walk).
-//! - **PR 5**: `IndexBuilder` + `SqliteAuditWriter` capability +
-//!   cross-app FK parse-time check + `impl Backend for SqliteBackend`
-//!   + the SQLite integration-test mirror.
+//! - `IndexBuilder` + `SqliteAuditWriter` capability + cross-app FK
+//!   parse-time check + `impl Backend for SqliteBackend` + the
+//!   SQLite integration-test mirror.
 //!
-//! **`impl Backend for SqliteBackend` lands in P1 PR 5**: every
-//! sub-trait now carries a real (non-stub) impl, so the composition
+//! Every sub-trait carries a real (non-stub) impl, so the composition
 //! marker `impl Backend for SqliteBackend {}` is added at the bottom
-//! of this file. The relaxation of the `Backend` super-bound to drop
-//! the `Client = compio_postgres::Client` pin landed in PR 1; PR 5 is
-//! the moment the marker actually wires up.
+//! of this file. The `Backend` super-bound was relaxed to drop the
+//! `Client = compio_postgres::Client` pin so the marker could wire up.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -43,16 +40,15 @@ use crate::error::DbError;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::query::IndexSpec;
 
-// `cdc` is the P2 PR-1+ home for the SQLite-side `ChangeStream`
-// adapter (the `preupdate_hook` install + worker→compio publisher
-// integration lands in PR 2; PR 1 ships the stub). Crate-private —
-// the public consumer surface is
+// `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
+// `preupdate_hook` install + worker->compio publisher integration).
+// Crate-private - the public consumer surface is
 // `BackendHandle::as_change_stream_sqlite()` (mirroring the
 // `as_postgres` / `as_sqlite` accessor shape).
 pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
-// **P4 PR 5** — FTS5 vtable lifecycle + MATCH query composition. The
+// FTS5 vtable lifecycle + MATCH query composition. The
 // `impl FullTextIndex for SqliteBackend` block at the bottom of this
 // file orchestrates the five idempotent DDL statements + the search
 // path; the SQL primitives (`build_create_fts_table_sql`,
@@ -60,22 +56,22 @@ pub(crate) mod error;
 // `fts.rs` so the documented shapes stay unit-testable in isolation.
 pub(crate) mod fts;
 pub(crate) mod lock;
-// **P5 PR 3.5** — `pub` under `test-helpers` so the e2e encrypted-
-// column round-trip test in `tests/sqlite_integration.rs` can name
-// `session::TypedCell` for typed BLOB extraction.
+// `pub` under `test-helpers` so the e2e encrypted-column round-trip
+// test in `tests/sqlite_integration.rs` can name `session::TypedCell`
+// for typed BLOB extraction.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod session;
 #[cfg(feature = "test-helpers")]
 pub mod session;
-// **P4 PR 5** — pure-Rust haversine + `(lat, lng)` BLOB round-trip.
-// The `impl SpatialIndex for SqliteBackend` block at the bottom of
+// Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The
+// `impl SpatialIndex for SqliteBackend` block at the bottom of
 // this file routes the flat-scan path through this module; the math
 // (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
 // stay unit-testable in `spatial.rs`.
 pub(crate) mod spatial;
-// **P4 PR 7** — `sqlite-vec` vec0 vtable lifecycle + MATCH query
-// composition. Supersedes the P4 PR 4 pure-Rust flat scan (see
-// `docs/proposals/p4-search-implementation-plan.md` §10 2026-05-24
+// `sqlite-vec` vec0 vtable lifecycle + MATCH query composition.
+// Supersedes the earlier pure-Rust flat scan (see
+// `docs/proposals/p4-search-implementation-plan.md` §10, 2026-05-24
 // reassessment). The `impl VectorIndex for SqliteBackend` block at
 // the bottom of this file orchestrates the five idempotent DDL
 // statements + the JOIN+MATCH search path; the SQL primitives
@@ -83,14 +79,14 @@ pub(crate) mod spatial;
 // live in `vector.rs` so the documented shapes stay unit-testable
 // in isolation.
 pub(crate) mod vector;
-// P3 PR 3: SQLite-side `SessionMinter` helpers — HMAC-SHA256 +
-// bounded LRU nonce cache. The `impl SessionMinter for
-// SqliteBackend` block lives at the bottom of THIS file (mirrors
+// SQLite-side `SessionMinter` helpers - HMAC-SHA256 + bounded LRU
+// nonce cache. The `impl SessionMinter for SqliteBackend` block
+// lives at the bottom of THIS file (mirrors
 // the AuditWriter/IndexBuilder convention); the helpers live in
 // `session_minter.rs` so the cryptography stays out of the
 // orchestration body.
 pub(crate) mod session_minter;
-// `fk_parse` was lifted out of this cfg-gated subtree in P1 PR 5 — the
+// `fk_parse` was lifted out of this cfg-gated subtree - the
 // cross-app FK check applies on BOTH backends (PG and SQLite) so it
 // lives at `crate::cross_app_fk` and is compiled unconditionally. The
 // module's design lineage (SQLite ATTACH file isolation per design §18
@@ -123,7 +119,7 @@ use session::{SqliteSession, SqliteSessionHandle};
 /// - `app_id_cache`: dedup set for the `NamespaceManager::ensure_app_schema`
 ///   path — SQLite errors on a second ATTACH of the same alias, so
 ///   we filter the second call site in Rust.
-/// - `_publisher`: P2 PR 2 — the worker→compio publisher task that
+/// - `_publisher`: the worker->compio publisher task that
 ///   drains the dispatcher's `flume::Receiver<CommitPacket>` and
 ///   re-emits each event onto the thread-local broker. The
 ///   `JoinHandle` is held so dropping `SqliteBackend` cancels the task
@@ -142,13 +138,13 @@ pub struct SqliteBackend {
     cdc_name_cache_invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
-    /// P2 PR 2: keeps the publisher task alive for the lifetime of the
+    /// Keeps the publisher task alive for the lifetime of the
     /// backend; dropped via `Drop` when the backend goes away. The
     /// `JoinHandle` is a `compio::runtime::Task<Result<(), …>>` whose
     /// `Drop` cancels the task per the `async-task` contract (see
     /// `async_task::Task` rustdoc).
     _publisher: compio::runtime::JoinHandle<()>,
-    /// **P3 PR 3** — active HMAC secret for the `SessionMinter`
+    /// Active HMAC secret for the `SessionMinter`
     /// trait impl. `None` if `ZEROSHIP_SESSION_SECRET` wasn't set
     /// at `new()` time; in that case `mint_session_token` /
     /// `init_session` fail with
@@ -156,23 +152,23 @@ pub struct SqliteBackend {
     /// first use (lazy failure — see plan §11 Q-P3-H).
     #[cfg(any(test, feature = "test-helpers"))]
     minter_secret: Option<Vec<u8>>,
-    /// **P3 PR 3** — previous-generation HMAC secret for the
+    /// Previous-generation HMAC secret for the
     /// rotation grace window. `None` if `ZEROSHIP_SESSION_SECRET_PREV`
     /// isn't set. When `Some`, `verify_signature` always evaluates
     /// both keys (no short-circuit) so timing leaks neither.
     #[cfg(any(test, feature = "test-helpers"))]
     minter_secret_prev: Option<Vec<u8>>,
-    /// **P3 PR 3** — bounded LRU cache for nonce-replay detection.
+    /// Bounded LRU cache for nonce-replay detection.
     /// `Rc<RefCell<…>>` because the trait impl mutates it through
     /// an `&self` receiver. Single-threaded per worker, no atomics
     /// needed.
     #[cfg(any(test, feature = "test-helpers"))]
     nonce_cache: Rc<RefCell<session_minter::NonceCache>>,
-    /// **P5 PR 3** — per-backend column-key cache. Resolves
-    /// `(app_id, key_id) → AeadKey` via the `ZEROSHIP_COLUMN_KEY_<KEYID>`
-    /// env var (the only sourcing variant on the SQLite arm — no
-    /// admin-schema sidecar; mirrors the session-minter pattern from
-    /// P3). Single-threaded (`RefCell` inside `KeyStore`) since every
+    /// Per-backend column-key cache. Resolves
+    /// `(app_id, key_id) -> AeadKey` via the `ZEROSHIP_COLUMN_KEY_<KEYID>`
+    /// env var (the only sourcing variant on the SQLite arm - no
+    /// admin-schema sidecar; mirrors the session-minter pattern).
+    /// Single-threaded (`RefCell` inside `KeyStore`) since every
     /// `SqliteBackend` is owned by a single compio thread.
     key_store: crate::encryption::KeyStore,
 }
@@ -190,7 +186,7 @@ impl SqliteBackend {
     /// Construct a backend rooted at `db_dir`.
     ///
     /// Opens the control session at `<db_dir>/zs-control.sqlite` and
-    /// spawns the **P2 PR 2 worker→compio publisher task** that
+    /// spawns the worker->compio publisher task that
     /// drains the CDC dispatcher's `CommitPacket` channel and
     /// re-emits each event onto the thread-local broker.
     ///
@@ -199,16 +195,16 @@ impl SqliteBackend {
     /// `rusqlite::Connection`. Writes against ATTACH-ed per-app
     /// aliases (the `ensure_app_schema` path) fire the same hooks with
     /// the alias as `db_name`, so a single dispatcher serves all apps
-    /// the backend hosts — no per-app session needed in PR 2. The
+    /// the backend hosts - no per-app session needed. The
     /// per-event `app_id` is derived from `db_name` inside the
     /// publisher (see `cdc.rs::publisher_loop`).
     ///
     /// **Cross-thread wire**: the channel is `flume::unbounded()` per
-    /// plan §11 — lock-free, structurally bounded by COMMIT cadence.
-    /// Switching to a bounded + overflow-to-resync channel is a PR 3+
-    /// concern if production traffic surfaces the need (plan §10
-    /// Q-P2-A).
-    /// **P5.5 PR 5** — accessor for the backend's filesystem root.
+    /// plan §11 - lock-free, structurally bounded by COMMIT cadence.
+    /// Switching to a bounded + overflow-to-resync channel is a
+    /// possible future concern if production traffic surfaces the
+    /// need (plan §10 Q-P2-A).
+    /// Accessor for the backend's filesystem root.
     /// The mask-policy sidecar file (`mask_policies.json`) lives at
     /// `<db_dir>/mask_policies.json`; the file's path is constructed
     /// from this accessor by `crate::crud::mask_policy::persist_sqlite`
@@ -264,7 +260,7 @@ impl SqliteBackend {
         Ok(Self::finish_open(opened))
     }
 
-    /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
+    /// **Test helper** - open a [`crate::backend::BrokerPauseGuard`]
     /// for `app_id`. While the returned guard is bound, the SQLite CDC
     /// publisher drops every packet whose `app_id` matches; on drop
     /// the suppression flag clears and one `Resync` is pushed per
@@ -285,7 +281,7 @@ impl SqliteBackend {
         crate::backend::BrokerPauseGuard::new(app_id.to_string())
     }
 
-    /// **Test helper** (P2 PR 4) — engage [`crate::backend::SchemaPendingGuard`]
+    /// **Test helper** - engage [`crate::backend::SchemaPendingGuard`]
     /// for `app_id`. While the guard is bound,
     /// [`crate::broker::Broker::try_subscribe`] returns
     /// `DbError::Coded { code: "schema_pending" }` for the app AND
@@ -394,7 +390,7 @@ impl SqliteBackend {
             packet_rx,
         );
 
-        // **P3 PR 3** — SessionMinter env-var read. Missing
+        // SessionMinter env-var read. Missing
         // `ZEROSHIP_SESSION_SECRET` is NOT a `new()` failure: a
         // backend without an auth secret can still serve plain
         // DB ops. The lazy failure (`code: "not_configured"`)
@@ -411,10 +407,10 @@ impl SqliteBackend {
         #[cfg(any(test, feature = "test-helpers"))]
         let nonce_cache = session_minter::NonceCache::new_shared(nonce_capacity);
 
-        // **P5 PR 3** — wire the column-key store. SQLite has no
+        // Wire the column-key store. SQLite has no
         // admin-schema sidecar (no SECURITY DEFINER getter equivalent),
-        // so the only sourcing variant is `EnvVar` — mirrors the
-        // session-minter pattern (P3) where the secret comes from
+        // so the only sourcing variant is `EnvVar` - mirrors the
+        // session-minter pattern where the secret comes from
         // `ZEROSHIP_SESSION_SECRET`. Cache lives for the lifetime of
         // the backend; clears on backend drop.
         let key_store = crate::encryption::KeyStore::new(
@@ -439,7 +435,7 @@ impl SqliteBackend {
         }
     }
 
-    /// **P3 PR 3 test helper** — construct a backend with the
+    /// **Test helper** - construct a backend with the
     /// HMAC secret(s) supplied explicitly, bypassing the env-var
     /// read. Used by deterministic fixtures (
     /// `tests/sqlite_integration.rs` session_*` tests, the
@@ -475,7 +471,7 @@ impl SqliteBackend {
         let nonce_cache =
             session_minter::NonceCache::new_shared(session_minter::DEFAULT_NONCE_CAPACITY);
 
-        // **P5 PR 3** — same `KeyStore::EnvVar` shape as `new()`. The
+        // Same `KeyStore::EnvVar` shape as `new()`. The
         // test helper diverges only on the session-minter secret; the
         // column-key store reads from env vars regardless.
         let key_store = crate::encryption::KeyStore::new(
@@ -506,10 +502,10 @@ struct OpenedBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Capability impls — five carved capability blocks. PR 1 ships
-// stubbed bodies; PR 2-5 backfill per `p1-sqlite-implementation-plan.md`
-// §9. The order below mirrors `backend/postgres.rs` so a reviewer can
-// diff the two files side-by-side as the SQLite side grows.
+// Capability impls - five carved capability blocks, per
+// `p1-sqlite-implementation-plan.md` §9. The order below mirrors
+// `backend/postgres.rs` so a reviewer can diff the two files
+// side-by-side as the SQLite side grows.
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for SqliteBackend {
@@ -557,8 +553,8 @@ impl LockManager for SqliteBackend {
     // `InProcessLockRegistry`:
     //
     // - `acquire_advisory_lock`: per plan §3.3, this method is
-    //   essentially unused in production — every typed `acquire` call
-    //   site routes through `try_acquire_with_backoff` (since [I43]).
+    //   essentially unused in production - every typed `acquire` call
+    //   site routes through `try_acquire_with_backoff`.
     //   We implement it for completeness with a bounded
     //   try-then-sleep loop (20ms tick) that mirrors the PG arm's
     //   "indefinite wait" surface without the PG arm's server-side
@@ -790,7 +786,7 @@ impl SchemaIntrospect for SqliteBackend {
             let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
             let col_rows = self.session.query(&table_info_sql, &[]).await?;
 
-            // **P5 PR 3** — pull the original `CREATE TABLE` text from
+            // Pull the original `CREATE TABLE` text from
             // `sqlite_master.sql` so we can recover per-column
             // encryption metadata from the `/* zsenc:<mode>:<keyId>:
             // <wraps> */` sentinel the DDL emitter writes for every
@@ -799,11 +795,11 @@ impl SchemaIntrospect for SqliteBackend {
             // surfaces the declared type but strips comments; the
             // sentinel only survives in `sqlite_master.sql`.
             //
-            // Acknowledge: regex-on-DDL is fragile — a future SDK that
+            // Acknowledge: regex-on-DDL is fragile - a future SDK that
             // emits column DDL with multiple comments or non-trivial
             // line breaks could trip the per-column attachment. The
             // sidecar `__zs_schema_meta` table is the upgrade path
-            // (Q-P5 deferred); same regex-on-DDL pattern as P4 PR 4's
+            // (Q-P5 deferred); same regex-on-DDL pattern as the
             // vector-dims introspection.
             let master_sql_query = format!(
                 "SELECT sql FROM {q_app}.sqlite_master \
@@ -819,9 +815,9 @@ impl SchemaIntrospect for SqliteBackend {
                 .and_then(|c| c.clone())
                 .unwrap_or_default();
             let encryption_by_col = parse_encryption_sentinels(&create_table_text);
-            // **P5.5 PR 6** — mask sentinels (`/* __zsmask:kind=…,
-            // classification=… */`) attached to `<col>_masked` sibling
-            // column DDL. Same regex-on-DDL pattern P5 uses for
+            // Mask sentinels (`/* __zsmask:kind=...,
+            // classification=... */`) attached to `<col>_masked` sibling
+            // column DDL. Same regex-on-DDL pattern used for
             // encryption sentinels.
             let mask_by_parent = parse_mask_sentinels(&create_table_text);
 
@@ -855,12 +851,12 @@ impl SchemaIntrospect for SqliteBackend {
                         // this `None` matches what the PG side sets for
                         // literal defaults; the diff classifier reads
                         // `default_volatility` only when the default
-                        // looks like a function call. Future PRs can
+                        // looks like a function call. Future changes can
                         // pattern-match on common volatile defaults
                         // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
                         default_volatility: None,
-                        // P4 PR 1: new fields default; PR 5 populates
-                        // `vector_dims` / `is_fts_source` / `is_geopoint`
+                        // New fields default; `vector_dims` /
+                        // `is_fts_source` / `is_geopoint` are populated
                         // from `sqlite_master.sql` introspection regexes.
                         encryption,
                         mask,
@@ -928,7 +924,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // analogue to PG's `indisvalid` (which can be
                         // false after a failed `CREATE INDEX
                         // CONCURRENTLY`). Mark every observed index
-                        // valid; PR 5's IndexBuilder retry logic does
+                        // valid; the IndexBuilder retry logic does
                         // not need a tri-state.
                         is_valid: true,
                     },
@@ -1190,8 +1186,8 @@ impl IndexBuilder for SqliteBackend {
     }
 }
 
-// PR 2: full `AuditWriter` capability for the SQLite register-model
-// pipeline — provisioning, `next_schema_version`, row insert, and
+// Full `AuditWriter` capability for the SQLite register-model
+// pipeline - provisioning, `next_schema_version`, row insert, and
 // terminal-status updates all route through the session actor.
 #[cfg(any(test, feature = "test-helpers"))]
 impl AuditWriter for SqliteBackend {
@@ -1379,26 +1375,26 @@ impl DialectBuilder for SqliteBackend {
     }
 }
 
-// P1 PR 5: `Backend` composition marker. Every sub-trait
+// `Backend` composition marker. Every sub-trait
 // (`SqlExecutor`, `LockManager`, `NamespaceManager`,
 // `SchemaIntrospect`, `IndexBuilder`) now carries a real (non-stub)
-// impl above, and the PR-1 super-trait relaxation that dropped the
+// impl above, and the super-trait relaxation that dropped the
 // `Client = compio_postgres::Client` pin from `Backend` cleared the
-// last obstacle. The marker is the one-liner the design names —
-// orchestrator paths that future PRs migrate onto a backend-agnostic
+// last obstacle. The marker is the one-liner the design names -
+// orchestrator paths that migrate onto a backend-agnostic
 // bound (`<B: Backend>`) will pick up `SqliteBackend` via this impl
 // without any further per-trait wiring.
 #[cfg(any(test, feature = "test-helpers"))]
 impl Backend for SqliteBackend {}
 
 // ---------------------------------------------------------------------------
-// P3 PR 3 — `SessionMinter` impl
+// `SessionMinter` impl
 // ---------------------------------------------------------------------------
 //
 // SQLite session-minter: in-memory HMAC-SHA256 + bounded LRU
 // nonce cache, no persistent state. Both methods share the
 // `canonical_payload` format with PG so cross-backend equivalence
-// is byte-for-byte (pinned by PR 4).
+// is byte-for-byte.
 //
 // The cryptography and replay-detection lives in
 // `session_minter.rs`; this block is pure orchestration:
@@ -1570,10 +1566,10 @@ impl crate::backend::SessionMinter for SqliteBackend {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 7 — `VectorIndex` impl (sqlite-vec `vec0` virtual table)
+// `VectorIndex` impl (sqlite-vec `vec0` virtual table)
 // ---------------------------------------------------------------------------
 //
-// Swapped from the pure-Rust flat scan that landed in P4 PR 4 (the
+// Swapped from the earlier pure-Rust flat scan (the
 // original Q-P4-D decision in `docs/proposals/p4-search-implementation-plan.md`
 // §10). Reassessment dated 2026-05-24 corrected the bundled-vs-`.so`
 // mistake: the `sqlite-vec` Rust crate compiles the C extension
@@ -1773,7 +1769,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 5 — `FullTextIndex` impl (FTS5 external-content vtables)
+// `FullTextIndex` impl (FTS5 external-content vtables)
 // ---------------------------------------------------------------------------
 //
 // FTS5 ships in rusqlite's `bundled` feature by default (the SQLite
@@ -1943,7 +1939,7 @@ fn build_spatial_near_base_query(
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 5 — `SpatialIndex` impl (pure-Rust haversine + flat scan)
+// `SpatialIndex` impl (pure-Rust haversine + flat scan)
 // ---------------------------------------------------------------------------
 //
 // Pure-Rust over an R-tree (Q-P4-C, plan §4.3): same rationale as the
@@ -2074,20 +2070,20 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 }
 
 // ===========================================================================
-// P5 PR 3 — Real EncryptedColumn impl on SqliteBackend
+// Real EncryptedColumn impl on SqliteBackend
 // ===========================================================================
 //
-// Symmetric to the PG-side impl in `backend/postgres.rs` (which landed
-// in PR 2). Crypto math is shared with PG via `crate::encryption::aead`;
-// key sourcing diverges: SQLite is env-var-only (`KeySource::EnvVar`)
-// because there's no admin-schema sidecar (no SECURITY DEFINER getter
-// equivalent on SQLite). Mirrors the session-minter pattern (P3) where
+// Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
+// is shared with PG via `crate::encryption::aead`; key sourcing
+// diverges: SQLite is env-var-only (`KeySource::EnvVar`) because
+// there's no admin-schema sidecar (no SECURITY DEFINER getter
+// equivalent on SQLite). Mirrors the session-minter pattern where
 // the secret comes from `ZEROSHIP_SESSION_SECRET`.
 //
 // Key sourcing on SQLite is env-var-only; the `sqlite` feature gate on
 // this file already restricts the build to SQLite-enabled targets.
 
-// **P5 PR 3** — Real `EncryptedColumn` body. Delegates to the workspace
+// Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
 // agnostic on decrypt because the wire format carries the nonce). Key
 // resolution goes through `self.key_store` (env-var-only on SQLite).
@@ -2136,7 +2132,7 @@ impl crate::backend::EncryptedColumn for SqliteBackend {
     }
 }
 
-/// **P5 PR 3** — recover per-column encryption metadata from the
+/// Recover per-column encryption metadata from the
 /// `/* zsenc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
 /// `crate::query::field_to_column`).
@@ -2162,7 +2158,7 @@ impl crate::backend::EncryptedColumn for SqliteBackend {
 /// that emits column DDL with non-trivial line breaks or stacked
 /// comments could trip per-column attachment. The plan §11 Q-P5 calls
 /// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
-/// PR 3 ships the regex per the implementation plan's §5
+/// the regex ships per the implementation plan's §5
 /// trade-off acknowledgement.
 #[cfg(any(test, feature = "test-helpers"))]
 fn parse_encryption_sentinels(
@@ -2234,7 +2230,7 @@ fn parse_encryption_sentinels(
     out
 }
 
-/// **P5.5 PR 6** — recover per-parent-column mask metadata from the
+/// Recover per-parent-column mask metadata from the
 /// `/* __zsmask:kind=…,classification=… */` sentinel comments the DDL
 /// emitter writes alongside every `<col>_masked` sibling column (see
 /// `crate::query::build_create_table_with_fks`).
@@ -2356,7 +2352,7 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// P5 PR 5 — `Backup` capability (VACUUM INTO snapshot + atomic
+// `Backup` capability (VACUUM INTO snapshot + atomic
 // file-swap restore + `pitr_pg_only` refusal).
 // ---------------------------------------------------------------------------
 //
@@ -2366,8 +2362,8 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //       1. Hold the per-app `register_model` advisory lock through the
 //          in-process `LockManager` so concurrent register_model /
 //          migration can't reshape the schema during the copy.
-//       2. Parse `dest_uri` — `file://` only (S3/HTTPS deferred,
-//          mirrors the PG arm in PR 4). Bare paths accepted.
+//       2. Parse `dest_uri` - `file://` only (S3/HTTPS deferred,
+//          mirrors the PG arm). Bare paths accepted.
 //       3. Send `Command::VacuumInto { Some(app_id), dest_path }` to
 //          the session actor. The actor runs
 //          `VACUUM "<app>" INTO '<dest>'` against the per-app ATTACH
@@ -2467,7 +2463,7 @@ mod backup_sqlite {
     /// path. Mirrors the PG arm's `parse_dest_path` shape so the SDK
     /// error codes stay consistent across backends.
     ///
-    /// PR 5 (SQLite) supports only the `file://` scheme. Bare paths
+    /// SQLite supports only the `file://` scheme. Bare paths
     /// (no scheme) are also accepted so operators can pass either
     /// form. S3 / HTTPS surface as `backup_dest_uri_unsupported`.
     fn parse_dest_path(dest_uri: &str) -> Result<PathBuf, DbError> {
@@ -2743,7 +2739,7 @@ mod backup_sqlite {
         let (k1, k2) =
             acquire_register_model_lock(backend, app_id, "restore").await?;
 
-        // 2. Resolve the snapshot URI to an on-disk path. PR 5
+        // 2. Resolve the snapshot URI to an on-disk path. SQLite
         //    supports file:// only.
         let src_path = match parse_dest_path(&snapshot.uri) {
             Ok(p) => p,
@@ -2834,7 +2830,7 @@ mod backup_sqlite {
 
     /// `pitr_replay` does not need a helper — the impl method body
     /// returns the typed `Configuration { code: "pitr_pg_only" }`
-    /// directly. PG retains its own replay path (PR 4); SQLite cannot
+    /// directly. PG retains its own replay path; SQLite cannot
     /// participate without a WAL-archive substrate.
     #[allow(dead_code)]
     fn _pitr_marker(_target: PitrTarget) {}
@@ -2903,10 +2899,10 @@ mod tests {
         );
     }
 
-    /// P1 PR 5: `Backend` composition marker now lands on
+    /// `Backend` composition marker now lands on
     /// `SqliteBackend`. Pinning the bound here means a future change
     /// that detaches one of the five sub-trait impls (or that
-    /// regresses the PR-1 super-bound relaxation back to
+    /// regresses the super-bound relaxation back to
     /// `Client = compio_postgres::Client`) fails compilation in this
     /// module rather than at a distant orchestrator call site.
     fn assert_sqlite_backend_impls_backend() {
@@ -2944,7 +2940,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P1 PR 5: `AuditWriter` capability — pin the impl wire so a
+    /// `AuditWriter` capability - pin the impl wire so a
     /// future refactor that detaches the trait-impl block from this
     /// type fails compilation here, not at the `IndexBuilder`
     /// consumer site that pulls the audit row through.
@@ -2953,7 +2949,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P3 PR 3: `SessionMinter` capability — pin the SQLite-arm
+    /// `SessionMinter` capability - pin the SQLite-arm
     /// impl wire so a future refactor that detaches the trait-impl
     /// block fails compilation here.
     #[cfg(feature = "test-helpers")]
@@ -2962,7 +2958,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P4 PR 4: `VectorIndex` capability — pin the SQLite-arm impl
+    /// `VectorIndex` capability - pin the SQLite-arm impl
     /// wire so the pure-Rust flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached or
     /// the method shape drifts from the trait surface.
@@ -2971,7 +2967,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P4 PR 5: `FullTextIndex` capability — pin the SQLite-arm impl
+    /// `FullTextIndex` capability - pin the SQLite-arm impl
     /// wire so the FTS5 vtable + AFTER-trigger path's trait composition
     /// regresses at compile time if the impl block is detached.
     fn assert_sqlite_backend_impls_full_text_index() {
@@ -2979,7 +2975,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P4 PR 5: `SpatialIndex` capability — pin the SQLite-arm impl
+    /// `SpatialIndex` capability - pin the SQLite-arm impl
     /// wire so the haversine flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached.
     fn assert_sqlite_backend_impls_spatial_index() {
@@ -2987,7 +2983,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// P2 PR 1: pin the SQLite-arm [`ChangeStream`] adapter
+    /// Pin the SQLite-arm [`ChangeStream`] adapter
     /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
     /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
     /// regression that detaches the impl block — or renames the
@@ -3015,7 +3011,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5 PR 3 — encryption sentinel parser unit tests
+    // Encryption sentinel parser unit tests
     // -----------------------------------------------------------------
 
     /// Round-trip a single encrypted column: emitter shape → parser
@@ -3142,10 +3138,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 6 — mask sentinel parser
+    // Mask sentinel parser
     // -----------------------------------------------------------------
 
-    /// **PR 6 — SQLite introspection**: a CREATE TABLE body with an
+    /// **SQLite introspection**: a CREATE TABLE body with an
     /// inline `/* __zsmask:kind=…,classification=… */` comment attached
     /// to the `<col>_masked` sibling column gets parsed back as a
     /// `MaskMeta` on the PARENT column.

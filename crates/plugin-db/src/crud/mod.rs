@@ -6,7 +6,7 @@
 //!
 //! 1. Grab the runtime state slot.
 //! 2. Optionally record into the active read-set ([`crate::read_set`])
-//!    for P8b subscription narrowing.
+//!    for subscription narrowing.
 //! 3. `setup_js_promise` — allocate the promise + resolver.
 //! 4. Build the SQL via `crate::query::build_*`.
 //! 5. Hand off to `run_op` — the async tail that drives the exec
@@ -14,10 +14,9 @@
 //!    or rejects via `DbError::to_op_error` (carries `.code` for the
 //!    SDK).
 //!
-//! Pre-stage-8b each helper was ~50 LOC of boilerplate; the template
-//! collapses the bottom half so each helper is ~15 LOC of intent —
-//! "which builder, which exec, which resolve". No new public API: each
-//! helper stays `pub(crate)` and is called from
+//! The template collapses the bottom half so each helper is ~15 LOC of
+//! intent — "which builder, which exec, which resolve". No new public
+//! API: each helper stays `pub(crate)` and is called from
 //! `v8_classes::collection`.
 //!
 //! The capability gate (`refuse_if_query_capability`) is enforced by
@@ -34,13 +33,13 @@ use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
-// **P5 PR 2** — transparent column-encryption pass. The helpers in
+// Transparent column-encryption pass. The helpers in
 // this module (`encrypt_row_on_write` / `decrypt_row_on_read`) sit
 // around `query::build_*` and `exec_query` respectively.
 //
 // Visibility: crate-private in release builds; `pub` under
 // `test-helpers` so `tests/sqlite_integration.rs` can drive the
-// helpers directly for the P5 PR 3.5 end-to-end encrypted-column
+// helpers directly for the end-to-end encrypted-column
 // CRUD round-trip test (the orchestrator's CRUD entry today is PG-only,
 // so the SQLite e2e gate composes the helpers itself).
 #[cfg(not(feature = "test-helpers"))]
@@ -48,7 +47,7 @@ pub(crate) mod encryption_pass;
 #[cfg(feature = "test-helpers")]
 pub mod encryption_pass;
 
-// **P5.5 PR 2** — Path B mask transforms + dual-write CRUD pass.
+// Sibling-column-based mask transforms + dual-write CRUD pass.
 // Same visibility pattern as `encryption_pass` so integration tests
 // can reach the helpers when `test-helpers` is on.
 #[cfg(not(feature = "test-helpers"))]
@@ -56,7 +55,7 @@ pub(crate) mod mask_pass;
 #[cfg(feature = "test-helpers")]
 pub mod mask_pass;
 
-// **P5.5 PR 4** — `unmask()` RPC dispatch + audit row writer.
+// `unmask()` RPC dispatch + audit row writer.
 // Same visibility pattern as the sibling passes so integration tests
 // can exercise `dispatch_unmask` directly when `test-helpers` is on.
 #[cfg(not(feature = "test-helpers"))]
@@ -64,7 +63,7 @@ pub(crate) mod unmask;
 #[cfg(feature = "test-helpers")]
 pub mod unmask;
 
-// **P5.5 PR 5** — `defineMaskPolicy()` storage + dispatcher + cache.
+// `defineMaskPolicy()` storage + dispatcher + cache.
 // Same visibility pattern: integration tests reach into the helpers
 // via the `test-helpers` gate to drive `dispatch_set_mask_policy`
 // directly without standing up V8.
@@ -76,21 +75,21 @@ pub mod mask_policy;
 pub(crate) use mask_policy::dispatch_set_mask_policy_field;
 pub(crate) use unmask::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 
-// **P5.5 PR 6** — mask backfill / rewrite / removal jobs driven by the
+// Mask backfill / rewrite / removal jobs driven by the
 // register-model apply pipeline. Same visibility pattern: `pub` under
 // `test-helpers` so the integration tests can drive the helpers
 // directly without standing up the full orchestrator.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod mask_backfill;
 
-// **P5.5 PR 7** — drift detection: sample masked-column siblings vs.
+// Drift detection: sample masked-column siblings vs.
 // recomputed mask of decrypt(parent). Same visibility pattern so the
 // SQLite + PG integration suites can drive `run_drift_check_*`
 // directly via the `test-helpers` gate.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod mask_drift;
 
-// **P7 PR 3** — INSERT-time auto-population of platform system fields
+// INSERT-time auto-population of platform system fields
 // (`id`, `created_by`, `updated_by`). Same visibility pattern as the
 // sibling encryption / mask passes so the integration tests can drive
 // `apply_system_fields_on_insert*` directly under the `test-helpers`
@@ -500,7 +499,7 @@ fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
     }
 }
 
-/// **P9 PR 2** — `first_row_or_null` variant that, when `has_masked` is
+/// `first_row_or_null` variant that, when `has_masked` is
 /// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
 /// walks the parsed value and replaces `__zsmask__` sentinels with
 /// native `MaskedValue` instances. When `has_masked` is `false` this is
@@ -523,7 +522,7 @@ fn usize_count_as_f64(count: usize) -> ResolveValue {
     ResolveValue::F64(count as f64)
 }
 
-/// **P9 PR 2** — `rows_as_json_array` variant that resolves via
+/// `rows_as_json_array` variant that resolves via
 /// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
 /// [`first_row_or_null_masked`].
 fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
@@ -531,7 +530,7 @@ fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue
     maybe_rehydrate(value, has_masked)
 }
 
-/// **P9 PR 2** — pick `ResolveValue::JsonWithRehydration` (walk the
+/// Pick `ResolveValue::JsonWithRehydration` (walk the
 /// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
 /// result is known to carry masked columns; otherwise the plain
 /// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
@@ -550,15 +549,15 @@ fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
 // find — read path
 // ---------------------------------------------------------------------------
 
-// P9 PR 1: `dispatch_find_one` was deleted along with `Collection.findOne`
+// `dispatch_find_one` does not exist: `Collection.findOne` was removed
 // (Convex-style consolidation). The SDK reaches the same "first matching
 // row" semantic via `find(filter).first()` / `.unique()` / `.last()` on
 // the Query terminal, which composes the existing `dispatch_find` with
 // `LIMIT 1` (or `LIMIT 2` for strict `.unique()`).
 
-/// **P5.5 PR 7** — extract `opts.unmask` into a `Vec<String>`. Returns
+/// Extract `opts.unmask` into a `Vec<String>`. Returns
 /// empty when the field is absent, null, or not an array of strings —
-/// per the proposal, malformed `unmask` shapes are tolerated as
+/// malformed `unmask` shapes are tolerated as
 /// "no hint" rather than an error so a stale SDK build doesn't bring
 /// down the find path.
 fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
@@ -599,7 +598,7 @@ fn validate_unmask_projection(
 
 /// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
 /// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
-/// (P5.5 PR 7) honours an upfront authorisation fence — a single
+/// honours an upfront authorisation fence — a single
 /// unauthorised column refuses the whole find with
 /// `unmask_not_permitted`.
 pub(crate) fn dispatch_find<'s>(
@@ -610,7 +609,7 @@ pub(crate) fn dispatch_find<'s>(
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    // P8b — record into the active query's read-set so the broker can
+    // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
@@ -651,7 +650,7 @@ pub(crate) fn dispatch_find<'s>(
             };
         }
 
-        // **P5.5 PR 7** — upfront auth fence for the unmask hint.
+        // Upfront auth fence for the unmask hint.
         if !unmask_columns.is_empty() {
             if let Err(e) = crate::crud::unmask::authorize_query_hint(
                 &app,
@@ -670,12 +669,12 @@ pub(crate) fn dispatch_find<'s>(
             }
         }
 
-        // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
+        // Fetch the cached schema BEFORE building SQL.
         // When the schema declares masked columns, the SELECT clause
         // emits `"<col>_masked" AS "<col>"` so the ciphertext column
         // never leaves Postgres on a default read.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        // **P7 PR 5** — soft-delete auto-filter gate.
+        // Soft-delete auto-filter gate.
         let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
         let mut sql_filter = filter;
         maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
@@ -778,7 +777,7 @@ pub(crate) fn dispatch_insert<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    // **P7 PR 3** — read the request-bound actor id at the synchronous
+    // Read the request-bound actor id at the synchronous
     // boundary BEFORE the async tail starts. The runtime's
     // `executing_request_id` is only guaranteed-set on the pump turn
     // that initiates the dispatch; once we `.await` (e.g. the
@@ -932,7 +931,7 @@ pub(crate) fn dispatch_insert_many<'s>(
 /// Shared dispatch for `updateOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
 ///
-/// **P7 PR 4** — every UPDATE auto-bumps `version` + `updated_at` +
+/// Every UPDATE auto-bumps `version` + `updated_at` +
 /// `updated_by` (when an actor is in scope). When the caller's filter
 /// carries `version: N`, the auto-bumped SQL still runs but the
 /// affected-rows count is checked: 0 affected → typed
@@ -952,7 +951,7 @@ pub(crate) fn dispatch_update_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    // **P7 PR 4** — read actor at the sync boundary (same rationale as
+    // Read actor at the sync boundary (same rationale as
     // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
     // rotates on the next pump turn).
     let actor_id = system_fields_pass::current_actor_id(&state);
@@ -968,7 +967,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 };
             }
         };
-        // **P7 PR 4** — detect creator-supplied CAS version + reject
+        // Detect creator-supplied CAS version + reject
         // the unsupported "version filter without id" shape eagerly.
         let cas_version = match system_fields_pass::extract_cas_version(&filter, &coll) {
             Ok(version) => version,
@@ -990,7 +989,7 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         }
 
-        // **P4 HALF B** — the per-row-randomised-encryption decision is sourced
+        // The per-row-randomised-encryption decision is sourced
         // from live introspection (cached); an introspection failure rejects the
         // op rather than silently skipping the per-row path.
         let per_row_encrypted_update =
@@ -1076,7 +1075,7 @@ pub(crate) fn dispatch_update_one<'s>(
             maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
             sql_filter
         };
-        // **P7 PR 4** — auto-bump via the system-fields-aware builder.
+        // Auto-bump via the system-fields-aware builder.
         // Actor flows into the `updated_by` bind; the `hints` from the
         // pre-pass tell the builder which auto-bumps to suppress.
         let autobump = query::SystemFieldAutoBump {
@@ -1123,7 +1122,7 @@ pub(crate) fn dispatch_update_one<'s>(
                         };
                     }
                 };
-                // **P7 PR 4** — optimistic-concurrency check. When the
+                // Optimistic-concurrency check. When the
                 // creator supplied a `version: N` predicate AND the
                 // RETURNING set is empty, classify as a CAS failure
                 // (the row exists at a different version, or the row
@@ -1182,13 +1181,13 @@ pub(crate) fn dispatch_update_one<'s>(
 /// Shared dispatch for `updateMany`. Resolves with the count of
 /// affected rows as a JS `number`.
 ///
-/// **P7 PR 4** — same auto-bump rules as `dispatch_update_one`. CAS
+/// Same auto-bump rules as `dispatch_update_one`. CAS
 /// semantics don't generalise to multi-row UPDATEs (the affected-row
 /// count conflates "row missing" / "version mismatched" / "filter
 /// didn't match"), so a `version` filter without `id` predicate
 /// refuses eagerly with `multi_row_version_filter_unsupported`. The
-/// pre-PR-4 contract that returned the affected-row count as a plain
-/// number is preserved on the success path.
+/// affected-row count is returned as a plain number on the success
+/// path.
 pub(crate) fn dispatch_update_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1202,7 +1201,7 @@ pub(crate) fn dispatch_update_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    // **P7 PR 4** — actor read at sync boundary (mirrors
+    // Actor read at sync boundary (mirrors
     // `dispatch_update_one`'s rationale).
     let actor_id = system_fields_pass::current_actor_id(&state);
 
@@ -1237,7 +1236,7 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
-        // **P4 HALF B** — per-row-randomised-encryption decision from live
+        // Per-row-randomised-encryption decision from live
         // introspection (cached); an introspection failure rejects the op.
         let per_row_encrypted_update =
             match write_pipeline::update_requires_per_row_encryption(&app, &coll, &update).await {
@@ -1451,7 +1450,7 @@ pub(crate) fn dispatch_update_many<'s>(
 // ---------------------------------------------------------------------------
 // deleteOne / deleteMany / purge / restore — write paths
 //
-// **P7 PR 5** — `delete()` soft-deletes by updating `deleted_at`.
+// `delete()` soft-deletes by updating `deleted_at`.
 // `purge()` remains the explicit hard-delete, and `restore()` clears
 // `deleted_at` on a soft-deleted row.
 // ---------------------------------------------------------------------------
@@ -1544,7 +1543,7 @@ pub(crate) fn dispatch_delete_many<'s>(
     promise
 }
 
-/// **P7 PR 5** — explicit hard-delete entry point. Always emits
+/// Explicit hard-delete entry point. Always emits
 /// `DELETE FROM ...` regardless of marker state. Used by the SDK's
 /// `purge(filter)` for compliance / right-to-be-forgotten flows.
 ///
@@ -1590,7 +1589,7 @@ pub(crate) fn dispatch_purge_one<'s>(
     promise
 }
 
-/// **P7 PR 5** — bulk-purge entry point.
+/// Bulk-purge entry point.
 pub(crate) fn dispatch_purge_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1619,7 +1618,7 @@ pub(crate) fn dispatch_purge_many<'s>(
     promise
 }
 
-/// **P7 PR 5** — restore a soft-deleted row.
+/// Restore a soft-deleted row.
 pub(crate) fn dispatch_restore_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1669,7 +1668,7 @@ pub(crate) fn dispatch_restore_one<'s>(
     promise
 }
 
-/// **P7 PR 5** — bulk-restore entry point.
+/// Bulk-restore entry point.
 pub(crate) fn dispatch_restore_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1716,8 +1715,8 @@ pub(crate) fn dispatch_restore_many<'s>(
 /// Shared dispatch for `aggregate`. Pipeline is a JSON array of stage
 /// objects.
 ///
-/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto
-/// soft-delete `$match` (per Q-SF-J in the proposal — every read-side
+/// `opts.include_deleted: true` opts out of the auto
+/// soft-delete `$match` (per Q-SF-J -- every read-side
 /// method auto-filters for consistency).
 pub(crate) fn dispatch_aggregate<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1728,7 +1727,7 @@ pub(crate) fn dispatch_aggregate<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
-    // P8b — record into the active query's read-set so the broker can
+    // Record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
     // otherwise record a coarse-grained entry (empty filter) — the
     // pipeline depends on the whole collection.
@@ -1795,7 +1794,7 @@ pub(crate) fn dispatch_aggregate<'s>(
 /// Shared dispatch for `distinct`. `field` is the column name; `filter`
 /// is the WHERE-clause JSON.
 ///
-/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto-
+/// `opts.include_deleted: true` opts out of the auto-
 /// filter; see [`dispatch_find`].
 pub(crate) fn dispatch_distinct<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1872,7 +1871,7 @@ pub(crate) fn dispatch_distinct<'s>(
 /// Shared dispatch for `count`. Resolves with a real JS `number`
 /// (not a JSON-stringified integer).
 ///
-/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto-
+/// `opts.include_deleted: true` opts out of the auto-
 /// filter.
 pub(crate) fn dispatch_count<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1882,7 +1881,7 @@ pub(crate) fn dispatch_count<'s>(
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    // P8b — record into the active query's read-set so the broker can
+    // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
@@ -1962,8 +1961,9 @@ pub(crate) fn dispatch_upsert<'s>(
             Ok(bq) => {
             // Upsert can be either INSERT (new row) or UPDATE (existing).
             // We tag as Update because the subscriber's reaction is the
-            // same — re-fetch. The proposal's read-set narrowing (P8b)
-            // will distinguish; P8a doesn't need to.
+            // same -- re-fetch. Finer-grained read-set narrowing could
+            // distinguish INSERT from UPDATE; this coarser tagging
+            // doesn't need to.
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
             }
             Err(e) => Err(DbError::from(e)),
@@ -2005,18 +2005,17 @@ pub(crate) fn dispatch_upsert<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// search — vector / FTS unified entry point (P4)
+// search — vector / FTS unified entry point
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `collection.search(args)` — the P4 unified
+/// Shared dispatch for `collection.search(args)` — the unified
 /// search entry. Inspects `args` for a discriminator key:
 ///
-/// - `{ vector, k?, metric?, column?, filter? }` → pgvector
-///   `VectorIndex::vector_search` (PG); SQLite returns a typed
-///   `vector_unsupported` configuration error (PR 4 lands the SQLite
-///   impl).
-/// - `{ text, ... }` → reserved for P4 PR 3 FTS. PR 2 returns a typed
-///   `fts_unsupported` until PR 3 lands.
+/// - `{ vector, k?, metric?, column?, filter? }` → `VectorIndex::vector_search`,
+///   routed to pgvector on PG or the pure-Rust flat-scan implementation
+///   on SQLite.
+/// - `{ text, ... }` → `FullTextIndex::fts_search`, routed to PG's
+///   `tsvector`/GIN index or SQLite's FTS5 vtable + bm25 ranking.
 ///
 /// Resolves with a JSON array of rows; each row carries the
 /// `_distance` synthetic column from pgvector. Errors are coded
@@ -2062,9 +2061,9 @@ pub(crate) fn dispatch_search<'s>(
     }
 
     if has_text && !has_vector {
-        // **P4 PR 3** — FTS branch. Pull the query string, limit, and
-        // filter from args; route to `FullTextIndex::fts_search` on the
-        // PG arm; SQLite returns `fts_unsupported` until PR 5 lands.
+        // FTS branch. Pull the query string, limit, and filter from
+        // args; route to `FullTextIndex::fts_search` on either the PG
+        // or SQLite arm.
         let text_query = match args.get("text").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
@@ -2109,11 +2108,11 @@ pub(crate) fn dispatch_search<'s>(
                 let backend = backend.ok_or_else(|| {
                     DbError::config("not_configured", "db: backend not initialized".to_string())
                 })?;
-                // **P4 PR 5** — SQLite arm routes through the FTS5
-                // vtable + bm25 ranking. We short-circuit BEFORE the
-                // PG path so a build with both arms compiled in
-                // dispatches based on which arm the runtime is bound
-                // to, not on Cargo-feature ordering.
+                // SQLite arm routes through the FTS5 vtable + bm25
+                // ranking. We short-circuit BEFORE the PG path so a
+                // build with both arms compiled in dispatches based
+                // on which arm the runtime is bound to, not on
+                // Cargo-feature ordering.
                 if let Some(sq) = backend.as_sqlite() {
                     use crate::backend::FullTextIndex as _;
                     return sq
@@ -2259,12 +2258,12 @@ pub(crate) fn dispatch_search<'s>(
                 pg.vector_search(&app, &coll, &column, &vector, k, metric, &filter)
                     .await
             };
-            // **P4 PR 4** — SQLite arm routes through the pure-Rust
-            // flat-scan `VectorIndex` impl on `SqliteBackend`. We
-            // short-circuit BEFORE the PG path so a build with both
-            // arms compiled in (`--features "pg sqlite"` for tests)
-            // dispatches based on which arm the runtime is bound to,
-            // not on Cargo-feature ordering.
+            // SQLite arm routes through the pure-Rust flat-scan
+            // `VectorIndex` impl on `SqliteBackend`. We short-circuit
+            // BEFORE the PG path so a build with both arms compiled
+            // in (`--features "pg sqlite"` for tests) dispatches
+            // based on which arm the runtime is bound to, not on
+            // Cargo-feature ordering.
             if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::VectorIndex as _;
                 return sq
@@ -2313,7 +2312,7 @@ pub(crate) fn dispatch_search<'s>(
     promise
 }
 
-/// Shared dispatch for the `Collection.near()` v8_method (P4 PR 3 — PG arm).
+/// Shared dispatch for the `Collection.near()` v8_method.
 ///
 /// `args` shape (validated SDK-side):
 /// ```js
@@ -2324,9 +2323,10 @@ pub(crate) fn dispatch_search<'s>(
 ///   limit?: 100 }
 /// ```
 ///
-/// Routes to `SpatialIndex::spatial_near` on the PG arm. SQLite returns
-/// `spatial_unsupported` until P4 PR 5 lands the haversine impl. Each
-/// returned row carries a synthetic `_distance_m` (`f64`) column.
+/// Routes to `SpatialIndex::spatial_near`, dispatching to PG's
+/// `geography(POINT, 4326)` support or SQLite's pure-Rust haversine
+/// flat-scan implementation. Each returned row carries a synthetic
+/// `_distance_m` (`f64`) column.
 pub(crate) fn dispatch_near<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -2417,11 +2417,11 @@ pub(crate) fn dispatch_near<'s>(
             let backend = backend.ok_or_else(|| {
                 DbError::config("not_configured", "db: backend not initialized".to_string())
             })?;
-            // **P4 PR 5** — SQLite arm routes through the pure-Rust
-            // haversine flat-scan `SpatialIndex` impl on
-            // `SqliteBackend`. Short-circuit BEFORE the PG path so a
-            // build with both arms compiled in dispatches based on
-            // which arm the runtime is bound to.
+            // SQLite arm routes through the pure-Rust haversine
+            // flat-scan `SpatialIndex` impl on `SqliteBackend`.
+            // Short-circuit BEFORE the PG path so a build with both
+            // arms compiled in dispatches based on which arm the
+            // runtime is bound to.
             if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::SpatialIndex as _;
                 return sq
@@ -2475,13 +2475,13 @@ pub(crate) fn dispatch_near<'s>(
     promise
 }
 
-// P9 PR 1: `dispatch_find_or_create` was deleted along with the
+// `dispatch_find_or_create` was removed along with the
 // `Collection.findOrCreate` v8_method (absorbed by `upsert`). The
 // `query::build_find_or_create` SQL builder stays for now —
 // `upsert({where, create})` shape lands in a follow-up.
 
 // ===========================================================================
-// P5 PR 2 — transparent column encryption hooks
+// Transparent column encryption hooks
 // ===========================================================================
 #[cfg(not(feature = "test-helpers"))]
 async fn prepare_insert_many_docs_for_write(
@@ -2515,7 +2515,7 @@ pub async fn prepare_insert_many_docs_for_write(
     .await
 }
 
-/// **P4 HALF B test helper** — drive the REAL read pipeline
+/// Test helper that drives the REAL read pipeline
 /// (`read_pipeline::apply` with default options: decrypt + mask-wrap on) over a
 /// set of freshly-fetched rows, so a faithful round-trip e2e can exercise the
 /// introspection-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
@@ -2537,7 +2537,7 @@ pub async fn finalize_rows_on_read_for_tests(
     Ok(result.rows)
 }
 
-/// **P4 HALF B test helper** — resolve the runtime data-access schema the way
+/// Test helper that resolves the runtime data-access schema the way
 /// the CRUD passes do (live introspection + sentinels, cached). Lets a test
 /// assert the metadata actually came from the catalog, not the declared schema.
 #[cfg(feature = "test-helpers")]
@@ -2592,18 +2592,18 @@ pub async fn prepare_upsert_doc_for_write(
 /// backend-arm `EncryptedColumn` impl.
 ///
 /// - **PG arm** (gated on `feature = "pg"`): goes through
-///   `PostgresBackend`'s `EncryptedColumn` impl (PR 2). The SQL builder
+///   `PostgresBackend`'s `EncryptedColumn` impl. The SQL builder
 ///   emits `decode($N, 'base64')::bytea` so the BYTEA column receives
 ///   raw bytes.
-/// - **SQLite arm** (gated on `feature = "sqlite"`, P5 PR 3.5): goes
-///   through `SqliteBackend`'s `EncryptedColumn` impl (PR 3) using
-///   env-var-sourced keys. The SQL builder (when called with
-///   `SqlDialect::Sqlite`) emits `$N` and tags the encrypted-column
-///   param with `SQLITE_ENC_BLOB_PREFIX`; the session actor binds the
-///   raw bytes as a BLOB.
+/// - **SQLite arm** (gated on `feature = "sqlite"`): goes through
+///   `SqliteBackend`'s `EncryptedColumn` impl using env-var-sourced
+///   keys. The SQL builder (when called with `SqlDialect::Sqlite`)
+///   emits `$N` and tags the encrypted-column param with
+///   `SQLITE_ENC_BLOB_PREFIX`; the session actor binds the raw bytes
+///   as a BLOB.
 ///
-/// PR 3.5 closes the SQLite gap PR 3 left open — encrypted columns
-/// now work end-to-end on both backends through the SDK's CRUD path.
+/// Encrypted columns work end-to-end on both backends through the
+/// SDK's CRUD path.
 ///
 /// If neither backend arm is compiled in (no `pg`, no `sqlite`) and the
 /// schema declares an encrypted column, surface a typed Configuration
@@ -2649,7 +2649,7 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// **P5.5 PR 2** — cheap walk: does any field def on `schema` carry a
+/// Cheap walk: does any field def on `schema` carry a
 /// `mask` entry with `kind != "none"`? Drives the per-write decision
 /// to invoke `mask_pass::apply_mask_on_write`. A `kind: "none"` opt-out
 /// returns false (no sibling column to populate).

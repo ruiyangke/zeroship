@@ -1,13 +1,13 @@
 //! `SqliteSession` — single-writer actor wrapping a `rusqlite::Connection`.
 //!
-//! **P1 PR 2** lights this up: a `compio::runtime::spawn_blocking`
-//! worker thread owns the only `rusqlite::Connection` for the backend
-//! and drains a bounded [`flume`] mpsc queue of [`Command`]s. The
-//! actor pattern serialises every DDL / DML / DQL through a single
-//! thread by construction, which is exactly the access model SQLite
-//! prefers (one writer at a time; readers are serialised behind the
-//! same queue in PR 2 — design §18 Q8's "1 writer + 4 readers" split
-//! lands in a later PR).
+//! A `compio::runtime::spawn_blocking` worker thread owns the only
+//! `rusqlite::Connection` for the backend and drains a bounded
+//! [`flume`] mpsc queue of [`Command`]s. The actor pattern serialises
+//! every DDL / DML / DQL through a single thread by construction,
+//! which is exactly the access model SQLite prefers (one writer at a
+//! time; readers are currently serialised behind the same queue -
+//! design §18 Q8's "1 writer + 4 readers" split is not yet
+//! implemented).
 //!
 //! **Bootstrap PRAGMAs** (`docs/proposals/p1-sqlite-implementation-plan.md`
 //! §2.2 + design §6.2.1): on `open` the worker runs
@@ -53,7 +53,7 @@ use crate::error::DbError;
 
 /// One-shot `sqlite-vec` auto-extension registration.
 ///
-/// **P4 PR 7**: `sqlite_vec::sqlite3_vec_init` is the C extension's
+/// `sqlite_vec::sqlite3_vec_init` is the C extension's
 /// initialiser; `rusqlite::ffi::sqlite3_auto_extension` registers a
 /// callback that fires for every subsequent `sqlite3_open*` call in the
 /// process. The hook IS process-global by design (it lives inside the
@@ -100,19 +100,18 @@ fn register_sqlite_vec_once() {
 /// borrow from the statement; we materialise to owned `Option<String>`
 /// here so the reply can cross the actor / future boundary).
 ///
-/// **Why text-only at PR 2**: the PG executor's `pool_exec` /
+/// **Why text-only**: the PG executor's `pool_exec` /
 /// `client_exec` surface takes `&[&str]` params and ignores typed
 /// returns (the SDK consumes rows via the higher-level `crud` layer
-/// that runs against PG today). PR 2 mirrors the surface so the
+/// that runs against PG today). This mirrors that surface so the
 /// SqlExecutor impl can return row counts; typed-row consumers for
-/// the SQLite arm follow in PR 4's `SchemaIntrospect` PRAGMA walk.
+/// the SQLite arm follow via `SchemaIntrospect`'s PRAGMA walk.
 #[allow(dead_code)]
 pub type Row = Vec<Option<String>>;
 
 /// A typed SQLite cell — preserves the underlying storage-class
 /// discriminator across the actor boundary instead of collapsing every
-/// value to `Option<String>`. Introduced in P4 PR 4 (then carried
-/// across the PR 7 vec0 swap), this is the row-decoder shape the
+/// value to `Option<String>`. This is the row-decoder shape the
 /// `vector_search` / `fts_search` / `spatial_near` paths consume: each
 /// emits `_distance` / `_rank` annotated JSON rows whose non-vector
 /// columns benefit from typed (numeric / boolean) round-tripping so
@@ -136,9 +135,8 @@ pub enum TypedCell {
 }
 
 /// A typed row + column names, returned by the `QueryTyped` command
-/// variant. Consumers: [`super::SqliteBackend::vector_search`] (P4
-/// PR 7 vec0 JOIN result), `fts_search` (PR 5), `spatial_near`
-/// (PR 5).
+/// variant. Consumers: [`super::SqliteBackend::vector_search`]
+/// (vec0 JOIN result), `fts_search`, `spatial_near`.
 ///
 /// Column names are carried alongside the cells so each caller can
 /// build a `serde_json::Value` row map without re-issuing a `PRAGMA
@@ -179,9 +177,8 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<(), DbError>>,
     },
     /// Run a row-returning statement; reply with the materialised
-    /// rows. PR 4 routes
-    /// [`super::SqliteBackend::introspect_schema`] +
-    /// [`super::SqliteBackend::estimate_row_count`] through this
+    /// rows. [`super::SqliteBackend::introspect_schema`] +
+    /// [`super::SqliteBackend::estimate_row_count`] route through this
     /// variant for the PRAGMA-walk catalog inspection.
     Query {
         sql: String,
@@ -189,9 +186,9 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<Vec<Row>, DbError>>,
     },
     /// Run a row-returning statement; reply with typed rows + column
-    /// names. Consumers (added in P4 PR 4 / PR 5):
+    /// names. Consumers:
     /// [`super::SqliteBackend::vector_search`] (the vec0 JOIN result
-    /// path; PR 7 retained the typed surface for the post-search row
+    /// path, using the typed surface for the post-search row
     /// re-emission to JSON), `fts_search` (FTS5 + bm25 ranking),
     /// `spatial_near` (haversine distance ordering). All three need
     /// numeric / blob / NULL discrimination at the row-out boundary.
@@ -207,7 +204,7 @@ pub(crate) enum Command {
         db_path: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// **P5 PR 5** — `VACUUM INTO '<dest_path>'`. Captures the source
+    /// `VACUUM INTO '<dest_path>'`. Captures the source
     /// database (or a per-app ATTACH alias if `app_id` is `Some`) to a
     /// fresh SQLite file at `dest_path`. SQLite's VACUUM INTO takes an
     /// implicit shared-snapshot read transaction on the source: writers
@@ -227,7 +224,7 @@ pub(crate) enum Command {
         dest_path: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// **P5 PR 5** — atomic file-swap restore: DETACH the per-app alias,
+    /// Atomic file-swap restore: DETACH the per-app alias,
     /// `std::fs::rename(temp_file, live_file)`, ATTACH the alias back
     /// against the same `live_file`. The three steps run sequentially
     /// on the worker thread; if any step fails the reply carries the
@@ -293,7 +290,7 @@ impl SqliteSession {
     /// failure surfaces here as a typed [`DbError`] and the worker
     /// thread exits without ever serving a `Command`.
     ///
-    /// **P2 PR 2 CDC integration**: when both `app_id` and
+    /// **CDC integration**: when both `app_id` and
     /// `packet_tx` are `Some`, the worker installs the
     /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet via
     /// [`crate::backend::sqlite::cdc::install`] before entering the
@@ -306,7 +303,7 @@ impl SqliteSession {
     /// The `app_id` parameter is currently unused inside the
     /// dispatcher (per-event app_id is derived from the
     /// preupdate hook's `db_name` argument — the ATTACH alias); it is
-    /// retained on the signature so a future PR can repoint it.
+    /// retained on the signature so a future change can repoint it.
     pub(crate) fn open(
         db_path: &Path,
         app_id: Option<&str>,
@@ -315,7 +312,7 @@ impl SqliteSession {
         // Bound the queue at 64 in-flight commands. The single-writer
         // actor means there is no parallelism downstream; a bigger
         // queue just delays backpressure. 64 is the same default
-        // `crates/sandbox/src/db.rs` uses for its phase-1 worker queue.
+        // `crates/sandbox/src/db.rs` uses for its worker queue.
         let (tx, rx) = flume::bounded::<Command>(64);
 
         // One-shot startup channel so the spawning task surfaces
@@ -375,7 +372,7 @@ impl SqliteSession {
                 return;
             }
 
-            // 2b. P2 PR 2 — install the CDC hook triplet on this
+            // 2b. Install the CDC hook triplet on this
             //     connection. The dispatcher is bound to a local
             //     `_dispatcher` so its owned `Arc<Mutex<…>>` clones
             //     outlive `conn` (rusqlite stores the boxed hook
@@ -502,7 +499,7 @@ impl SqliteSession {
 
     /// Send a `Query` command and await the materialised row slice.
     ///
-    /// **PR 4** consumer: [`super::SqliteBackend::introspect_schema`]
+    /// Consumer: [`super::SqliteBackend::introspect_schema`]
     /// + [`super::SqliteBackend::estimate_row_count`] route through
     /// this method to read PRAGMA / COUNT(*) results. Each call is one
     /// round-trip through the actor's mpsc queue + one
@@ -520,9 +517,9 @@ impl SqliteSession {
 
     /// Send a `QueryTyped` command and await typed rows + column names.
     ///
-    /// Consumers: [`super::SqliteBackend::vector_search`] (P4 PR 7
-    /// vec0 JOIN row decode), `fts_search` (PR 5 bm25 + row re-emit),
-    /// `spatial_near` (PR 5 haversine distance + row re-emit). The
+    /// Consumers: [`super::SqliteBackend::vector_search`]
+    /// (vec0 JOIN row decode), `fts_search` (bm25 + row re-emit),
+    /// `spatial_near` (haversine distance + row re-emit). The
     /// [`TypedCell`] discriminant lets each caller branch on
     /// numeric / blob / NULL at the JSON encoder layer.
     pub(crate) async fn query_typed(
@@ -553,7 +550,7 @@ impl SqliteSession {
         recv_reply(reply_rx).await?
     }
 
-    /// **P5 PR 5** — send a `VacuumInto` command and await the reply.
+    /// Send a `VacuumInto` command and await the reply.
     /// Consumer is the SQLite `Backup::snapshot` impl. The
     /// `#[allow(dead_code)]` mirrors the `attach`/`detach` helpers
     /// above — rustc's dead-code analysis doesn't follow the
@@ -576,7 +573,7 @@ impl SqliteSession {
         recv_reply(reply_rx).await?
     }
 
-    /// **P5 PR 5** — send a `ReattachFile` command and await the reply.
+    /// Send a `ReattachFile` command and await the reply.
     /// Consumer is the SQLite `Backup::restore` impl. The actor body
     /// DETACHes the alias, `std::fs::rename`s `temp_path → live_path`
     /// on the same filesystem, and ATTACHes the alias back against
@@ -698,16 +695,17 @@ impl SqliteSessionHandle {
     ///
     /// `pub` under the `test-helpers` feature so the integration
     /// target (`tests/sqlite_integration.rs`) can read PRAGMA values
-    /// back without reaching into the actor surface directly. PR 4
-    /// will route the SchemaIntrospect impl through this same path,
-    /// at which point the visibility tightens back to `pub(crate)`.
+    /// back without reaching into the actor surface directly. A future
+    /// change may route the SchemaIntrospect impl through this same
+    /// path, at which point the visibility tightens back to
+    /// `pub(crate)`.
     #[cfg(feature = "test-helpers")]
     pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         self.0.query(sql, params).await
     }
 
-    /// **P5 PR 3.5** — forward a `query_typed` through the underlying
-    /// session. `pub` under the `test-helpers` feature so the P5 PR 3.5
+    /// Forward a `query_typed` through the underlying
+    /// session. `pub` under the `test-helpers` feature so the
     /// end-to-end encrypted-column round-trip test in
     /// `tests/sqlite_integration.rs` can read BLOB columns back as raw
     /// bytes without the `<N bytes blob>` stringification `query`
@@ -721,7 +719,7 @@ impl SqliteSessionHandle {
         self.0.query_typed(sql, params).await
     }
 
-    /// **P5.5 PR 4** — crate-private `query` for the unmask RPC dispatch.
+    /// Crate-private `query` for the unmask RPC dispatch.
     ///
     /// Separate symbol from the `cfg(test-helpers)` `query` above so the
     /// production `crate::crud::unmask::dispatch_unmask` path can reach
@@ -737,7 +735,7 @@ impl SqliteSessionHandle {
         self.0.query(sql, params).await
     }
 
-    /// **P5.5 PR 4** — crate-private `query_typed` counterpart for
+    /// Crate-private `query_typed` counterpart for
     /// the unmask RPC dispatch (encrypted-column read path needs raw
     /// `TypedCell::Blob` bytes, not the `<N bytes blob>` stringification
     /// `query` emits). Same visibility-fork rationale as
@@ -821,7 +819,7 @@ impl From<Rc<SqliteSession>> for SqliteSessionHandle {
 // ---------------------------------------------------------------------------
 
 fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbError> {
-    // **P5 PR 3.5** — the param vector carries an optional encrypted-
+    // The param vector carries an optional encrypted-
     // column side-channel: a value tagged with [`SQLITE_ENC_BLOB_PREFIX`]
     // is base64-decoded to raw bytes and bound as BLOB instead of TEXT.
     // The PG arm never produces this prefix; non-encrypted params
@@ -842,11 +840,11 @@ fn run_exec_batch(conn: &Connection, sql: &str) -> Result<(), DbError> {
     conn.execute_batch(sql).map_err(from_sqlite)
 }
 
-/// **P5 PR 3.5** — typed bind value. Either a borrowed `&str` (the
-/// TEXT default — preserves the zero-alloc shape that
-/// `&[String] → &[&dyn ToSql]` had pre-PR-3.5) or an owned `Vec<u8>`
-/// produced by base64-decoding a [`SQLITE_ENC_BLOB_PREFIX`]-tagged
-/// param.
+/// Typed bind value. Either a borrowed `&str` (the
+/// TEXT default - preserves the zero-alloc shape that
+/// `&[String] -> &[&dyn ToSql]` had before this type existed) or an
+/// owned `Vec<u8>` produced by base64-decoding a
+/// [`SQLITE_ENC_BLOB_PREFIX`]-tagged param.
 enum BindParam<'a> {
     /// Plain TEXT bind — borrows from the caller's `Vec<String>`.
     Text(&'a str),
@@ -863,7 +861,7 @@ impl BindParam<'_> {
     }
 }
 
-/// **P5 PR 3.5** — scan the param vector for encrypted-column side-
+/// Scan the param vector for encrypted-column side-
 /// channel markers and produce a typed bind list. Values prefixed with
 /// [`SQLITE_ENC_BLOB_PREFIX`] are base64-decoded to raw bytes and bound
 /// as BLOB; every other value passes through as TEXT.
@@ -896,7 +894,7 @@ fn run_query(
 ) -> Result<Vec<Row>, DbError> {
     let mut stmt = conn.prepare(sql).map_err(from_sqlite)?;
     let column_count = stmt.column_count();
-    // **P5 PR 3.5** — same encrypted-column blob-bind side-channel as
+    // Same encrypted-column blob-bind side-channel as
     // `run_exec` (see [`decode_blob_params`]).
     let decoded = decode_blob_params(params)?;
     let refs: Vec<&dyn rusqlite::ToSql> = decoded
@@ -915,8 +913,8 @@ fn run_query(
             // discriminant and stringify uniformly. NULL → None;
             // everything else → Some(...).
             //
-            // The Query path is consumed at PR 2 by PRAGMA inspection
-            // (integration tests) and at PR 4 by the SchemaIntrospect
+            // The Query path is consumed by PRAGMA inspection
+            // (integration tests) and by the SchemaIntrospect
             // PRAGMA walk; both produce INTEGER + TEXT, never BLOB.
             // Refuse accidental binary reads loudly so callers route
             // them through `query_typed` instead of silently receiving
@@ -949,7 +947,7 @@ fn run_query(
     Ok(out)
 }
 
-/// Typed row materialisation — the **P4 PR 4** vector path's
+/// Typed row materialisation - the vector path's
 /// row-decoder. Preserves SQLite's storage-class discriminator so the
 /// BLOB column reaches the caller as `Vec<u8>` (not the `<N bytes
 /// blob>` placeholder string `run_query` emits at session.rs:522).
@@ -965,7 +963,7 @@ fn run_query_typed(
     let columns: Vec<String> = (0..column_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    // **P5 PR 3.5** — same encrypted-column blob-bind side-channel as
+    // Same encrypted-column blob-bind side-channel as
     // `run_exec` (see [`decode_blob_params`]).
     let decoded = decode_blob_params(params)?;
     let refs: Vec<&dyn rusqlite::ToSql> = decoded
@@ -1007,7 +1005,7 @@ fn run_query_typed(
     })
 }
 
-/// **P5 PR 5** — worker body for [`Command::VacuumInto`].
+/// Worker body for [`Command::VacuumInto`].
 ///
 /// `VACUUM INTO 'path'` (optionally prefixed with `"<alias>"`) instructs
 /// SQLite to write a fresh, consistent copy of the source database to
@@ -1045,7 +1043,7 @@ fn run_vacuum_into(
     conn.execute_batch(&sql).map_err(from_sqlite)
 }
 
-/// **P5 PR 5** — worker body for [`Command::ReattachFile`].
+/// Worker body for [`Command::ReattachFile`].
 ///
 /// Atomic-file-swap restore on the per-app alias:
 ///
@@ -1137,7 +1135,7 @@ fn run_reattach_file(
 
 #[cfg(test)]
 mod tests {
-    //! **P5 PR 5** — direct unit-tests for the new `run_vacuum_into`
+    //! Direct unit-tests for the `run_vacuum_into`
     //! and `run_reattach_file` worker bodies. Each test exercises the
     //! helper synchronously against a bare `rusqlite::Connection` (no
     //! session actor, no compio runtime) — the goal is to pin the SQL
