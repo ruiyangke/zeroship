@@ -238,7 +238,20 @@ pub enum ApplyError {
     },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort.
-    #[error("checksum drift on {version}: journal has {recorded}, set has {expected}")]
+    ///
+    /// The recorded side is not always a completed event: an inflight marker
+    /// records the checksum of the body that half-ran, so editing a
+    /// non-transactional migration in place after an interrupted apply lands
+    /// here BEFORE the backend's interrupted-marker refusal can explain the
+    /// repair. The message names that possibility so the operator knows to look
+    /// at the marker.
+    #[error(
+        "checksum drift on {version}: journal has {recorded}, set has {expected}. \
+         If this version was interrupted mid-apply, {recorded} may be an inflight \
+         marker recording the body that half-ran rather than a completed event: \
+         restore the reviewed migration source unedited and resolve the marker, \
+         instead of editing the migration to match"
+    )]
     ChecksumDrift {
         /// The drifting migration's version.
         version: String,

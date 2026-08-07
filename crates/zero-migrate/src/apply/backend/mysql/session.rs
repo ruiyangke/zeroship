@@ -617,7 +617,10 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 ///    kind is preserved so repeatable checksums remain discoverable.
 ///
 /// Returns `false` on success. A prior inflight marker returns an error and is
-/// left intact for an audited repair.
+/// left intact for an operator repair: either a direct `DELETE` on the mutable
+/// inflight side-table after the operator restores the pre-migration shape, or
+/// [`super::MysqlBackend::recover_inflight_ddl`] from a Rust host for the same
+/// resolution plus a marker-identity check and an immutable audit row.
 ///
 /// # Errors
 /// [`ApplyError::MigrationFailed`] if the `up` failed; [`ApplyError::Db`] /
@@ -634,14 +637,30 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     let version = m.version.as_str();
 
     if had_inflight {
+        // Name the repair the person reading this can actually perform. The
+        // inflight side-table is mutable by design and the applying credential
+        // already deletes from it on every successful apply (`clear_inflight`),
+        // so clearing the marker needs no extra privilege and no extra API.
+        // `recover_inflight_ddl` is the audited alternative, and it is reachable
+        // only from a Rust host that depends on this crate directly.
+        let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
         return Err(ApplyError::Backend(format!(
             "mysql migration {version} has an inflight marker from an interrupted \
              auto-committing DDL apply; zero-migrate will not replay possibly-applied \
              CREATE/ALTER statements; inspect the live schema and the migration SQL, \
-             then call MysqlBackend::recover_inflight_ddl with either \
-             MarkAppliedAfterVerification after proving the full intended shape, or \
-             ClearForRetryAfterRollback after restoring and proving the complete old \
-             shape; the API verifies marker identity and records an immutable audit"
+             then take one of two repairs. (1) Restore and verify the complete \
+             pre-migration shape yourself, clear the marker with \
+             DELETE FROM {meta}.schema_migrations_inflight WHERE version = '{version}', \
+             and run apply again; this is a supported repair on the mutable inflight \
+             side-table and is the only route available from the CLI and the Node SDK. \
+             (2) From a Rust host that embeds this crate, call \
+             MysqlBackend::recover_inflight_ddl with MarkAppliedAfterVerification \
+             after verifying the complete new shape, or ClearForRetryAfterRollback \
+             after restoring and verifying the complete old shape; over route (1) it \
+             adds a marker-identity check against the reviewed migration and an \
+             immutable recovery audit row. Neither route inspects the database: \
+             recovery does NOT verify schema shape, it records your assertion about \
+             it. Do not fabricate a completed event in the append-only journal"
         )));
     }
     let kind = match (requested_kind, supersedes.is_empty()) {

@@ -4431,6 +4431,13 @@ mod render_tests {
     /// already have landed. Recovery must preserve that evidence and fail closed;
     /// blindly deleting the marker and replaying a bare CREATE/ALTER can wedge the
     /// deployment or apply only part of a multi-statement migration.
+    ///
+    /// Failing closed is only half the contract: the refusal has to name a repair
+    /// the reader can actually run. `recover_inflight_ddl` is Rust-host-only (it
+    /// has no binding across the addon seam), so a CLI or Node operator can reach
+    /// nothing but the marker `DELETE`. The message must name that statement, must
+    /// keep the audited Rust-host route as the alternative, and must not let the
+    /// reader believe either route inspects the live schema.
     #[compio::test]
     async fn crashed_ddl_is_not_blindly_replayed() {
         let rec = RecordingSession::new();
@@ -4442,12 +4449,22 @@ mod render_tests {
             .apply_one(&cfg, &m, "tester", true, &[], "apply")
             .await;
 
+        // The exact statement an operator without a Rust host can copy and run.
+        let reachable_delete = format!(
+            "DELETE FROM `proj_x_migrations`.schema_migrations_inflight WHERE version = '{}'",
+            m.version.as_str()
+        );
         assert!(
             matches!(result, Err(ApplyError::Backend(ref message))
                 if message.contains("inflight")
                     && message.contains("inspect")
+                    // The audited Rust-host alternative stays named.
                     && message.contains("recover_inflight_ddl")
-                    && message.contains(m.version.as_str())),
+                    && message.contains(m.version.as_str())
+                    // ... but it is not the ONLY named route.
+                    && message.contains(reachable_delete.as_str())
+                    // Recovery audits an operator assertion; it proves nothing.
+                    && message.contains("recovery does NOT verify schema shape")),
             "recovery must fail closed with an actionable error: {result:?}"
         );
         let all = rec.log.borrow().join("\n");
