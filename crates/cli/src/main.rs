@@ -607,13 +607,18 @@ fn deploy_auto_create(args: &[String]) -> bool {
     !args.iter().any(|arg| arg == "--no-create")
 }
 
+/// True when `value` is an app id rather than an app name.
+///
+/// Uses the same parse the control plane applies to the path segment
+/// (`id.parse::<Uuid>()`), because the two must agree on the boundary. The
+/// hand-rolled check this replaces accepted ONLY the 36-character hyphenated
+/// form, while the server also takes the simple (32 hex, no hyphens), braced
+/// and `urn:uuid:` forms. An id in any of those spellings therefore fell
+/// through to resolve-or-create and, under the default auto-create, produced
+/// a brand-new app named after the id - with the deploy landing on it instead
+/// of on the app the caller meant.
 fn is_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 36
-        && [8, 13, 18, 23].iter().all(|&idx| bytes[idx] == b'-')
-        && bytes.iter().enumerate().all(|(idx, byte)| {
-            matches!(idx, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit()
-        })
+    value.parse::<uuid::Uuid>().is_ok()
 }
 
 fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<String>, String> {
@@ -798,6 +803,34 @@ fn non_empty_token(token: String) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    /// `--app=<id>` must recognise every form the control plane accepts.
+    ///
+    /// The server parses the path segment with `id.parse::<Uuid>()`, which
+    /// takes the simple (32 hex, no hyphens), hyphenated, braced and
+    /// `urn:uuid:` forms. Anything this helper rejects is routed down the
+    /// resolve-or-create path instead, so a caller who pastes an app id in a
+    /// form the CLI does not know gets a NEW app created under a name that is
+    /// really an id, and the deploy lands on the wrong app.
+    #[test]
+    fn app_id_recognises_every_form_the_server_accepts() {
+        let hyphenated = "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
+        let simple = "0197f8a12b3c7d4e8f901a2b3c4d5e6f";
+        let braced = "{0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f}";
+        let urn = "urn:uuid:0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
+
+        for form in [hyphenated, simple, braced, urn] {
+            assert!(is_uuid(form), "{form} is an app id the server would accept");
+        }
+    }
+
+    /// The converse: a name that merely looks id-shaped must stay a name.
+    #[test]
+    fn app_id_rejects_non_uuid_names() {
+        for name in ["my-app", "", "not-a-uuid", "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6"] {
+            assert!(!is_uuid(name), "{name:?} must resolve by name, not as an id");
+        }
+    }
 
     // -----------------------------------------------------------------------
     // ISS-57: arg-parser robustness
