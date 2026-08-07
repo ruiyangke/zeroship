@@ -9,7 +9,7 @@
 // third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs.
 // Faithfulness to the engine's live Support::decision() is proven Rust-side by
 // tests/dialect_table_faithfulness.rs; the TS drift test pins this file (and the
-// Rust one) against the sidecar. S0.1 is ADDITIVE — no consumer reads it yet.
+// Rust one) against the sidecar. Nothing reads it yet.
 
 export type Disposition = "portable" | "transparentDegradable" | "vendor" | "unsupported";
 export type Dialect = "postgres" | "sqlite" | "mysql";
