@@ -1279,3 +1279,263 @@ fn mysql_unmanaged_text_reference_validates_catalog_collation_intent() {
         "unexpected MySQL collation diagnostic: {error}"
     );
 }
+
+/// One already-applied parent table as the live catalog reports it. The catalog
+/// carries the physical column and its key objects but never the authored
+/// value-format metadata, which is exactly why the contract must arrive
+/// separately.
+fn applied_parent_snapshot(
+    table: &str,
+    columns: Vec<ColumnSnapshot>,
+    constraints: Vec<ConstraintSnapshot>,
+) -> SchemaSnapshot {
+    let mut snapshot = SchemaSnapshot::default();
+    snapshot.tables.insert(
+        table.to_string(),
+        TableSnapshot {
+            columns,
+            indexes: Vec::new(),
+            constraints,
+            runtime_options: Default::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: None,
+        },
+    );
+    snapshot
+}
+
+fn text_column(name: &str) -> ColumnSnapshot {
+    ColumnSnapshot {
+        name: name.to_string(),
+        data_type: "text".to_string(),
+        nullable: false,
+        ddl_type_override: Some("text".to_string()),
+        ..Default::default()
+    }
+}
+
+fn contract_for<'a>(
+    live: &'a LiveSchema,
+    table: &str,
+    column: &str,
+) -> &'a zero_migrate::LogicalColumnContract {
+    live.logical_columns
+        .iter()
+        .find(|(key, _)| key.table == table && key.column == column)
+        .map(|(_, contract)| contract)
+        .unwrap_or_else(|| panic!("absorbed contracts omitted {table}.{column}"))
+}
+
+#[test]
+fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_key() {
+    // Migration A is ALREADY APPLIED: it is folded into the catalog snapshot and
+    // is never lowered again, so its authored TypeID contract can only reach
+    // migration B through contract accumulation. A catalog cannot supply it.
+    let applied = ir(
+        "applied_create_accounts",
+        vec![create_table(
+            "accounts",
+            vec![column(
+                "id",
+                "text",
+                false,
+                Some(type_id("account")),
+                None,
+                None,
+            )],
+            Some(&["id"]),
+        )],
+    );
+    let appended = ir(
+        "appended_create_sessions",
+        vec![create_table(
+            "sessions",
+            vec![column(
+                "account_id",
+                "text",
+                true,
+                Some(type_id("account")),
+                None,
+                Some(reference("accounts", None, None)),
+            )],
+            None,
+        )],
+    );
+    let snapshot = applied_parent_snapshot(
+        "accounts",
+        vec![text_column("id")],
+        vec![ConstraintSnapshot {
+            name: "accounts_pkey".to_string(),
+            kind: "PRIMARY KEY".to_string(),
+            definition: "PRIMARY KEY (id)".to_string(),
+            comment: None,
+        }],
+    );
+    let author = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Postgres,
+        &no_inject_policy(),
+    );
+
+    let error = author
+        .lower(
+            &appended,
+            &LiveSchema::from_catalog_snapshot(snapshot.clone(), OWNER),
+        )
+        .expect_err("skipping the applied file's contracts must break the appended foreign key");
+    assert!(
+        error
+            .to_string()
+            .contains("no authored value-format metadata"),
+        "unexpected missing-contract diagnostic: {error}"
+    );
+
+    let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
+    live.absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .expect("an applied artifact contributes contracts without strict lower-time validation");
+    let migrations = author
+        .lower(&appended, &live)
+        .expect("the absorbed contract makes the appended foreign key lower");
+    assert_reference_target(
+        create_sql(&migrations, SqlDialect::Postgres, "sessions"),
+        SqlDialect::Postgres,
+        "accounts",
+    );
+}
+
+#[test]
+fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file() {
+    // The referenced column is made referenceable only by a UNIQUE createIndex in
+    // the SKIPPED file. An accumulator that replayed only the declaration-bearing
+    // ops would keep the contract but lose that candidate key, and the appended
+    // foreign key would be rejected as targeting a non-key column.
+    let applied = ir(
+        "applied_create_orgs",
+        vec![
+            create_table(
+                "orgs",
+                vec![
+                    column("row_id", "bigInt", false, None, None, None),
+                    column("public_id", "text", false, Some(type_id("org")), None, None),
+                ],
+                Some(&["row_id"]),
+            ),
+            json!({
+                "op": "createIndex",
+                "table": "orgs",
+                "name": "orgs_public_id_key",
+                "columns": [{ "kind": "column", "name": "public_id" }],
+                "unique": true,
+            }),
+        ],
+    );
+    let appended = ir(
+        "appended_create_org_links",
+        vec![create_table(
+            "org_links",
+            vec![column(
+                "org_public_id",
+                "text",
+                true,
+                Some(type_id("org")),
+                None,
+                Some(reference_column("orgs", "public_id", None, None)),
+            )],
+            None,
+        )],
+    );
+    let snapshot = applied_parent_snapshot(
+        "orgs",
+        vec![
+            ColumnSnapshot {
+                name: "row_id".to_string(),
+                data_type: "bigint".to_string(),
+                nullable: false,
+                ..Default::default()
+            },
+            text_column("public_id"),
+        ],
+        vec![ConstraintSnapshot {
+            name: "orgs_pkey".to_string(),
+            kind: "PRIMARY KEY".to_string(),
+            definition: "PRIMARY KEY (row_id)".to_string(),
+            comment: None,
+        }],
+    );
+
+    let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
+    live.absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .expect("the applied artifact's UNIQUE index is part of its accumulated contracts");
+    assert!(
+        contract_for(&live, "orgs", "public_id").single_column_reference_key,
+        "the UNIQUE createIndex in the applied file must survive accumulation"
+    );
+
+    let migrations = IrAuthor::new(
+        PROJECT_SCHEMA,
+        OWNER,
+        SqlDialect::Postgres,
+        &no_inject_policy(),
+    )
+    .lower(&appended, &live)
+    .expect("a UNIQUE key declared by the applied file is a valid reference target");
+    assert!(
+        create_sql(&migrations, SqlDialect::Postgres, "org_links").contains(&format!(
+            "REFERENCES \"{PROJECT_SCHEMA}\".\"orgs\" (\"public_id\")"
+        )),
+        "the appended foreign key did not target the absorbed UNIQUE key: {migrations:#?}"
+    );
+}
+
+#[test]
+fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
+    // The applied file references a target authored in a file that is not in this
+    // seed. Strict accumulation refuses it; the lenient path must still harvest
+    // the file's own contracts, because refusing here would make an ordered replay
+    // depend on seeding order it cannot control.
+    let applied = ir(
+        "applied_reference_to_an_unseeded_target",
+        vec![create_table(
+            "invoices",
+            vec![
+                column("id", "text", false, Some(type_id("invoice")), None, None),
+                column(
+                    "customer_id",
+                    "text",
+                    true,
+                    Some(type_id("customer")),
+                    None,
+                    Some(reference("customers", None, None)),
+                ),
+            ],
+            Some(&["id"]),
+        )],
+    );
+
+    let error = LiveSchema::default()
+        .advance_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .expect_err("strict accumulation still rejects an unseeded formatted target");
+    assert!(
+        error
+            .to_string()
+            .contains("no authored value-format metadata"),
+        "unexpected strict diagnostic: {error}"
+    );
+
+    let mut lenient = LiveSchema::default();
+    lenient
+        .absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .expect("the lenient path performs no lower-time reference validation");
+    assert!(
+        contract_for(&lenient, "invoices", "id").single_column_reference_key,
+        "the absorbed primary key contract did not land"
+    );
+    assert!(
+        contract_for(&lenient, "invoices", "customer_id")
+            .value_format
+            .is_some(),
+        "the absorbed reference column contract did not land"
+    );
+}

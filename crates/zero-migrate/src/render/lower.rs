@@ -554,6 +554,61 @@ impl LiveSchema {
         Ok(())
     }
 
+    /// Accumulate one resolved migration artifact's authored logical column
+    /// contracts WITHOUT lower-time reference validation.
+    ///
+    /// This is the accumulator for an artifact the caller does not lower: one
+    /// already applied to the target database. A consumer walking an ordered
+    /// migration set still has to carry every earlier file's contracts forward,
+    /// because a foreign key authored in a later file is rejected when its target's
+    /// contract is absent, and a catalog cannot supply that semantic metadata.
+    /// [`Self::advance_logical_columns`] cannot serve here: it validates the
+    /// artifact against a seed that need not yet contain the artifact's own
+    /// dependencies, so accumulating an already-applied file would fail on
+    /// references that were perfectly valid when that file was lowered.
+    ///
+    /// What this deliberately does NOT do: it runs neither the column-reference
+    /// nor the table-foreign-key lower-time check, and it defers rather than
+    /// rejects a per-row backfill destination whose declaration is not in scope.
+    /// It is not a substitute for lowering. Every artifact the caller actually
+    /// lowers must still go through [`Self::advance_logical_columns`], which is
+    /// where those gates run. Dropping the two reference checks costs nothing in
+    /// accumulation: both validate against a private clone of the seed and never
+    /// write declarations back.
+    ///
+    /// `project_schema` and `default_schema` must be the same effective-schema
+    /// inputs the artifact's [`IrAuthor`] used when it was lowered, so the
+    /// absorbed declarations key the same way the later lower resolves them.
+    ///
+    /// # Errors
+    /// Returns an [`crate::model::validate::AuthoringError`] when a per-row
+    /// generator is malformed, targets a cursor column, or resolves to an
+    /// ambiguous or mismatched declared destination. Those are artifact defects
+    /// that load-time validation already rejects, so an artifact that was applied
+    /// cannot trip them.
+    pub fn absorb_logical_columns(
+        &mut self,
+        ir: &MigrationIr,
+        dialect: SqlDialect,
+        project_schema: &str,
+        default_schema: Option<&str>,
+    ) -> Result<(), crate::model::validate::AuthoringError> {
+        let target = match dialect {
+            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+        };
+        self.logical_columns = crate::model::validate::accumulate_logical_declarations_for_lower(
+            ir,
+            target,
+            &[],
+            &self.logical_columns,
+            project_schema,
+            default_schema,
+        )?;
+        Ok(())
+    }
+
     /// The per-table live column set for the DML apply/render-seam ColRef
     /// resolution (rule (c)). Projects [`Self::table_snapshots`] into a
     /// `table → [column names]` map ([`crate::model::validate::validate_op_resolved`]'s

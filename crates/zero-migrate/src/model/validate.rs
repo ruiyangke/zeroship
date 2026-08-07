@@ -1263,6 +1263,66 @@ pub(crate) fn validate_per_row_destinations_for_lower(
     project_schema: &str,
     default_schema: Option<&str>,
 ) -> Result<LogicalColumnContracts, AuthoringError> {
+    replay_logical_declarations_for_lower(
+        ir,
+        target_dialect,
+        ts_locations,
+        seed,
+        project_schema,
+        default_schema,
+        MissingLogicalDeclaration::Reject,
+    )
+}
+
+/// Accumulate an artifact's logical declarations without lower-time strictness.
+///
+/// A consumer replaying an ordered migration set must feed EVERY file's authored
+/// contracts forward, including files it skips because they are already applied.
+/// A skipped file cannot be run through [`validate_per_row_destinations_for_lower`]:
+/// that walk rejects a per-row destination whose declaration lives in a file the
+/// caller has not seeded yet, so the accumulator would refuse contracts purely
+/// because of seeding order it cannot control. Deferring the missing-declaration
+/// verdict keeps the same replay, and the same candidate-key lifecycle, without
+/// that ordering coupling.
+///
+/// This deliberately does NOT weaken any gate. The deferred verdict matches what
+/// load-time [`validate_per_row_destinations`] already accepted for this artifact,
+/// and the artifact being skipped is one that already lowered and applied under
+/// the full strict walk. Malformed generators, cursor-column collisions, ambiguous
+/// destinations, and declared-but-mismatched destinations are all still rejected.
+pub(crate) fn accumulate_logical_declarations_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+) -> Result<LogicalColumnContracts, AuthoringError> {
+    replay_logical_declarations_for_lower(
+        ir,
+        target_dialect,
+        ts_locations,
+        seed,
+        project_schema,
+        default_schema,
+        MissingLogicalDeclaration::DeferToLower,
+    )
+}
+
+/// The single declaration replay both lower-time accumulators share. Every
+/// declaration and candidate-key mutation in [`validate_per_row_op`] is
+/// unconditional; `missing` only decides the verdict for a per-row backfill
+/// destination with no declaration in scope, so the accumulated contracts are
+/// identical either way.
+fn replay_logical_declarations_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+    missing: MissingLogicalDeclaration,
+) -> Result<LogicalColumnContracts, AuthoringError> {
     let mut declared = seed.clone();
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
@@ -1275,7 +1335,7 @@ pub(crate) fn validate_per_row_destinations_for_lower(
             op_index,
             ts_locations,
             &mut declared,
-            MissingLogicalDeclaration::Reject,
+            missing,
             schema_mode,
         )?;
     }
