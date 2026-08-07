@@ -17,8 +17,9 @@
 //     int8 parser to `Number` would silently truncate large bigints below the seam
 //     with NO error. So we construct the Client with its OWN `types` object whose
 //     `getTypeParser` forces oid 20/1700/1016 → `String` and pins oid 16 (bool)
-//     to its own 't'/'f' decode, independent of any global override. The §D.2
-//     poison oracle proves these win.
+//     to its own 't'/'f' decode and oid 1003 (name[]) to its own
+//     array parse, independent of any global override. The §D.2 poison oracle
+//     proves these win.
 //
 //  2. `executeTextParams` is a DISTINCT path (§B.2/§D.2): it receives a
 //     `(string | null)[]` and calls `client.query(sql, values)` with NO explicit
@@ -75,7 +76,60 @@ const OID_INT8 = 20;
 const OID_NUMERIC = 1700;
 const OID_INT8_ARRAY = 1016;
 const OID_NAME_ARRAY = 1003;
-const OID_TEXT_ARRAY = 1009;
+
+/**
+ * Parse a PostgreSQL one-dimensional array literal into its elements.
+ *
+ * The wire form is `{a,b}`, with an element quoted when it contains a comma,
+ * brace, quote, backslash or whitespace, or when it would otherwise read as the
+ * unquoted word NULL. Inside quotes, a backslash escapes the next character.
+ * `{}` is the empty array; an unquoted NULL is a null element, while a quoted
+ * `"NULL"` is the four-character string.
+ *
+ * Deliberately self-contained: the point of pinning oid 1003 is to depend on
+ * nothing that a global `setTypeParser` can reach.
+ */
+function parsePgTextArray(literal: string): Array<string | null> {
+  if (!literal.startsWith("{") || !literal.endsWith("}")) {
+    throw new Error(`malformed PostgreSQL array literal: ${literal}`);
+  }
+  const body = literal.slice(1, -1);
+  if (body === "") return [];
+
+  const out: Array<string | null> = [];
+  let current = "";
+  let quoted = false;
+  let sawQuotes = false;
+
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (quoted) {
+      if (ch === "\\") {
+        i += 1;
+        current += body[i] ?? "";
+      } else if (ch === '"') {
+        quoted = false;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+      sawQuotes = true;
+      continue;
+    }
+    if (ch === ",") {
+      out.push(!sawQuotes && current === "NULL" ? null : current);
+      current = "";
+      sawQuotes = false;
+      continue;
+    }
+    current += ch;
+  }
+  out.push(!sawQuotes && current === "NULL" ? null : current);
+  return out;
+}
 
 /**
  * Build a connection-scoped `types` object whose `getTypeParser(oid, format)`
@@ -112,12 +166,14 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
       if (oid === OID_NAME_ARRAY) {
         // `name[]` has no default array parser: pg-types registers 1000, 1009,
         // 1015 and 1016, and not 1003. Catalog introspection returns it from
-        // `array_agg(attname)`, so without this the value crosses as the raw
-        // literal `{a,b}` and fails the seam's Vec<String> decode. Reuse the
-        // `text[]` parser, whose array-literal syntax is identical.
-        return defaults.getTypeParser(OID_TEXT_ARRAY as never, format as never) as (
-          value: string,
-        ) => unknown;
+        // `array_agg(attname)`, so without a parser the value crosses as the raw
+        // literal `{a,b}` and fails the seam's Vec<String> decode.
+        //
+        // Parsed here rather than borrowed from `text[]`. Borrowing would mean
+        // `defaults.getTypeParser(1009)`, which is a LIVE read of the same mutable
+        // global map this whole object exists to be immune from - a shadow built
+        // that way is not a pin, it just moves which oid has to be poisoned.
+        return parsePgTextArray;
       }
       if (oid === OID_INT8_ARRAY) {
         // int8[]: the ARRAY parser composed over a string element parser, so each
@@ -308,4 +364,4 @@ function toJsError(err: unknown): JsError {
 /** Internals reached by this package's own tests. Not part of the published
  *  surface: the driver's contract is `openPgSession` and `HostDriver`, and
  *  anything here may change without notice. */
-export const __testing = { connectionScopedTypes, valueToCell };
+export const __testing = { connectionScopedTypes, valueToCell, parsePgTextArray };
