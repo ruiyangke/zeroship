@@ -121,10 +121,16 @@ jobs:
           # been deleted; rustc could not write. The number was real and meant
           # nothing.
           #
-          # `--keep-going` so one broken package cannot mask the targets of every
-          # package after it, which would shrink the count for a second reason.
+          # No `--keep-going` here: cargo 1.94.0 accepts it on `cargo build` but
+          # NOT on `cargo test`, so its presence made this step exit with
+          # "unexpected argument" on every run - a gate that could never pass,
+          # reported as a build failure. It was added to stop one broken package
+          # masking the targets of every package after it, and the failure branch
+          # below already covers that: a build that does not complete exits here
+          # instead of reaching the count, so a short count from a partial build
+          # is not a state this step can report as coverage loss.
           set -o pipefail
-          if ! cargo test --workspace --no-run --keep-going --message-format=json \
+          if ! cargo test --workspace --no-run --message-format=json \
               >"$RUNNER_TEMP/targets.json" 2>"$RUNNER_TEMP/targets.err"; then
             echo "::error::the test build failed, so the target count below would measure the build and not the coverage"
             grep -E '^error' "$RUNNER_TEMP/targets.err" | sort -u | head -20
@@ -146,7 +152,14 @@ jobs:
           # job does not provision; they are built and run by the billing-gate
           # job instead. The floor moves by the measured delta and no further -
           # it is not slack, and nothing else was allowed to disappear behind it.
-          floor=245
+          # 245 -> 250: the local measurement moved 261 -> 266 as test targets were
+          # added, so the floor moves by that same +5 and no further. It is still
+          # NOT tight, and deliberately so - the count is environment-sensitive
+          # (feature resolution, optional deps) and no CI run has ever reported
+          # its own number, which is the only thing that would justify fitting
+          # this to the real value. The step prints the count on every run; the
+          # first CI number that appears is what to set here.
+          floor=250
           echo "test targets built: $count (floor $floor)"
           if [ "$count" -lt "$floor" ]; then
             echo "::error::built test targets ($count) fell below the floor ($floor); a suite stopped being built"
