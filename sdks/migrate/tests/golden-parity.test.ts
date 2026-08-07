@@ -39,7 +39,7 @@ import {
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturesDir = resolve(here, "../../../crates/zeroship-migrate/tests/op_fixtures");
+const fixturesDir = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/tests/op_fixtures");
 
 async function golden(stem: string): Promise<any> {
   return JSON.parse(await readFile(resolve(fixturesDir, `${stem}.golden.json`), "utf8"));
