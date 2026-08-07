@@ -419,6 +419,24 @@ pub async fn deploy(
         }));
     }
 
+    // The app has to exist before we take the upload. `ingest` below persists
+    // every blob in the bundle, and it runs before the lookup that produces the
+    // deploy record - so without this gate a bundle aimed at an app that was
+    // never created is written to the blob store and then answered 404, leaving
+    // blobs nothing will reference, bill, or collect.
+    //
+    // Authz alone does not cover it: a caller holding a fleet-wide grant is
+    // authorized for an app id whether or not a row exists behind it. This
+    // joins the rejections above that all resolve before a body byte is read.
+    match state.registry.get_app(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error":"app not found"}))
+        }
+        Err(e) => return error_response(e),
+    }
+
     // Stream the request body to a tmp file under the configured
     // deploy tmp dir. Tmp files live for the duration of the deploy
     // and are removed after ingest (success or error). Path includes
