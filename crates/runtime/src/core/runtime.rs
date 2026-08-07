@@ -179,6 +179,50 @@ pub const DEFAULT_IDLE_GC_AFTER: Duration = Duration::from_millis(30_000);
 /// Conservative cadence (10s) so the ticker itself costs ~nothing.
 const IDLE_GC_TICK: Duration = Duration::from_secs(10);
 
+/// How many zero-delay timer callbacks one pump pass may fire before it hands
+/// control back to `pump_loop`. See [`RuntimeInner::fire_ready_timers_pump`].
+///
+/// `setTimeout(fn, 0)` is a YIELD, not a delay, and this bound must not turn it
+/// into one. 64 is chosen to sit far above what real programs queue in a single
+/// turn — promise-resolution ladders, `await new Promise(r => setTimeout(r, 0))`
+/// hops and the like run one to a handful of zero-delay timers per turn, so
+/// they drain in the first pass and observe byte-for-byte the behaviour they
+/// did when the drain was unbounded. It only bites a callback chain that
+/// re-arms itself faster than it is consumed, which is exactly the runaway the
+/// bound exists to catch.
+///
+/// It can be this small because crossing a pass boundary is cheap: while
+/// `ready_timers` is non-empty `pump_loop` waits only up to
+/// [`READY_TIMER_PASS_TICK`] before re-entering PHASE 1, so a boundary costs one
+/// isolate enter/exit plus one reactor turn rather than an unbounded park.
+/// Measured at roughly 7 us per boundary against a pass of 64 callbacks. What
+/// the boundary buys is that `bill_pump_cpu` runs, pending I/O gets looked at,
+/// and other tasks on the thread get a scheduling slot.
+///
+/// The bound is on CALLBACK COUNT, not on time, so the wall-clock grip a runaway
+/// keeps is `64 x per-callback cost`. Per-callback cost is what the CPU timer
+/// armed around each callback bounds, so the two limits compose; lowering this
+/// constant tightens the grip at the cost of paying the boundary more often.
+const MAX_READY_TIMERS_PER_PASS: usize = 64;
+
+/// Upper bound on how long the pump waits for I/O between two zero-delay timer
+/// passes. Only reached when a chain outran [`MAX_READY_TIMERS_PER_PASS`], i.e.
+/// never on the ordinary "a handful of `setTimeout(fn, 0)` per turn" path.
+///
+/// It has to be a real, non-zero deadline. `compio::time::sleep(Duration::ZERO)`
+/// is NOT a yield: `TimerRuntime::insert` discards any deadline that is already
+/// in the past and the future completes without ever returning `Pending`, so a
+/// loop built on it never lets the executor reach `Runtime::poll_with` — the
+/// only place completed I/O is reaped and elapsed timers are woken. Parking on
+/// a genuine deadline instead guarantees exactly one reactor turn per pass.
+///
+/// 50 us is chosen to be negligible against a 64-callback pass while still
+/// being far enough in the future that it cannot be rounded away. It is a
+/// ceiling, not a delay: the same park resolves the instant any op, timer, or
+/// pump notification becomes ready, so the wait is only ever paid when the
+/// isolate genuinely has nothing else to do but run more zero-delay timers.
+const READY_TIMER_PASS_TICK: Duration = Duration::from_micros(50);
+
 // ---------------------------------------------------------------------------
 // Runtime — the public handle
 // ---------------------------------------------------------------------------
@@ -1244,6 +1288,12 @@ impl RuntimeInner {
         let mut work = AsyncWork::new();
 
         loop {
+            // Set when PHASE 1's drain hit its per-pass bound and left zero-delay
+            // timers on the queue. Those are RUNNABLE work with no I/O behind
+            // them, so this iteration must not park waiting for an event —
+            // nothing would ever wake it (`setTimeout` does not `notify_pump`).
+            let mut ready_timers_pending = false;
+
             // Upgrade the Weak back-reference for this iteration's synchronous
             // V8 work. If it returns `None`, the `Runtime` handle has been
             // dropped (LRU eviction or shutdown) and `RuntimeInner` is gone —
@@ -1286,10 +1336,14 @@ impl RuntimeInner {
                     // `record_pump_cpu`: that budget is a safety mechanism
                     // with its own calibration, and widening what it polices
                     // is a behaviour change to make on its own terms, not a
-                    // side effect of a billing fix. Consequence worth knowing:
-                    // a `setTimeout(fn, 0)` self-rescheduling loop burns its
-                    // CPU here, so it is billed but escapes the 80%-of-wall
-                    // budget, which only ever sees the PHASE 2 window.
+                    // side effect of a billing fix.
+                    //
+                    // The drain is bounded (`MAX_READY_TIMERS_PER_PASS`), which
+                    // is what makes the billing below reachable at all: an
+                    // unbounded drain let a self-rescheduling `setTimeout(fn, 0)`
+                    // chain hold this call forever, so `bill_pump_cpu` never ran
+                    // and the loop burned a core for free. Anything the bound
+                    // left behind is picked up by the next iteration.
                     let cpu_start = crate::core::init::thread_cpu_time();
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
@@ -1300,12 +1354,68 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
+                    ready_timers_pending = !rt.state().borrow().ready_timers.is_empty();
                 }
                 // `runtime` (strong Rc) dropped here — not held across the
                 // event await below.
             }
 
-            let event = {
+            let event = if ready_timers_pending {
+                // PHASE 1's drain hit its bound and left zero-delay timers
+                // queued, so this iteration must come back here promptly. The
+                // wait below is therefore the same select as the steady-state
+                // one plus a `READY_TIMER_PASS_TICK` ceiling.
+                //
+                // It must not become an unbounded park. `setTimeout` pushes onto
+                // `ready_timers` without touching `notify_rx`, so on the
+                // `(false, false)` arm — a zero-delay chain and no I/O at all,
+                // exactly the runaway shape — waiting on `notify_rx` alone would
+                // be a wake that is never sent: a deadlock, not a delay.
+                //
+                // It must not become a busy loop either. Going straight back to
+                // PHASE 1 without awaiting anything real would starve every
+                // other task on this cooperative single-threaded executor,
+                // including the handler task waiting for the response the chain
+                // is holding up, and would never let the executor reach
+                // `Runtime::poll_with`, where completed I/O is reaped. Parking
+                // on a real deadline yields both: one reactor turn per pass, and
+                // any op/timer that completes in the meantime is picked up here
+                // and taken through PHASE 2 on its normal path.
+                let mut tick = compio::time::sleep(READY_TIMER_PASS_TICK).boxed_local().fuse();
+                let has_ops = !work.pending_ops.is_empty();
+                let has_timers = !work.pending_timers.is_empty();
+
+                match (has_ops, has_timers) {
+                    (true, true) => {
+                        futures::select! {
+                            r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                            r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                            _ = notify_rx.next() => None,
+                            _ = tick => None,
+                        }
+                    }
+                    (true, false) => {
+                        futures::select! {
+                            r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                            _ = notify_rx.next() => None,
+                            _ = tick => None,
+                        }
+                    }
+                    (false, true) => {
+                        futures::select! {
+                            r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                            _ = notify_rx.next() => None,
+                            _ = tick => None,
+                        }
+                    }
+                    (false, false) => {
+                        futures::select! {
+                            _ = notify_rx.next() => None,
+                            _ = tick => None,
+                        }
+                    }
+                }
+            } else {
                 let has_ops = !work.pending_ops.is_empty();
                 let has_timers = !work.pending_timers.is_empty();
 
@@ -1435,10 +1545,19 @@ impl RuntimeInner {
                 // Yield to the compio scheduler so handler tasks that are
                 // waiting on borrow_mut() get a chance to run before we
                 // loop back and potentially grab the borrow again for the
-                // next batch. compio doesn't expose a `yield_now()`, so a
-                // zero-duration sleep serves the same purpose: it posts a
-                // completion that fires on the next io_uring cycle, giving
-                // ready handlers a scheduling slot.
+                // next batch.
+                //
+                // CAVEAT, established while fixing the zero-delay drain: this
+                // is not actually a yield. `TimerRuntime::insert` drops any
+                // deadline already in the past, so `sleep(Duration::ZERO)`
+                // completes without ever returning `Pending` and the scheduler
+                // is never reached. It is left alone here because this arm
+                // always has real awaits around it (the next iteration parks on
+                // the event select) and because the surrounding hot path was
+                // calibrated with it in place — but it does NOT provide the
+                // fairness the paragraph above describes. Anything that needs a
+                // genuine yield must park on a non-zero deadline, as the
+                // `ready_timers_pending` wait above does.
                 //
                 // Skip the yield when there's no outstanding work: with empty
                 // pending_ops + pending_timers, the next loop iteration will
@@ -1452,6 +1571,11 @@ impl RuntimeInner {
                     compio::time::sleep(Duration::ZERO).await;
                 }
             } else {
+                // No event: either a bare pump notification, or the
+                // `READY_TIMER_PASS_TICK` ceiling expiring with more zero-delay
+                // timers still queued. Both fall through to the next iteration,
+                // which re-runs PHASE 1. No yield is needed here — reaching this
+                // point means the wait above already awaited a real deadline.
                 let Some(runtime) = runtime.upgrade() else { return; };
                 runtime.borrow_mut().cleanup_cancelled_requests();
             }
@@ -2967,8 +3091,24 @@ impl RuntimeInner {
     /// Fire zero-delay timers inline during dispatch_start (no AsyncWork needed).
     /// Spawned ops/timers from callbacks remain in RuntimeState for the pump to drain.
     /// Fire zero-delay timers, draining new tasks into external AsyncWork.
+    ///
+    /// BOUNDED BY DESIGN — fires at most [`MAX_READY_TIMERS_PER_PASS`] callbacks
+    /// and then returns, leaving whatever is left (including anything the fired
+    /// callbacks re-scheduled) on `ready_timers` for the next pass. Without the
+    /// bound this was a liveness hole: a callback that re-arms itself with
+    /// `setTimeout(fn, 0)` pushes onto the very queue this loop pops from, so
+    /// `spin(){ work(); setTimeout(spin, 0) }` never let the loop reach its
+    /// `break`. Everything that would have noticed sits AFTER the drain —
+    /// `bill_pump_cpu` in the pump's PHASE 1, `record_pump_cpu` in PHASE 2 —
+    /// so the loop pinned a core while being billed nothing and policed by
+    /// nothing. Returning early puts the pump back in control of both.
+    ///
+    /// FIFO order is preserved across the pass boundary: entries are taken with
+    /// `pop_front` and the untouched remainder keeps its position in the deque,
+    /// so a bounded pass fires exactly the same callbacks in exactly the same
+    /// order as the old unbounded one — it just gets there in several hops.
     fn fire_ready_timers_pump(&mut self, work: &mut AsyncWork) {
-        loop {
+        for _ in 0..MAX_READY_TIMERS_PER_PASS {
             let timer_id = {
                 let mut s = self.state.borrow_mut();
                 s.ready_timers.pop_front()

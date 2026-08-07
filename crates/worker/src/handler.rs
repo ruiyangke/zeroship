@@ -2591,6 +2591,106 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         );
     }
 
+    /// A `setTimeout(fn, 0)` callback that re-arms ITSELF must not wedge the pump.
+    ///
+    /// The zero-delay queue (`RuntimeState::ready_timers`) is drained by the
+    /// pump's PHASE 1. That drain used to run until the queue was empty, and a
+    /// callback that re-arms itself pushes onto the very queue the drain pops
+    /// from — so `spin(){ burn(); setTimeout(spin, 0) }` never let the drain
+    /// return. Every mechanism that would have noticed sits after it:
+    /// `bill_pump_cpu` on the next line, `record_pump_cpu` further down the same
+    /// iteration. The chain therefore pinned a core while being billed nothing
+    /// and policed by nothing, and — the part this test pins — the pump never
+    /// got back to its event loop, so unrelated I/O on the same isolate stalled
+    /// forever behind it.
+    ///
+    /// The handler below encodes exactly that. The response is gated on a REAL
+    /// (>= 1 ms) timer, which is the half that makes the failure observable: a
+    /// >= 1 ms delay lands in `spawned_timers` -> `AsyncWork::pending_timers`,
+    /// and the ONLY place those are polled is the pump's event select, after
+    /// the drain returns. With an unbounded drain the response is unreachable.
+    ///
+    /// WHAT IS ASSERTED, and why not termination. The 80%-of-wall budget in
+    /// `record_pump_cpu` is fed only from the pump's PHASE 2 window, so a chain
+    /// that lives entirely in PHASE 1 is outside its input by construction —
+    /// asserting on termination would be asserting on a mechanism this fix
+    /// deliberately does not rewire. Billing is the mechanism that IS supposed
+    /// to see this window, so the assertions are (a) the dispatch completes at
+    /// all, which is the liveness bug itself, and (b) the CPU the chain burned
+    /// reaches `cpu_us`.
+    ///
+    /// The JS chain is UNBOUNDED on purpose — a chain with a stop condition
+    /// gets billed correctly even today, just late, because the drain does
+    /// eventually return. So the wall-time bound has to come from the harness
+    /// rather than from the app: the dispatch runs on its own thread with its
+    /// own compio runtime (the isolate cache is thread-local), and the test
+    /// waits on a channel with a timeout. A wedged pump is then a failed
+    /// assertion with a diagnosis, not a hung suite. On that failure path the
+    /// worker thread is left spinning and deliberately not joined — joining it
+    /// is precisely the hang being avoided; it dies with the process.
+    #[test]
+    fn self_rescheduling_zero_delay_timer_does_not_wedge_the_pump() {
+        const WATCHDOG: Duration = Duration::from_secs(30);
+
+        let source = br#"
+            export default {
+              async fetch() {
+                // Re-arms itself every hop, so `ready_timers` is never empty.
+                function spin() {
+                  const until = Date.now() + 4;
+                  while (Date.now() < until) {}
+                  setTimeout(spin, 0);
+                }
+                setTimeout(spin, 0);
+                // A real timer: reachable only via the pump's event select,
+                // i.e. only if the zero-delay drain hands control back.
+                await new Promise(resolve => setTimeout(resolve, 5));
+                return new Response("pump-alive");
+              }
+            };
+        "#;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_metered_dispatch(
+                source,
+                AppRuntimeLimits::default(),
+                b"pump-spin",
+                true,
+            ));
+        });
+
+        let Ok(dispatched) = rx.recv_timeout(WATCHDOG) else {
+            panic!(
+                "the pump never came back: a self-rescheduling setTimeout(fn, 0) \
+                 chain held the PHASE 1 drain for {WATCHDOG:?}, so the handler's \
+                 5 ms timer was never polled and the request could not complete. \
+                 The zero-delay drain must be bounded per pass.",
+            );
+        };
+        let Some(result) = dispatched else {
+            return;
+        };
+
+        assert_eq!(
+            result.status,
+            StatusCode::OK,
+            "the handler must complete normally once the pump yields between \
+             passes; body was {}",
+            String::from_utf8_lossy(&result.body),
+        );
+        assert_eq!(result.body, b"pump-alive");
+
+        let cpu_us = usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0);
+        assert!(
+            cpu_us >= 25_000,
+            "the CPU a self-rescheduling zero-delay chain burns on the pump must \
+             reach cpu_us; got {cpu_us} us. Zero here means the drain ran the \
+             app's JS and returned past `bill_pump_cpu` without it, which is the \
+             under-billing half of the same bug",
+        );
+    }
+
     #[test]
     fn pre_dispatch_bad_envelope_reject_records_platform_counters() {
         // The frame does not decode, so the inner body length is unknowable and
