@@ -479,13 +479,19 @@ mod platform_cli {
 
         // (1a) no index name is at or past PostgreSQL's 63-byte identifier limit.
         //
-        // PostgreSQL truncates a longer name silently, so two distinct authored
-        // names can collapse onto one index with only a NOTICE. The engine refuses
-        // an over-long name on an explicit index op, but a UNIQUE or PRIMARY KEY
-        // constraint name is not covered by that check, and PostgreSQL names the
-        // backing index after the constraint. Those are our longest identifiers, so
-        // the corpus is guarded here until the engine closes it. A stored name of
-        // exactly 63 bytes is already indistinguishable from a truncated one.
+        // Verified against the PostgreSQL this suite runs on. Two over-long index
+        // names created with `IF NOT EXISTS` both report success, emit only a
+        // NOTICE, and leave ONE index behind. The constraint spelling of the same
+        // collision errors instead, so it is the index spelling that fails
+        // silently. A single over-long name of either spelling is truncated with
+        // only a NOTICE, leaving the authored name and the catalog name disagreeing.
+        //
+        // This reads the REALIZED index names rather than the authored ops because
+        // constraint-backed indexes and plain indexes share one relation namespace
+        // per schema: a truncated constraint name on one table collides with a
+        // truncated index name on another. Checking realized names is the only
+        // check that sees the whole budget. A stored name of exactly 63 bytes is
+        // already indistinguishable from a truncated one.
         if !scalar_bool(
             &probe,
             "SELECT NOT EXISTS (SELECT 1 FROM pg_indexes \
