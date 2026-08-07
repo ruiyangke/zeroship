@@ -1,9 +1,29 @@
 //! Usage-event outbox for the worker producer.
 //!
 //! Drained events are persisted to a worker-local redb WAL before publish. A
-//! successful stream publish trims only that event's WAL sequence; failures leave
-//! the event in place so the next drain or process restart replays the same
-//! `event_id`.
+//! successful stream publish trims only that event's WAL sequence; a failure
+//! leaves the event in place so the NEXT DRAIN of the same process replays the
+//! same `event_id`.
+//!
+//! It does NOT survive a process restart in the shipped configuration, and an
+//! earlier version of this comment claimed it did. The default WAL path is
+//! derived from `producer_source`, and both binaries that use it mint that
+//! source with a fresh UUID per boot - `crates/worker/src/main.rs` builds
+//! `{hostname}-{uuid}`, `crates/gateway/src/main.rs` builds
+//! `gate-{hostname}-{uuid}`. A restart therefore opens a DIFFERENT, empty redb
+//! file, orphaning whatever was unpublished and leaving the old file on disk
+//! with nothing that reads it. Nothing in `deploy/` overrides the path;
+//! `USAGE_OUTBOX_WAL_PATH` is set only by the e2e scripts.
+//!
+//! `zeroship-control` does not share the defect: it passes a stable constant
+//! (`DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH`).
+//!
+//! Making the path stable is NOT sufficient on its own and must not be done
+//! alone: redb is single-writer, so co-located producers sharing one path would
+//! fail to open, and a failed open currently degrades to a drain-and-drop task
+//! rather than refusing to boot. Stable paths have to land together with that
+//! fail-closed change, or an intermittent partial loss becomes a permanent
+//! total one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -659,6 +679,14 @@ mod tests {
         });
     }
 
+    /// Proves the WAL layer replays an unpublished event when the SAME path is
+    /// reopened.
+    ///
+    /// It does not prove that a process restart replays anything, despite the
+    /// `drop` + reopen below looking like one. The path is hand-passed on both
+    /// opens; production derives it from a per-boot UUID and so never reopens
+    /// the same file (see the module docs). A test that used
+    /// `build_usage_outbox` with two different boot sources would fail today.
     #[test]
     fn publish_failure_retains_event_and_retries_next_attempt() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
