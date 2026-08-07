@@ -1,22 +1,31 @@
 // No tracked file may carry a NUL byte.
 //
-// A NUL turns a text file binary for SOME of the toolchain, and WHICH grep you get
-// depends on where you are standing. Measured on a clean file and a copy with one
-// NUL appended:
+// A NUL turns a text file binary for the search tools, and BOTH greps in play here
+// are blinded by it - in different ways, neither of which is loud. Measured on a
+// clean file and a copy with one NUL appended, exit codes captured separately:
 //
-//   interactive shell, ugrep 7.5.0     clean -> "1" exit 0    NUL -> EMPTY exit 1
-//   nix devShell, GNU grep 3.12        clean -> "1" exit 0    NUL -> "1"   exit 0
+//                                    LINE MODE          -c
+//   interactive shell, ugrep 7.5.0   EMPTY, exit 1      EMPTY, exit 1
+//   nix devShell, GNU grep 3.12      EMPTY, exit 0      "1",   exit 0
 //
-// So the blindness is a property of the INTERACTIVE environment, not of this
-// repository's build environment: the devShell grep that CI and every test run
-// through counts the match happily. The hazard is real and it is narrower than
-// "every grep-based sweep lies" - it is that a HUMAN OR AGENT SEARCHING BY HAND
-// gets a clean-looking nothing, with no zero count and no error, while the same
-// search inside the devShell finds the line.
+// (Control: the same line-mode search on the clean file prints the line, exit 0.)
+//
+// GNU GREP IS THE WORSE OF THE TWO IN THE MODE PEOPLE USE. It omits the matching
+// line and RETURNS SUCCESS, which is byte-identical to a pattern that genuinely is
+// not there - ugrep at least exits 1, so a caller checking status has a signal.
+// Line mode is what a human or agent runs (`grep -rn pattern .`); the counting
+// mode, where GNU grep answers correctly, is the one nobody audits with.
+//
+// This comment has been wrong twice today, the same way each time: first it said
+// "reports no matches" when the tool prints NOTHING, then it said the devShell grep
+// "counts the match happily" - true of `-c`, false of line mode, measured in one
+// mode and written as a claim about the tool. Both errors were WHAT THE OUTPUT
+// MEANT rather than WHAT IT PRINTED.
 //
 // This is not asserted in a test below, deliberately: ugrep is not on the PATH the
-// test runs under, so an assertion here could only pin the devShell grep - the one
-// that does NOT have the problem - and would read as pinning the one that does.
+// test runs under, so an assertion could only pin one of the two greps while
+// reading as though it pinned the behaviour. The gate itself needs no grep - it
+// reads bytes - which is why it is environment-independent and this header is not.
 // That is how a real NUL got written
 // here: `dialect-support.toml`'s generator built a composite key with a literal
 // 0x00 separator, and searches over the generator read as empty for as long as it
