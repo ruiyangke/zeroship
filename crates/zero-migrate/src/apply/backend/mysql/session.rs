@@ -785,10 +785,16 @@ pub(crate) async fn rollback_one<D: SqlSession>(
     m: &Migration,
     applied_by: &str,
 ) -> Result<(), RollbackError> {
+    // An irreversible migration is a REFUSAL, not a caller bug. See the same gate on
+    // the PostgreSQL leaf: the trait method is public, advertises no `down is Some`
+    // precondition, and irreversible steps are ordinary on the IR path.
     let down = m
         .down
         .as_deref()
-        .expect("rollback_one is only called for RollbackStep::Down (down is Some)");
+        .ok_or_else(|| RollbackError::Irreversible {
+            version: m.version.as_str().to_string(),
+            name: m.name.clone(),
+        })?;
     let version = m.version.as_str();
     let snapshot = read_session_snapshot(conn)
         .await
