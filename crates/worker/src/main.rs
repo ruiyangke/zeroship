@@ -88,6 +88,11 @@ struct WorkerCli {
     worker_key: String,
 
     /// Shutdown drain timeout in seconds.
+    ///
+    /// Zero does NOT mean wait forever. ntex takes its ungraceful branch when the
+    /// timeout is zero and stops workers immediately, dropping in-flight requests,
+    /// so zero is the harshest setting rather than the most patient one. To wait a
+    /// long time, pass a long time.
     #[arg(long = "shutdown-timeout", env = "SHUTDOWN_TIMEOUT", default_value = "30")]
     shutdown_timeout: u64,
 
