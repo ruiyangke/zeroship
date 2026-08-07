@@ -26,7 +26,7 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
 /**
  * Infers the value type from a field definition built via `t.*`.
  *
- * **P5.5 PR 1** — when the field is masked (third `TypeBuilder` brand
+ * when the field is masked (third `TypeBuilder` brand
  * is a non-`"none"` mask kind), the inferred type wraps the bare
  * primitive in `MaskedValue<T>`. The `<col>_masked` sibling column
  * is NEVER part of `Row<S>` — only the parent column appears, with
@@ -136,7 +136,7 @@ export type InferInsertSchema<S> = S extends infer T
   : never;
 
 /**
- * **P7 PR 1** — platform-managed system fields injected into every
+ * platform-managed system fields injected into every
  * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
  * (`crates/plugin-db/src/query.rs`). Creator schemas cannot declare
  * fields with these names — the SDK-side reservation in
@@ -189,7 +189,7 @@ export type SystemFields = {
  * fields remain required; system fields are always present at read
  * time (auto-populated by the platform).
  *
- * **P7 PR 3** — `id` is a typed_id string
+ * `id` is a typed_id string
  * (`<prefix>_<base62(uuidv7)>`) and the system fields are exposed in
  * snake_case only.
  */
@@ -470,7 +470,7 @@ export function err<T>(error: Error): Result<T> {
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json" | "calendarDate";
 
 /**
- * **P5 PR 2** — column-encryption mode. Picks both the nonce-derivation
+ * column-encryption mode. Picks both the nonce-derivation
  * strategy and the AAD shape (Camp A, resolved 2026-05-24):
  *
  * - `randomised` — per-write fresh nonce; AAD binds `(collection,
@@ -489,7 +489,7 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
 export type EncryptionMode = "randomised" | "deterministic";
 
 /**
- * **P5.5 PR 1** — built-in mask transform applied at write time to
+ * built-in mask transform applied at write time to
  * compute the sibling `<col>_masked` column's value from the
  * plaintext. Mirrors `crate::diff::MaskKind` on the Rust side.
  *
@@ -520,7 +520,7 @@ export type MaskKind =
   | "none";
 
 /**
- * **P5.5 PR 1** — sensitivity classification used by the unmask
+ * sensitivity classification used by the unmask
  * authorization (PR 4) and audit (PR 4) machinery. Mirrors
  * `crate::diff::Classification` on the Rust side.
  *
@@ -547,7 +547,7 @@ export type Classification =
   | "internal";
 
 /**
- * **P5.5 PR 1** — options accepted by `.mask(opts)` on a `TypeBuilder`.
+ * options accepted by `.mask(opts)` on a `TypeBuilder`.
  *
  * - `kind`            — required. The mask transform; see {@link MaskKind}.
  * - `classification`  — optional. Defaults to `"pii"` when omitted.
@@ -559,10 +559,10 @@ export interface MaskOpts {
 }
 
 /**
- * **P5.5 PR 1** — wire shape the Rust read path emits for masked
+ * wire shape the Rust read path emits for masked
  * columns (the `__zsmask__` sentinel object).
  *
- * **P9 PR 2** — this wire shape is now consumed entirely Rust-side:
+ * this wire shape is now consumed entirely Rust-side:
  * the row serializer emits the sentinel into the JSON string, and the
  * runtime's rehydration pass (`masked_value::rehydrate_masked_values`)
  * replaces it with a native {@link MaskedValue} v8_class instance at
@@ -591,7 +591,7 @@ export interface MaskedValueRepr {
 }
 
 /**
- * **P5.5 PR 1** — opaque actor descriptor passed to
+ * opaque actor descriptor passed to
  * `MaskedValue.unmask({ actor? })`. PR 4 will wire the round-trip
  * through the unmask RPC; today the type stays minimal (any plain
  * object) so PR 5 (`defineMaskPolicy`) can land the concrete shape.
@@ -599,7 +599,7 @@ export interface MaskedValueRepr {
 export type Actor = Record<string, unknown>;
 
 /**
- * **P9 PR 2** — masked-value wrapper, now a NATIVE v8_class.
+ * masked-value wrapper, now a NATIVE v8_class.
  *
  * `MaskedValue` instances are minted Rust-side by the row serializer's
  * rehydration pass (`crates/plugin-db/src/v8_classes/masked_value.rs`)
@@ -689,7 +689,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
 }
 
 /**
- * **P5 PR 2** — options accepted by `t.encrypted(opts?)`.
+ * options accepted by `t.encrypted(opts?)`.
  *
  * - `mode` — defaults to `"randomised"` (fail-safe).
  * - `keyId` — selects the per-platform root key (env var
@@ -720,7 +720,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * "literal" (C2 discriminator constant), and "union" (C2 discriminated
  * union document shape — proposal §C2).
  *
- * **P7 PR 1** — adds `"id"` (typed_id PK candidate) and `"actor"`
+ * adds `"id"` (typed_id PK candidate) and `"actor"`
  * (session.actor_id source for `created_by` / `updated_by` style
  * columns). These shapes feed the PR 2 CREATE TABLE rewrite that
  * injects the seven platform system fields; PR 1 ships the builders
@@ -729,7 +729,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
 
 /**
- * **P4 PR 2** — distance metric for `t.vector(...)` fields. The three
+ * distance metric for `t.vector(...)` fields. The three
  * metrics map 1:1 to pgvector operator classes (`vector_cosine_ops`,
  * `vector_l2_ops`, `vector_ip_ops`) and to the matching `VectorMetric`
  * variants on the Rust side.
@@ -786,7 +786,7 @@ export interface RefOptions {
  * property typed but never assigned at runtime; the runtime value is
  * just a string, so JSON serialisation is unchanged.
  *
- * **P7 PR 3** — widened from `number & { __zeroshipTable }` to
+ * widened from `number & { __zeroshipTable }` to
  * `string & { __zeroshipTable }` in lockstep with the Rust-side
  * `id TEXT PRIMARY KEY` DDL and the `dispatch_insert` auto-mint pass
  * (which calls `zeroship_core::typed_id::generate(prefix)`). FK
@@ -865,7 +865,7 @@ export interface FieldDef {
    */
   discriminator?: string;
   /**
-   * **P4 PR 2** — declared dimensionality of a `t.vector(...)` field.
+   * declared dimensionality of a `t.vector(...)` field.
    * Present iff `type === "vector"`. The DDL emitter (PG arm) renders
    * `vector(N)` with this value; the index emitter routes through
    * `VectorIndex::ensure_vector_index`. Range: `1..=16000` (pgvector
@@ -873,13 +873,13 @@ export interface FieldDef {
    */
   vectorDims?: number;
   /**
-   * **P4 PR 2** — distance metric for a `t.vector(...)` field. Present
+   * distance metric for a `t.vector(...)` field. Present
    * iff `type === "vector"`. Selects the pgvector opclass for the
    * ivfflat index and the operator for ORDER BY at search time.
    */
   vectorMetric?: VectorMetric;
   /**
-   * **P4 PR 3** — full-text-search marker. Set to `true` by the
+   * full-text-search marker. Set to `true` by the
    * `.fts(language?)` modifier on a `t.string()` field. Every field
    * carrying this flag is folded into a single composite FTS index per
    * collection (Q-P4-B); the index emitter (`build_create_indexes` on
@@ -889,7 +889,7 @@ export interface FieldDef {
    */
   fts?: boolean;
   /**
-   * **P4 PR 3** — tsvector configuration language for an FTS-marked
+   * tsvector configuration language for an FTS-marked
    * column. Honoured on PG (`to_tsvector('pg_catalog.<lang>', ...)`);
    * SQLite FTS5 default tokenizer is language-agnostic Unicode and
    * ignores it. Defaults to `"english"` when `.fts()` is called without
@@ -897,7 +897,7 @@ export interface FieldDef {
    */
   ftsLanguage?: string;
   /**
-   * **P5 PR 2** — column-encryption metadata. Present iff the SDK
+   * column-encryption metadata. Present iff the SDK
    * declared the column with `t.encrypted({ mode, keyId, wraps })`.
    * The DDL emitter renders BYTEA / BLOB regardless of `wraps`; the
    * `wraps` field survives so the validator walks the right
@@ -918,7 +918,7 @@ export interface FieldDef {
     wraps: "string" | "number" | "bytes";
   };
   /**
-   * **P5.5 PR 1** — column-mask metadata. Present iff the SDK declared
+   * column-mask metadata. Present iff the SDK declared
    * the column with `.mask({ kind, classification? })`, OR the column
    * is `t.encrypted(...)` without explicit `.mask(...)` and the
    * schema-normaliser auto-populates the default mask
@@ -942,7 +942,7 @@ export interface FieldDef {
     classification: Classification;
   };
   /**
-   * **P7 PR 1** — typed_id prefix discriminator for `t.id(prefix?)`.
+   * typed_id prefix discriminator for `t.id(prefix?)`.
    * Present iff `type === "id"`. The SDK auto-mint pass (PR 3) will
    * use this prefix to call `typed_id::new(prefix)` when the row is
    * inserted without an explicit id. Absent / undefined means the
@@ -955,7 +955,7 @@ export interface FieldDef {
    */
   idPrefix?: string;
   /**
-   * **P7 PR 1** — explicit nullability for `t.actor()` columns. Set
+   * explicit nullability for `t.actor()` columns. Set
    * to `true` by `.nullable()` (Q-SF-I in the proposal: explicit
    * preferred). The default for `t.actor()` is nullable because
    * system-initiated writes (migrations, background jobs) have no
@@ -963,7 +963,7 @@ export interface FieldDef {
    */
   actorNullable?: boolean;
   /**
-   * **P7 PR 1** — timestamp auto-population modifier set by
+   * timestamp auto-population modifier set by
    * `.auto_now()` / `.auto_now_on_update()` on a `t.timestamp()` field.
    *
    * - `"now"` — DEFAULT NOW() at INSERT. Used for `created_at`-style
@@ -990,7 +990,7 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  * Generic params:
  * - `T` — the inferred TS value type (bare primitive or branded id).
  * - `R` — `true` when the field was marked `.required()`; otherwise `false`.
- * - `M` — **P5.5 PR 1** — the mask kind declared via `.mask({...})`,
+ * - `M` — the mask kind declared via `.mask({...})`,
  *   or the default `"full"` for `t.encrypted()` columns, or
  *   `undefined` for unmasked columns. Surfaces through
  *   `InferFieldDef` so `Row<S>` wraps masked fields in
@@ -1053,7 +1053,7 @@ export class TypeBuilder<
 
   /** Adds a unique index constraint to the field. */
   unique(): this {
-    // **P5 PR 2** — randomised + unique is incoherent: randomised mode
+    // randomised + unique is incoherent: randomised mode
     // produces a fresh nonce per write, so the ciphertext for the
     // same plaintext differs across rows, which defeats any
     // ciphertext-equality uniqueness constraint. Deterministic mode
@@ -1110,7 +1110,7 @@ export class TypeBuilder<
   }
 
   /**
-   * **P4 PR 3** — mark this field as a source for the per-collection
+   * mark this field as a source for the per-collection
    * composite full-text-search index. Only valid on `t.string()` fields;
    * called on any other type throws synchronously with code
    * `FTS_ON_NON_STRING`.
@@ -1156,7 +1156,7 @@ export class TypeBuilder<
   }
 
   /**
-   * **P5.5 PR 1** — declare a column-level mask. The platform emits
+   * declare a column-level mask. The platform emits
    * a pre-computed sibling `<col>_masked` column (Path B) at CREATE
    * TABLE time (PR 2), routes default reads through that sibling
    * (PR 3), and exposes the parent column as `MaskedValue<T>` on
@@ -1262,7 +1262,7 @@ export class TypeBuilder<
   }
 
   /**
-   * **P7 PR 1** — mark the field as nullable. Today this is meaningful
+   * mark the field as nullable. Today this is meaningful
    * only on `t.actor()` (matches Q-SF-I in the proposal: explicit
    * `.nullable()` preferred over implicit). Calling `.nullable()` on
    * any other type sets the `actorNullable` discriminator only when
@@ -1282,7 +1282,7 @@ export class TypeBuilder<
   }
 
   /**
-   * **P7 PR 1** — mark a `t.timestamp()` field as auto-populated to
+   * mark a `t.timestamp()` field as auto-populated to
    * `NOW()` at INSERT. PR 2 emits the DDL as `DEFAULT NOW()`; the
    * INSERT auto-populate pass (PR 3) lets the DB DEFAULT fire when
    * the caller omits the column.
@@ -1306,7 +1306,7 @@ export class TypeBuilder<
   }
 
   /**
-   * **P7 PR 1** — mark a `t.timestamp()` field as auto-populated to
+   * mark a `t.timestamp()` field as auto-populated to
    * `NOW()` at INSERT AND bumped to `NOW()` by every UPDATE. PR 2
    * emits the column as `DEFAULT NOW()`; PR 4 wires the UPDATE
    * builder to append `<col> = NOW()` to every SET clause.
@@ -1475,7 +1475,7 @@ export const t = {
     return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
   },
   /**
-   * **P4 PR 2** — vector embedding field. Stored as pgvector's
+   * vector embedding field. Stored as pgvector's
    * `vector(N)` column type on PG; the runtime materialises a matching
    * ivfflat index per the chosen metric.
    *
@@ -1521,7 +1521,7 @@ export const t = {
     });
   },
   /**
-   * **P4 PR 3** — geographic point field (WGS84, EPSG:4326). Stored as
+   * geographic point field (WGS84, EPSG:4326). Stored as
    * PostGIS's `geography(POINT, 4326)` column on PG; on SQLite (P4 PR 5)
    * a `BLOB` packed `(lat, lng)` × `f64` = 16 bytes.
    *
@@ -1557,7 +1557,7 @@ export const t = {
     return new TypeBuilder<string>({ type: "calendarDate" });
   },
   /**
-   * **P5 PR 2** — byte-array wrap for `t.encrypted({ wraps: t.bytes() })`.
+   * byte-array wrap for `t.encrypted({ wraps: t.bytes() })`.
    *
    * At the JS layer the field is exchanged as a base64-encoded string;
    * at the DB layer it becomes a BYTEA column (always — bytes-typed
@@ -1570,7 +1570,7 @@ export const t = {
     return new TypeBuilder<string>({ type: "bytes" });
   },
   /**
-   * **P5 PR 2** — transparent column encryption. Wraps a string /
+   * transparent column encryption. Wraps a string /
    * number / bytes field with AEAD encryption at the storage boundary.
    *
    * ```ts
@@ -1657,7 +1657,7 @@ export const t = {
     // type so validators see the right user-facing shape (e.g.
     // `validate.ts` rejects `123` for a wraps=string column).
     //
-    // **P5.5 PR 1** — fail-safe default-mask rule (§3 of the
+    // fail-safe default-mask rule (§3 of the
     // sensitive-field-masking proposal): every `t.encrypted()` column
     // gets `mask: { kind: "full", classification: "pii" }` at
     // builder time when no `.mask(...)` is chained. The
@@ -1749,7 +1749,7 @@ export const t = {
    * ```
    */
   /**
-   * **P7 PR 1** — typed_id field. At the JS layer the field is exchanged
+   * typed_id field. At the JS layer the field is exchanged
    * as a string carrying the UUIDv7 + base62 + optional entity prefix
    * (e.g. `"post_01HXYZ..."`). At the DB layer it's a TEXT column.
    *
@@ -1801,7 +1801,7 @@ export const t = {
     return new TypeBuilder<string>(def);
   },
   /**
-   * **P7 PR 1** — actor field. Stores a typed_id at the DB layer
+   * actor field. Stores a typed_id at the DB layer
    * (TEXT) sourced from the current request's `SessionMinter.actor_id`
    * (P3). Used for `created_by` / `updated_by` system fields, and
    * available to creators who want their own actor-tracking columns

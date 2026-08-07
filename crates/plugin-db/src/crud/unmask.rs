@@ -409,7 +409,7 @@ pub async fn dispatch_unmask(
                 mask_meta.classification
             ),
             hint: Some(
-                "Configure mask policy via defineMaskPolicy() in your app's bootstrap (PR 5+).".into(),
+                "Configure mask policy via defineMaskPolicy() in your app's bootstrap.".into(),
             ),
         });
     }

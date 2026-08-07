@@ -67,7 +67,7 @@ interface ZeroshipDbFindOpts {
   orderBy?: Record<string, 1 | -1>;
   select?: string[];
   /**
-   * **P5.5 PR 7** — per-query unmask hint. Each column name in this
+   * per-query unmask hint. Each column name in this
    * array is promoted from `MaskedValue<T>` to bare plaintext on the
    * returned row(s). Authorisation is checked upfront against the
    * per-app mask policy; a single unauthorised column rejects the
@@ -83,7 +83,7 @@ interface ZeroshipDbFindOpts {
   actor?: Record<string, unknown>;
   unmaskReason?: string;
   /**
-   * **P7 PR 5** — opt out of the default `AND deleted_at IS NULL`
+   * opt out of the default `AND deleted_at IS NULL`
    * auto-filter. When `true`, soft-deleted rows participate in the
    * result set. Default omitted means "filter soft-deleted out" on
    * post-migration tables (no-op on pre-migration tables where the
@@ -229,7 +229,7 @@ interface ZeroshipCollection {
 
   /** Update one document. Returns the updated row or `null` when nothing matched.
    *
-   *  **P9 PR 1** — renamed from `updateOne` to `update` to align with
+   *  renamed from `updateOne` to `update` to align with
    *  the SDK and Prisma/Convex singular-default convention. */
   update(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
 
@@ -238,9 +238,9 @@ interface ZeroshipCollection {
 
   /** Delete one document. Returns the deleted row or `null` when nothing matched.
    *
-   *  **P9 PR 1** — renamed from `deleteOne` to `delete`.
+   *  renamed from `deleteOne` to `delete`.
    *
-   *  **P7 PR 5** — on post-migration tables (those carrying the
+   *  on post-migration tables (those carrying the
    *  platform `deleted_at` column) this performs a SOFT delete:
    *  `UPDATE ... SET deleted_at = NOW()` and the returned row carries
    *  the populated `deleted_at`. On pre-migration tables it still
@@ -250,22 +250,22 @@ interface ZeroshipCollection {
 
   /** Delete multiple documents. Returns the count of affected rows.
    *
-   *  **P7 PR 5** — same Path C semantics as `delete`. */
+   *  same Path C semantics as `delete`. */
   deleteMany(filter: ZeroshipDbFilter): Promise<number>;
 
-  /** **P7 PR 5** — explicit hard-delete. Always emits `DELETE FROM ...`,
+  /** explicit hard-delete. Always emits `DELETE FROM ...`,
    *  regardless of the system-fields marker. */
   purge(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
-  /** **P7 PR 5** — bulk hard-delete. Returns the count of affected rows. */
+  /** bulk hard-delete. Returns the count of affected rows. */
   purgeMany(filter: ZeroshipDbFilter): Promise<number>;
 
-  /** **P7 PR 5** — restore a soft-deleted row by clearing `deleted_at`.
+  /** restore a soft-deleted row by clearing `deleted_at`.
    *  Refuses with `restore_unsupported_legacy_table` on pre-migration
    *  tables. */
   restore(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
-  /** **P7 PR 5** — bulk-restore. Returns the count of restored rows. */
+  /** bulk-restore. Returns the count of restored rows. */
   restoreMany(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Upsert a document (insert or update on conflict). Returns the row.
@@ -273,7 +273,7 @@ interface ZeroshipCollection {
    *  be a non-empty array of column names; missing / empty rejects
    *  with `TypeError`.
    *
-   *  **P9 PR 1** — `findOrCreate` was removed; callers use `upsert`
+   *  `findOrCreate` was removed; callers use `upsert`
    *  directly. If the SDK consumer needs the legacy `{row, created}`
    *  envelope, do an explicit `find(filter).first()` first, branch on
    *  `null`, and decide. */
@@ -305,7 +305,7 @@ interface ZeroshipCollection {
   ): Promise<Record<string, unknown>[]>;
 
   /**
-   * **P4 PR 2** — unified vector / FTS search entry. Discriminated by
+   * unified vector / FTS search entry. Discriminated by
    * `args.vector` (pgvector path) or `args.text` (FTS — PR 3). Each
    * returned row carries a synthetic `_distance` (vector) or `_rank`
    * (FTS) column.
@@ -323,7 +323,7 @@ interface ZeroshipCollection {
   openSubscription(): ZeroshipSubscription;
 
   /**
-   * **P9 PR 2** — single-cell unmask round-trip. The collection name
+   * single-cell unmask round-trip. The collection name
    * is inherited from this receiver (not passed in args). Reachable
    * from `Collection.unmaskField`; resolves with the bare plaintext
    * string. Granted AND denied dispatches both write an audit row.
@@ -335,7 +335,7 @@ interface ZeroshipCollection {
   ): Promise<string>;
 
   /**
-   * **P9 PR 2** — bulk unmask round-trip (collection inherited from
+   * bulk unmask round-trip (collection inherited from
    * this receiver). Authorisation is atomic: a single denied
    * (rowPk, column) pair refuses the whole call with
    * `bulk_unmask_partial_unauthorized`. Reachable from
@@ -404,7 +404,7 @@ interface ZeroshipSubscription {
   close(): void;
 }
 
-// **P9 PR 4** — `ZeroshipMigrations` and `ZeroshipReplication` moved to
+// `ZeroshipMigrations` and `ZeroshipReplication` moved to
 // `@zeroship/bootstrap`'s framework-internal `internal.d.ts` (reached
 // via `__platform.migrations` / `__platform.replication`, not
 // `env.db.*`). Absent from this published surface.
@@ -422,7 +422,7 @@ interface ZeroshipSubscription {
  * not on this surface.
  */
 interface ZeroshipDb {
-  // **P9 PR 4** — the platform-internal entry points moved off `env.db`
+  // the platform-internal entry points moved off `env.db`
   // to the `__platform` capability handle (reached only via a V8
   // private symbol; §8). Removed from this published surface:
   //   - `registerModel`         → `__platform.registerModel`
@@ -436,7 +436,7 @@ interface ZeroshipDb {
   // `env.db.__platform` (string access) is actively refused at runtime
   // with `platform_internal_only`.
   //
-  // **P9 PR 2** — `unmaskField` / `bulkUnmaskFields` moved off `Db` to
+  // `unmaskField` / `bulkUnmaskFields` moved off `Db` to
   // `Collection` (collection name inherited from the receiver). See
   // `ZeroshipCollection.unmaskField` / `.bulkUnmask`. `MaskedValue`
   // instances dispatch unmask natively from their own bound `_meta`.
@@ -476,7 +476,7 @@ interface ZeroshipDb {
     },
   ): Promise<R>;
 
-  // **P9 PR 4** — `migrations`, `startReplicationConsumer`, and
+  // `migrations`, `startReplicationConsumer`, and
   // `replication` moved to the `__platform` capability handle (see the
   // note at the top of this interface and `ZeroshipDbPlatform` in
   // `@zeroship/bootstrap`'s `internal.d.ts`). They are no longer on the
