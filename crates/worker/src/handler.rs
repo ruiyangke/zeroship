@@ -368,11 +368,18 @@ pub async fn dispatch(
     // Enter isolate, dispatch through the unified fetch handler. Sample the
     // V8 thread's CPU clock (CLOCK_THREAD_CPUTIME_ID — the same clock the
     // CPU limiter arms) around the synchronous isolate entry: the delta is
-    // the real CPU time this request burned in V8. (For a `Pending` handler
-    // the async continuation runs on the shared V8 actor thread via the
-    // pump and is not attributable to this request without a per-request
-    // accumulator the kernel does not expose; the synchronous burn captured
-    // here is the faithful, non-fabricated lower bound — see report.)
+    // the real CPU time this request burned in V8.
+    //
+    // This is the REQUEST-attributable half of the app's CPU, not all of it.
+    // For a `Pending` handler the async continuation runs on the shared V8
+    // actor thread via the pump, and no per-request accumulator the kernel
+    // exposes could attribute it back to this request. That does not make it
+    // unbillable: `RuntimeInner::bill_pump_cpu` samples the same CPU clock
+    // around every pump V8 window and emits it to the app's `cpu_us` meter,
+    // which is keyed by app — the granularity billing consumes. So the
+    // number recorded here is a partial figure for THIS request and a
+    // complete one for nothing; the app's `cpu_us` total is this plus the
+    // pump's contribution.
     let cpu_start = zeroship_runtime::init::thread_cpu_time();
     let outcome = {
         runtime.enter_isolate();
@@ -2520,6 +2527,68 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         assert_generated_error_metering(result, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    /// CPU burned AFTER the first await must land on the `cpu_us` meter.
+    ///
+    /// The handler returns a pending promise straight away, so the
+    /// synchronous isolate entry this dispatch path times around
+    /// `call_fetch_handler_with_user` sees almost nothing. All the work
+    /// happens in the timer continuation, which V8 runs on the runtime's
+    /// pump — and pump CPU used to reach no meter at all, so an app that does
+    /// its work in promise chains, `setInterval` callbacks or stream pushes
+    /// was billed as if it were idle. `RuntimeInner::bill_pump_cpu` now emits
+    /// each pump V8 window to the app's `cpu_us` meter, which is keyed by app
+    /// — the granularity billing consumes — even though the work is not
+    /// attributable to any one request.
+    ///
+    /// `setTimeout(fn, 0)` specifically lands in `RuntimeState::ready_timers`
+    /// and fires inline in the pump's PHASE 1 drain, a window the per-app CPU
+    /// budget never saw either. Keeping the delay at 0 here is therefore
+    /// deliberate: it exercises the arm that had no accounting whatsoever.
+    ///
+    /// The burn is wall-clock driven inside JS but it is a spin loop, so the
+    /// thread CPU clock the pump samples tracks it. The assertion floor is
+    /// well under the burn to absorb scheduling noise while staying far
+    /// above the few milliseconds of module init that the synchronous entry
+    /// legitimately contributes.
+    #[test]
+    fn dispatch_meters_cpu_burned_on_the_pump_after_an_await() {
+        let source = br#"
+            export default {
+              async fetch() {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const deadline = Date.now() + 300;
+                while (Date.now() < deadline) {}
+                return new Response("burned");
+              }
+            };
+        "#;
+        let Some(result) =
+            run_metered_dispatch(source, AppRuntimeLimits::default(), b"pump-cpu", true)
+        else {
+            return;
+        };
+
+        assert_eq!(
+            result.status,
+            StatusCode::OK,
+            "the burn handler must complete normally; body was {}",
+            String::from_utf8_lossy(&result.body),
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "requests"),
+            Some(1),
+            "exactly one request",
+        );
+
+        let cpu_us = usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0);
+        assert!(
+            cpu_us >= 200_000,
+            "a 300 ms spin loop that runs on the pump must be metered as \
+             cpu_us; got {cpu_us} us, which means the pump's V8 window burned \
+             the app's CPU without billing it",
+        );
     }
 
     #[test]
