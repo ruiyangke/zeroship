@@ -126,15 +126,26 @@ impl MockOP {
         )
     }
 
-    /// Sign an EdDSA JWT (id_token or access JWT) with the standard claims.
-    fn sign(&self, claims: serde_json::Value) -> String {
+    /// Sign an EdDSA JWT with an explicit `typ` header.
+    ///
+    /// The default `typ` the encoder writes is `JWT`, which is right for an ID
+    /// token and wrong for an access token: the RP verifier hard-checks
+    /// `at+jwt` per RFC 9068 and rejects anything else before it looks at a
+    /// single claim.
+    fn sign_with_typ(&self, claims: serde_json::Value, typ: &str) -> String {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         let der = self.signing.to_pkcs8_der().expect("pkcs8");
         let key = EncodingKey::from_ed_der(der.as_bytes());
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
+        header.typ = Some(typ.to_owned());
         encode(&header, &claims, &key).expect("sign jwt")
+    }
+
+    /// Sign an EdDSA ID token with the standard claims.
+    fn sign(&self, claims: serde_json::Value) -> String {
+        self.sign_with_typ(claims, "JWT")
     }
 
     fn id_token(&self) -> String {
@@ -158,15 +169,22 @@ impl MockOP {
         // profile facts live on the ID token. This is what makes the BFF minor
         // fix observable: a reload-recovery that sourced identity ONLY from the
         // access JWT would silently drop name/avatar.
-        self.sign(serde_json::json!({
-            "iss": MOCK_ISSUER,
-            "sub": self.user_id.to_string(),
-            "aud": "https://api.zeroship.ai",
-            "client_id": self.client_id,
-            "exp": now + 3600,
-            "iat": now,
-            "scope": "openid email profile offline_access",
-        }))
+        self.sign_with_typ(
+            serde_json::json!({
+                "iss": MOCK_ISSUER,
+                "sub": self.user_id.to_string(),
+                "aud": "https://api.zeroship.ai",
+                "client_id": self.client_id,
+                "exp": now + 3600,
+                "iat": now,
+                // RFC 9068 §2.2 requires `jti`, and the RP enforces it by
+                // deserializing it as a non-optional field. A fresh one per
+                // token, as a real OP would mint.
+                "jti": uuid::Uuid::new_v4().to_string(),
+                "scope": "openid email profile offline_access",
+            }),
+            "at+jwt",
+        )
     }
 
     /// The ID token returned on a `refresh_token` grant. Carries DISTINCT
