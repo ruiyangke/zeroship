@@ -1,16 +1,23 @@
 // No tracked file may carry a NUL byte.
 //
-// A NUL turns a text file binary for most of the toolchain. The local `grep` is
-// ugrep 7.5.0, and its behaviour is quieter than "reports no matches" suggests.
-// Measured on a clean file and a copy with one NUL appended:
+// A NUL turns a text file binary for SOME of the toolchain, and WHICH grep you get
+// depends on where you are standing. Measured on a clean file and a copy with one
+// NUL appended:
 //
-//   grep -c needle clean.txt   ->  stdout "1", exit 0
-//   grep -c needle nul.txt     ->  stdout EMPTY, exit 1, stderr EMPTY
+//   interactive shell, ugrep 7.5.0     clean -> "1" exit 0    NUL -> EMPTY exit 1
+//   nix devShell, GNU grep 3.12        clean -> "1" exit 0    NUL -> "1"   exit 0
 //
-// It does not print a zero count. It prints NOTHING and exits 1, which is
-// byte-identical to a file that genuinely lacks the pattern unless the caller was
-// also reading the exit code. So a NUL anywhere in the tree makes every subsequent
-// search over that file return a clean-looking nothing. That is how a real one got written
+// So the blindness is a property of the INTERACTIVE environment, not of this
+// repository's build environment: the devShell grep that CI and every test run
+// through counts the match happily. The hazard is real and it is narrower than
+// "every grep-based sweep lies" - it is that a HUMAN OR AGENT SEARCHING BY HAND
+// gets a clean-looking nothing, with no zero count and no error, while the same
+// search inside the devShell finds the line.
+//
+// This is not asserted in a test below, deliberately: ugrep is not on the PATH the
+// test runs under, so an assertion here could only pin the devShell grep - the one
+// that does NOT have the problem - and would read as pinning the one that does.
+// That is how a real NUL got written
 // here: `dialect-support.toml`'s generator built a composite key with a literal
 // 0x00 separator, and searches over the generator read as empty for as long as it
 // was there (fixed in 301ac74 by spelling the separator as the two-character
@@ -143,3 +150,4 @@ test("no tracked file contains a NUL byte", (t) => {
   // under any reporter - what is lost is the reader's view of a PASS.
   t.diagnostic(`scanned ${scanned} of ${files.length} tracked files, 0 carry a NUL byte`);
 });
+
