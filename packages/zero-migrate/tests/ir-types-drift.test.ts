@@ -354,6 +354,72 @@ test("RefAction tokens match the schema (C1 FK actions)", () => {
   assert.deepEqual(enumTokens(schema.$defs.RefAction), TS.RefAction);
 });
 
+// Three closed string-enum defs (VectorMetric, IrMaskKind, IrClassification) are
+// absent from ENUM_DEFS in scripts/gen-ir-types.mjs, so nothing generates them:
+// their TS mirrors are hand-typed unions in src/generated/ir.ts. That left them
+// outside every gate below - the regenerate-and-diff check only covers what the
+// generator emits, and the Op/Expr tag pins only cover tagged variants. Renaming
+// a VectorMetric token in the engine schema therefore kept CI green while
+// t.vector({ metric }) and .mask({ kind, classification }) went on offering the
+// old tokens to migration authors. The two tests below close that hole: the
+// first pins the hand-typed unions to the schema, the second fails when a NEW
+// closed enum appears in the schema with no TS mirror at all.
+
+const irTsSource = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+const enumsTsSource = readFileSync(resolve(here, "../src/generated/enums.ts"), "utf8");
+
+/** The sorted string-literal members of an `export type X = "a" | "b";` alias,
+ *  which may wrap across lines. Null when the source declares no such alias. */
+function tsUnionTokens(source: string, name: string): string[] | null {
+  const m = source.match(new RegExp(`^export type ${name}\\s*=([^;]*);`, "m"));
+  if (!m) return null;
+  return [...m[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((t) => t[1]).sort();
+}
+
+/** Schema def name -> the `ir.ts` alias that hand-mirrors it. The engine and the
+ *  DSL spell two of these differently (IrMaskKind is MaskKind, IrClassification
+ *  is Classification), which is why the mapping has to be explicit. */
+const IR_TS_HAND_AUTHORED_ENUMS: Record<string, string> = {
+  VectorMetric: "VectorMetric",
+  IrMaskKind: "MaskKind",
+  IrClassification: "Classification",
+};
+
+test("hand-authored ir.ts token unions match their schema enum defs", () => {
+  for (const [defName, tsName] of Object.entries(IR_TS_HAND_AUTHORED_ENUMS)) {
+    const declared = tsUnionTokens(irTsSource, tsName);
+    assert.ok(declared, `src/generated/ir.ts must declare "export type ${tsName}"`);
+    assert.deepEqual(
+      declared,
+      enumTokens(schema.$defs[defName]),
+      `${tsName} drifted from the schema ${defName} tokens - update src/generated/ir.ts`,
+    );
+  }
+});
+
+test("every closed string-enum schema def has a TypeScript mirror", () => {
+  const closed = Object.entries(schema.$defs)
+    .filter(
+      ([, def]: [string, any]) =>
+        Array.isArray(def.oneOf) &&
+        def.oneOf.length > 0 &&
+        def.oneOf.every((b: any) => typeof b.const === "string"),
+    )
+    .map(([name]) => name)
+    .sort();
+  const unmirrored = closed.filter(
+    (name) => tsUnionTokens(enumsTsSource, name) === null && !(name in IR_TS_HAND_AUTHORED_ENUMS),
+  );
+  assert.deepEqual(
+    unmirrored,
+    [],
+    "closed string-enum schema defs reach no TypeScript type. Either add them to " +
+      "ENUM_DEFS in scripts/gen-ir-types.mjs so they are generated into enums.ts, " +
+      "or hand-author them in src/generated/ir.ts and register them in " +
+      "IR_TS_HAND_AUTHORED_ENUMS so the pin above covers them.",
+  );
+});
+
 // The per-op FIELD-presence drift gate. This is the gate the
 // stale-`ir.ts` review asked for: had it existed, the un-regenerated `ir.ts` (a
 // removed `ifExists`, a missing `schema`/`existenceGuard`) would have FAILED CI
