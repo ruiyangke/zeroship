@@ -61,6 +61,22 @@ serde = { workspace = true, optional = true }
 name = "zeroship-platform-migrate"
 required-features = ["platform-cli"]
 
+# The whole body of this suite is `#[cfg(feature = "platform-cli")] mod
+# platform_cli`, because it drives `src/platform.rs`, which is gated the same way
+# to keep V8 out of the base library surface.
+#
+# Without this declaration the target still BUILDS without the feature - the
+# module compiles away and the binary runs with nothing in it, printing
+# "running 0 tests ... ok. 0 passed". `cargo test --workspace` therefore reported
+# this suite as passing while executing none of its 8 tests. Declaring the
+# requirement makes cargo skip the target instead of running an empty one, so the
+# workspace run stops making a claim it cannot support. CI runs it with the
+# feature enabled as its own step.
+[[test]]
+name = "platform_migrate"
+path = "tests/platform_migrate.rs"
+required-features = ["platform-cli"]
+
 [dev-dependencies]
 compio = { workspace = true }
 tempfile = { workspace = true }
