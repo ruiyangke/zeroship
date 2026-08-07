@@ -79,6 +79,33 @@ impl MigrationStore {
         Ok(())
     }
 
+    /// The migration already awaiting approval for this app with the SAME request
+    /// body, if there is one.
+    ///
+    /// What an operator approves is the CONTENT, so identical content is one
+    /// pending migration however many times it is submitted. Without this a
+    /// retrying deploy inserts a fresh row per attempt: the operator sees several
+    /// rows for one decision, approving one leaves the rest pending forever, and
+    /// nothing reaps them.
+    pub async fn find_pending_for_request(
+        &self,
+        app_id: Uuid,
+        request_body: &serde_json::Value,
+    ) -> Result<Option<Uuid>, MigrationStoreError> {
+        let client = self.connect().await?;
+        let rows = client
+            .query(
+                "SELECT migration_id FROM zeroship.migrated_migrations \
+                  WHERE app_id = $1 AND status = 'pending_approval' \
+                    AND request_body = $2::jsonb \
+                  ORDER BY submitted_at ASC LIMIT 1",
+                &[&app_id, &request_body],
+            )
+            .await
+            .map_err(MigrationStoreError::Query)?;
+        Ok(rows.first().map(|row| row.get("migration_id")))
+    }
+
     pub async fn get_pending(
         &self,
         app_id: Uuid,

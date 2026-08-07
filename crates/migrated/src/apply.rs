@@ -421,6 +421,20 @@ async fn apply_ir_documents_with_policy(
             let gated_versions = gated_versions_for_policy(&policy, &schema, &report);
             let requires_approval = !gated_versions.is_empty();
             if requires_approval {
+                // A re-submission of content already awaiting approval names the
+                // existing migration instead of opening a second one. The operator
+                // approves content, so two rows for one content would be two
+                // decisions where there is one, and approving either would leave
+                // the other pending with nothing to reap it.
+                if let Some(existing) = migration_store
+                    .find_pending_for_request(*app_id, &request_body)
+                    .await?
+                {
+                    return Err(ApplyRequestError::ApprovalRequiredPending {
+                        migration_id: existing,
+                        gated_versions,
+                    });
+                }
                 migration_store
                     .insert_pending(StoreMigrationInput {
                         app_id: *app_id,
