@@ -1,5 +1,5 @@
 /**
- * Cut 1 — the MANUAL schema source (the new capability).
+ * The MANUAL schema source: a committed `schema.ts` of `@zeroship/db` builders.
  *
  * A hand-written `schema.ts` (a map of collection → `@zeroship/db` builder)
  * evaluates → `CollectionDescriptorDto[]` → `genArtifacts({ descriptors })` →
@@ -109,7 +109,7 @@ export const schema = {
 };
 `;
 
-describe("Cut 1 — manual schema source", () => {
+describe("manual schema source", () => {
   test("writes a valid v1 schema.runtime.json + an augmentation env.db.ts", async () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
@@ -156,7 +156,7 @@ describe("Cut 1 — manual schema source", () => {
     }
   });
 
-  test("env.db.ts is the module augmentation over the author's schema.ts (§11.3)", async () => {
+  test("env.db.ts is the module augmentation over the author's schema.ts", async () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
@@ -271,7 +271,7 @@ describe("Cut 1 — manual schema source", () => {
   });
 });
 
-describe("Cut 1 — NormalizedSchema → CollectionDescriptorDto mapping", () => {
+describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
   test("common facets map onto the DTO field shape", async () => {
     const { schema: defineSchema, t } = await import("@zeroship/db");
     const builder = defineSchema({

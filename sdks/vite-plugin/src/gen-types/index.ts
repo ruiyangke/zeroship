@@ -10,10 +10,15 @@
  *
  * Both write `schema.runtime.json` (the v1 RuntimeSchemaDescriptor packed into
  * the `.zship`). They differ only in `env.db.ts`:
- *  - GENERATED writes the inline `const schema = { … } as const` literal
- *    `genArtifacts` emits (migrations are the source of truth).
- *  - MANUAL writes an AUGMENTATION over the author's `schema.ts` (§11.3): the
- *    author owns `schema.ts`; `env.db.ts` just re-exports its typing.
+ *  - GENERATED renders an inline `const schema = { ... } as const` literal of
+ *    `@zeroship/db` builder calls from that descriptor (migrations are the
+ *    source of truth, so there is no `schema.ts` to point at).
+ *  - MANUAL writes an AUGMENTATION over the author's `schema.ts`: the author
+ *    owns `schema.ts`; `env.db.ts` just re-exports its typing.
+ *
+ * Neither uses the engine's own `envDbTs`: that string round-trips the folded IR
+ * back into the *migration authoring* DSL (`from "zero-migrate"`), which is the
+ * engine's artifact, not a creator app's type surface.
  *
  * `--check` (`{ check: true }`) regenerates in memory and diffs against the
  * committed artifacts — a HARD drift gate, no write. There is no CLI to be
@@ -27,6 +32,7 @@ import { loadMigrateAddon, type GenArtifactsReply } from "./addon.js";
 import { CONFINED_SCHEMA_EMIT_CEILING_TOML } from "./confined-ceiling.js";
 import { recordMigrationsDir } from "./recorder.js";
 import { evaluateSchemaModule, schemaModuleToDescriptors } from "./manual.js";
+import { renderGeneratedEnvDb, type RuntimeDescriptor } from "./render-env-db.js";
 
 /** The two committed artifact filenames gen-types emits. */
 export const RUNTIME_DESCRIPTOR_FILE = "schema.runtime.json";
@@ -105,12 +111,10 @@ export async function genTypesFromMigrations(
     charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
   });
   const runtimeJson = unwrap(reply, "generated migration source");
-  const envDbTs = reply.envDbTs;
-  if (envDbTs === undefined) {
-    throw new Error(
-      "gen-types: the generated source produced no env.db.ts (genArtifacts.envDbTs was empty)",
-    );
-  }
+  // The typed surface is rendered HERE, off the runtime descriptor - the engine's
+  // own `envDbTs` re-authors the fold in the migration DSL, which a deployed app
+  // neither depends on nor gets `env.db` typing from.
+  const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson));
   return emit(outDir, envDbTs, runtimeJson, opts.check ?? false);
 }
 
@@ -126,8 +130,29 @@ function unwrap(reply: GenArtifactsReply, source: string): string {
   return reply.runtimeJson;
 }
 
+/** Parse the emitted `schema.runtime.json` back into the descriptor the
+ *  `env.db.ts` renderer reads. A parse failure here is an emitter bug, so it
+ *  surfaces as a build error rather than a silently empty schema. */
+function parseRuntimeDescriptor(runtimeJson: string): RuntimeDescriptor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(runtimeJson);
+  } catch (cause) {
+    throw new Error(
+      `gen-types: the generated source emitted an unparseable ${RUNTIME_DESCRIPTOR_FILE}`,
+      { cause },
+    );
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error(
+      `gen-types: the generated source emitted a non-object ${RUNTIME_DESCRIPTOR_FILE}`,
+    );
+  }
+  return parsed as RuntimeDescriptor;
+}
+
 /**
- * Render the MANUAL `env.db.ts` augmentation (§11.3): import the author's
+ * Render the MANUAL `env.db.ts` augmentation: import the author's
  * `schema` and declare `Env.db = Db<typeof schema>`. The import path is relative
  * from the out dir to `schema.ts`, extension-stripped, always `./`-anchored and
  * POSIX-slashed for a stable, cross-platform module specifier.

@@ -1,12 +1,13 @@
 /**
- * Cut 2 — the GENERATED schema source (record `op.*` migrations → genArtifacts).
+ * The GENERATED schema source: record `op.*` migrations, fold via genArtifacts.
  *
  * The generated front-end records each `.ts` migration into an IR envelope
  * (pure-JS recorder, no CLI) and folds the envelopes through the Rust
- * `genArtifacts` verb → the inline `const schema = { … } as const` `env.db.ts`
- * literal + a valid v1 `schema.runtime.json` carrying the 7 injected system
- * fields + system indexes. These tests run the LIBRARY path in-process — no
- * subprocess is ever spawned.
+ * `genArtifacts` verb into a valid v1 `schema.runtime.json` carrying the 7
+ * injected system fields + system indexes, off which gen-types then renders the
+ * inline `const schema = { ... } as const` `env.db.ts` literal of
+ * `@zeroship/db` builder calls. These tests run the LIBRARY path in-process -
+ * no subprocess is ever spawned.
  *
  * The db-hitcounter example is the golden proof: regenerating its committed
  * artifacts from its migrations reproduces them byte-identically (`--check`
@@ -29,6 +30,9 @@ import {
 
 /** The db-hitcounter example — the golden generated app. */
 const HITCOUNTER = resolve(import.meta.dirname, "../../../../examples/db-hitcounter");
+
+/** The scaffold every new creator app is stamped from. */
+const SCAFFOLD = resolve(import.meta.dirname, "../../../create-zeroship-app/template");
 
 /** The 7 platform system fields the producer injects into every collection. */
 const SYSTEM_FIELDS = [
@@ -95,7 +99,7 @@ export default {
 };
 `;
 
-describe("Cut 2 — generated schema source (record → genArtifacts)", () => {
+describe("generated schema source (record -> genArtifacts)", () => {
   test("records a migration → valid v1 descriptor + all 7 system fields, no subprocess", async () => {
     const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
     const outDir = join(fx.root, "generated/zeroship");
@@ -145,6 +149,33 @@ describe("Cut 2 — generated schema source (record → genArtifacts)", () => {
     }
   });
 
+  test("the generated env.db.ts imports ONLY runtime deps a scaffolded app has", async () => {
+    // The generated artifact is committed into the creator's app and typechecked
+    // by their tsc. Every specifier it names must therefore resolve from the
+    // scaffold's own dependencies. A schema-toolchain-internal package (the
+    // migration engine, say) would typecheck here and break there, so pin the
+    // whole import set rather than spot-checking one specifier.
+    const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
+    const outDir = join(fx.root, "generated/zeroship");
+    try {
+      await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+      const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
+
+      // Every `from "..."` / bare `import "..."` specifier in the emitted module.
+      const specifiers = new Set<string>();
+      for (const m of envDb.matchAll(/\bfrom\s+"([^"]+)"/g)) specifiers.add(m[1]!);
+      for (const m of envDb.matchAll(/\bimport\s+"([^"]+)"/g)) specifiers.add(m[1]!);
+
+      assert.deepEqual(
+        [...specifiers].sort(),
+        ["@zeroship/db"],
+        "generated env.db.ts imports exactly @zeroship/db",
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   test("db-hitcounter regenerates BYTE-IDENTICAL to its committed artifacts (--check clean)", async () => {
     // The proof: the committed generated/zeroship artifacts are exactly what the
     // in-process emitter produces from the migrations. `--check` regenerates in
@@ -153,5 +184,20 @@ describe("Cut 2 — generated schema source (record → genArtifacts)", () => {
     const migDir = join(HITCOUNTER, "migrations");
     const res = await genTypesFromMigrations(migDir, outDir, { check: true });
     assert.equal(res.status, "checked", "committed db-hitcounter artifacts reproduce from migrations");
+  });
+
+  test("the scaffold template's committed artifacts regenerate BYTE-IDENTICAL too", async () => {
+    // The template ships `generated/zeroship/*` so a freshly scaffolded app
+    // typechecks before its first `pnpm dev`. Nothing regenerates them for us -
+    // they are committed by hand whenever the template's migrations change - so
+    // without this they drift silently and every new app starts from a schema
+    // surface that does not match its own migrations. db-hitcounter's golden
+    // does not cover it: different migrations, and an example nobody stamps.
+    const res = await genTypesFromMigrations(
+      join(SCAFFOLD, "migrations"),
+      join(SCAFFOLD, "generated/zeroship"),
+      { check: true },
+    );
+    assert.equal(res.status, "checked", "committed scaffold artifacts reproduce from migrations");
   });
 });
