@@ -19,6 +19,8 @@ use zeroship_control::{
     SecretString, StripeStore,
 };
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -381,6 +383,16 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     assert_eq!(detail["amount_cents"], 1234);
     assert_eq!(detail["stripe_event_id"], event_id);
     assert_eq!(detail["stripe_object_id"], stripe_object_id);
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(conn);
+    drop(seed);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// PR-1 (billing-ops gap #26): a paid INFRA invoice webhook appends a `charge`
@@ -459,8 +471,10 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
         .header("content-type", "application/json")
         .set_payload(body.to_string())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK);
 
     // A single `charge` row was appended for exactly the cash collected.
     let rows = seed
@@ -492,6 +506,11 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
         .expect("read invoice");
     assert_eq!(inv[0].get::<_, String>("status"), "finalized");
     assert_eq!(inv[0].get::<_, i64>("total_cents"), 4500);
+
+    drop(seed);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// POST a webhook body to `$app`, optionally with a `stripe-signature` header.
@@ -613,21 +632,25 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
 
     // Delivery #1 — fresh event id, full cash.
     let evt1 = format!("evt_idem1_{}", Uuid::new_v4().simple());
-    let r1 = post_webhook!(
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = post_webhook!(
         app,
         infra_invoice_paid_body(&evt1, &provider_invoice_id, creator_id, 4500),
         None
-    );
-    assert_eq!(r1.status(), StatusCode::OK, "first delivery processed");
+    )
+    .status();
+    assert_eq!(status1, StatusCode::OK, "first delivery processed");
 
     // Delivery #2 — DIFFERENT event id, SAME Stripe invoice + cumulative amount.
     let evt2 = format!("evt_idem2_{}", Uuid::new_v4().simple());
-    let r2 = post_webhook!(
+    let status2 = post_webhook!(
         app,
         infra_invoice_paid_body(&evt2, &provider_invoice_id, creator_id, 4500),
         None
-    );
-    assert_eq!(r2.status(), StatusCode::OK, "second (distinct-evt) delivery processed");
+    )
+    .status();
+    assert_eq!(status2, StatusCode::OK, "second (distinct-evt) delivery processed");
 
     // Both events were claimed (distinct ids), yet exactly ONE charge row exists.
     assert_eq!(ledger_count(&conn, &evt1).await, 1, "evt1 claimed");
@@ -641,6 +664,11 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
         .await
         .expect("cash_collected");
     assert_eq!(cash, 4500, "cash_collected must be the single amount, NOT doubled");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// CRITICAL-1 (same-event retry leg): the charge-row append runs BEFORE the fallible
@@ -682,9 +710,11 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
 
     // First delivery: the charge row is appended, THEN the settlement-id fetch 500s
     // → 500, event NOT claimed.
-    let r1 = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r1.status(),
+        status1,
         StatusCode::INTERNAL_SERVER_ERROR,
         "settlement-fetch failure fails closed → retryable 5xx",
     );
@@ -696,8 +726,8 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     );
 
     // Retry (SAME event id) — the mock now serves the invoice; append once → 200.
-    let r2 = post_webhook!(app, &body, None);
-    assert_eq!(r2.status(), StatusCode::OK, "retry processed (not lost)");
+    let status2 = post_webhook!(app, &body, None).status();
+    assert_eq!(status2, StatusCode::OK, "retry processed (not lost)");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "retry claimed once");
 
     // EXACTLY one charge row across the two deliveries.
@@ -724,6 +754,11 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
         .expect("count pi refs")[0]
         .get::<_, i64>("n");
     assert_eq!(pi_refs, 1, "the fetched pi_ linkage was recorded on retry (D2)");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// MAJOR-2: a TRANSIENT `append_charge` failure must NOT be swallowed-then-claimed
@@ -781,9 +816,11 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     })
     .to_string();
 
-    let r = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::INTERNAL_SERVER_ERROR,
         "an append failure must fail the webhook closed (retryable 5xx)",
     );
@@ -794,6 +831,11 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     );
     // No charge row was committed (the INSERT itself failed).
     assert_eq!(charge_row_count(&conn, &inv_id).await, 0, "no partial charge row on failed append");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Count payout-ledger rows for a creator.
@@ -850,6 +892,11 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
         0,
         "an infra invoice.paid must NOT write a payout row (it returns before record_payout)",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D3 (no-regression companion): a NON-infra `invoice.paid` (a real Connect-revenue
@@ -900,6 +947,11 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
         1,
         "a real Connect creator's invoice.paid still records a payout (D3 did not break this)",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M4 (payout attribution): a Connect-revenue `invoice.paid` whose settling account
@@ -958,6 +1010,11 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
         0,
         "and certainly none mis-credited to the real settling account's creator",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D2 (real-Stripe regression, webhook leg): a real `invoice.paid` payload carries NO
@@ -989,8 +1046,10 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
     // Payload OMITS pi_/ch_ entirely (the real-Stripe shape) — forces the fetch.
     let evt = format!("evt_d2_{}", Uuid::new_v4().simple());
     let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
-    let r = post_webhook!(app, &body, None);
-    assert_eq!(r.status(), StatusCode::OK, "infra invoice.paid processed");
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, None).status();
+    assert_eq!(status, StatusCode::OK, "infra invoice.paid processed");
 
     // The pi_/ch_ linkage was FETCHED and recorded (the dispute-resolution anchor).
     let refs = conn
@@ -1015,6 +1074,11 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
         pairs.contains(&("payment_intent".to_string(), format!("pi_flaky_{suffix}"))),
         "pi_ linkage fetched + recorded; got {pairs:?}",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// C2 (webhook poison via the uncovered second unique): a settling `pi_`/`ch_`
@@ -1092,9 +1156,11 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     // Body omits inline pi_/ch_ → the handler MUST fetch (gets the shared pi_).
     let body = infra_invoice_paid_body(&evt, &provider_b, creator_id, 4500);
 
-    let r = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::OK,
         "invoice B's invoice.paid must ACK 200 — the reused pi_ must not poison the webhook",
     );
@@ -1117,6 +1183,11 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
         inv_a,
         "the reused pi_ stays linked to the FIRST settlement (invoice A), never re-pointed to B",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M1 (dunning must fail-closed): an error from `record_payment_failed` during an
@@ -1154,9 +1225,11 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
     })
     .to_string();
 
-    let r = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::INTERNAL_SERVER_ERROR,
         "a record_payment_failed error must fail the webhook closed (retryable 5xx)",
     );
@@ -1165,6 +1238,11 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
         0,
         "the event must NOT be claimed — Stripe retries so the creator still enters dunning",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M2 (the money hole): an `account.updated` flipping `charges_enabled=false`
@@ -1222,6 +1300,11 @@ async fn account_updated_disables_cached_charges_flag() {
         !acct_row.charges_enabled,
         "account.updated must flip the cached charges_enabled to false so checkout is blocked",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M2 (no double-debit): a `charge.dispute.funds_withdrawn` event must NOT append a
@@ -1272,8 +1355,10 @@ async fn dispute_funds_event_does_not_double_debit() {
         }}
     })
     .to_string();
-    let r1 = post_webhook!(app, &created, None);
-    assert_eq!(r1.status(), StatusCode::OK, "dispute.created recorded");
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = post_webhook!(app, &created, None).status();
+    assert_eq!(status1, StatusCode::OK, "dispute.created recorded");
     let debits_after_created = dispute_debit_count(&conn, &inv_id).await;
     assert_eq!(debits_after_created, 1, "exactly one dispute_debit from the lifecycle handler");
 
@@ -1297,6 +1382,11 @@ async fn dispute_funds_event_does_not_double_debit() {
         1,
         "the funds event must NOT add a second dispute_debit (single source of truth)",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Append a charge row through the REAL helper (keeps cash_collected honest).
@@ -1376,6 +1466,10 @@ async fn lock_event_serializes_same_event() {
         .execute("SELECT pg_advisory_unlock(hashtext($1::text)::bigint)", &[&event_id])
         .await;
     drop(lock_conn);
+
+    drop(probe);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ─── G6 replay-dedup ledger tests ──────────────────────────────────────────
@@ -1476,6 +1570,11 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
         1,
         "handler did NOT re-run on redelivery — exactly-once effective"
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// A FORGED / unsigned event is rejected by signature verification BEFORE the
@@ -1493,8 +1592,10 @@ async fn forged_event_rejected_before_ledger_claim() {
     let body = setup_intent_body(&event_id, creator_id);
 
     // Bogus signature header — verification must reject.
-    let r = post_webhook!(app, &body, Some("t=1777017600,v1=deadbeef"));
-    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "forged event rejected");
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, Some("t=1777017600,v1=deadbeef")).status();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "forged event rejected");
     assert_eq!(
         ledger_count(&conn, &event_id).await,
         0,
@@ -1505,6 +1606,11 @@ async fn forged_event_rejected_before_ledger_claim() {
         0,
         "forged event NEVER processed"
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// A handler that FAILS (non-2xx) does NOT claim the event — so Stripe's retry
@@ -1524,9 +1630,11 @@ async fn handler_failure_is_retried_not_lost() {
     let body = setup_intent_body(&event_id, creator_id);
 
     // First delivery: handler errors (FK violation) → non-2xx, NOT claimed.
-    let r1 = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r1.status(),
+        status1,
         StatusCode::INTERNAL_SERVER_ERROR,
         "handler failed (FK) → retryable 5xx"
     );
@@ -1551,6 +1659,11 @@ async fn handler_failure_is_retried_not_lost() {
     assert_eq!(b2["status"], "default_pm_set");
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "retry recorded once");
     assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1719,6 +1832,11 @@ async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
     assert_eq!(r2.status(), StatusCode::OK, "redelivery processed");
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// MONEY-CRITICAL (charge.refund.updated, credit clawback via a directly-seeded re_…):
@@ -1795,6 +1913,11 @@ async fn refund_updated_failed_credit_claws_back_grant() {
     assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
     assert_eq!(clawback_count(&conn, &refund_id).await, 1, "still exactly one clawback");
     assert_eq!(credit_balance(&conn, creator_id).await, 0, "balance still conserved");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// A `charge.refund.updated` with a NON-terminal status (e.g. `succeeded`) is a benign
@@ -1812,6 +1935,11 @@ async fn refund_updated_succeeded_is_noop() {
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "refund_update_noop", "a non-failure update is a no-op");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "event still claimed (acked)");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Count payout_failures rows for a creator.
@@ -1893,6 +2021,11 @@ async fn payout_failed_records_failure_and_notifies_once() {
         1,
         "still exactly one payout_failed notification (no duplicate)",
     );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Count `sent` `billing_notifications` rows for a creator + kind (per-creator, immune to
@@ -2003,6 +2136,11 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "duplicate", "same pi_… is a no-op");
     assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "still one row");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2057,12 +2195,18 @@ async fn webhook_oversized_body_rejected_413() {
     let app = init_control!(fx);
     // 256 KiB + 1 byte of valid-ish JSON padding.
     let big = format!("{{\"id\":\"evt_big\",\"pad\":\"{}\"}}", "a".repeat(256 * 1024 + 1));
-    let r = post_webhook!(app, big, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, big, None).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::PAYLOAD_TOO_LARGE,
         "a webhook body over 256 KiB is rejected with 413 before parse/HMAC/DB"
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #9 (signature-header cap): a `stripe-signature` header over MAX_SIGNATURE_HEADER_BYTES
@@ -2077,12 +2221,18 @@ async fn webhook_oversized_signature_header_rejected_400() {
     // A 4097-char header.
     let huge_sig = format!("t=1,{}", "v1=deadbeef,".repeat(400)); // > 4096 chars
     assert!(huge_sig.len() > 4096);
-    let r = post_webhook!(app, &body, Some(huge_sig.as_str()));
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, Some(huge_sig.as_str())).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "a stripe-signature header over 4096 bytes is rejected with 400"
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #9 (missing signature header): with verification ON (real secret, insecure_dev=false),
@@ -2098,13 +2248,20 @@ async fn webhook_missing_signature_header_rejected_400() {
     let event_id = format!("evt_nosig_{}", Uuid::new_v4().simple());
     let body = setup_intent_body(&event_id, creator_id);
     // No stripe-signature header at all.
-    let r = post_webhook!(app, &body, None);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, None).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "a request with NO stripe-signature header is rejected 400 when verification is on"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 0, "unsigned event never claimed");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #2 (multi-v1 OR-fold): a signature header whose FIRST `v1=` is WRONG but a LATER `v1=`
@@ -2131,13 +2288,20 @@ async fn webhook_second_v1_matches_is_accepted() {
     let good = stripe_v1(secret, t, &body);
     // FIRST v1 wrong, SECOND v1 correct — the rotation-window OR-fold must accept.
     let sig = format!("t={t},v1=00000000deadbeef,v1={good}");
-    let r = post_webhook!(app, &body, Some(sig.as_str()));
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, Some(sig.as_str())).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::OK,
         "a later matching v1 is accepted (rotation-window OR-fold; no early-exit on the first mismatch)"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "the accepted event is claimed");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #7 (empty signing secret → verify Err): `verify_stripe_signature` with an EMPTY secret
@@ -2164,12 +2328,18 @@ async fn webhook_empty_secret_not_insecure_dev_is_500() {
     let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "", false).await;
     let app = init_control!(fx);
     let body = json!({"id":"evt_emptysecret","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
-    let r = post_webhook!(app, &body, Some("t=1,v1=abc"));
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = post_webhook!(app, &body, Some("t=1,v1=abc")).status();
     assert_eq!(
-        r.status(),
+        status,
         StatusCode::INTERNAL_SERVER_ERROR,
         "empty webhook secret with insecure_dev=false fails closed (500), never processes"
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #12 (concurrent dispatch e2e): two CONCURRENT `webhook()` calls for the SAME event_id
@@ -2218,6 +2388,11 @@ async fn concurrent_same_event_dispatches_once() {
         "the handler dispatched exactly once across the concurrent deliveries"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "event claimed exactly once");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #29 (payout.failed with NO connected account): a `payout.failed` carrying neither a
@@ -2261,6 +2436,11 @@ async fn payout_failed_without_connected_account_acks_no_row() {
         .expect("count")[0]
         .get::<_, i64>("n");
     assert_eq!(n, 0, "no payout_failures row written for this payout");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #29 (payment_intent.payment_failed with NO connected account): a platform (non-Connect)
@@ -2304,6 +2484,11 @@ async fn payment_intent_failed_without_connected_account_acks_no_row() {
         .expect("count")[0]
         .get::<_, i64>("n");
     assert_eq!(n, 0, "no connect_checkout_failures row written for this pi");
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// #27 (account.updated for an UNLINKED account): an `account.updated` for an `acct_…` we
@@ -2338,4 +2523,8 @@ async fn account_updated_unlinked_account_acks_not_linked() {
         b["status"], "account_not_linked",
         "an account.updated for an acct_ we never linked is a benign no-op (0-row flag update)"
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

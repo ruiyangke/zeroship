@@ -34,6 +34,8 @@ use zeroship_core::auth_provider::{
 };
 use zeroship_authz::{Action, Resource};
 
+mod common;
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const SUPABASE_ANON_KEY: &str = "test-anon-key";
@@ -710,8 +712,10 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
         .uri("/api/device/approve")
         .set_json(&json!({ "user_code": user_code }))
         .to_request();
-    let absent_resp = test::call_service(&app, absent_req).await;
-    assert_eq!(absent_resp.status(), StatusCode::UNAUTHORIZED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let absent_status = test::call_service(&app, absent_req).await.status();
+    assert_eq!(absent_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let invalid_req = test::TestRequest::post()
@@ -719,8 +723,8 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
         .header("authorization", "Bearer not-a-jwt")
         .set_json(&json!({ "user_code": user_code }))
         .to_request();
-    let invalid_resp = test::call_service(&app, invalid_req).await;
-    assert_eq!(invalid_resp.status(), StatusCode::UNAUTHORIZED);
+    let invalid_status = test::call_service(&app, invalid_req).await.status();
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let wrong_provider_token = gotrue_token(
@@ -734,8 +738,8 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
         .header("authorization", bearer(&wrong_provider_token))
         .set_json(&json!({ "user_code": user_code }))
         .to_request();
-    let wrong_provider_resp = test::call_service(&app, wrong_provider_req).await;
-    assert_eq!(wrong_provider_resp.status(), StatusCode::UNAUTHORIZED);
+    let wrong_provider_status = test::call_service(&app, wrong_provider_req).await.status();
+    assert_eq!(wrong_provider_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let approval_token = fx
@@ -746,9 +750,9 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
         .header("authorization", bearer(&approval_token))
         .set_json(&json!({ "user_code": user_code }))
         .to_request();
-    let approve_resp = test::call_service(&app, approve_req).await;
+    let approve_status = test::call_service(&app, approve_req).await.status();
 
-    assert_eq!(approve_resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(approve_status, StatusCode::NO_CONTENT);
     let approved = fx
         .state
         .control_pg
@@ -764,6 +768,14 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
     assert_eq!(approved.get::<_, Uuid>("principal_id"), principal_id);
 
     fx.cleanup().await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -861,8 +873,10 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             "user_code": user_code
         }))
         .to_request();
-    let no_bearer_resp = test::call_service(&app, no_bearer_req).await;
-    assert_eq!(no_bearer_resp.status(), StatusCode::UNAUTHORIZED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let no_bearer_status = test::call_service(&app, no_bearer_req).await.status();
+    assert_eq!(no_bearer_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let invalid_bearer_req = test::TestRequest::post()
@@ -872,8 +886,8 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             "user_code": user_code
         }))
         .to_request();
-    let invalid_bearer_resp = test::call_service(&app, invalid_bearer_req).await;
-    assert_eq!(invalid_bearer_resp.status(), StatusCode::UNAUTHORIZED);
+    let invalid_bearer_status = test::call_service(&app, invalid_bearer_req).await.status();
+    assert_eq!(invalid_bearer_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let subject = Uuid::new_v4().to_string();
@@ -886,8 +900,8 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             "user_code": user_code
         }))
         .to_request();
-    let wrong_role_resp = test::call_service(&app, wrong_role_req).await;
-    assert_eq!(wrong_role_resp.status(), StatusCode::UNAUTHORIZED);
+    let wrong_role_status = test::call_service(&app, wrong_role_req).await.status();
+    assert_eq!(wrong_role_status, StatusCode::UNAUTHORIZED);
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     let bearer_token = gotrue_token(fx.issuer(), &subject, &email, "authenticated");
@@ -913,8 +927,8 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             "user_code": user_code
         }))
         .to_request();
-    let approve_resp = test::call_service(&app, approve_req).await;
-    assert_eq!(approve_resp.status(), StatusCode::NO_CONTENT);
+    let approve_status = test::call_service(&app, approve_req).await.status();
+    assert_eq!(approve_status, StatusCode::NO_CONTENT);
     let principal_id = fx.track_principal_for_subject(&subject).await;
 
     let row = fx
@@ -1009,9 +1023,9 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
         .uri(&format!("/apps/{app_id}/deploy-check"))
         .header("authorization", bearer(&deploy_token))
         .to_request();
-    let deploy_check_resp = test::call_service(&app, deploy_check_req).await;
+    let deploy_check_status = test::call_service(&app, deploy_check_req).await.status();
     assert_eq!(
-        deploy_check_resp.status(),
+        deploy_check_status,
         StatusCode::OK,
         "minted token should authorize apps:deploy through oauth_guard_from_bearer"
     );
@@ -1182,8 +1196,8 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             "user_code": limited_user_code
         }))
         .to_request();
-    let limited_approve_resp = test::call_service(&app, limited_approve_req).await;
-    assert_eq!(limited_approve_resp.status(), StatusCode::NO_CONTENT);
+    let limited_approve_status = test::call_service(&app, limited_approve_req).await.status();
+    assert_eq!(limited_approve_status, StatusCode::NO_CONTENT);
     let limited_token_req = test::TestRequest::post()
         .uri("/api/device/token")
         .set_json(&json!({
@@ -1213,6 +1227,10 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Starting a device flow is rate limited.
@@ -1276,5 +1294,7 @@ async fn device_auth_is_rate_limited() {
         statuses.len(),
     );
 
+    drop(app);
     drop(fx);
+    common::drain_pg().await;
 }

@@ -137,6 +137,13 @@ async fn invoice_payments_is_append_only() {
         .expect("read back")[0]
         .get("amount_cents");
     assert_eq!(amt, 6000, "the row must survive the rejected mutations unchanged");
+
+    // Teardown: `client` is the only handle to this test's Postgres connection,
+    // and locals are dropped only after the body returns - by which point the
+    // runtime is gone and the socket can no longer be closed. Drop it
+    // explicitly, then wait for the close to land.
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +220,9 @@ async fn partial_unique_index_releases_period_only_on_void() {
         .clone();
     assert_eq!(counts.get::<_, i64>("active"), 1, "exactly one active claim");
     assert_eq!(counts.get::<_, i64>("voided"), 1, "the void row is retained as audit");
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +280,9 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
     // append_charge rejects a non-positive amount (a $0 invoice records no row).
     assert!(append_charge(&client, &inv, 0, "usd", None).await.is_err());
     assert!(append_charge(&client, &inv, -1, "usd", None).await.is_err());
+
+    drop(client);
+    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,4 +352,7 @@ async fn pr1_schema_objects_present() {
         .expect("trigger")[0]
         .get("n");
     assert_eq!(trg, 1, "invoice_payments immutability trigger must exist");
+
+    drop(client);
+    common::drain_pg().await;
 }

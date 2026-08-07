@@ -13,6 +13,8 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -274,6 +276,15 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     assert!(preserved.iter().any(|uri| uri.contains(&custom)));
 
     registry.delete_app(&app_id).await.expect("delete app");
+
+    // Teardown: `raw`, `conn`, and `registry` each hold a Postgres connection,
+    // and locals are dropped only after the body returns - by which point the
+    // runtime is gone and the sockets can no longer be closed. Drop them
+    // explicitly, then wait for the close to land.
+    drop(conn);
+    drop(raw);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
@@ -393,4 +404,7 @@ async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
         .expect("count app_oauth_clients")[0]
         .get("n");
     assert_eq!(ext_count, 0, "app_oauth_clients row cascaded with app delete");
+
+    drop(state);
+    common::drain_pg().await;
 }

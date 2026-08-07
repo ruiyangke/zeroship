@@ -1145,6 +1145,13 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "provider invoice id recorded after finalize",
     );
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// billing-metering (a): a single-segment invoice → the `create_invoice_item`
@@ -1232,6 +1239,9 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
         .get::<_, i64>("amount_cents");
     assert_eq!(amount, line_amount, "Stripe amount == frozen line amount_cents");
     assert_eq!(amount, 750, "amount is the authoritative ChargeBreakdown.total_cents, untouched");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// billing-metering (c)+(d): a MANY-metric app drives the REAL reconcile, and the
@@ -1324,6 +1334,9 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
         Some(expected_cu),
         "gross compute_units is exact even when the per-metric blob is truncated",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// C1: EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
@@ -1435,6 +1448,9 @@ async fn reconcile_is_idempotent_per_period() {
         .await
         .expect("count invoices");
     assert_eq!(rows[0].get::<_, i64>("n"), 1, "exactly one invoice row");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// The REAL cyper client sends a non-empty `Idempotency-Key` + the
@@ -1476,6 +1492,9 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     assert_eq!(invoice_create.idempotency_key.as_deref(), Some("billrun:k2"), "invoice idempotency key sent");
     let finalize = reqs.iter().find(|r| r.path.contains("/finalize")).expect("finalize");
     assert_eq!(finalize.idempotency_key.as_deref(), Some(format!("finalize:{draft}").as_str()), "finalize idempotency key keyed on draft id");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D1 (real-Stripe regression): `create_invoice` MUST send
@@ -1531,6 +1550,9 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
         Some(2000),
         "the pending items must be swept onto the draft (D1); a $0 sweep means the creator is not billed",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D2 (real-Stripe regression): a paid infra invoice's settling pi_/ch_ live ONLY
@@ -1577,6 +1599,9 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
         "the settlement fetch must EXPAND payments.data.payment.payment_intent; path={}",
         get.path
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D2 (real-Stripe regression, refund leg): `POST /v1/refunds` does NOT accept a
@@ -1636,6 +1661,9 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
         last.body
     );
     assert!(!last.body.contains("currency="), "still no currency param");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// `billing/setup` ensures a Customer exists, and a SECOND setup reuses the same
@@ -1675,6 +1703,9 @@ async fn setup_session_creates_customer_once() {
     assert_eq!(fx.mock.count_path("POST", "/v1/checkout/sessions"), 2, "a session per setup");
     let stored = fx.state.stripe_store.get_customer(creator).await.unwrap();
     assert!(stored.is_some(), "customer id persisted to billing_customer_refs");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Two apps owned by the SAME user_id roll into ONE creator invoice spanning
@@ -1729,6 +1760,9 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
         Some(("finalized".to_string(), 300)),
         "owned apps summed; unowned excluded",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Commit-then-crash recovery: a `billing_runs` row pre-exists with
@@ -1794,6 +1828,9 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "provider invoice id filled in",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// MAJOR-2 (fail-closed) REGRESSION: weights present, a plan that INHERITS the
@@ -1904,6 +1941,9 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     assert_eq!(items, 0, "no item posted");
     assert_eq!(invoices, 0, "no invoice created");
     assert!(runs.is_empty(), "no invoice row — bill no one when the platform can't price");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Build the real `StripeClient` pointed at the fixture's mock — used by the
@@ -2062,6 +2102,9 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "invoice finalized",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// C1 decorator: `create_invoice_item` POSTS to the real Stripe (mock) — so the
@@ -2217,6 +2260,9 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
         1,
         "the post is now confirmed (one line provider-ref)",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
@@ -2260,6 +2306,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "provider invoice id recorded",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// C2 decorator: `create_invoice` creates the draft for real (it lands on Stripe
@@ -2418,6 +2467,9 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "completed with the finalized provider invoice id",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2458,12 +2510,14 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
     .await;
 
     // (1) Self-service: creator A acts on creator A's OWN id → OK (200).
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
     let req = test::TestRequest::post()
         .uri(&format!("/api/creators/{}/billing/setup", creator_a.user_id))
         .header("authorization", creator_a.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK, "creator may set up their OWN card");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK, "creator may set up their OWN card");
 
     // (2) Cross-creator: creator A acts on creator B's id → FORBIDDEN (403),
     //     and no Stripe customer is created for B.
@@ -2471,9 +2525,9 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
         .uri(&format!("/api/creators/{}/billing/setup", creator_b.user_id))
         .header("authorization", creator_a.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "a creator must NOT set up billing for a DIFFERENT creator",
     );
@@ -2482,6 +2536,10 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
 
     creator_a.cleanup(&fx.state).await;
     creator_b.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// CRIT-10 (operator path): a platform billing operator may set up ANY
@@ -2499,14 +2557,20 @@ async fn billing_setup_allows_platform_operator_for_any_creator() {
     )
     .await;
 
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
     let req = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/billing/setup"))
         .header("authorization", operator.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK, "a billing operator may set up any creator");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK, "a billing operator may set up any creator");
 
     operator.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2555,12 +2619,14 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
     .await;
 
     // (1) No bearer → 401. The gate, not the reconcile, answers.
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
     let req = test::TestRequest::post()
         .uri(&format!("/internal/billing/reconcile?period={now}"))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
+    let status = test::call_service(&svc, req).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::UNAUTHORIZED,
         "force-reconcile without the control-key bearer must be rejected (gated, not a bypass)",
     );
@@ -2576,8 +2642,8 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
         .uri(&format!("/internal/billing/reconcile?period={now}"))
         .header("authorization", "Bearer test-control-key")
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK, "the keyed request reconciles");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::OK, "the keyed request reconciles");
 
     // The mock saw exactly one invoice-item create (the owned app) + the
     // invoice create/finalize — the REAL cyper wire path, billing the chosen
@@ -2598,6 +2664,10 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "the reconciled invoice carries a finalized provider invoice id",
     );
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2697,6 +2767,9 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() 
         "re-running charge_cents over the PERSISTED frozen snapshot reproduces the stored \
          amount_cents bit-for-bit (the snapshot equals the real charge input)",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M2 decorator: `finalize_invoice` returns Stripe's `invoice_already_finalized`
@@ -2831,6 +2904,9 @@ async fn refinalize_already_finalized_converges_locally() {
         finalized, persisted_draft,
         "the recorded finalized id is the draft id (Stripe finalize does not change the id)",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// M1 decorator: `finalize_invoice` returns a FIXED provider invoice id, so the
@@ -3000,4 +3076,7 @@ async fn finalize_and_invoice_ref_commit_atomically() {
         "no finalized invoice ref — and since the invoice is not finalized, the partial \
          'finalized-without-ref' state never occurs (lookup_invoice_id can't strand at None)",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }

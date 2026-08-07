@@ -32,6 +32,8 @@ use zeroship_control::{
 };
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
+mod common;
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> String {
@@ -298,13 +300,16 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     };
 
     // 1. Creator assigning the OPERATOR-ONLY plan ⇒ 403, plan unchanged.
-    let resp = test::call_service(
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(
         &app_svc,
         put(creator_pat.bearer(), app.id, operator_only.id.clone()),
     )
-    .await;
+    .await
+    .status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "creator must NOT self-assign a non-assignable (operator) plan",
     );
@@ -315,22 +320,24 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     );
 
     // 2. Creator assigning an ASSIGNABLE plan ⇒ 200, plan updated.
-    let resp = test::call_service(
+    let status = test::call_service(
         &app_svc,
         put(creator_pat.bearer(), app.id, assignable.id.clone()),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "creator may assign an assignable plan");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::OK, "creator may assign an assignable plan");
     assert_eq!(app_plan_id(&pg, app.id).await, assignable.id, "creator assignment applied");
 
     // 3. Operator assigning the OPERATOR-ONLY plan ⇒ 200 (operator may assign
     //    EITHER), plan updated.
-    let resp = test::call_service(
+    let status = test::call_service(
         &app_svc,
         put(operator_pat.bearer(), app.id, operator_only.id.clone()),
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "operator may assign ANY plan");
+    .await
+    .status();
+    assert_eq!(status, StatusCode::OK, "operator may assign ANY plan");
     assert_eq!(
         app_plan_id(&pg, app.id).await,
         operator_only.id,
@@ -353,4 +360,15 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             .await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
+
+    // Teardown: the service, the plan catalog, the cloned `pg` handle, and the
+    // fixture all hold (or share) a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // sockets can no longer be closed. Drop them explicitly, then wait for the
+    // close to land.
+    drop(app_svc);
+    drop(catalog);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
 }

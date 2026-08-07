@@ -161,6 +161,14 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         events,
         "recompute rewind must not cause already-committed events to be forwarded again"
     );
+
+    // Teardown: `client` and `registry` each hold a Postgres connection, and
+    // locals are dropped only after the body returns - by which point the
+    // runtime is gone and the sockets can no longer be closed. Drop them
+    // explicitly, then wait for the close to land.
+    drop(client);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -265,6 +273,11 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
     .expect("repeated spend recompute");
     assert_eq!(second.polled, 1);
     assert_total(&client, app, period, "storage_ops", 7).await;
+
+    drop(metering);
+    drop(client);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -487,6 +500,10 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
     assert_eq!(decode_cycle.dead_lettered, 1);
     assert_eq!(decode_cycle.committed, 1);
     assert_dead_letter_row(&client, decode_provider.id(), "decode:0:0", "decode_error").await;
+
+    drop(sink);
+    drop(client);
+    common::drain_pg().await;
 }
 
 #[derive(Debug)]

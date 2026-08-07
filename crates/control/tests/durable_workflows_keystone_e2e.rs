@@ -1163,6 +1163,14 @@ fn dw23_workflow_engine_load_bench() {
             bench_percentile_ms(&latencies, 0.99),
             bench_max_ms(&latencies)
         );
+
+        // Teardown: this test hand-builds its own compio runtime (`rt`) rather
+        // than using `#[compio::test]`, but the same rule applies - the
+        // fixture holds the sole Postgres connection, and `rt` is torn down
+        // the instant this block returns, so the drop and drain must happen
+        // while `rt` is still alive to drive them.
+        drop(fx);
+        common::drain_pg().await;
     });
 }
 
@@ -4979,6 +4987,14 @@ async fn durable_workflows_m1_keystone_real_spine() {
         schedule_count, 0,
         "redeploy without the schedule must delete the registry row"
     );
+
+    // Teardown: the fixture holds the sole Postgres connection this test
+    // opens (every dispatcher here talks to the real gateway over HTTP, not
+    // the database directly), and locals are dropped only after the body
+    // returns - by which point the runtime is gone and the socket can no
+    // longer be closed. Drop it explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5023,6 +5039,9 @@ async fn bare_await_body_io_is_rejected() {
         bare_dispatcher.count() >= 1,
         "bare-await workflow should have dispatched at least once"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5136,6 +5155,9 @@ async fn scheduler_misfire_lost_register_recovers() {
     assert_eq!(counts.get("a").copied(), Some(1));
     assert_eq!(counts.get("b").copied(), Some(1));
     wait_for_scheduler_counts(&fx, &run_id, (0, 0)).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5251,6 +5273,9 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         "idempotent side effect should commit once despite duplicate dispatch"
     );
     wait_for_scheduler_counts(&fx, &run_id, (0, 0)).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -5486,4 +5511,7 @@ async fn compensation_saga_rollback_real_spine() {
         Some(serde_json::Value::String("completed".to_string()))
     );
     wait_for_scheduler_counts(&fx, &cancel_run, (0, 0)).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }

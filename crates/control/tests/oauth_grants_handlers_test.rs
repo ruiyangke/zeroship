@@ -430,6 +430,14 @@ async fn list_returns_empty_when_no_grants() {
     assert_eq!(body, json!([]));
 
     pat.cleanup(&fx.state).await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -469,6 +477,10 @@ async fn list_returns_user_grants_with_client_metadata() {
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -500,6 +512,10 @@ async fn list_does_not_leak_other_users_grants() {
     fx.cleanup_clients(&[client_a, client_b]).await;
     cleanup_user(&fx.state, other_user).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -516,9 +532,11 @@ async fn revoke_removes_grant_row() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
     assert_eq!(
         audit_event_count(&fx.state, pat.user_id, "oauth_grant_revoke", &client_id).await,
@@ -527,6 +545,10 @@ async fn revoke_removes_grant_row() {
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -543,9 +565,11 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
     assert_eq!(
         audit_event_count(&fx.state, pat.user_id, "oauth_grant_revoke", &client_id).await,
@@ -554,6 +578,10 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -568,11 +596,17 @@ async fn revoke_returns_404_when_no_grant() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -590,14 +624,20 @@ async fn revoke_does_not_affect_other_users() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", revoker.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(count_grant(&fx.state, owner.user_id, &client_id).await, 1);
 
     fx.cleanup_clients(&[client_id]).await;
     revoker.cleanup(&fx.state).await;
     owner.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// 5c §6 — the B4 revocation cascade: revoking a grant sets
@@ -629,8 +669,10 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     // The grant is gone AND the alias is revoked — committed atomically.
     assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
@@ -648,6 +690,10 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Seed the `zeroship.app_oauth_clients` extension row carrying the app's apex
@@ -745,8 +791,10 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
         .uri(&format!("/me/oauth-grants/{client_id}"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     // The marker row exists for (client_id, pws_).
     let marker_rows = fx
@@ -805,6 +853,10 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
         .await
         .ok();
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// 5c §6.1 — re-grant stability: revoke then re-grant reuses the SAME alias
@@ -864,6 +916,10 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Raw `(grant_present, revoked_at_is_set)` snapshot of the terminal state, so
@@ -946,15 +1002,16 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
 
         // First revoke (sets revoked_at + DELETEs grant), then re-consent fully
         // re-grants (un-revoke + grant), then revoke AGAIN as the LAST writer.
-        let resp = test::call_service(
+        let status = test::call_service(
             &app,
             test::TestRequest::delete()
                 .uri(&format!("/me/oauth-grants/{client_id}"))
                 .header("authorization", pat.bearer())
                 .to_request(),
         )
-        .await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::NO_CONTENT);
         reconsent(&fx.state, &client_id, pat.user_id, "relay.zeroship.localhost").await;
         // After re-consent the alias forwards again (grant present, revoked_at cleared).
         assert!(
@@ -962,15 +1019,16 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             "order A: re-consent must restore forwarding"
         );
         // Revoke is the LAST writer → terminal grant-absent.
-        let resp = test::call_service(
+        let status = test::call_service(
             &app,
             test::TestRequest::delete()
                 .uri(&format!("/me/oauth-grants/{client_id}"))
                 .header("authorization", pat.bearer())
                 .to_request(),
         )
-        .await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::NO_CONTENT);
 
         let (grant_present, _revoked) =
             grant_and_alias_state(&fx.state, &client_id, pat.user_id).await;
@@ -1021,15 +1079,16 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
 
         // Revoke commits: grant DELETEd, revoked_at set.
-        let resp = test::call_service(
+        let status = test::call_service(
             &app,
             test::TestRequest::delete()
                 .uri(&format!("/me/oauth-grants/{client_id}"))
                 .header("authorization", pat.bearer())
                 .to_request(),
         )
-        .await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::NO_CONTENT);
 
         // A concurrent re-consent's ALIAS un-revoke lands AFTER the revoke but
         // its grant upsert lost the race (never ran / was DELETEd): we replay
@@ -1086,6 +1145,10 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     }
 
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Atomic app-delete cascade (new FK design): deleting an app drops the per-app
@@ -1149,6 +1212,9 @@ async fn app_delete_cascades_away_relay_identities() {
 
     cleanup_user(&fx.state, user_a).await;
     cleanup_user(&fx.state, user_b).await;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// App-delete happy path: the handler returns 200 `{deleted: true}`. Deletion is
@@ -1197,6 +1263,10 @@ async fn app_delete_returns_200_atomic() {
     pat.cleanup(&fx.state).await;
     // App delete cascaded the membership; remove the orphan owner user.
     cleanup_user(&fx.state, owner_id).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -1206,7 +1276,13 @@ async fn unauthenticated_request_returns_401() {
     let app = init_control!(fx);
 
     let req = test::TestRequest::get().uri("/me/oauth-grants").to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

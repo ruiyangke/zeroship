@@ -615,6 +615,14 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
         )
         .await;
     assert!(direct.is_err(), "the over-refund trigger must RAISE on a direct over-cap INSERT");
+
+    // Teardown: the fixture and the dedicated refund connection both hold
+    // Postgres connections, and locals are dropped only after the body returns -
+    // by which point the runtime is gone and the sockets can no longer be
+    // closed. Drop them explicitly, then wait for the close to land.
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// D2 (refund-target resolution): a cash refund must target the SETTLING `pi_…`
@@ -684,6 +692,11 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     .expect("issue");
     let recorded_target = stripe.last_refund_target().expect("a refund was recorded");
     assert_eq!(recorded_target, pi, "create_refund received the pi_ as its target");
+
+    drop(link_conn);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -799,6 +812,10 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
         grant[0].get::<_, Option<String>>("note").as_deref(),
         Some(refund::refund_to_credit_note(&credit_refund_id).as_str())
     );
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -870,6 +887,10 @@ async fn refund_replay_is_idempotent_exactly_one() {
     .await
     .expect("issue");
     assert!(matches!(conflict, RefundOutcome::Conflict), "same key + different body → Conflict");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -943,6 +964,10 @@ async fn tax_split_refund_returns_proportional_tax() {
     )
     .await;
     assert!(bad.is_err(), "a split where subtotal+tax != amount is rejected");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1059,8 +1084,10 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", creator_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "creator token must be 403");
+    // Status only: a retained `WebResponse` keeps the app state - and its Postgres
+    // client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "creator token must be 403");
 
     // (2) Operator credit refund of $10 → 201.
     let req = test::TestRequest::post()
@@ -1069,8 +1096,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "operator refund is 201");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::CREATED, "operator refund is 201");
 
     // (3) Same key + same body → idempotent 200.
     let req = test::TestRequest::post()
@@ -1079,8 +1106,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK, "same key+body is an idempotent 200");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::OK, "same key+body is an idempotent 200");
 
     // (4) Same key + DIFFERENT body → 409.
     let req = test::TestRequest::post()
@@ -1089,8 +1116,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 2000, "destination": "credit"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT, "same key + different body is a 409");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::CONFLICT, "same key + different body is a 409");
 
     // (5) Missing Idempotency-Key → 400.
     let req = test::TestRequest::post()
@@ -1098,8 +1125,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
 
     // (6) An over-refund (more than cash collected) → 422.
     let req = test::TestRequest::post()
@@ -1108,8 +1135,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&serde_json::json!({"amount_cents": 100000, "destination": "cash"}))
         .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "over-refund is a 422");
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "over-refund is a 422");
 
     // Exactly ONE refund row for key k2.
     let n: i64 = fx
@@ -1123,6 +1150,10 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "exactly one refund for the reused key");
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1191,6 +1222,9 @@ async fn void_reversal_conserves_credit_balance() {
         .expect("vr")[0]
         .get::<_, i64>("s");
     assert_eq!(vr, 600, "the void_reversal restores exactly the $6 the voided invoice consumed");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1277,6 +1311,10 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
             .await
             .expect("sum");
     assert_eq!(total_cash_refunds, 5000, "Σ cash refunds on B = $50 ≤ cash $60 (cap held)");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1428,6 +1466,10 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
     // Cap holds: Σ cash refunds ($30) ≤ cash anchor ($40).
     let cash = refund::cash_collected(&*fx.state.control_pg, &inv).await.expect("cash");
     assert_eq!(cash, 4000, "cash anchor = $60 − $20 dispute_debit = $40");
+
+    drop(obs);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1489,6 +1531,9 @@ async fn one_active_invoice_per_period_void_releases_claim() {
         .expect("count")[0]
         .get("n");
     assert_eq!(active, 1, "exactly one active invoice; the void is an audit row");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1576,6 +1621,11 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
     obs_client.execute("SELECT pg_advisory_unlock_all()", &[]).await.ok();
 
     tx.commit().await.expect("commit claim");
+
+    drop(obs_client);
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1629,6 +1679,10 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
         .await
         .expect("sum");
     assert_eq!(total, 4000, "only the first $40 stuck; Σ cash refunds ≤ cash $50");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1715,6 +1769,10 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 
     // Still exactly one grant; the credit balance reflects ONE $30 grant, not two.
     assert_eq!(count_grants(fx.state.clone(), marker).await, 1, "still exactly one grant — no double credit");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1837,6 +1895,9 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd").await.expect("bal"),
         400, "balance still $4 after a third drive",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1926,6 +1987,10 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
             .get("n");
         assert_eq!(n, 0, "a non-finalized invoice never gets a refund row claimed (invoice {inv})");
     }
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1963,6 +2028,10 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 0, "no refund row for a non-existent invoice");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2098,6 +2167,9 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
     assert_eq!(row.get::<_, i64>("amount_cents"), 2000, "amount never changed");
     assert_eq!(row.get::<_, String>("dest"), "cash", "destination never changed");
     assert_eq!(row.get::<_, String>("status"), "failed", "status legally progressed to failed");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2191,6 +2263,10 @@ async fn true_up_noop_when_over_collection_not_positive() {
         .expect("void+reissue");
     assert_eq!(outcome.true_up_refund_id, None, "no true-up refund when over-collection ≤ 0");
     assert_eq!(outcome.true_up_cents, 0, "true_up_cents == 0 on the no-op path");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2292,6 +2368,10 @@ async fn true_up_redrive_converges_noop_after_issue() {
         .expect("read")[0]
         .get("s");
     assert_eq!(st, "issued", "the original true-up stayed issued; the re-drive added nothing");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -2363,4 +2443,8 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "the moved-anchor conflict never appended a second refund row");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }

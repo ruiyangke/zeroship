@@ -528,6 +528,13 @@ async fn missed_invoice_payment_is_flagged() {
         finding_count(&fx.state, "missed_invoice_payment", &stripe_in).await, 1,
         "Stripe-paid invoice with no charge row → exactly one missed_invoice_payment finding"
     );
+
+    // Teardown: `fx.state` holds the live connection, and it is dropped only
+    // after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -554,6 +561,9 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
         finding_count(&fx.state, "refund_status_drift", &stripe_re).await, 1,
         "Stripe-failed refund we hold issued → exactly one refund_status_drift finding"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -587,6 +597,9 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count parked")[0].get("n");
     assert_eq!(parked, 0, "default is FLAG-only — no auto-heal park");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // C2: a missed `charge.dispute.created` on an ALREADY-LINKED, already-paid invoice must be
@@ -674,6 +687,9 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
         )
         .await.expect("sum cash2")[0].get("c");
     assert_eq!(cash2, 5000, "no double-debit on re-sweep");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -718,6 +734,9 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count disputes")[0].get("n");
     assert_eq!(rows, 0, "no billing_disputes row invented for an unresolved dispute");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -798,6 +817,10 @@ async fn backstop_then_live_webhook_does_not_double_apply() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("dispute rows")[0].get("n");
     assert_eq!(rows, 1, "exactly one billing_disputes row across both rails");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 async fn side_conn(url: &str) -> compio_postgres::Client {
@@ -848,6 +871,9 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
         finding_count(&fx.state, "dispute_status_drift", &du).await, 1,
         "a Stripe-resolved dispute we still hold open → exactly one dispute_status_drift finding"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -894,6 +920,9 @@ async fn fully_consistent_state_produces_no_findings() {
     assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 0, "known dispute not flagged missing");
     // Scoped: this creator's entities contributed zero findings.
     let _ = summary;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -921,6 +950,9 @@ async fn second_sweep_does_not_duplicate_findings() {
     );
     assert!(s1.findings_recorded >= 1, "first sweep recorded the finding");
     assert_eq!(s2.findings_recorded, 0, "second sweep recorded nothing new (deduped)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -948,6 +980,10 @@ async fn concurrent_tick_single_flights_under_advisory_lock() {
 
     // Release so the session is clean.
     let _ = holder.execute("SELECT pg_advisory_unlock($1)", &[&lock_key]).await;
+
+    drop(holder);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// Build the REAL `StripeClient` pointed at the mock (no shim on the wire path).

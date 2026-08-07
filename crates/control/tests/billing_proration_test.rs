@@ -774,6 +774,13 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     // Structural invariants hold for ANY month length:
     let total_days_quota_ok = seg0.4 + seg1.4 <= 3_000; // Σ base ≤ one full Pro fee
     assert!(total_days_quota_ok, "Σ prorated base ≤ one full base fee (base-fee invariant)");
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// billing-metering (b): a 2-segment proration invoice → EACH segment's Stripe
@@ -877,6 +884,9 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     // And the metadata segment labels distinguish the two.
     assert!(form_param(&seg0.body, "metadata[segment]").is_some(), "seg0 carries a segment label");
     assert!(form_param(&seg1.body, "metadata[segment]").is_some(), "seg1 carries a segment label");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (b) Invariants: Σ segment_days == days_in_period, Σ base ≤ one full fee,
@@ -964,6 +974,9 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
     let usage: HashMap<String, i64> = serde_json::from_value(lines[0].6.clone()).unwrap();
     assert_eq!(usage.get("requests"), Some(&750), "full-period usage (delta from 0)");
     assert_eq!(confirmed_item_refs(&fx.state, creator, app).await, 1, "one provider-ref");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (f) Reconcile re-run does NOT double-post segments. After a full bill, a second
@@ -1016,6 +1029,9 @@ async fn reconcile_rerun_does_not_double_post_segments() {
     );
     let lines = read_segment_lines(&fx.state, creator, app).await;
     assert_eq!(lines.len(), 2, "still exactly two lines");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (g) set_plan snapshots usage_at_change SERVER-SIDE (from usage_aggregates), with
@@ -1094,6 +1110,9 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
         .get("plan_id");
     assert_eq!(cur, free, "the plan flip applies immediately even past a finalized period");
     let _ = now;
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (e) Past the per-period cap, set_plan still flips apps.plan_id but records NO
@@ -1194,6 +1213,9 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         "the tail (last segment) prices under the ACTUALLY-RUNNING expensive FX (MAJOR-4) — \
          NOT the cheap last-recorded plan (a revenue leak)"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (d) An END-missing metric floors its segment delta at max(0,…) so a vanished
@@ -1250,6 +1272,9 @@ async fn end_missing_metric_does_not_credit_the_bill() {
             assert!(v >= 0, "no negative usage_snapshot delta on any segment line");
         }
     }
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (h) CRITICAL-1: segment pricing reads the LIVE catalog at RECONCILE time — it
@@ -1330,6 +1355,9 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
             pro_line.4, change_time_derived
         );
     }
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (i) MAJOR-1: a re-drive that builds FEWER segments than a prior crashed drive
@@ -1438,6 +1466,9 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
         1,
         "only the surviving segment's provider-ref remains"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 /// (j) MINOR-4: a corrupt `usage_at_change` (valid JSONB but NOT a {metric: int}
@@ -1510,4 +1541,7 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
         .unwrap()[0]
         .get("n");
     assert_eq!(finalized, 0, "no finalized invoice for the skipped creator");
+
+    drop(fx);
+    common::drain_pg().await;
 }

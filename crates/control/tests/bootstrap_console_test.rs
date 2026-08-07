@@ -32,6 +32,8 @@ use zeroship_control::bootstrap_console::{
 };
 use zeroship_control::{EnvStore, Registry};
 
+mod common;
+
 /// The server-only control credential the seed USED to mint+inject. The console
 /// is now a pure creator app, so this key must NOT appear in the console env.
 /// Kept as a local literal (the const was deleted from the seed module) so the
@@ -663,4 +665,13 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     if zship.starts_with(std::env::temp_dir()) {
         let _ = std::fs::remove_file(&zship);
     }
+
+    // Teardown: `env_store`, `control_pg`, and `registry` each hold (or wrap) a
+    // Postgres connection, and locals are dropped only after the body returns -
+    // by which point the runtime is gone and the sockets can no longer be
+    // closed. Drop them explicitly, then wait for the close to land.
+    drop(env_store);
+    drop(control_pg);
+    drop(registry);
+    common::drain_pg().await;
 }

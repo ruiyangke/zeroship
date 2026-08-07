@@ -267,6 +267,13 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
     assert_eq!(finding_count(&fx.state, app, period).await, 1);
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -301,6 +308,9 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
         0,
         "stripe_meters InvoiceCredit drift must not be recorded as provider_reject"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -340,6 +350,9 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
         1,
         "the drift must be flagged correction_unpriceable for operator repricing"
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -406,6 +419,9 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
         .expect("second multi-metric reconcile pass");
     assert_eq!(second.corrections_issued, 0);
     assert_eq!(second.findings_recorded, 0);
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 async fn make_creator(state: &AppState) -> Uuid {

@@ -545,6 +545,13 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
         .expect("read back")[0]
         .get("amount_cents");
     assert_eq!(amt, 1000);
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -621,6 +628,9 @@ async fn finalize_consumes_oldest_first_and_balances() {
         .get("amount_cents");
     assert_eq!(drawn_old, -300, "oldest grant fully consumed first");
     assert_eq!(drawn_new, -200, "newer grant consumed for the remainder");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -678,6 +688,9 @@ async fn reconcile_rerun_does_not_double_consume() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "exactly one consumed entry — never doubled by a re-run");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -724,6 +737,9 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
     // Balance conserved: $10 − $6 = $4 (not $10 − $12).
     let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
     assert_eq!(bal, 400, "balance conserved — the helper never double-draws on a re-drive");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -764,6 +780,9 @@ async fn expired_grant_is_not_consumed() {
     let inv = read_invoice_money(&fx.state, creator, period).await.expect("invoice");
     assert_eq!(inv.2, 200, "only the non-expired $2 grant is drawn (the expired $10 is skipped)");
     assert_eq!(inv.3, 300, "total = 500 − 200 = 300");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -809,6 +828,9 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     assert_eq!(usd_bal, 0, "USD balance: $1 granted − $1 consumed = 0");
     let eur_bal = credit::balance(&*fx.state.control_pg, &creator, "eur").await.unwrap();
     assert_eq!(eur_bal, 1000, "the EUR grant is untouched");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -872,6 +894,9 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     )
     .await;
     assert!(bad.is_err(), "a non-USD grant is rejected at the Rust boundary (v1 USD-pinned)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -982,9 +1007,11 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", creator_pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its Postgres
+    // client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::FORBIDDEN,
         "a creator (App-scoped) token must be 403 on the operator-only credit endpoint",
     );
@@ -996,8 +1023,8 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "operator grant is 201");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::CREATED, "operator grant is 201");
 
     // (3) Same key + SAME body ⇒ 200 (idempotent retry, no second grant).
     let req = test::TestRequest::post()
@@ -1006,8 +1033,8 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK, "same key+body is an idempotent 200 retry");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK, "same key+body is an idempotent 200 retry");
 
     // (4) Same key + DIFFERENT body ⇒ 409 (no double grant).
     let body2 = serde_json::json!({"creator_id": creator, "amount_cents": 999});
@@ -1017,8 +1044,8 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&body2)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT, "same key + different body is a 409");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::CONFLICT, "same key + different body is a 409");
 
     // Exactly ONE grant for the key, amount 500.
     let rows = fx
@@ -1039,8 +1066,16 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
         .header("authorization", op_pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1125,6 +1160,9 @@ async fn grant_note_change_is_a_conflict() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "the note conflict never created a second grant");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1199,6 +1237,9 @@ async fn grant_idempotency_key_is_creator_scoped() {
     assert_eq!(bal_a, 500, "creator A's grant is untouched");
     let bal_b = credit::balance(&*fx.state.control_pg, &creator_b, "usd").await.unwrap();
     assert_eq!(bal_b, 0, "creator B has no credit");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1251,6 +1292,9 @@ async fn grant_kind_is_case_insensitive() {
     .await
     .expect("mixed-case promo accepted");
     assert!(matches!(r2, GrantOutcome::Created(_)));
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1290,9 +1334,9 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
         .header("authorization", op_pat.bearer())
         .set_json(&body)
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::BAD_REQUEST,
         "a grant for a non-existent creator is a 400 (FK violation classified by SQLSTATE 23503)",
     );
@@ -1306,8 +1350,12 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
         .header("authorization", op_pat.bearer())
         .set_json(&body_ok)
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "a grant for a real creator is 201");
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::CREATED, "a grant for a real creator is 201");
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1443,6 +1491,12 @@ async fn consume_takes_per_creator_advisory_lock() {
     let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
     assert_eq!(bal, 0, "balance is non-negative and exact after both draws ($10 − $6 − $4)");
     assert!(bal >= 0, "balance MUST never go negative");
+
+    drop(obs_client);
+    drop(conn);
+    drop(conn2);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1492,6 +1546,9 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
     assert_eq!(n, 0, "an empty-ledger consume appends NO consumed entries");
     // Balance stays exactly 0 (nothing granted, nothing drawn).
     assert_eq!(credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(), 0);
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1545,6 +1602,9 @@ async fn consume_with_zero_subtotal_short_circuits() {
         credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(),
         1000, "the grant is preserved — never drawn against a $0 bill",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1615,6 +1675,9 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
         credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap(),
         1000, "the late grant's full value is preserved for the next bill",
     );
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1661,6 +1724,9 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 0, "a rejected-kind grant appends NO ledger row");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1729,6 +1795,9 @@ async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "neither illegal row was inserted — only the seed grant exists");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1785,6 +1854,9 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
         .expect("sum")[0]
         .get("s");
     assert_eq!(drawn, -600, "one consumed entry of −$6 (the capped draw)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1903,4 +1975,8 @@ async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
     let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
     assert_eq!(bal, 400, "balance after the serialized consume = $10 − $6 = $4");
     assert!(bal >= 0, "balance never goes negative under consume↔plan-change serialization");
+
+    drop(conn);
+    drop(fx);
+    common::drain_pg().await;
 }

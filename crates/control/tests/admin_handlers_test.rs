@@ -222,9 +222,11 @@ async fn non_admin_cannot_grant_platform_role() {
         .uri(&format!("/admin/users/{target}/role"))
         .set_json(&serde_json::json!({"role": "admin"}))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
     assert!(
-        matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
         "unauthenticated admin role grant should be rejected"
     );
 
@@ -234,13 +236,21 @@ async fn non_admin_cannot_grant_platform_role() {
         .header("authorization", actor.bearer())
         .set_json(&serde_json::json!({"role": "admin"}))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(count_role(&fx.state.control_pg, target, "admin").await, 0);
 
     actor.cleanup(&fx.state).await;
     cleanup_user(&fx.state.control_pg, target).await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -261,9 +271,9 @@ async fn admin_can_grant_platform_role() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({"role": "support"}))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(count_role(&fx.state.control_pg, target, "support").await, 1);
     assert_eq!(
         count_audit(&fx.state.control_pg, "platform_role_granted", target).await,
@@ -272,6 +282,10 @@ async fn admin_can_grant_platform_role() {
 
     cleanup_user(&fx.state.control_pg, target).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -300,13 +314,17 @@ async fn admin_can_revoke_platform_role() {
         .uri(&format!("/admin/users/{target}/role"))
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(count_role(&fx.state.control_pg, target, "support").await, 0);
 
     cleanup_user(&fx.state.control_pg, target).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -359,8 +377,8 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
             "note": "frontable wildcard must be rejected"
         }))
         .to_request();
-    let resp = test::call_service(&app, bad).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let status = test::call_service(&app, bad).await.status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let good = test::TestRequest::post()
         .uri(&format!("/admin/apps/{}/net-grants", app_record.id))
@@ -401,8 +419,8 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
             "port": 587
         }))
         .to_request();
-    let resp = test::call_service(&app, revoke).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let status = test::call_service(&app, revoke).await.status();
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let rows = fx
         .state
@@ -417,6 +435,10 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
 
     cleanup_user(&fx.state.control_pg, owner).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -446,13 +468,17 @@ async fn admin_can_audit_lock_app() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({"audit_locked": true}))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(status, StatusCode::OK);
     assert!(app_flag(&fx.state.control_pg, app_record.id, "audit_locked").await);
 
     let _ = fx.state.registry.delete_app(&app_record.id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -478,13 +504,17 @@ async fn admin_can_suspend_app() {
         .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({"suspended": true}))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(status, StatusCode::OK);
     assert!(app_flag(&fx.state.control_pg, app_record.id, "suspended").await);
 
     let _ = fx.state.registry.delete_app(&app_record.id).await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -513,9 +543,9 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
             "enabled": true
         }))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let rows = fx
         .state
         .control_pg
@@ -535,6 +565,10 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
         .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
         .await;
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -563,9 +597,9 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
             "enabled": true
         }))
         .to_request();
-    let resp = test::call_service(&app, req).await;
+    let status = test::call_service(&app, req).await.status();
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let rows = fx
         .state
         .control_pg
@@ -578,4 +612,8 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
     assert_eq!(rows[0].get::<_, i64>("n"), 0);
 
     pat.cleanup(&fx.state).await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

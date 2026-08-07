@@ -11,6 +11,8 @@ use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
 
+mod common;
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .ok()
@@ -94,6 +96,14 @@ async fn var_crud_roundtrip() {
 
     // Cleanup.
     registry.delete_app(&app).await.ok();
+
+    // Teardown: `store` and `registry` each cycle their own connections per
+    // call, and the last one opened has no later await in this test to let
+    // the runtime drive its shutdown before the runtime itself is torn down.
+    // Drop the handles, then wait for the close to land.
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -131,6 +141,10 @@ async fn secret_roundtrip_encrypted() {
 
     // Cleanup.
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -148,6 +162,10 @@ async fn merged_env_secret_overrides_var() {
     assert_eq!(merged.get("API_KEY").and_then(|v| v.as_str()), Some("secret-value"));
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -167,6 +185,10 @@ async fn invalid_key_rejected_client_side() {
     }
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -191,6 +213,10 @@ async fn per_app_isolation() {
 
     registry.delete_app(&app_a).await.ok();
     registry.delete_app(&app_b).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -213,6 +239,11 @@ async fn wrong_master_key_fails_decrypt() {
     assert!(matches!(err, zeroship_control::env_store::EnvError::SecretDecrypt { .. }));
 
     registry.delete_app(&app).await.ok();
+
+    drop(writer);
+    drop(reader);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -266,6 +297,11 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     registry.delete_app(&app_a).await.ok();
     registry.delete_app(&app_b).await.ok();
+
+    drop(client);
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -282,6 +318,10 @@ async fn delete_cascades_from_app() {
     registry.delete_app(&app).await.unwrap();
     assert!(store.list_vars(app).await.unwrap().is_empty());
     assert!(store.list_secret_names(app).await.unwrap().is_empty());
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -319,6 +359,10 @@ async fn env_version_bumps_on_every_mutation() {
     assert_eq!(v5.get(&app).unwrap().env_version, 4);
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -362,6 +406,12 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     assert_eq!(merged.get("OPENAI_KEY").and_then(|v| v.as_str()), Some("sk-new"));
 
     registry.delete_app(&app).await.ok();
+
+    drop(store_v1);
+    drop(store_v2);
+    drop(store_v3);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -412,6 +462,9 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[1].actor_token_id, Some(token_id));
 
     registry.delete_app(&app).await.ok();
+
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -453,6 +506,10 @@ async fn app_audit_is_append_only() {
     );
 
     registry.delete_app(&app).await.ok();
+
+    drop(conn);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -467,6 +524,10 @@ async fn merged_env_404s_on_missing_app() {
         matches!(err, zeroship_control::env_store::EnvError::AppNotFound),
         "expected AppNotFound for missing app, got {err:?}",
     );
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -475,6 +536,8 @@ async fn empty_master_key_rejected_without_dev_flag() {
     let registry = Registry::new(&url).await.expect("registry");
     let err = EnvStore::new(registry, "", false).unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::MasterKeyRequired));
+
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -482,6 +545,9 @@ async fn empty_master_key_allowed_in_dev_mode() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let _store = EnvStore::new(registry, "", true).expect("dev-mode should accept empty key");
+
+    drop(_store);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -498,6 +564,10 @@ async fn set_value_over_cap_rejected() {
     assert!(matches!(err, zeroship_control::env_store::EnvError::TooLarge(_)));
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -556,6 +626,10 @@ async fn merged_env_for_worker_emits_split_shape() {
     assert!(matches!(err, zeroship_control::env_store::EnvError::BadKey(_)));
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -572,6 +646,10 @@ async fn long_value_roundtrip() {
     assert_eq!(merged.get("BIG_TOKEN").and_then(|v| v.as_str()), Some(big.as_str()));
 
     registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }
 
 /// A secret that cannot be decrypted must name itself in the error.
@@ -621,4 +699,9 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
     );
 
     registry.delete_app(&app).await.ok();
+
+    drop(conn);
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
 }

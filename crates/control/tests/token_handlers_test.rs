@@ -299,6 +299,14 @@ async fn create_pat_with_valid_policy_returns_jwt() {
     );
 
     fx.cleanup().await;
+
+    // Teardown: the service and the fixture both hold connections, and locals
+    // are dropped only after the body returns - by which point the runtime is
+    // gone and the sockets can no longer be closed. Drop them explicitly, then
+    // wait for the close to land.
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -324,6 +332,10 @@ async fn create_pat_with_policy_exceeding_user_returns_400() {
     assert_eq!(body.get("error").and_then(Value::as_str), Some("excess_permissions"));
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -362,6 +374,10 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
         .await
         .expect("delete owned app");
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -400,6 +416,10 @@ async fn create_pat_with_invalid_resource_id_returns_400() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -435,6 +455,10 @@ async fn create_pat_with_empty_statement_actions_returns_400() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -470,6 +494,10 @@ async fn create_pat_with_empty_statement_resources_returns_400() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -506,6 +534,10 @@ async fn create_pat_with_mfa_condition_returns_400() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -532,6 +564,10 @@ async fn list_pats_returns_user_tokens_without_secret() {
     assert!(entries.iter().all(|entry| entry.get("name").is_some()));
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -574,6 +610,10 @@ async fn delete_pat_marks_revoked() {
     );
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]
@@ -587,16 +627,18 @@ async fn using_revoked_pat_returns_401() {
         .uri("/me/tokens")
         .header("accept", "application/json")
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::OK);
 
     fx.state
         .control_pg
@@ -612,9 +654,13 @@ async fn using_revoked_pat_returns_401() {
         .header("accept", "application/json")
         .header("authorization", pat.bearer())
         .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     pat.cleanup(&fx.state).await;
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }

@@ -545,6 +545,13 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     assert_eq!(inv.4, 700, "total = subtotal − credit + tax(0) = 1000 − 300 + 0");
     // The balance CHECK (total = subtotal − credit + tax) held (the row finalized).
     assert_eq!(inv.4, inv.1 - inv.2 + inv.3, "balance CHECK identity");
+
+    // Teardown: the fixture holds a Postgres connection, and locals are dropped
+    // only after the body returns - by which point the runtime is gone and the
+    // socket can no longer be closed. Drop it explicitly, then wait for the
+    // close to land.
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -598,6 +605,9 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let bases = fake.seen_bases.lock().unwrap().clone();
     assert_eq!(bases.len(), 1, "compute_tax called ONCE per invoice");
     assert_eq!(bases[0], 700, "tax computed over the post-credit base (1000 − 300)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -642,6 +652,9 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
 
     let bases = fake.seen_bases.lock().unwrap().clone();
     assert_eq!(bases[0], 500, "tax computed over the full subtotal (no credit)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -720,6 +733,9 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
         .expect("count")[0]
         .get("n");
     assert_eq!(finalized, 0, "no finalized invoice when the tax provider errors");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -768,6 +784,9 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
         .expect("count")[0]
         .get("n");
     assert_eq!(any, 0, "a creator with usage but no Stripe customer gets NO invoice (skipped + warned)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -849,6 +868,9 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
         .expect("count")[0]
         .get("n");
     assert_eq!(pay_rows, 0, "no invoice_payments charge row for a $0 invoice");
+
+    drop(fx);
+    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -941,4 +963,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let bases = fake.seen_bases.lock().unwrap().clone();
     assert_eq!(bases.len(), 1, "compute_tax called ONCE per invoice — not per segment");
     assert_eq!(bases[0], 800, "tax computed over the SUMMED post-credit subtotal (300 + 500)");
+
+    drop(fx);
+    common::drain_pg().await;
 }
