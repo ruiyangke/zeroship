@@ -366,6 +366,27 @@ impl Fixture {
     }
 
     async fn new_with_provider(provider: FixtureProvider) -> Self {
+        Self::build(provider, Quota::per_minute(10_000, 100), false).await
+    }
+
+    /// Builds a fixture whose admin limiter can actually be reached.
+    ///
+    /// Both knobs move together, and that is the point. The default quota is
+    /// deliberately too high to cross, so a test that wants to see a 429 must
+    /// lower it - but the limiter bucket lives in Postgres and is keyed by the
+    /// resolved caller identity, so every test in this binary shares one bucket
+    /// unless the caller can be told apart. `X-Forwarded-For` is what tells
+    /// them apart, and it is ignored unless `trust_proxy` is on. Lowering the
+    /// quota without it drains the shared bucket and every later test in the
+    /// file starts getting 429 where it asserted 401.
+    async fn new_probing_the_admin_limiter(
+        provider: FixtureProvider,
+        admin_quota: Quota,
+    ) -> Self {
+        Self::build(provider, admin_quota, true).await
+    }
+
+    async fn build(provider: FixtureProvider, admin_quota: Quota, trust_proxy: bool) -> Self {
         let db_url = db_url();
         let mock_supabase = MockSupabase::start();
         let mock_platform = MockPlatformAuth::start();
@@ -430,10 +451,10 @@ impl Fixture {
             gateway_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
-            admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            admin_limiter: Arc::new(RateLimiter::new(admin_quota)),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             insecure_dev: true,
-            trust_proxy: false,
+            trust_proxy,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
             app_base_domain: "zeroship.localhost".to_string(),
@@ -1192,4 +1213,68 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
     );
 
     fx.cleanup().await;
+}
+
+/// Starting a device flow is rate limited.
+///
+/// `device_auth` takes no credential and every accepted call writes a row to
+/// `zeroship.device_grants`, so before this limit one caller could fill that
+/// table without ever holding a token. The limiter runs ahead of the provider
+/// check for the same reason: probing a disabled endpoint should cost the
+/// caller its allowance too.
+///
+/// Unlike the deploy limiter test this caller is deliberately UNAUTHENTICATED,
+/// because that is the endpoint's real threat model - there is no extractor in
+/// front of the handler to reject it first.
+#[compio::test]
+async fn device_auth_is_rate_limited() {
+    // DualIssuer, not Platform: under the Platform-only provider `device_auth`
+    // is disabled and answers 400 before it can mint anything, so the test
+    // would only prove the limiter beats a dead endpoint. Here the accepted
+    // calls really do insert grant rows, which is the thing being bounded.
+    let fx = Fixture::new_probing_the_admin_limiter(
+        FixtureProvider::DualIssuer,
+        Quota::per_minute(5, 60),
+    )
+    .await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    // The bucket lives in Postgres and outlives the process, so a narrow
+    // identity space would eventually reuse one that has already spent tokens.
+    let r = Uuid::new_v4().as_u128();
+    let caller_ip = format!(
+        "10.{}.{}.{}",
+        (r >> 16) as u8,
+        (r >> 8) as u8,
+        (r as u8) | 1
+    );
+
+    let mut statuses = Vec::new();
+    for _ in 0..31 {
+        let req = test::TestRequest::post()
+            .uri("/api/device/auth")
+            .header("x-forwarded-for", caller_ip.as_str())
+            .set_json(&json!({ "client_id": "zeroship-cli" }))
+            .to_request();
+        statuses.push(test::call_service(&app, req).await.status());
+    }
+
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "31 anonymous device-auth calls must trip the limiter; got {statuses:?}",
+    );
+    let minted = statuses.iter().filter(|s| s.is_success()).count();
+    assert!(
+        minted > 0 && minted < statuses.len(),
+        "the limiter must bound grant creation without disabling it; {minted} of {} calls minted",
+        statuses.len(),
+    );
+
+    drop(fx);
 }
