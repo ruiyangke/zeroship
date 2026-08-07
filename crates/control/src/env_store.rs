@@ -14,6 +14,18 @@ use crate::registry::Registry;
 pub enum EnvError {
     Db(String),
     Crypto(CryptoError),
+    /// A stored secret could not be decrypted, and WHICH one.
+    ///
+    /// Failing closed here is right - an app must not boot with a silently
+    /// missing secret - but the failure is total: one poisoned row takes down
+    /// every deploy of that app. Carrying the key NAME (never the value) is the
+    /// difference between a five-minute fix and auditing every secret the app
+    /// owns. Reachable through operator error rather than attack: a key dropped
+    /// from the rotation set before `rotate_app` drained it, or corruption.
+    SecretDecrypt {
+        key_name: String,
+        source: CryptoError,
+    },
     BadKey(String),
     /// Value exceeded the per-secret/var length cap.
     TooLarge(usize),
@@ -29,6 +41,16 @@ impl std::fmt::Display for EnvError {
         match self {
             Self::Db(m) => write!(f, "{m}"),
             Self::Crypto(e) => write!(f, "crypto: {e}"),
+            Self::SecretDecrypt { key_name, source } => {
+                // The key NAME only. Names are creator-chosen identifiers, not
+                // secrets; the plaintext never reaches this string.
+                let safe: String = key_name
+                    .chars()
+                    .take(80)
+                    .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+                    .collect();
+                write!(f, "secret '{safe}' failed to decrypt: {source}")
+            }
             Self::BadKey(k) => {
                 // Sanitize the key — drop anything non-printable to keep
                 // stray bytes out of logs (defense against log injection).
@@ -362,7 +384,8 @@ impl EnvStore {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
             let aad = app_secret_aad(app_id, &k);
-            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)
+                .map_err(|source| EnvError::SecretDecrypt { key_name: k.clone(), source })?;
             // Strict UTF-8 — `from_utf8_lossy` would silently replace
             // invalid bytes with U+FFFD and hand the creator a mangled
             // secret. Treat any non-UTF-8 in plaintext as corruption.
@@ -507,7 +530,8 @@ impl EnvStore {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
             let aad = app_secret_aad(app_id, &k);
-            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)
+                .map_err(|source| EnvError::SecretDecrypt { key_name: k.clone(), source })?;
             let s = String::from_utf8(plain).map_err(|_| EnvError::Crypto(CryptoError::Decrypt))?;
             secrets.insert(k, serde_json::Value::String(s));
         }

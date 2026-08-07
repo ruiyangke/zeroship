@@ -52,7 +52,7 @@ fn env_err_response(e: EnvError) -> web::HttpResponse {
         // Db / Crypto messages may contain internal details (SQLSTATEs,
         // column names, crypto internals). Log the raw error to stderr
         // but return a generic body to the client.
-        Db(_) | Crypto(_) | MasterKeyRequired => {
+        Db(_) | Crypto(_) | SecretDecrypt { .. } | MasterKeyRequired => {
             tracing::error!(error = %e, "control: env_store error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
