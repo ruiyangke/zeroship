@@ -7804,3 +7804,40 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
         .await;
     release_pg(pool).await;
 }
+
+/// A new test must not open a pool without going through the teardown helpers.
+///
+/// Every pool this file opens today is paired with `release_pg`/`drain_pg`, which
+/// is what keeps the suite from exhausting the server. That pairing is a
+/// convention, and nothing stops test 108 from calling `Pool::connect` and
+/// forgetting it - the suite would stay green, because two leaked connections are
+/// nowhere near the ceiling, until the count creeps back up and returns as
+/// "dozens of tests cannot connect".
+///
+/// So pin the number of direct construction sites. Adding a test that opens its
+/// own pool now fails here and has to be a deliberate edit; adding one that uses
+/// the helpers does not touch this count.
+///
+/// Sound as a text check because these are CONSTRUCTION sites: a constructor has
+/// to be written literally to be called, so it cannot hide behind indirection the
+/// way an execution can. Verified when this was written: no aliased `Pool` import
+/// and no indirect use of the constructor anywhere in this tree. An alias would
+/// evade it, which is why the message says to keep the pairing rather than to
+/// satisfy the number.
+#[test]
+fn direct_pool_construction_sites_do_not_grow() {
+    // Split so this test's own needle is not part of what it counts.
+    let direct = concat!("Pool", "::connect(");
+    let with_config = concat!("Pool", "::connect_with_config(");
+    let source = include_str!("integration.rs");
+
+    let sites = source.matches(direct).count() + source.matches(with_config).count();
+    const PINNED: usize = 108;
+
+    assert!(
+        sites <= PINNED,
+        "this file now opens {sites} pools directly, up from {PINNED}. A pool opened \
+         without a `release_pg`/`drain_pg` teardown outlives its runtime and leaks a \
+         server connection. Pair the new one with a teardown, then raise PINNED."
+    );
+}
