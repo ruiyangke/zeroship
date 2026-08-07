@@ -6765,6 +6765,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+ "uuid",
  "zeroship-core",
  "zeroship-metering",
  "zeroship-plugin-db",
