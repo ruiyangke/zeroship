@@ -11,7 +11,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
-      - run: cargo test --workspace
+      # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
+      # target and never builds or runs the ones after it. Those targets do not
+      # report as failed, they report as nothing at all, so one known-failing
+      # unit test can hide every integration suite behind it. The verdict is
+      # unchanged either way - the job still fails if anything fails - but
+      # without this the run only tells you about the first thing that broke.
+      - run: cargo test --workspace --no-fail-fast
       # `cargo test --workspace` SKIPS any target whose `required-features` are
       # not enabled, and skips it silently - the target is never built, so it
       # contributes no test count and no failure. plugin-db puts three suites
