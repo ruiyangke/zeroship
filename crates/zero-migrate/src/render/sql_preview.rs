@@ -298,11 +298,28 @@ pub fn render_ir_envelope_sql(
 /// Load + lower an IR envelope artifact through the SAME tolerant path used by
 /// [`render_ir_envelope_sql`], returning only executable statement text.
 ///
-/// This is the DB-free lint seam: callers can feed these statements to the
-/// advisory analyzers without scraping SQL back out of the human preview, while
-/// runtime-resolved labels and comments stay out of the analyzer input.
+/// Returns the plan name plus the statement stream. This is the machine-readable
+/// half of the offline preview surface: plan headers, `[runtime-resolved]` labels,
+/// and the trailing tally are DROPPED rather than commented out, so a caller that
+/// must not see prose does not have to scrape SQL back out of the human preview.
 /// For MySQL, a non-empty statement stream includes the same save/pin/restore
 /// `sql_mode` envelope as the human preview, so it is also safe to execute as-is.
+///
+/// What this does NOT do: it does not analyze, classify, or guard-check the
+/// statements it returns; it does not consult a live catalog; and it does not
+/// report which ops were left out. An op that degrades to a `[runtime-resolved]`
+/// label in the human preview has NO entry here at all, so a short stream is not
+/// evidence of a short plan; compare against [`render_ir_envelope_sql`] to see
+/// what was dropped.
+///
+/// Nothing in this repository calls it. The TS CLI's `lint` and `plan` commands
+/// render the HUMAN preview instead, through the addon's `previewSql`
+/// verb (`crates/zero-migrate-node/src/bridge.rs`), which calls
+/// [`render_ir_envelope_sql`]. It is retained because it is re-exported from the
+/// crate root for out-of-tree embedders that take this crate as a path dependency
+/// (see `docs/embedding.md`), and it is the only way to obtain the statement text
+/// without re-deriving the statement/label split that
+/// [`render_ir_envelope_sql`] folds into one formatted string.
 ///
 /// # Errors
 ///
