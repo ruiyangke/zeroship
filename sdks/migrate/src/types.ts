@@ -194,7 +194,7 @@ export interface ColumnDef {
   /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
   notNull(): ColumnDef;
   /** A structured default — a typed scalar/container literal, `nextval(...)`, a
-   *  top-level value constructor (`now()`, `genRandomUuid()`), or a narrow
+   *  top-level value constructor (`now()`, `uuidV4()`, `uuidV7()`), or a narrow
    *  expression callback. NEVER raw SQL (property A).
    *  Returns a fresh def. */
   default(value: DefaultValue | DefaultExprFn | ExprChain | Expr): ColumnDef;
@@ -481,7 +481,7 @@ export type DbSynthSymbol =
 
 /** A DML value is either a typed scalar or a closed expression node. At runtime,
  *  the exact native function identities above are normalized to
- *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
+ *  `fnSynth(now)` or the exact `uuidV4` expression; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
 /** A DML assignment RHS accepts the same scalar/expression values as insert rows,
@@ -533,7 +533,8 @@ export type DefaultValue =
   | JsonDefaultValue;
 
 export declare function now(): ExprChain;
-export declare function genRandomUuid(): ExprChain;
+export declare function uuidV4(): ExprChain;
+export declare function uuidV7(): ExprChain;
 export declare function currentSetting(name: string, opts?: CurrentSettingOptions): ExprChain;
 export declare function currentUser(): ExprChain;
 export declare function interval(duration: Duration): ExprChain;
@@ -639,7 +640,7 @@ export interface ExprChain {
  *  callbacks. Defaults cannot reference columns, vendor PG helpers, or trigger
  *  OLD/NEW state by construction. Aggregates are type-reachable through chain
  *  methods / `countStar()` and rejected by Rust validation. Receiver-less value
- *  constructors are top-level imports (`now()`, `genRandomUuid()`). */
+ *  constructors are top-level imports (`now()`, `uuidV4()`, `uuidV7()`). */
 export interface DefaultBuilder {
   /** The searched `CASE` form: `col.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;

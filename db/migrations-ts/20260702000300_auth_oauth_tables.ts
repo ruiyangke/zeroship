@@ -3,7 +3,7 @@ import {
   table,
   t,
   now,
-  genRandomUuid,
+  uuidV4,
   interval,
   sequence,
 } from "@zeroship/migrate";
@@ -13,7 +13,7 @@ export const name = "auth_oauth_tables";
 export function up() {
   table("app_session_anchors", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       app_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       global_user_id: t.uuid().notNull(),
@@ -56,7 +56,7 @@ export function up() {
   sequence("audit_events_id_seq").alter({ schema: "zeroship", ownedBy: { table: "audit_events", column: "id" } });
   table("authz_decisions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       occurred_at: t.timestamp().notNull().default(now()),
       actor_user_id: t.uuid(),
       token_id: t.uuid(),
@@ -129,7 +129,7 @@ export function up() {
   });
   table("federated_identities", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       user_id: t.uuid().notNull(),
       provider: t.text().notNull(),
       subject: t.text().notNull(),
@@ -141,7 +141,7 @@ export function up() {
   });
   table("gateway_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       user_id: t.uuid().notNull(),
       app_id: t.uuid().notNull(),
       email: t.text({ caseSensitive: false }),
@@ -171,7 +171,7 @@ export function up() {
   });
   table("idp_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       user_id: t.uuid().notNull(),
       auth_method: t.text().notNull(),
       amr: t.textArray().notNull(),
@@ -369,7 +369,7 @@ export function up() {
   });
   table("users", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
+      id: t.uuid().notNull().default(uuidV4()),
       email: t.text({ caseSensitive: false }).notNull(),
       email_verified_at: t.timestamp(),
       name: t.text().notNull(),

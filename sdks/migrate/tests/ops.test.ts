@@ -77,7 +77,9 @@ test("@zeroship/migrate core exports enumType, pg vendor names, and omits old na
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
   assert.equal(typeof imported.now, "function");
-  assert.equal(typeof imported.genRandomUuid, "function");
+  assert.equal(typeof imported.uuidV4, "function");
+  assert.equal(typeof imported.uuidV7, "function");
+  assert.equal(imported.genRandomUuid, undefined);
   assert.equal(typeof imported.currentSetting, "function");
   assert.equal(typeof imported.currentUser, "function");
   assert.equal(typeof imported.interval, "function");
@@ -180,14 +182,14 @@ test("t.textArray() records the textArray column type", () => {
   assert.equal(col.nullable, false);
 });
 
-test("t.id() records a uuid PK + genRandomUuid default + top-level primaryKey", () => {
+test("t.id() records a uuid PK + uuidV4 default + top-level primaryKey", () => {
   const ops = record(() => {
     table("u").create({ columns: { id: t.id() } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "uuid");
   assert.equal(col.nullable, false);
-  assert.deepEqual(col.default, { expr: { node: "fnSynth", fn: "genRandomUuid", args: [] } });
+  assert.deepEqual(col.default, { expr: { node: "uuidV4" } });
   assert.deepEqual(ops[0].primaryKey, ["id"]);
   assert.equal(ops[0].constraints, undefined);
 });
@@ -836,9 +838,9 @@ test("supported native function symbols still record as fnSynth", () => {
   const ops = record(() => table("t").insert({ rows: [rows] as any }));
   const values = ops[0].rows[0];
   assert.deepEqual(values[0], { node: "fnSynth", fn: "now", args: [] });
-  assert.deepEqual(values[1], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+  assert.deepEqual(values[1], { node: "uuidV4" });
   if (globalThis.crypto?.randomUUID !== undefined) {
-    assert.deepEqual(values[2], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+    assert.deepEqual(values[2], { node: "uuidV4" });
   }
 });
 
@@ -1925,11 +1927,11 @@ test("immutable-only slots reject forced volatile/vendor nodes and record aggreg
           indexes: [{
             name: "users_bad_partial_idx",
             on: ["email"],
-            where: { node: "fnSynth", fn: "genRandomUuid", args: [] } as any,
+            where: { node: "uuidV4" } as any,
           }],
         }),
       ),
-    (e: any) => e.code === "OP_INVALID" && /partial index predicate/.test(e.message) && /genRandomUuid is volatile/.test(e.message),
+    (e: any) => e.code === "OP_INVALID" && /partial index predicate/.test(e.message) && /uuidV4 is volatile/.test(e.message),
   );
 
   assert.throws(
