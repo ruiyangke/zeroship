@@ -232,6 +232,9 @@ zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }
 zeroship-mailer = { path = "crates/mailer" }
+# Dev-dependency only. Owns the one skip announcer every gated test calls, so
+# that `tests/run_auth_suite.sh` has a single token to search for.
+zeroship-test-support = { path = "crates/test-support" }
 
 # ---------------------------------------------------------------------------
 # Shared lints
