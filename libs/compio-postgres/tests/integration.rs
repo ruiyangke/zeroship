@@ -13,7 +13,7 @@
 //!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, Error, NoTls, Pool};
+use compio_postgres::{Client, Error, NoTls, Pool, PoolConfig, TransactionStatus};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -1971,4 +1971,202 @@ async fn frontend_encode_failure_is_not_blamed_on_the_server() {
             "{api} blamed the server for a frontend encoding failure: {err:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pool release hygiene: an open transaction must not survive into the next
+// borrower.
+//
+// `Transaction`'s Drop already covers the typed API - it borrows the client
+// mutably, so the `PooledClient` cannot be released while a `Transaction`
+// lives, and Drop queues a ROLLBACK. Nothing covered a transaction opened as
+// raw SQL (`BEGIN` via batch_execute / execute), which is what these tests
+// pin.
+// ---------------------------------------------------------------------------
+
+/// A pool sized to exactly one connection, so a release and the next
+/// acquisition are guaranteed to be the same backend session.
+async fn single_connection_pool(url: &str) -> Pool {
+    Pool::connect_with_config(
+        url,
+        PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[compio::test]
+async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    {
+        let client = pool.get().await.unwrap();
+        client
+            .batch_execute("CREATE TABLE tx_leak (id int)")
+            .await
+            .unwrap();
+    }
+
+    // Open a transaction with raw SQL and write inside it, then release the
+    // connection without committing or rolling back.
+    {
+        let client = pool.get().await.unwrap();
+        client.batch_execute("BEGIN").await.unwrap();
+        client
+            .execute("INSERT INTO tx_leak VALUES (1)", &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            client.transaction_status(),
+            TransactionStatus::InTransaction,
+            "the session should be inside a transaction before release"
+        );
+    }
+
+    let client = pool.get().await.unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        TransactionStatus::Idle,
+        "the next borrower inherited an open transaction"
+    );
+    // The uncommitted row is visible only from inside the transaction that
+    // wrote it, so seeing it proves this borrower is still in that
+    // transaction.
+    let rows: i64 = client
+        .query_one_scalar("SELECT count(*) FROM tx_leak", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the next borrower saw the previous one's uncommitted row");
+}
+
+#[compio::test]
+async fn released_aborted_transaction_is_not_inherited_by_the_next_borrower() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    // A failed statement inside a transaction leaves the session in the
+    // "aborted" state, where every further statement is rejected until a
+    // rollback. Releasing there would hand the next borrower a connection
+    // that answers 25P02 to everything.
+    {
+        let client = pool.get().await.unwrap();
+        client.batch_execute("BEGIN").await.unwrap();
+        client
+            .batch_execute("SELECT * FROM no_such_table_here")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            client.transaction_status(),
+            TransactionStatus::Failed,
+            "the session should be in an aborted transaction before release"
+        );
+    }
+
+    let client = pool.get().await.unwrap();
+    let one: i32 = client.query_one_scalar("SELECT 1", &[]).await.unwrap();
+    assert_eq!(one, 1, "the next borrower inherited an aborted transaction");
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+}
+
+#[compio::test]
+async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    // Session-scoped state a borrower is allowed to hand off across a
+    // release: an advisory lock (crates/plugin-db's LockGuard does exactly
+    // this), a prepared statement (the driver's own type-info cache holds
+    // these for the life of the Client), and a session GUC. Clearing the
+    // transaction must not clear any of them - `DISCARD ALL` / `RESET ALL` /
+    // `DEALLOCATE ALL` would.
+    //
+    // The advisory-lock key is database-wide, so it is derived from this
+    // test's own schema name to keep it clear of the rest of the suite. The
+    // acquisition is the non-blocking form: if a backend left over from an
+    // earlier run still held the key, `pg_advisory_lock` would park here with
+    // no timeout, which is a hang rather than a test result.
+    let schema = test_schema();
+    let statement;
+    {
+        let client = pool.get().await.unwrap();
+        let got: bool = client
+            .query_one_scalar("SELECT pg_try_advisory_lock(hashtext($1)::int4)", &[&schema])
+            .await
+            .unwrap();
+        assert!(got, "another session is holding this test's advisory key");
+        client
+            .batch_execute("SET application_name = 'cpg_release_state'")
+            .await
+            .unwrap();
+        statement = client.prepare("SELECT $1::int4 + 1").await.unwrap();
+
+        // Leave a transaction open so the release path has to clear it.
+        client.batch_execute("BEGIN").await.unwrap();
+    }
+
+    let client = pool.get().await.unwrap();
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+
+    let held: i64 = client
+        .query_one_scalar(
+            "SELECT count(*) FROM pg_locks \
+             WHERE locktype = 'advisory' AND pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(held, 1, "the release path dropped a session-scoped advisory lock");
+
+    let app_name: String = client
+        .query_one_scalar("SELECT current_setting('application_name')", &[])
+        .await
+        .unwrap();
+    assert_eq!(app_name, "cpg_release_state", "the release path reset a session GUC");
+
+    let bumped: i32 = client.query_one_scalar(&statement, &[&41i32]).await.unwrap();
+    assert_eq!(bumped, 42, "the release path deallocated a prepared statement");
+}
+
+// ---------------------------------------------------------------------------
+// TLS: the pool has no TLS connector, so a connection string that requires
+// encryption must fail rather than quietly connect in the clear.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn sslmode_require_fails_closed_without_a_tls_connector() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let require = format!("{url}{sep}sslmode=require");
+
+    let err = compio_postgres::connect(&require, NoTls)
+        .await
+        .err()
+        .expect("sslmode=require must not succeed over a plaintext connection");
+    assert_eq!(err.to_string(), "error performing TLS handshake");
+
+    let err = Pool::connect(&require, 2)
+        .await
+        .err()
+        .expect("the pool must not satisfy sslmode=require in the clear");
+    // `Error`'s own Display is a category; the cause carries the detail.
+    let cause = std::error::Error::source(&err)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(
+        cause.contains("sslmode=require") && cause.contains("NoTls"),
+        "the pool's refusal should name the unsatisfiable setting and why, got: {cause}"
+    );
 }
