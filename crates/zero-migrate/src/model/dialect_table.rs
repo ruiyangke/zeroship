@@ -6,8 +6,10 @@
 //! One [`DispositionRow`] per (op-kind, variant) recording the token's
 //! disposition on each dialect. Faithfulness to the engine's live
 //! `Support::decision()` is proven by
-//! `tests/dialect_table_faithfulness.rs`. S0.1 is ADDITIVE — no engine code
-//! consumes this table yet (that is S0.2).
+//! `tests/dialect_table_faithfulness.rs`. Engine code DOES read this table:
+//! `crate::model::op_support` calls `dialect_table::lookup(kind, variant)`.
+//! The TypeScript mirror has no reader outside its own file; state the two
+//! sides separately, because they have already drifted apart once.
 
 use crate::model::support::Dialect;
 

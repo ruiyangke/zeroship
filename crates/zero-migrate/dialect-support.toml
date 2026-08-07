@@ -1,5 +1,4 @@
-# dialect-support.toml — the single-source dialect-support sidecar (DSL redesign
-# Phase 0, slice S0.1).
+# dialect-support.toml - the single-source dialect-support sidecar.
 #
 # WHAT: one hand-authored row per (op-kind, variant) recording that token's
 # DISPOSITION on each of the three dialects (postgres / sqlite / mysql). The
@@ -12,13 +11,13 @@
 #
 # DISPOSITION vocabulary (per (row, dialect)):
 #   portable             core construct that renders/validates on this dialect
-#   transparentDegradable P12 — native where supported, absence-tolerable elsewhere
-#                         (NOT produced by the current engine; reserved for the
-#                          redesign — no S0.1 row uses it yet)
+#   transparentDegradable native where supported, absence-tolerable elsewhere
+#                         (NOT produced by the current engine; reserved, and no
+#                          row in this file uses it)
 #   vendor               vendor-tier construct, admitted only on this dialect
 #   unsupported          refused on this dialect
 #
-# FAITHFULNESS (the whole point of S0.1): this file is HAND-AUTHORED to MIRROR the
+# FAITHFULNESS, which is the whole point: this file is HAND-AUTHORED to MIRROR the
 # live `crates/zero-migrate/src/model/support.rs` `Support::decision()` +
 # `Support::tier` behaviour, mapped decision→disposition as:
 #   Supported + Core   -> portable
@@ -26,8 +25,15 @@
 #   Unsupported        -> unsupported
 # The Rust test `tests/dialect_table_faithfulness.rs` proves the generated table
 # agrees with `Op::support()` for every op-kind × variant × dialect, so this file
-# cannot silently drift from the engine's dialect truth. S0.1 is ADDITIVE — no
-# consumer reads the table yet (that is S0.2).
+# cannot silently drift from the engine's dialect truth.
+#
+# CONSUMERS differ per side, so state them separately. The Rust table IS read by
+# engine code: `crates/zero-migrate/src/model/op_support.rs` calls
+# `dialect_table::lookup(kind, variant)`. The TypeScript mirror is read by
+# NOTHING outside its own generated file - it exists so the SDK can be checked
+# against the same sidecar, and a grep for `generated/dialect-table`,
+# `DIALECT_TABLE` or `dialectTable` finds no other reference. Do not collapse
+# these into one claim; they have already drifted apart once.
 #
 # VARIANT keys: payload-independent ops carry a single `variant = "base"` row.
 # Ops whose `Support::decision()` depends on a node/option carry one row per
