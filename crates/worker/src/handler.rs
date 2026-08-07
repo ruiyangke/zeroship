@@ -190,12 +190,33 @@ pub async fn dispatch(
         Err(resp) => return resp,
     };
 
+    // Wall clock for the reject arms below. Dispatch keeps its own, started
+    // after on-demand load, so a cold start is not billed as app wall time.
+    let handler_start = std::time::Instant::now();
+
     let app_id = match path.parse::<Uuid>() {
         Ok(id) => id,
         Err(_) => {
+            // The only reject with no app to attribute to: the id did not
+            // parse, so there is no subject to meter against.
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_APP_ID);
             return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
         }
+    };
+
+    // Rejects that happen before dispatch still consumed platform work: the
+    // worker read the bytes and produced a response. Metering them keeps a
+    // rejected request from being a free channel, and matches the env-missing
+    // arm further down, which has always recorded. CPU is zero because no
+    // isolate ran.
+    let record_reject = |response: &HttpResponse, ingress_bytes: u64| {
+        cache::record_request(
+            &app_id,
+            0,
+            handler_start.elapsed().as_micros() as u64,
+            buffered_response_body_len(response),
+            ingress_bytes,
+        );
     };
 
     // Parse the metadata prefix from the dispatch frame. The remaining bytes
@@ -208,14 +229,20 @@ pub async fn dispatch(
         }
         Err(e) => {
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
-            return HttpResponse::BadRequest()
+            let response = HttpResponse::BadRequest()
                 .json(&serde_json::json!({"error": format!("invalid envelope: {e}")}));
+            // The frame did not decode, so the inner body length is unknowable;
+            // the raw bytes received off the wire are what we actually read.
+            record_reject(&response, body.len() as u64);
+            return response;
         }
     };
     if request_body.len() > MAX_DISPATCH_BODY_BYTES {
         metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
-        return HttpResponse::PayloadTooLarge()
+        let response = HttpResponse::PayloadTooLarge()
             .json(&serde_json::json!({"error": "dispatch body too large"}));
+        record_reject(&response, request_body.len() as u64);
+        return response;
     }
 
     // On-demand loading: if app is not cached, pull from control plane.
@@ -223,16 +250,20 @@ pub async fn dispatch(
         metrics::inc(&metrics::ON_DEMAND_LOADS_TOTAL);
         if let Err(e) = load_on_demand(&config, &envs, &app_id).await {
             metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
-            return HttpResponse::ServiceUnavailable()
+            let response = HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": format!("failed to load app: {e}")}));
+            record_reject(&response, request_body.len() as u64);
+            return response;
         }
     }
 
     let runtime = match cache::get_runtime(&app_id) {
         Some(r) => r,
         None => {
-            return HttpResponse::NotFound()
-                .body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
+            let response =
+                HttpResponse::NotFound().body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
+            record_reject(&response, request_body.len() as u64);
+            return response;
         }
     };
 
@@ -2113,6 +2144,87 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         events: Vec<zeroship_core::usage_event::UsageEvent>,
     }
 
+    /// A worker config pointed at a dead control plane, so any on-demand load
+    /// attempt fails rather than reaching the network.
+    fn test_worker_config(blob_root: &std::path::Path) -> Arc<crate::WorkerConfig> {
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(LocalDiskBlobStore::new(blob_root.to_path_buf()).expect("blob store"));
+        let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+            zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.to_path_buf())
+                .expect("workflow blob store"),
+        );
+        Arc::new(crate::WorkerConfig {
+            control_url: "http://127.0.0.1:1".to_string(),
+            control_key: String::new(),
+            db_url: None,
+            kv_url: None,
+            storage_backend: None,
+            max_isolates: 10,
+            max_pinned_isolates_per_app: 4,
+            poll_interval_secs: 60,
+            worker_key: String::new(),
+            shutdown_timeout_secs: 0,
+            blob_store,
+            workflow_blob_store,
+            max_step_blob_bytes: 64 * 1024 * 1024,
+            workflow_advance_unsigned: false,
+        })
+    }
+
+    /// Drive `dispatch` with a raw payload against an app that was never
+    /// loaded, so the request is rejected before any isolate work happens.
+    /// These are the pre-dispatch reject arms; the app id is well-formed, so
+    /// the rejected request is still attributable to an app.
+    fn run_pre_dispatch_reject(payload: Vec<u8>) -> Option<MeteredDispatchResult> {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return None;
+        };
+
+        Some(runtime.block_on(async {
+            let app_id = Uuid::new_v4();
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            crate::cache::init_cache(
+                10,
+                4,
+                crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: meter.clone(),
+                },
+            );
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("pre-dispatch-reject-meter");
+            let config = test_worker_config(&blob_root);
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(payload)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let body = test::read_body(resp).await.to_vec();
+            let events = meter.drain();
+
+            let _ = std::fs::remove_dir_all(blob_root);
+            MeteredDispatchResult { app_id, status, body, events }
+        }))
+    }
+
     fn run_metered_dispatch(
         source: &[u8],
         limits: AppRuntimeLimits,
@@ -2164,28 +2276,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             }
             let logs = crate::logs::new_store();
             let blob_root = tmpdir("generated-error-meter");
-            let blob_store: Arc<dyn BlobStore> =
-                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-                    .expect("workflow blob store"),
-            );
-            let config = Arc::new(crate::WorkerConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: String::new(),
-                db_url: None,
-                kv_url: None,
-                storage_backend: None,
-                max_isolates: 10,
-                max_pinned_isolates_per_app: 4,
-                poll_interval_secs: 60,
-                worker_key: String::new(),
-                shutdown_timeout_secs: 0,
-                blob_store,
-                workflow_blob_store,
-                max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_advance_unsigned: false,
-            });
+            let config = test_worker_config(&blob_root);
 
             let app = test::init_service(
                 web::App::new()
@@ -2309,6 +2400,56 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         assert_generated_error_metering(result, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn pre_dispatch_bad_envelope_reject_records_platform_counters() {
+        // The frame does not decode, so the inner body length is unknowable and
+        // ingress is the raw bytes the worker actually received off the wire.
+        let payload = b"not-a-dispatch-frame".to_vec();
+        let Some(result) = run_pre_dispatch_reject(payload.clone()) else {
+            return;
+        };
+
+        assert_eq!(result.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "requests"),
+            Some(1),
+            "a rejected envelope is still one request the platform served"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            Some(payload.len() as u64),
+            "ingress must be the raw frame bytes received, since the frame did not decode"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "egress_bytes"),
+            Some(result.body.len() as u64),
+            "egress must be the error body actually sent"
+        );
+    }
+
+    #[test]
+    fn pre_dispatch_on_demand_load_failure_records_platform_counters() {
+        // The control plane is unreachable, so on-demand load fails and the
+        // request is refused before any isolate exists.
+        let request_body = b"load-failure-request-body";
+        let payload = dispatch_frame("POST", "http://example.test/load-fail", request_body);
+        let Some(result) = run_pre_dispatch_reject(payload) else {
+            return;
+        };
+
+        assert_eq!(result.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "requests"),
+            Some(1),
+            "a failed on-demand load is still one request the platform handled"
+        );
+        assert_eq!(
+            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            Some(request_body.len() as u64),
+            "ingress must be the request body the worker received"
+        );
     }
 
     #[test]
