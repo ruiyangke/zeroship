@@ -722,3 +722,204 @@ fn mysql_constraint_requoting_escapes_hostile_identifiers() {
          a KEY clause: {backtick}"
     );
 }
+
+/// The offline preview renders the statement APPLY will run, which means it runs the
+/// policy table-shape resolve itself. A RAW envelope (the shape the pure-JS host
+/// recorder writes: author-declared columns only) previewed under an INJECTING
+/// charter must therefore show the charter-injected columns, the pinned primary key,
+/// and the injected indexes -- not the author's bare declaration.
+///
+/// Scope: this covers `createTable` shape only. It says nothing about ops the
+/// resolver does not touch, nothing about apply-time behaviour, and nothing about
+/// the `[runtime-resolved]` boundary.
+#[test]
+fn preview_of_a_raw_envelope_shows_the_charter_injected_shape() {
+    let raw = r#"{"ir_version":1,"name":"raw_shape","ops":[
+      {"op":"createTable","name":"notes","columns":[
+        {"name":"title","type":"text","nullable":false}
+      ]}
+    ]}"#;
+
+    let out = render_ir_envelope_sql(raw, SqlDialect::Postgres, &opts())
+        .expect("a raw envelope renders under the injecting charter");
+
+    for injected in [
+        "\"id\"",
+        "\"created_at\"",
+        "\"updated_at\"",
+        "\"created_by\"",
+        "\"updated_by\"",
+        "\"version\"",
+        "\"deleted_at\"",
+    ] {
+        assert!(
+            out.contains(injected),
+            "preview must show charter-injected column {injected}:\n{out}"
+        );
+    }
+    // A single-column primary key renders inline on the column, not as a table
+    // constraint.
+    assert!(
+        out.contains("\"id\" character varying(255) PRIMARY KEY"),
+        "preview must show the charter-pinned primary key:\n{out}"
+    );
+    // Inject index names are logical policy labels; the physical name is the
+    // engine's deterministic table/column spelling (`inject_index_to_ir` sets
+    // `name: None`), so assert what the preview actually prints.
+    for index in [
+        "\"notes_deleted_at_idx\"",
+        "\"notes_updated_at_idx\"",
+        "\"notes_created_by_idx\"",
+    ] {
+        assert!(
+            out.contains(index),
+            "preview must show charter-injected index {index}:\n{out}"
+        );
+    }
+}
+
+/// The resolve the preview runs is IDEMPOTENT, so it is safe on envelopes that
+/// arrive ALREADY resolved (native on-disk artifacts are post-fold; host-recorder
+/// envelopes are raw). Both spellings of the same migration must preview to the
+/// identical byte stream -- no doubled injection.
+///
+/// Scope: create-table injection only; it does not compare against apply output.
+#[test]
+fn preview_is_identical_for_raw_and_pre_resolved_envelopes() {
+    let raw = r#"{"ir_version":1,"name":"raw_shape","ops":[
+      {"op":"createTable","name":"notes","columns":[
+        {"name":"title","type":"text","nullable":false}
+      ]}
+    ]}"#;
+    let pre_resolved = resolve_envelope_json(raw);
+
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        let from_raw =
+            render_ir_envelope_sql(raw, dialect, &opts()).expect("raw envelope previews");
+        let from_resolved = render_ir_envelope_sql(&pre_resolved, dialect, &opts())
+            .expect("pre-resolved envelope previews");
+        assert_eq!(
+            from_raw, from_resolved,
+            "a second resolve must be a no-op for {dialect:?}"
+        );
+        assert_eq!(
+            from_raw.matches("\"created_at\"").count() + from_raw.matches("`created_at`").count(),
+            from_resolved.matches("\"created_at\"").count()
+                + from_resolved.matches("`created_at`").count(),
+            "an injected column must not be emitted twice for {dialect:?}:\n{from_raw}"
+        );
+    }
+}
+
+/// An envelope that VIOLATES the charter fails the preview closed rather than
+/// rendering DDL apply would refuse. The resolver's collision blame is the message.
+///
+/// Scope: one violation shape (an author column colliding with an injected system
+/// column). It does not enumerate every `TableShapeError`.
+#[test]
+fn preview_fails_closed_on_a_charter_violating_envelope() {
+    let violating = r#"{"ir_version":1,"name":"violating","ops":[
+      {"op":"createTable","name":"notes","columns":[
+        {"name":"created_at","type":"text","nullable":false}
+      ]}
+    ]}"#;
+
+    let err = render_ir_envelope_sql(violating, SqlDialect::Postgres, &opts())
+        .expect_err("a create-table colliding with an injected system column is refused");
+    assert!(
+        err.contains("table-shape resolve"),
+        "the refusal must name the resolve that produced it: {err}"
+    );
+}
+
+/// The preview must resolve BEFORE it validates, the order apply uses. An authored
+/// partial index whose predicate references a charter-INJECTED column (the canonical
+/// soft-delete `deleted_at`) is only a valid IR document once the injected columns
+/// are present, so validating the raw envelope first rejects a migration apply
+/// accepts.
+///
+/// Scope: this pins the resolve/validate ORDER only. It asserts nothing about the
+/// rendered predicate SQL and nothing about apply-time index behaviour.
+#[test]
+fn preview_resolves_before_it_validates() {
+    let raw = r#"{"ir_version":1,"name":"soft_delete_partial","ops":[
+      {"op":"createTable","name":"notes","columns":[
+        {"name":"title","type":"text","nullable":false}
+      ],"indexes":[
+        {"name":"notes_live_title_idx","columns":[{"kind":"column","name":"title"}],
+         "unique":true,
+         "where":{"node":"unaryOp","op":"isNull","operand":{"node":"colRef","name":"deleted_at"}}}
+      ]}
+    ]}"#;
+
+    let out = render_ir_envelope_sql(raw, SqlDialect::Postgres, &opts()).expect(
+        "a partial index over an injected column previews once the shape is resolved first",
+    );
+    assert!(
+        out.contains("notes_live_title_idx"),
+        "the authored partial index must render:\n{out}"
+    );
+    assert!(
+        out.contains("\"deleted_at\""),
+        "the injected column the predicate reads must be present:\n{out}"
+    );
+}
+
+/// The preview resolves against `PreviewOpts::default_schema`, the same value apply
+/// threads as its project schema. A SCHEMA-SCOPED inject must therefore cover a
+/// table previewed into that schema, and only that schema -- resolving against a
+/// hardcoded `public` would silently drop the injection for any other project.
+///
+/// Scope: object-name threading only. It says nothing about which schema an op
+/// RENDERS into, which the lowering context already owns.
+#[test]
+fn preview_resolves_against_the_requested_default_schema() {
+    let charter = r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["tenant_a"] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["tenant_a"] }
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[inject]]
+scope = { include = ["tenant_a.*"] }
+mandatory = true
+columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
+"#;
+    let scoped = zero_migrate::effective_policy_from_charter_toml(charter)
+        .expect("schema-scoped inject charter composes");
+    let scoped_opts = |schema: &str| PreviewOpts {
+        default_schema: schema.to_string(),
+        owner_app: "app_preview".to_string(),
+        effective_policy: scoped.clone(),
+    };
+    let raw = r#"{"ir_version":1,"name":"scoped","ops":[
+      {"op":"createTable","name":"notes","columns":[
+        {"name":"title","type":"text","nullable":false}
+      ]}
+    ]}"#;
+
+    let covered = render_ir_envelope_sql(raw, SqlDialect::Postgres, &scoped_opts("tenant_a"))
+        .expect("the covered schema previews");
+    assert!(
+        covered.contains("\"tenant_stamp\""),
+        "a table previewed into the injected schema must carry the injection:\n{covered}"
+    );
+
+    let uncovered = render_ir_envelope_sql(raw, SqlDialect::Postgres, &scoped_opts("tenant_b"))
+        .expect("an uncovered schema previews");
+    assert!(
+        !uncovered.contains("tenant_stamp"),
+        "a table outside the inject scope must not gain the injection:\n{uncovered}"
+    );
+}

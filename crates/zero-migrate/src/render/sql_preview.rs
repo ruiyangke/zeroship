@@ -41,6 +41,19 @@
 //!
 //! The preview is HONEST that it shows the offline-renderable subset and labels the
 //! rest; the header + trailing summary state exactly that.
+//!
+//! # Policy table-shape resolve
+//!
+//! The IR-envelope entries run [`resolve_create_table_policy`](crate::resolve_create_table_policy)
+//! over the parsed document before validating and lowering it, exactly as the apply
+//! path does. A previewed `createTable` therefore shows the charter-injected
+//! columns, the pinned primary key, and the injected indexes apply will create. The
+//! resolve is idempotent, so an already-resolved envelope previews identically to
+//! the raw host-recorder spelling, and a no-inject charter leaves the IR verbatim.
+//! An envelope that VIOLATES the charter now fails the preview closed instead of
+//! rendering DDL apply would refuse. This applies to the envelope entries only:
+//! [`render_plan_sql`] and [`render_set_sql`] take an ALREADY-lowered plan and
+//! resolve nothing.
 
 use std::fmt::Write as _;
 
@@ -79,9 +92,11 @@ pub struct PreviewOpts {
     /// upstream by the load gate; here it only affects DML journal identity, never
     /// the rendered SQL). For the preview it is a cosmetic attribution.
     pub owner_app: String,
-    /// The composed policy whose inject rules shaped any resolved create-table
-    /// operation being previewed. This is mandatory; preview has no ambient
-    /// system-field profile.
+    /// The composed policy whose inject rules shape every previewed create-table
+    /// operation. The preview runs the table-shape resolve itself against this
+    /// policy, so an envelope may arrive raw or already resolved. It is mandatory;
+    /// preview has no ambient system-field profile. It does NOT drive anything
+    /// beyond create-table injection and the lowering context.
     pub effective_policy: zero_migrate_policy::EffectivePolicy,
 }
 
@@ -320,6 +335,32 @@ fn render_ir_envelope_rendered(
     // offline. The structural validator is enough to refuse a malformed artifact.
     let ir: MigrationIr =
         serde_json::from_str(bytes).map_err(|e| format!("parse IR envelope: {e}"))?;
+
+    // Run the policy table-shape resolve the apply path runs
+    // (`crates/zero-migrate-node/src/lower.rs`), so the previewed `createTable`
+    // carries the charter-injected columns, pinned primary key, and injected indexes
+    // apply will actually create. Without this the preview showed the author's bare
+    // declaration and silently disagreed with apply.
+    //
+    // Order matters: resolve BEFORE `validate_ir`. An authored index predicate may
+    // reference an injected column (the soft-delete partial unique on `deleted_at`),
+    // which only validates once the injected columns are present. This is the same
+    // order apply uses.
+    //
+    // The resolve is idempotent, so an envelope that arrives already resolved (the
+    // native on-disk artifact is post-fold) previews identically to the raw
+    // host-recorder spelling. A no-inject charter early-returns.
+    //
+    // This covers `createTable` shape only: it does not resolve anything about other
+    // ops, does not consult a live catalog, and does not change which ops degrade to
+    // a `[runtime-resolved]` label.
+    let ir = crate::model::table_shape::resolve_create_table_policy(
+        &ir,
+        &opts.effective_policy,
+        &opts.default_schema,
+    )
+    .map_err(|e| format!("table-shape resolve for IR envelope: {e}"))?;
+
     let target = match dialect {
         SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
         SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,

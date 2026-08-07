@@ -32,13 +32,16 @@
 //     expectation added to `sql_preview.rs` first.
 //   - Nothing about apply-time behaviour. `previewSql` is the DB-free render path;
 //     it opens no connection and executes nothing.
-//   - Nothing about the policy table-shape resolve. `previewSql` renders the RAW
-//     envelope: unlike `sql_preview.rs`'s golden helper, the addon's preview verb
-//     does NOT run `resolve_create_table_policy`, so charter-injected columns and
-//     indexes are absent from this output. The expectations asserted below are all
-//     author-declared shape, which resolution leaves untouched -- that is why they
-//     transfer. The whole-file goldens under `crates/zero-migrate/tests/golden/`
-//     are NOT comparable through this path for the same reason.
+//   - Little about the policy table-shape resolve. `previewSql` DOES run
+//     `resolve_create_table_policy` (the engine's preview entry resolves before it
+//     validates and lowers, matching apply), so the rendered CREATE TABLE below
+//     carries the CONFINED_CHARTER-injected columns, pinned primary key, and
+//     injected indexes alongside the author-declared shape. The expectations here
+//     are `includes()` checks on the author-declared facets only, because those are
+//     what `sql_preview.rs` pins by hand -- the injected shape is asserted on the
+//     Rust side, not here. Whole-file comparison against the goldens under
+//     `crates/zero-migrate/tests/golden/` is still out of scope: those goldens cover
+//     a different migration set, not these three.
 //   - It is not a second renderer. The SQL text is produced by the one engine
 //     renderer; only the IR reaching it comes from the TypeScript side.
 //
@@ -240,9 +243,7 @@ test("authored bounded string renders the per-dialect spellings sql_preview.rs p
 });
 
 // PORT of `sql_preview.rs::guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause`.
-// That Rust test feeds its IR to the renderer WITHOUT the golden helper's
-// pre-resolve, so this is the one ported case whose render path is identical on
-// both sides. `{ ifNotExists: true }` must reach the engine as an `existenceGuard`
+// `{ ifNotExists: true }` must reach the engine as an `existenceGuard`
 // -- a runtime catalog probe -- and must NOT become a native `IF NOT EXISTS` clause
 // on the statement.
 test("authored guarded addColumn renders the bare DDL sql_preview.rs pins", () => {
