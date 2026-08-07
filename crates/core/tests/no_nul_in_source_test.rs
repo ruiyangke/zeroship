@@ -3,22 +3,36 @@
 //! This is not about the compiler - it is about every grep-based sweep in this
 //! repository, and about the ones a reviewer runs by hand.
 //!
-//! The `grep` on this machine is ugrep 7.5.0. Given a file containing a NUL
-//! byte it PRINTS NOTHING. Measured, both arms, on files made for the run:
+//! TWO greps are in play here and they differ, so both are measured. The
+//! interactive shell resolves ugrep 7.5.0; `nix develop` - which is what the
+//! test suite and CI run under - resolves GNU grep 3.12. Same two files, one
+//! clean and one with a single trailing NUL:
 //!
-//!     grep -c needle clean.txt   stdout "1"    exit 0
-//!     grep -c needle nul.txt     stdout EMPTY  exit 1, stderr EMPTY
+//!                      LINE MODE                 -c
+//!     ugrep 7.5.0      empty, exit 1             empty, exit 1
+//!     GNU grep 3.12    empty, exit 0             "1",   exit 0
 //!
-//! Note what the second line is not. It does not print `0`, and it does not
-//! warn. An earlier version of this comment said ugrep "reports no matches",
-//! which is the outcome inferred rather than the output seen - the tool told us
-//! nothing and it got written down as having told us zero. Nothing distinguishes
-//! that from a file genuinely lacking the pattern except the exit code, and
-//! nobody reads the exit code of a grep they expect to succeed.
+//! The clean file matches in every cell. Read the NUL column carefully, because
+//! the naive summary - "the local grep is blind, the build grep is fine" - is
+//! wrong and was the first conclusion reached here.
 //!
-//! The version matters and is why it is named. GNU grep does not behave this
-//! way: it prints "Binary file ... matches", which is loud enough to notice. The
-//! hazard this test guards is specific to the grep in this environment.
+//! GNU grep counts correctly under `-c` and is BLIND IN LINE MODE, which is the
+//! mode a reviewer actually uses (`grep -rn pattern .`). It omits the matching
+//! line and exits 0. That is stealthier than ugrep, which at least exits 1: a
+//! successful exit with no output is exactly what a genuinely absent pattern
+//! looks like, so the hazard is worse in the environment the tests run under,
+//! not absent from it.
+//!
+//! Both this repository's grep-based CI gates use line mode - the doc-citation
+//! scan (`grep -rhoP`) and the auth suite's skip-marker check (`grep -F`), so
+//! both are exposed.
+//!
+//! Two earlier versions of this comment were wrong in the way this paragraph
+//! exists to prevent. The first said ugrep "reports no matches", which is the
+//! outcome inferred rather than the output seen - the tool printed nothing and
+//! it was written down as having told us zero. The second asserted GNU grep
+//! prints "Binary file ... matches"; 3.12 prints no such message on either
+//! path, and that claim came from memory rather than a run.
 //!
 //! That makes a NUL byte in a source file a silent hole in every audit. A sweep
 //! for dead citations, leftover process markers, or a dangerous call reports
