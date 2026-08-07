@@ -116,7 +116,7 @@ async fn cleanup_app(client: &Client, app_id: Uuid) {
 #[compio::test]
 async fn list_returns_idp_and_gateway_sessions() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email = format!("iss10-list-{}@zeroship.test", Uuid::new_v4().simple());
@@ -170,7 +170,7 @@ async fn list_returns_idp_and_gateway_sessions() {
 #[compio::test]
 async fn list_excludes_revoked_and_expired() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email = format!("iss10-excl-{}@zeroship.test", Uuid::new_v4().simple());
@@ -261,7 +261,7 @@ async fn list_excludes_revoked_and_expired() {
 #[compio::test]
 async fn list_excludes_other_users_sessions() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email_a = format!("iss10-a-{}@zeroship.test", Uuid::new_v4().simple());
@@ -312,7 +312,7 @@ async fn list_excludes_other_users_sessions() {
 #[compio::test]
 async fn revoke_one_idp_session_succeeds() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email = format!("iss10-revidp-{}@zeroship.test", Uuid::new_v4().simple());
@@ -354,7 +354,7 @@ async fn revoke_one_idp_session_succeeds() {
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email = format!("iss10-revgw-{}@zeroship.test", Uuid::new_v4().simple());
@@ -386,7 +386,7 @@ async fn revoke_one_gateway_session_succeeds() {
 #[compio::test]
 async fn revoke_other_users_session_is_noop_idor_guard() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email_a = format!("iss10-idor-a-{}@zeroship.test", Uuid::new_v4().simple());
@@ -455,7 +455,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 #[compio::test]
 async fn revoke_already_revoked_or_missing_is_noop() {
     let Some(client) = pg().await else {
-        eprintln!("skipping session_visibility_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping session_visibility_test (no AUTH_DB_URL)");
         return;
     };
     let email = format!("iss10-noop-{}@zeroship.test", Uuid::new_v4().simple());

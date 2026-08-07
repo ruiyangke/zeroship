@@ -20,7 +20,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use compio_s3::client::{PutOptions, S3Client};
 use compio_s3::{S3Config, S3Credentials};
-use std::io::Write as _;
+
+mod common;
 
 const ACCESS_KEY: &str = "minioadmin";
 const SECRET_KEY: &str = "minioadmin";
@@ -70,7 +71,7 @@ fn start_minio() -> bool {
         ])
         .status();
     if !matches!(run, Ok(s) if s.success()) {
-        let _ = std::io::stderr().write_all("skip: failed to start MinIO container\n".as_bytes());
+        common::skip("skip: failed to start MinIO container");
         return false;
     }
 
@@ -111,7 +112,7 @@ fn start_minio() -> bool {
             }
         }
     }
-    let _ = std::io::stderr().write_all("skip: MinIO did not become ready / bucket create failed\n".as_bytes());
+    common::skip("skip: MinIO did not become ready / bucket create failed");
     cleanup();
     false
 }
@@ -127,7 +128,7 @@ fn client() -> S3Client {
 #[test]
 fn minio_full_surface_and_multipart() {
     if !docker_available() {
-        let _ = std::io::stderr().write_all("skip: docker unavailable\n".as_bytes());
+        common::skip("skip: docker unavailable");
         return;
     }
     if !start_minio() {

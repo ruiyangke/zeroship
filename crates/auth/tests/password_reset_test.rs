@@ -135,12 +135,12 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -299,12 +299,12 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -408,12 +408,12 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -470,7 +470,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -519,7 +519,7 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn complete_rolls_back_token_consume_with_transaction() {
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -625,12 +625,12 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -867,7 +867,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 #[compio::test]
 async fn complete_binds_issue_time_user_not_current_email_owner() {
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -970,7 +970,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
     let Some(client) = pg().await else {
-        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
         return;
     };
 

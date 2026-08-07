@@ -26,7 +26,6 @@ use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
-use std::io::Write as _;
 
 mod common;
 
@@ -140,7 +139,7 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
 #[compio::test]
 async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
-        let _ = std::io::stderr().write_all("skip: REDPANDA_BROKERS unset — real-broker e2e\n".as_bytes());
+        zeroship_test_support::skip("skip: REDPANDA_BROKERS unset — real-broker e2e");
         return;
     };
     let brokers = brokers.to_string_lossy().to_string();

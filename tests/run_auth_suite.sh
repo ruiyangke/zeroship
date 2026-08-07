@@ -15,8 +15,11 @@
 # figure is written down here to go stale.
 #
 # This script provisions an isolated database, points the tests at it, and then
-# checks that they ACTUALLY RAN. If any test reports that it skipped, the run
-# fails - a missing database can never masquerade as a pass.
+# checks that they ACTUALLY RAN. If any test announces that it skipped, the run
+# fails - a missing database can never masquerade as a pass. The one exception
+# is an allowlist further down that names each tolerated skip and why; it is
+# there so a deferred decision reads as a deferred decision rather than as a
+# blind spot in the check.
 #
 # USAGE
 # -----
@@ -82,8 +85,9 @@ trap 'rm -f "$LOG"' EXIT
 
 echo "==> Running the auth suite against ${TEST_DB}"
 status=0
-# --nocapture is REQUIRED, not cosmetic: without it cargo swallows the "skipping"
-# lines the tests print, and the skip check below would pass vacuously.
+# --nocapture is no longer what makes the skip check work - the announcer writes
+# straight to the stderr handle, which the harness's capture never touches. It
+# stays for everything else a gated test prints on its way to a decision.
 cargo test -p zeroship-auth -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
@@ -100,21 +104,21 @@ echo "------------------------------------------------------------------"
 # it does not. That script invokes zeroship-control and zeroship-migrated and
 # never touches the gateway crate, so oidc_rp_e2e is covered by nothing.
 #
-# TWO BINARIES IN THE LIST BELOW ARE NOT ACTUALLY COVERED EITHER, and the skip
-# check further down cannot see it. `auth_token_anchors_test` gates on
-# GATEWAY_ANCHORS_DB_URL, which is set nowhere in this repo - not here, not in
-# ci.yml, not in deploy/. Measured on a full gate run: 13 lines reading
-# "[anchors] skip <name> (no GATEWAY_ANCHORS_DB_URL)" sat in this script's own
-# log while it reported "0 skipped", because the check greps for "skipping" and
-# those say "skip". `browser_auth_test` gates on the same unset variable.
+# TWO BINARIES IN THE LIST BELOW ARE NOT ACTUALLY COVERED EITHER.
+# `auth_token_anchors_test` gates on GATEWAY_ANCHORS_DB_URL, which is set
+# nowhere in this repo - not here, not in ci.yml, not in deploy/. Measured on a
+# full gate run: 13 lines reading "[anchors] skip <name> (no
+# GATEWAY_ANCHORS_DB_URL)" sat in this script's own log while it reported "0
+# skipped". `browser_auth_test` gates on the same unset variable.
 #
 # Exporting it is not the fix and that is measured too: with the variable
 # pointed at this script's database the suite runs 23 tests and 11 FAIL, the
 # first on "initial login must succeed, left: 400". So the coverage was never
 # merely switched off - the tests need work, and turning them on turns this gate
 # red. Whether to fix them or delete them is an operator decision, filed rather
-# than taken here. What is fixed now is the claim: this comment no longer says
-# these binaries are covered when they are not.
+# than taken here. The skip check below now SEES those 13 lines; it tolerates
+# them by an explicit allowlist that names them, so the deferral is stated
+# rather than smuggled in as a gap in the search.
 echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
 for spec in \
   "zeroship-authz:" \
@@ -137,11 +141,44 @@ done
 
 echo "------------------------------------------------------------------"
 # The point of the whole script: a test that skipped is not a test that passed.
-skips="$(grep -ci 'skipping' "$LOG" || true)"
+#
+# The search is for a token, not a word. `zeroship_test_support::skip` (and its
+# verbatim copy in the standalone libs/ crates) prefixes every announcement with
+# SKIP_MARKER, and nothing else in a run log is spelled that way. The word
+# "skip" cannot do this job and that is measured: of the 98 lines containing it
+# in one full run, 13 were real announcements, 5 were the harness's own
+# "test <name> ... ok" for tests whose names contain "skips"/"skipped", and ~80
+# were driver debug output echoing an INSERT that names a skip_consent column.
+# The marker's hyphens are not legal in a Rust identifier, so no test name can
+# forge it.
+SKIP_MARKER="ZEROSHIP-TEST-SKIPPED"
+
+# Skips this gate reports but does not fail on. Each entry names a backend this
+# script does not provision, and the decision to leave it unprovisioned:
+#
+#   GATEWAY_ANCHORS_DB_URL - auth_token_anchors_test (13 tests) and
+#     browser_auth_test. Pointing this at the gate's own database runs 23 tests
+#     of which 11 fail; see the comment above the binary list. Fixing or
+#     deleting them is an open operator decision, so the skips stay visible and
+#     tolerated rather than silently undetectable.
+#   AUTH_TEST_SMTP_SINK - one zeroship-mailer test
+#     (smtp_plaintext_sink_delivers_relay_forward) wants a live SMTP sink at a
+#     host:port this script has no way to stand up. Its two siblings in the same
+#     binary gate only on AUTH_DB_URL and ARE covered; the allowlist matches on
+#     the reason rather than the binary precisely so exempting this one does not
+#     blind the gate to the rest of the file.
+SKIP_ALLOWLIST='GATEWAY_ANCHORS_DB_URL|AUTH_TEST_SMTP_SINK'
+
+skips="$(grep -F "$SKIP_MARKER" "$LOG" | grep -cvE "$SKIP_ALLOWLIST" || true)"
+tolerated="$(grep -F "$SKIP_MARKER" "$LOG" | grep -cE "$SKIP_ALLOWLIST" || true)"
+if [ "$tolerated" -ne 0 ]; then
+  echo "NOTE: ${tolerated} allowlisted skip(s) - reported, not failed:"
+  grep -F "$SKIP_MARKER" "$LOG" | grep -E "$SKIP_ALLOWLIST" | sort -u | head -20
+fi
 if [ "$skips" -ne 0 ]; then
   echo "FAIL: ${skips} test(s) skipped despite a provisioned database." >&2
   echo "A skipped auth test is a silent pass. Offending lines:" >&2
-  grep -i 'skipping' "$LOG" | sort -u | head -20 >&2
+  grep -F "$SKIP_MARKER" "$LOG" | grep -vE "$SKIP_ALLOWLIST" | sort -u | head -20 >&2
   status=1
 fi
 
@@ -149,9 +186,9 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+'
 
 # The skip check above counts problems and requires none, so it succeeds when it
 # finds nothing - including when there was nothing it COULD find. It only sees a
-# test that prints the word "skipping", and 7 of the OIDC suites do not: they
-# gate on `let Some(fx) = Fixture::boot(...).await else { return; };` and return
-# in silence. Measured with no database: 75 tests across
+# test that announces, and 7 of the OIDC suites do not: they gate on
+# `let Some(fx) = Fixture::boot(...).await else { return; };` and return in
+# silence. Measured with no database: 75 tests across
 # oidc_{refresh_token,authorization_code,userinfo,brokered_login,login_consent,
 # backchannel_logout}_test and device_grant_test all report "ok" in ~0.00s, and
 # the grep above finds zero. The gate would print "0 skipped" and exit 0.
@@ -170,7 +207,7 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  echo "AUTH SUITE: ${passed} tests passed, 0 skipped (floor ${AUTH_MIN_PASSED})"
+  echo "AUTH SUITE: ${passed} tests passed, 0 unexpected skips, ${tolerated} allowlisted (floor ${AUTH_MIN_PASSED})"
 else
   echo "AUTH SUITE: FAILED"
 fi

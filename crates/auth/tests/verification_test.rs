@@ -85,12 +85,12 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
     let dsn = match std::env::var("AUTH_DB_URL") {
         Ok(dsn) => dsn,
         Err(_) => {
-            eprintln!("skipping verification_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
             return;
         }
     };
     let Some(client) = pg().await else {
-        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -148,7 +148,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     let Some(client) = pg().await else {
-        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -198,7 +198,7 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
     let Some(client) = pg().await else {
-        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -259,7 +259,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
 #[compio::test]
 async fn new_issue_supersedes_previous() {
     let Some(client) = pg().await else {
-        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
         return;
     };
 

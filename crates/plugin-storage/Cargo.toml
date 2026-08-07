@@ -31,6 +31,7 @@ default = []
 s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 # The metering assertions in the e2e suites read `UsageEvent` off a real Meter.
 zeroship-core = { workspace = true }
 # Backend-parity integration test drives the trait directly on a compio

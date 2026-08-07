@@ -126,7 +126,7 @@ async fn cleanup(db: &Client, user_id: Uuid, client_id: &str) {
 #[compio::test]
 async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
     let Some(db) = pg_or_skip().await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let (user_id, client_id, relay_email) = seed_active_alias(&db).await;

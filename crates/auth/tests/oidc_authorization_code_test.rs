@@ -68,7 +68,7 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot_with_email_verified(email_verified: bool) -> Option<Self> {
         let Some(db_url) = db_url() else {
-            eprintln!("[op_authorization_code_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+            zeroship_test_support::skip("[op_authorization_code_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
             return None;
         };
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");

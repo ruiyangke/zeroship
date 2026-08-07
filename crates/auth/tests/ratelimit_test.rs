@@ -27,7 +27,7 @@ async fn pg_connect(dsn: &str) -> compio_postgres::Client {
 #[compio::test]
 async fn consumes_until_throttled() {
     let Some(client) = pg_or_skip().await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
 
@@ -59,7 +59,7 @@ async fn consumes_until_throttled() {
 #[compio::test]
 async fn concurrent_consumes_are_atomic() {
     let Some(seed_client) = pg_or_skip().await else {
-        eprintln!("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let dsn = std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL present after pg_or_skip");

@@ -305,7 +305,7 @@ async fn get_device_with_user_code_from_ip(
 #[allow(clippy::future_not_send)]
 async fn device_route_renders_and_rejects_bad_input() {
     let Some((srv, auth_base, _pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -393,7 +393,7 @@ async fn device_route_renders_and_rejects_bad_input() {
 #[allow(clippy::future_not_send)]
 async fn device_authorization_user_code_uses_high_entropy_format() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_entropy] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_entropy] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -425,7 +425,7 @@ async fn device_authorization_user_code_uses_high_entropy_format() {
 #[allow(clippy::future_not_send)]
 async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_code() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -566,7 +566,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
 #[allow(clippy::future_not_send)]
 async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_get_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_get_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -643,7 +643,7 @@ async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
 #[allow(clippy::future_not_send)]
 async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_ip_backstop] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_ip_backstop] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -718,7 +718,7 @@ async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
 #[allow(clippy::future_not_send)]
 async fn device_authorization_omitted_scope_defaults_to_openid_only() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_scope] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_scope] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -763,7 +763,7 @@ async fn device_authorization_omitted_scope_defaults_to_openid_only() {
 #[allow(clippy::future_not_send)]
 async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant_confirm] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_confirm] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -880,7 +880,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
 #[allow(clippy::future_not_send)]
 async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     let Some((srv, auth_base, pg, issuer)) = boot_native().await else {
-        eprintln!("[device_grant_native] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant_native] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -1064,7 +1064,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
 #[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -1205,7 +1205,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 #[allow(clippy::future_not_send)]
 async fn device_post_requires_csrf_token() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        zeroship_test_support::skip("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();

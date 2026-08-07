@@ -73,7 +73,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 #[compio::test]
 async fn request_soft_disables_and_schedules() {
     let Some(db) = pg().await else {
-        eprintln!("skipping account_deletion_test (no AUTH_DB_URL/PG_TEST_URL)");
+        zeroship_test_support::skip("skipping account_deletion_test (no AUTH_DB_URL/PG_TEST_URL)");
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();

@@ -17,7 +17,6 @@ use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{is_authorized_anywhere, load_platform_policies, Action, AuthzContext, Resource};
-use std::io::Write as _;
 
 #[test]
 fn is_authorized_anywhere_with_app_membership_reads_uuid_app_id() {
@@ -102,7 +101,7 @@ where
     Fut: Future<Output = ()>,
 {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        let _ = std::io::stderr().write_all("skipping (no AUTH_DB_URL)\n".as_bytes());
+        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
         return;
     };
     compio::runtime::Runtime::new()

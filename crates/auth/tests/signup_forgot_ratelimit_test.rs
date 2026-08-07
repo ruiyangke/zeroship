@@ -138,7 +138,7 @@ fn unique_loopback() -> IpAddr {
 #[allow(clippy::future_not_send)]
 async fn signup_native_return_to_redirects_to_login_return_to() {
     let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -201,7 +201,7 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
 #[allow(clippy::future_not_send)]
 async fn signup_rejects_open_redirect_return_to_at_intake() {
     let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -261,7 +261,7 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
 #[allow(clippy::future_not_send)]
 async fn signup_post_throttles_after_ip_bucket_capacity() {
     let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -367,7 +367,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
 #[allow(clippy::future_not_send)]
 async fn signup_non_duplicate_create_error_renders_error_page() {
     let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
     };
 
@@ -482,7 +482,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 #[allow(clippy::future_not_send)]
 async fn forgot_post_throttles_after_email_bucket_capacity() {
     let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
     };
 

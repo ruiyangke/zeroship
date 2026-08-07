@@ -101,6 +101,7 @@ tempfile = { workspace = true }
 # uses the Rust impl on the PG side.
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the

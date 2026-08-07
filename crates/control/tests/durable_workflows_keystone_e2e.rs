@@ -2877,7 +2877,7 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
 #[serial]
 async fn durable_workflows_m1_keystone_real_spine() {
     if !enabled() {
-        let _ = std::io::stderr().write_all("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh\n".as_bytes());
+        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 
@@ -5000,7 +5000,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
 #[serial]
 async fn bare_await_body_io_is_rejected() {
     if !enabled() {
-        let _ = std::io::stderr().write_all("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh\n".as_bytes());
+        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 
@@ -5047,7 +5047,7 @@ async fn bare_await_body_io_is_rejected() {
 #[serial]
 async fn scheduler_misfire_lost_register_recovers() {
     if !enabled() {
-        let _ = std::io::stderr().write_all("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh\n".as_bytes());
+        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 
@@ -5163,7 +5163,7 @@ async fn scheduler_misfire_lost_register_recovers() {
 #[serial]
 async fn scheduler_overfire_duplicate_dispatch_noops() {
     if !enabled() {
-        let _ = std::io::stderr().write_all("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh\n".as_bytes());
+        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 
@@ -5281,7 +5281,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 #[serial]
 async fn compensation_saga_rollback_real_spine() {
     if !enabled() {
-        let _ = std::io::stderr().write_all("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh\n".as_bytes());
+        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 

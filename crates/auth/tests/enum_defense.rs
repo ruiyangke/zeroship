@@ -95,7 +95,7 @@ const N_PAIRS: usize = 4;
 async fn login_failure_responses_are_indistinguishable() {
     // 0. Env-skip check.
     let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
-        eprintln!("[enum_defense] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[enum_defense] skip (need AUTH_DB_URL)");
         return;
     };
 

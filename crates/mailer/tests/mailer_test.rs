@@ -9,12 +9,11 @@ use compio_postgres::{connect, NoTls};
 use zeroship_mailer::stdout::StdoutMailer;
 use zeroship_mailer::suppressions;
 use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
-use std::io::Write as _;
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        let _ = std::io::stderr().write_all("skip (no AUTH_DB_URL)\n".as_bytes());
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -56,7 +55,7 @@ async fn stdout_mailer_sends_when_not_suppressed() {
 #[compio::test]
 async fn stdout_mailer_refuses_suppressed() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-        let _ = std::io::stderr().write_all("skip (no AUTH_DB_URL)\n".as_bytes());
+        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -134,7 +133,7 @@ async fn smtp_plaintext_sink_delivers_relay_forward() {
         std::env::var("AUTH_DB_URL"),
         std::env::var("AUTH_TEST_SMTP_SINK"),
     ) else {
-        let _ = std::io::stderr().write_all("skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)\n".as_bytes());
+        zeroship_test_support::skip("skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)");
         return;
     };
     let (host, port) = sink

@@ -55,7 +55,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 #[compio::test]
 async fn only_confirmed_credential_gates_login() {
     let Some(db) = pg().await else {
-        eprintln!("skipping totp_login_challenge_test (no AUTH_DB_URL/PG_TEST_URL)");
+        zeroship_test_support::skip("skipping totp_login_challenge_test (no AUTH_DB_URL/PG_TEST_URL)");
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();

@@ -7,7 +7,6 @@
 #![cfg(feature = "redis")]
 
 use zeroship_plugin_kv::backend::{Backend, Redis, TtlState};
-use std::io::Write as _;
 
 /// Single-node test URL. When `KV_REQUIRE_REDIS=1` is set but no
 /// `REDIS_TEST_URL` is configured, this PANICS instead of silently
@@ -41,7 +40,7 @@ fn cluster_url() -> Option<String> {
 #[compio::test]
 async fn single_node_roundtrip() {
     let Some(url) = redis_url() else {
-        let _ = std::io::stderr().write_all("skip: REDIS_TEST_URL not set\n".as_bytes());
+        zeroship_test_support::skip("skip: REDIS_TEST_URL not set");
         return;
     };
     let b = Redis::new(url);
@@ -85,7 +84,7 @@ async fn list_all(b: &Redis, app: &str, prefix: &str) -> Vec<String> {
 #[compio::test]
 async fn cluster_roundtrip_via_backend() {
     let Some(url) = cluster_url() else {
-        let _ = std::io::stderr().write_all("skip: DRAGONFLY_CLUSTER_SEEDS not set\n".as_bytes());
+        zeroship_test_support::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
         return;
     };
     let b = Redis::new(url);
@@ -357,7 +356,7 @@ async fn same_sorted_seeds_share_cluster_handle() {
     // correctness-focused KV, but also shows the pool is re-used (no
     // flakiness from duplicate bootstrap).
     let Some(seeds) = std::env::var("DRAGONFLY_CLUSTER_SEEDS").ok() else {
-        let _ = std::io::stderr().write_all("skip: DRAGONFLY_CLUSTER_SEEDS not set\n".as_bytes());
+        zeroship_test_support::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
         return;
     };
     let parts: Vec<&str> = seeds.split(',').map(str::trim).collect();

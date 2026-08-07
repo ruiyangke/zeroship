@@ -5,7 +5,6 @@
 
 use serde_json::{json, Value};
 use zeroship_core::superjson::{self, Envelope, Meta, MetaTag};
-use std::io::Write as _;
 
 fn fx(name: &str) -> Vec<u8> {
     let path = format!(
@@ -283,7 +282,7 @@ fn node_available() -> bool {
 #[test]
 fn npm_deserialize_accepts_our_bytes() {
     if !node_available() {
-        let _ = std::io::stderr().write_all("skipping: node not available\n".as_bytes());
+        zeroship_test_support::skip("skipping: node not available");
         return;
     }
     // Use a tmpdir that already has superjson installed (created in the

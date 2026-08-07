@@ -11,7 +11,6 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -228,7 +227,7 @@ async fn isolated_fixture(label: &str) -> Option<Fixture> {
 
 async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Option<Fixture> {
     let Some(base_url) = db_url() else {
-        let _ = std::io::stderr().write_all("skip: CONTROL_TEST_DB not set\n".as_bytes());
+        zeroship_test_support::skip("skip: CONTROL_TEST_DB not set");
         return None;
     };
     Some(build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await)

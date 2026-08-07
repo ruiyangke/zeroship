@@ -43,6 +43,7 @@ tracing-logfmt = { workspace = true }
 tracing-bunyan-formatter = { workspace = true }
 
 [dev-dependencies]
+zeroship-test-support = { workspace = true }
 # Core tests include local ntex/compio HTTP servers. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.
