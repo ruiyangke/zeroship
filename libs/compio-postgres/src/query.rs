@@ -83,7 +83,7 @@ pub async fn query_text_params(
 ) -> Result<RowStream, Error> {
     let buf = client.with_buf(|buf| {
         // Parse with no type hints — server infers.
-        frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::parse)?;
+        frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::encode)?;
 
         // Bind: text format for parameters (code 0), binary format for results (code 1).
         let param_refs: Vec<Option<&[u8]>> =
@@ -171,7 +171,7 @@ pub async fn execute_text_params(
     params: &[Option<String>],
 ) -> Result<u64, Error> {
     let buf = client.with_buf(|buf| {
-        frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::parse)?;
+        frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::encode)?;
         let param_refs: Vec<Option<&[u8]>> =
             params.iter().map(|s| s.as_ref().map(|v| v.as_bytes())).collect();
         frontend::bind(
@@ -235,7 +235,7 @@ where
         let param_oids = params.iter().map(|(_, t)| t.oid()).collect::<Vec<_>>();
 
         client.with_buf(|buf| {
-            frontend::parse("", query, param_oids, buf).map_err(Error::parse)?;
+            frontend::parse("", query, param_oids, buf).map_err(Error::encode)?;
             encode_bind_raw("", params, "", buf)?;
             frontend::describe(b'S', "", buf).map_err(Error::encode)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;
@@ -296,7 +296,7 @@ where
         let param_oids = params.iter().map(|(_, t)| t.oid()).collect::<Vec<_>>();
 
         client.with_buf(|buf| {
-            frontend::parse("", query, param_oids, buf).map_err(Error::parse)?;
+            frontend::parse("", query, param_oids, buf).map_err(Error::encode)?;
             encode_bind_raw("", params, "", buf)?;
             frontend::describe(b'S', "", buf).map_err(Error::encode)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;

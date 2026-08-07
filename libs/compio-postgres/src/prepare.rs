@@ -69,6 +69,39 @@ ORDER BY attnum
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Owns a statement name from the moment `Parse` is queued until a `Statement`
+/// takes over responsibility for closing it.
+///
+/// `prepare` queues `Parse + Describe + Sync` and then awaits several
+/// responses. `StatementInner::drop` is what sends `Close S`, and no
+/// `Statement` exists until the whole exchange succeeds - so a future dropped
+/// in that window (a cancelled caller, a timeout, an error out of the
+/// `get_type` lookups) would leave the parsed statement on the server for the
+/// rest of the session with nothing able to name it. This guard closes it
+/// instead; `disarm` hands the name over once a `Statement` is about to exist.
+struct ParsedStatementGuard<'a> {
+    client: &'a Arc<InnerClient>,
+    name: Option<String>,
+}
+
+impl ParsedStatementGuard<'_> {
+    /// Release the name to the caller, which is about to build the `Statement`
+    /// whose `Drop` closes it from here on.
+    fn disarm(mut self) -> String {
+        self.name
+            .take()
+            .expect("a guard holds its name until it is disarmed exactly once")
+    }
+}
+
+impl Drop for ParsedStatementGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = self.name.take() {
+            crate::statement::close_statement(self.client, &name);
+        }
+    }
+}
+
 pub async fn prepare(
     client: &Arc<InnerClient>,
     query: &str,
@@ -76,6 +109,13 @@ pub async fn prepare(
 ) -> Result<Statement, Error> {
     let name = format!("s{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
     let buf = encode(client, &name, query, types)?;
+    // Armed before the Parse is queued, because from that point on the server
+    // may hold the statement and only the guard can still name it. Encoding
+    // failures above send nothing, so they need no guard.
+    let guard = ParsedStatementGuard {
+        client,
+        name: Some(name),
+    };
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
     match responses.next().await? {
@@ -117,7 +157,7 @@ pub async fn prepare(
         }
     }
 
-    Ok(Statement::new(client, name, parameters, columns))
+    Ok(Statement::new(client, guard.disarm(), parameters, columns))
 }
 
 /// Build an error describing a cycle in pg_catalog type resolution.
