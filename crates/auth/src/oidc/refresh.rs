@@ -771,6 +771,8 @@ pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(
     Ok((family_deleted, idem_reaped))
 }
 
+/// A presentation of an already-rotated token is one of two things: the single
+/// retry a lost response earns, or reuse. Serve the retry, then kill.
 async fn replay_or_kill(
     db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
@@ -778,43 +780,98 @@ async fn replay_or_kill(
     client: &OAuthClient,
     row: &RefreshRow,
 ) -> Result<TokenResponse, OAuthError> {
-    if let (Some(successor_hash), Some(idem_expires_at), Some(enc)) = (
+    if let Some(response) = replay_lost_response(db, issuer, keys, client, row).await? {
+        return Ok(response);
+    }
+    kill_family(db, &row.refresh_family_id, "replay").await?;
+    Err(OAuthError::invalid_grant("refresh token is invalid"))
+}
+
+/// `Ok(None)` is the reuse verdict, and every arm below that declines to serve
+/// must reach the caller as one. Nothing here may short-circuit with an
+/// `invalid_grant` of its own: an early return skips `kill_family`, so a
+/// decrypt failure that answered `invalid_grant` directly would disarm reuse
+/// detection for every family at once the moment the idempotency key rotated
+/// or a snapshot came back under a different one.
+async fn replay_lost_response(
+    db: &(impl GenericClient + ?Sized),
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    client: &OAuthClient,
+    row: &RefreshRow,
+) -> Result<Option<TokenResponse>, OAuthError> {
+    let (Some(successor_hash), Some(idem_expires_at), Some(enc)) = (
         row.replaced_by_token_hash.as_ref(),
         row.idem_expires_at,
         row.idem_response_enc.as_ref(),
-    ) {
-        let now = Utc::now();
-        if idem_expires_at > now
-            && row.expires_at > now
-            && row.family_absolute_expires_at > now
-        {
-            if let Some(successor) = select_live_successor(db, successor_hash).await? {
-                if successor.expires_at > now && successor.family_absolute_expires_at > now {
-                    let cached =
-                        keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc)?;
-                    let scopes = parse_scopes(&cached.scope);
-                    let access_token =
-                        mint_access_token(issuer, client, successor.user_id, &scopes)?;
-                    tracing::info!(
-                        family_id = %row.refresh_family_id,
-                        client_id = %row.client_id,
-                        "refresh idempotency replay recovered"
-                    );
-                    return Ok(TokenResponse {
-                        access_token,
-                        id_token: None,
-                        refresh_token: Some(cached.refresh_token),
-                        token_type: TOKEN_TYPE_BEARER,
-                        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
-                        scope: scopes.join(" "),
-                    });
-                }
-            }
-        }
+    ) else {
+        return Ok(None);
+    };
+    let now = Utc::now();
+    if idem_expires_at <= now || row.expires_at <= now || row.family_absolute_expires_at <= now {
+        return Ok(None);
+    }
+    // `select_live_successor` requires `rotated_at IS NULL`, so a chain that has
+    // already advanced past the successor is a kill and not a retry: the
+    // legitimate client is holding something newer, and no honest retry of this
+    // token remains outstanding.
+    let Some(successor) = select_live_successor(db, successor_hash).await? else {
+        return Ok(None);
+    };
+    if successor.expires_at <= now || successor.family_absolute_expires_at <= now {
+        return Ok(None);
     }
 
-    kill_family(db, &row.refresh_family_id, "replay").await?;
-    Err(OAuthError::invalid_grant("refresh token is invalid"))
+    // The record is single-use: serving it consumes it, so the second
+    // presentation of the same predecessor falls through to the family kill.
+    // A conditional UPDATE rather than a read-then-write, so two replays cannot
+    // both observe it present and both be served. NULL is already the spent
+    // marker the idempotency sweep writes, so no other reader learns a new
+    // state.
+    let consumed = db
+        .execute(
+            "UPDATE zeroship.oauth_refresh_tokens \
+             SET idem_response_enc = NULL, idem_expires_at = NULL \
+             WHERE token_hash = $1 AND idem_response_enc IS NOT NULL",
+            &[&row.token_hash],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                family_id = %row.refresh_family_id,
+                "refresh idempotency consume failed"
+            );
+            OAuthError::server_error("refresh rotation unavailable")
+        })?;
+    if consumed == 0 {
+        return Ok(None);
+    }
+
+    let Ok(cached) = keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc) else {
+        tracing::warn!(
+            family_id = %row.refresh_family_id,
+            client_id = %row.client_id,
+            "refresh idempotency record would not open; failing closed and treating \
+             the presentation as reuse"
+        );
+        return Ok(None);
+    };
+    let scopes = parse_scopes(&cached.scope);
+    let access_token = mint_access_token(issuer, client, successor.user_id, &scopes)?;
+    tracing::info!(
+        family_id = %row.refresh_family_id,
+        client_id = %row.client_id,
+        "refresh idempotency replay recovered"
+    );
+    Ok(Some(TokenResponse {
+        access_token,
+        id_token: None,
+        refresh_token: Some(cached.refresh_token),
+        token_type: TOKEN_TYPE_BEARER,
+        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+        scope: scopes.join(" "),
+    }))
 }
 
 pub(super) async fn authenticated_client_id(

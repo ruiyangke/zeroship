@@ -418,6 +418,89 @@ async fn legit_lost_response_retry_recovers_without_family_kill() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn second_replay_of_a_spent_predecessor_kills_family() {
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"])
+        .await
+        .expect("AUTH_DB_URL is required for oidc_refresh_token_test");
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let family_id = refresh_family_id(&fx).await;
+
+    let rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("first rotation");
+    assert_eq!(rotation.status().as_u16(), 200, "first rotation");
+    let rotation = rotation.json::<TokenResponse>().await.expect("rotation json");
+    let successor = rotation.refresh_token.expect("successor refresh token");
+
+    // One lost response is one retry, so the first replay still recovers. That
+    // is the whole reason the idempotency record exists and it stays intact.
+    let retry = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("lost response retry");
+    assert_eq!(retry.status().as_u16(), 200, "lost-response retry must recover");
+
+    // No client retries the same lost response twice: the second retry already
+    // carried a successor back. A further presentation of the spent predecessor
+    // is reuse, and RFC 9700 4.14.2 requires the family to die for it.
+    let reuse = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("second replay");
+    assert_eq!(reuse.status().as_u16(), 400, "second replay must not be served");
+    assert_error(reuse, "invalid_grant").await;
+    assert_family_revoked(&fx, &family_id).await;
+
+    // Revoking the family is the point; a 400 on the replay alone would leave
+    // the token an attacker actually wants still spendable.
+    let after = refresh_request(&fx, &successor, Some(NARROW_SCOPE))
+        .await
+        .expect("successor after reuse detection");
+    assert_eq!(after.status().as_u16(), 400, "successor must die with its family");
+    assert_error(after, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid_grant() {
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"])
+        .await
+        .expect("AUTH_DB_URL is required for oidc_refresh_token_test");
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let family_id = refresh_family_id(&fx).await;
+
+    let rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("first rotation");
+    assert_eq!(rotation.status().as_u16(), 200, "first rotation");
+    let rotation = rotation.json::<TokenResponse>().await.expect("rotation json");
+    let successor = rotation.refresh_token.expect("successor refresh token");
+
+    // Stands in for a rotated REFRESH_IDEM_KEY_FILE, or a snapshot restored
+    // under a different key: the sealed successor no longer opens. Reuse
+    // detection must not be something an unreadable blob can switch off.
+    corrupt_idempotency_record(&fx, &family_id).await;
+
+    let replay = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("replay over an unreadable idempotency record");
+    assert_eq!(replay.status().as_u16(), 400, "replay must not be served");
+    assert_error(replay, "invalid_grant").await;
+    assert_family_revoked(&fx, &family_id).await;
+
+    let after = refresh_request(&fx, &successor, Some(NARROW_SCOPE))
+        .await
+        .expect("successor after reuse detection");
+    assert_eq!(after.status().as_u16(), 400, "successor must die with its family");
+    assert_error(after, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -1381,6 +1464,27 @@ async fn expire_idempotency_window(fx: &Fixture, family_id: &str) {
         )
         .await
         .expect("expire idempotency cache");
+}
+
+/// Flip the last byte of the sealed successor. It lands in the AES-GCM tag, so
+/// the blob authenticates under no key at all - the same observable state a
+/// re-keyed deployment or a snapshot restored under a different key produces,
+/// without this test needing to own key custody.
+async fn corrupt_idempotency_record(fx: &Fixture, family_id: &str) {
+    let corrupted = fx
+        .db
+        .execute(
+            "UPDATE zeroship.oauth_refresh_tokens \
+             SET idem_response_enc = set_byte( \
+                     idem_response_enc, \
+                     length(idem_response_enc) - 1, \
+                     get_byte(idem_response_enc, length(idem_response_enc) - 1) # 255) \
+             WHERE refresh_family_id = $1 AND idem_response_enc IS NOT NULL",
+            &[&family_id],
+        )
+        .await
+        .expect("corrupt sealed idempotency response");
+    assert_eq!(corrupted, 1, "exactly one sealed idempotency record to corrupt");
 }
 
 async fn assert_family_revoked(fx: &Fixture, family_id: &str) {

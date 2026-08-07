@@ -157,7 +157,9 @@ All token operations are native to `crates/auth`.
 - **Access token:** RFC 9068-style EdDSA JWT, 15 min TTL, `typ = at+jwt`.
 - **Refresh token:** opaque `zrt_...` token. Only HMAC-SHA256 verifiers are
   stored in `zeroship.oauth_refresh_tokens`. Families are 7 d idle / 30 d hard
-  and rotate on every refresh with a bounded idempotency window.
+  and rotate on every refresh. A lost response can be retried once inside a
+  bounded window; the record is single-use, so a second presentation of an
+  already-rotated token revokes the whole family.
 - **Authorization code:** single-use, PKCE-bound, 60 s TTL.
 - **Device code:** 10 min TTL, polling interval enforced by the OP.
 
