@@ -26,7 +26,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "../../../crates/zeroship-migrate/op-ir.schema.json");
+const schemaPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json");
 // The output path defaults to the committed enums.ts, but the freshness CI gate
 // (`tests/ir-types-drift.test.ts`) overrides it via `GEN_IR_OUT` to regenerate
 // into a temp file and byte-compare against the committed copy — the "regenerate
