@@ -57,6 +57,27 @@ jobs:
       # from a tree that is genuinely clean.
       - name: Doc citations resolve
         run: |
+          ROOTS="crates sdks libs tests db examples"
+          # The corpus check, and it carries more weight than the count below.
+          #
+          # A count floor cannot see a DROPPED DIRECTORY. Measured distribution:
+          # crates 33, sdks 6, tests 3, examples 1, libs 0, db 0. Rename `sdks/`
+          # and 6 citations vanish, leaving ~31 - above any floor loose enough to
+          # survive ordinary comment edits. One whole tree skipped, gate green.
+          # `libs/` and `db/` yield zero legitimately, which is why the per-root
+          # assertion has to be EXISTENCE and not "yielded at least one": a
+          # directory with no citations is normal, a directory that is not there
+          # is a scan that silently stopped covering it.
+          #
+          # This is also why the `2>/dev/null` below is safe now and was not
+          # before: it swallows grep's "No such file or directory", so a renamed
+          # root used to produce a smaller result and no signal at all.
+          for r in $ROOTS; do
+            if [ ! -d "$r" ]; then
+              echo "::error::doc-citation scan lists $r/, which does not exist - the scan silently stopped covering it"
+              exit 1
+            fi
+          done
           missing=0
           found=0
           for p in $(grep -rhoP '(?<![A-Za-z0-9_/.-])(?:\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
@@ -64,7 +85,7 @@ jobs:
               --include='*.toml' --include='*.sh' \
               --exclude-dir=wpt --exclude-dir=dist \
               --exclude-dir=node_modules --exclude-dir=target \
-              crates/ sdks/ libs/ tests/ db/ examples/ 2>/dev/null \
+              $ROOTS 2>/dev/null \
             | sed 's|^\(\.\./\)*||' | sort -u); do
             found=$((found + 1))
             if [ ! -f "$p" ]; then
@@ -72,19 +93,18 @@ jobs:
               missing=$((missing + 1))
             fi
           done
-          echo "doc citations checked: $found, unresolvable: $missing"
-          # 30 against a measured 37. That is 19 percent of headroom, looser than
-          # the 7 percent the two enumeration floors carry, and the difference is
-          # deliberate rather than sloppy: those guard a count that can be
-          # PARTIALLY lost (a truncated file list reads fine and looks clean),
-          # whereas this one guards against the extraction breaking, which is an
-          # all-or-nothing failure - a wrong pattern or a wrong directory list
-          # yields zero or a handful, never 80 percent. The floor only has to
-          # separate "clean tree" from "scanned nothing", and the count moves
-          # with ordinary comment edits, so a tight floor here buys churn and no
-          # coverage.
-          if [ "$found" -lt 30 ]; then
-            echo "::error::only $found doc citations found (expected ~37); the scan is not reaching the tree it claims to cover, so a clean result would mean nothing"
+          # Print the coverage on SUCCESS, not only inside a failure message. A
+          # number nobody sees until the gate already failed is a number that
+          # cannot warn anyone; this is the channel where a false green differs
+          # from a true one.
+          echo "doc citations checked: $found across $ROOTS, unresolvable: $missing"
+          # With the per-root check above carrying the corpus, this is back to
+          # being the degenerate-case guard it was always meant to be: it only
+          # has to separate "clean tree" from "the extraction returned nothing".
+          # Left loose on purpose - the count moves with any ordinary comment
+          # edit, so a tight floor here buys churn rather than coverage.
+          if [ "$found" -lt 20 ]; then
+            echo "::error::only $found doc citations found (expected ~37); the extraction returned nothing usable, so a clean result would mean nothing"
             exit 1
           fi
           [ "$missing" -eq 0 ]
