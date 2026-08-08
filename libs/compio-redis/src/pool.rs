@@ -55,7 +55,14 @@ impl Default for PoolConfig {
 struct Inner {
     url: String,
     config: PoolConfig,
-    /// Idle connections, LIFO for hottest-first reuse.
+    /// Idle connections, LIFO for hottest-first reuse: `acquire` pops from
+    /// the tail, release pushes onto it.
+    ///
+    /// Ordered oldest-first in practice (every push stamps `Instant::now()`
+    /// and entries are only appended), which is what makes a LIFO pop return
+    /// the hottest conn. Nothing depends on that for CORRECTNESS: the
+    /// idle-timeout sweep in `acquire` examines every entry rather than
+    /// assuming the expired ones sit at either end.
     idle: Vec<(Client, Instant)>,
     /// Currently-in-use count.
     busy: usize,
@@ -155,15 +162,29 @@ impl Pool {
             // `max_size` re-check is needed on this path — only an atomic claim.
             let candidate = {
                 let mut inner = self.inner.borrow_mut();
-                // Drop stale-by-idle-timeout conns from the top of the stack.
+                // Reclaim every conn that has sat idle past `idle_timeout`.
+                //
+                // Sweeping from the TAIL and stopping at the first live entry
+                // (as this once did) reached nothing in steady traffic: the
+                // stack is oldest-first, so every release pushes a
+                // freshly-stamped conn on top, the scan halted on its first
+                // look, and the older conns buried underneath were never
+                // examined. A burst that opened N conns left N-1 sockets open
+                // indefinitely, holding server-side slots, whatever
+                // `idle_timeout` said. There is no background reaper, so this
+                // sweep is the only enforcement point.
+                //
+                // Age is therefore evaluated over EVERY entry rather than
+                // walking in from one end and stopping. That deliberately
+                // costs O(idle) instead of O(expired) - `idle` is bounded by
+                // `max_size` (16 by default), so the scan is noise next to
+                // the socket work around it - and buys a sweep that owes
+                // nothing to the stack's ordering: a future change that
+                // reorders `idle`, or parks an entry with a timestamp other
+                // than "now", cannot silently make connections unreachable
+                // to it again.
                 let timeout = inner.config.idle_timeout;
-                while let Some((_, ts)) = inner.idle.last() {
-                    if now.duration_since(*ts) > timeout {
-                        inner.idle.pop();
-                    } else {
-                        break;
-                    }
-                }
+                inner.idle.retain(|(_, ts)| now.duration_since(*ts) <= timeout);
                 let mut picked = None;
                 while let Some((c, ts)) = inner.idle.pop() {
                     if c.is_dirty() || !c.is_rx_empty() {
@@ -1029,5 +1050,71 @@ mod red_team_tests {
              (B acquired ok? {})",
             b_result.is_ok(),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // FIX B - `idle_timeout` must be enforced across the WHOLE idle stack,
+    // not just its top.
+    //
+    // Idle entries are pushed with a fresh `Instant` on release, so the
+    // stack is ordered oldest-first and the FRESHEST entry sits on top.
+    // A sweep that walks the tail and stops at the first live entry
+    // therefore stops immediately in steady traffic, and every older
+    // connection buried underneath is never examined again. After a burst
+    // opens N connections and traffic settles back to one, N-1 sockets stay
+    // open forever holding server-side slots - whatever `idle_timeout` says.
+    //
+    // There is no background reaper, so `acquire` is the only place this can
+    // be caught.
+    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn buried_idle_connection_is_reclaimed_on_timeout() {
+        let url = spawn_replying_mock(b"$5\r\nhello\r\n").await;
+        let pool = Pool::connect_with(
+            &url,
+            PoolConfig {
+                max_size: 4,
+                // Two warm connections: one will be buried under the other.
+                min_idle: 2,
+                idle_timeout: Duration::from_secs(1),
+                // Never probe - this test is about expiry, not liveness.
+                liveness_probe_after: Duration::from_secs(3600),
+            },
+        )
+        .await
+        .expect("pool warm-up");
+        assert_eq!(pool.idle_len(), 2, "warm-up parked two idle conns");
+
+        // Age the BOTTOM entry past `idle_timeout` while leaving the top one
+        // fresh. Backdating the parked timestamp is exactly the state the
+        // pool reaches on its own after a burst drains away (the bottom conn
+        // has not been touched since the burst); doing it directly keeps the
+        // test deterministic instead of sleeping out a real idle_timeout.
+        {
+            let mut inner = pool.inner.borrow_mut();
+            let aged = Instant::now()
+                .checked_sub(Duration::from_secs(5))
+                .expect("monotonic clock is at least 5s past boot");
+            inner.idle[0].1 = aged;
+            // Sanity: the stack is still ordered oldest-first.
+            assert!(inner.idle[0].1 < inner.idle[1].1);
+        }
+
+        // One acquire in steady traffic. It takes the fresh top entry - and
+        // must also reclaim the expired one buried underneath.
+        let conn = pool.acquire().await.expect("acquire");
+        assert_eq!(pool.busy_count(), 1, "the fresh conn is checked out");
+        assert_eq!(
+            pool.idle_len(),
+            0,
+            "an idle conn older than idle_timeout must be reclaimed even when \
+             a fresher entry sits on top of it"
+        );
+
+        // And the reclaim must be real: returning the checked-out conn leaves
+        // exactly one idle entry, not two.
+        drop(conn);
+        assert_eq!(pool.idle_len(), 1, "only the returned conn should be idle");
+        assert_eq!(pool.busy_count(), 0);
     }
 }

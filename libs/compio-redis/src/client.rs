@@ -64,7 +64,13 @@ pub struct Client {
     /// reply split across syscalls still decodes cleanly.
     rx: BytesMut,
     /// Scratch buffer for `read_exact`-style reads. Compio's ownership-
-    /// transfer API returns the Vec back; we reuse it.
+    /// transfer API takes the Vec BY VALUE and hands it back in the
+    /// `BufResult`, so it necessarily leaves the struct for the duration of
+    /// every read.
+    ///
+    /// This field is therefore a CACHE, not state: see
+    /// [`Client::take_read_scratch`] for why nothing may depend on it
+    /// surviving a read.
     read_scratch: Vec<u8>,
     cmd_timeout: Duration,
     /// "Dirty" barrier for safe pool reuse. Set SYNCHRONOUSLY at the start
@@ -477,8 +483,15 @@ impl Client {
             }
 
             // Need more bytes. Read a chunk.
-            let scratch = std::mem::take(&mut self.read_scratch);
+            //
+            // `take_read_scratch` guarantees a usable buffer regardless of
+            // what any previous read did with it, so neither the `?` below
+            // nor a cancellation at the `.await` can strand the client. The
+            // assignment back into the field is a pure cache refill and is
+            // deliberately unconditional and effect-free if skipped.
+            let scratch = self.take_read_scratch();
             let compio::BufResult(res, buf) = self.stream.read(scratch).await;
+            self.read_scratch = buf;
             let n = res.map_err(Error::Io)?;
             if n == 0 {
                 return Err(Error::Io(std::io::Error::new(
@@ -486,10 +499,49 @@ impl Client {
                     "redis connection closed",
                 )));
             }
-            self.rx.extend_from_slice(&buf[..n]);
-            // Return the scratch buffer for reuse next iteration.
-            self.read_scratch = buf;
+            // `AsyncRead::read` writes to the BEGINNING of the buffer and
+            // sets its length to `n`, so the bytes just read are `[..n]`.
+            self.rx.extend_from_slice(&self.read_scratch[..n]);
         }
+    }
+
+    /// Hand out the reusable read buffer, guaranteeing it can actually hold
+    /// a `READ_CHUNK` read.
+    ///
+    /// This exists because the read buffer CANNOT be treated as durable
+    /// state. `compio`'s ownership-transfer `read` moves the `Vec` into the
+    /// `io_uring` operation, so the field is empty for the whole await - and
+    /// there are two ways it never comes back:
+    ///
+    /// 1. an early return inside the read loop (any `?`), and
+    /// 2. cancellation - `send_recv` wraps this loop in a `timeout`, which
+    ///    drops the future while the buffer is still inside the op.
+    ///
+    /// Cancellation is the decisive one: no amount of restore-on-error code
+    /// can fix it, because no code of ours runs at all. Restoring the buffer
+    /// on every path would also be a standing invitation to regress - the
+    /// next `?` added to that loop silently reintroduces the bug.
+    ///
+    /// So the invariant is moved to the point of USE instead: a missing or
+    /// undersized buffer is a cache miss, and this function repairs it. The
+    /// worst a lost buffer can now cost is one allocation. That matters
+    /// because the failure mode was severe and silent: a zero-capacity
+    /// buffer makes `read` complete with `Ok(0)` as soon as the socket is
+    /// merely readable, which the loop above reports as
+    /// `UnexpectedEof: redis connection closed` - a permanent, false "server
+    /// hung up" on a perfectly healthy connection.
+    ///
+    /// Capacity, not length, is the quantity that matters: `AsyncRead::read`
+    /// fills the buffer's whole capacity from offset 0 and then sets its
+    /// length to the byte count read. A buffer handed back with `len == n`
+    /// after a short read is therefore still full-size and reused as-is; a
+    /// buffer that lost its capacity (or never had it) is replaced.
+    fn take_read_scratch(&mut self) -> Vec<u8> {
+        let mut buf = std::mem::take(&mut self.read_scratch);
+        if buf.capacity() < READ_CHUNK {
+            buf = vec![0u8; READ_CHUNK];
+        }
+        buf
     }
 }
 
@@ -545,6 +597,96 @@ mod red_team_tests {
         })
         .detach();
         (addr.ip(), addr.port())
+    }
+
+    /// A mock that swallows the FIRST command without replying and stalls
+    /// for `stall` (long enough for the client's `cmd_timeout` to fire and
+    /// cancel the in-flight read), then serves every SUBSEQUENT command
+    /// promptly with `reply`. Models the ordinary "one slow command, then
+    /// the server is fine again" case - the socket is never closed.
+    async fn mock_server_stall_then_serve(
+        stall: Duration,
+        reply: &'static [u8],
+    ) -> (std::net::IpAddr, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            let (mut stream, _peer) = listener.accept().await.expect("accept");
+            // Command 1: read it, answer NOTHING, stall past the client's
+            // command timeout so the client cancels its pending read.
+            let buf = vec![0u8; 1024];
+            let compio::BufResult(_n, _buf) = stream.read(buf).await;
+            compio::time::sleep(stall).await;
+            // From here on the server is healthy and prompt.
+            loop {
+                let buf = vec![0u8; 1024];
+                let compio::BufResult(n, _b) = stream.read(buf).await;
+                match n {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let compio::BufResult(w, _r) = stream.write_all(reply).await;
+                        if w.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+        (addr.ip(), addr.port())
+    }
+
+    // -----------------------------------------------------------------
+    // FIX A - a timed-out (cancelled) read must not brick the Client.
+    //
+    // `send_recv_inner` hands its reusable read buffer to compio by value
+    // (`mem::take`). If the buffer is not back in the struct when the next
+    // command runs, the next read goes into a ZERO-CAPACITY buffer, which
+    // completes with `Ok(0)` the instant the socket is merely readable -
+    // and `n == 0` is reported as "redis connection closed". So one
+    // timed-out command would permanently poison a perfectly healthy
+    // connection with a FALSE EOF.
+    //
+    // What this test does NOT catch: it pins the client's BEHAVIOUR, not
+    // the buffer-reuse optimisation. Deleting the `self.read_scratch = buf`
+    // refill in `send_recv_inner` leaves this test green, because
+    // `take_read_scratch` would then just allocate a fresh buffer per read.
+    // That is the point of the shape - correctness no longer depends on the
+    // restore - but it means only a benchmark, not this test, would notice
+    // the reuse being lost.
+    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn timed_out_command_does_not_brick_the_client() {
+        // Server stalls ~400ms (client times out at 100ms), then serves.
+        let (ip, port) =
+            mock_server_stall_then_serve(Duration::from_millis(400), b"$5\r\nhello\r\n").await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        c.set_cmd_timeout(Duration::from_millis(100));
+
+        // Command 1 must time out - that part is correct behaviour.
+        let err = c.get("k").await.expect_err("stalled server must time cmd 1 out");
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "cmd 1 should be TimedOut, got {err:?}"
+        );
+
+        // Let the mock finish stalling, then give the client room to work.
+        compio::time::sleep(Duration::from_millis(500)).await;
+        c.set_cmd_timeout(Duration::from_secs(2));
+
+        // Commands 2 and 3 run on the SAME, healthy, open socket. They must
+        // succeed. Pre-fix they fail instantly with "redis connection closed".
+        for i in 2..=3 {
+            let v = c
+                .get("k")
+                .await
+                .unwrap_or_else(|e| panic!("cmd {i} failed on a healthy connection: {e}"));
+            assert_eq!(
+                v.as_deref(),
+                Some(b"hello".as_ref()),
+                "cmd {i} returned the wrong value"
+            );
+        }
     }
 
     // -----------------------------------------------------------------
