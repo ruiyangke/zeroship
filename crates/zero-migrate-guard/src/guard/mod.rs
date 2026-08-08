@@ -636,16 +636,25 @@ fn fold_identifier(name: &str) -> Vec<u8> {
 /// is compiled as a SEPARATE crate that `use`s `zero_migrate_guard`, so it
 /// exercises exactly the boundary an external consumer of this crate sits behind.
 ///
+/// KEEP THE FIELD LISTS BELOW EXACT. A `compile_fail` doctest passes when the code
+/// fails to compile for ANY reason, so a literal naming a field that no longer
+/// exists passes on the typo and stops testing privacy at all. Both of these did
+/// exactly that until the lists were corrected: they would have passed unchanged
+/// with every field made `pub`. When a field is added or renamed, update these and
+/// re-check them the only way that means anything - make the fields `pub`, confirm
+/// the doctests FAIL, then put the visibility back.
+///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal — the
-/// fields (`dialect`, `effective`) are private, so a privileged profile can never
-/// be forged by a literal (the `EffectivePolicy` is itself unforgeable). This MUST
-/// fail to compile:
+/// fields (`dialect`, `effective`, `guard_mode`) are private, so a privileged
+/// profile can never be forged by a literal (the `EffectivePolicy` is itself
+/// unforgeable). This MUST fail to compile:
 ///
 /// ```compile_fail
 /// use zero_migrate_guard::guard::GuardConfig;
 /// let _ = GuardConfig {
 ///     dialect: zero_migrate_ir::dialect::SqlDialect::Postgres,
 ///     effective: unimplemented!(),
+///     guard_mode: unimplemented!(),
 /// };
 /// ```
 ///
@@ -657,10 +666,7 @@ fn fold_identifier(name: &str) -> Vec<u8> {
 /// ```compile_fail
 /// let _ = zero_migrate_policy::EffectivePolicy {
 ///     registry: unimplemented!(),
-///     grants: unimplemented!(),
-///     requires: vec![],
-///     injects: vec![],
-///     validates: vec![],
+///     layers: unimplemented!(),
 /// };
 /// ```
 ///
