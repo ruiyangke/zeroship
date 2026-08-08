@@ -92,7 +92,10 @@ enum ScheduleDescriptor {
         cron_expr: String,
         tz: Tz,
         tz_name: String,
-        cron: ParsedCron,
+        // Boxed: `ParsedCron` is ~160 bytes (5 `CronField`s), which would
+        // otherwise make every `ScheduleDescriptor` (including the much
+        // smaller `Interval` variant) pay the largest-variant size.
+        cron: Box<ParsedCron>,
     },
     Interval {
         interval_ms: i64,
@@ -622,7 +625,7 @@ fn descriptor_from_wire(wire: ScheduleDescriptorWire) -> Result<ScheduleDescript
                 cron_expr: normalize_cron_expr(&cron_expr)?,
                 tz: parsed_tz,
                 tz_name: tz,
-                cron,
+                cron: Box::new(cron),
             })
         }
         ScheduleDescriptorWire::Interval {

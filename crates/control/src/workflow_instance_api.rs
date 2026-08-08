@@ -35,7 +35,16 @@ pub const SIGNAL_REQUEST_BODY_BYTES: usize = 128 * 1024;
 pub const SIGNAL_PAYLOAD_BYTES: usize = 64 * 1024;
 
 const SIGNAL_RATE_LIMIT_CAPACITY: f64 = 60.0;
-const SIGNAL_RATE_LIMIT_REFILL_PER_SEC: f64 = 60.0 / 60.0;
+// Full-bucket refill window: the bucket refills from empty to
+// `SIGNAL_RATE_LIMIT_CAPACITY` over this many seconds. Previously this was
+// the literal `60.0 / 60.0`, i.e. capacity divided by a duplicated literal
+// `60.0` rather than by this named window — correct today only because the
+// window and the capacity both happen to be 60; changing either constant
+// independently would have silently decoupled the refill rate from the
+// capacity it's meant to track.
+const SIGNAL_RATE_LIMIT_REFILL_WINDOW_SECS: f64 = 60.0;
+const SIGNAL_RATE_LIMIT_REFILL_PER_SEC: f64 =
+    SIGNAL_RATE_LIMIT_CAPACITY / SIGNAL_RATE_LIMIT_REFILL_WINDOW_SECS;
 const SIGNAL_TOKEN_MAX_TYPES: usize = 16;
 const SIGNAL_TOKEN_MAX_TTL_SECS: i64 = 24 * 60 * 60;
 const SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS: i64 = 1;
@@ -685,7 +694,7 @@ fn status_output(row: &compio_postgres::Row) -> Value {
 
 fn retry_after_header(secs: f64) -> String {
     if secs.is_finite() {
-        format!("{:.0}", secs.ceil().max(1.0).min(3600.0))
+        format!("{:.0}", secs.ceil().clamp(1.0, 3600.0))
     } else {
         "60".to_string()
     }
@@ -1075,21 +1084,38 @@ where
     Ok(())
 }
 
+/// Grouped inputs shared by [`insert_run`], [`insert_run_on_conflict_do_nothing`],
+/// and [`join_or_create_keyed_run`] — kept as a struct rather than individual
+/// parameters purely to stay under clippy's `too_many_arguments` threshold;
+/// every field is still required and read exactly once.
+struct NewRun<'a> {
+    app_id: &'a Uuid,
+    workflow_name: &'a str,
+    deploy_id: &'a str,
+    input: &'a Value,
+    input_journal_bytes: i64,
+    dedup_key: Option<&'a String>,
+    started_at: Option<DateTime<Utc>>,
+}
+
 async fn insert_run<C>(
     conn: &C,
     tables: &WorkflowTables,
-    app_id: &Uuid,
-    workflow_name: &str,
-    deploy_id: &str,
-    input: &Value,
-    input_journal_bytes: i64,
-    dedup_key: Option<&String>,
+    run: NewRun<'_>,
     run_id: &str,
-    started_at: Option<DateTime<Utc>>,
 ) -> Result<(), WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    let NewRun {
+        app_id,
+        workflow_name,
+        deploy_id,
+        input,
+        input_journal_bytes,
+        dedup_key,
+        started_at,
+    } = run;
     let sql = format!(
         "INSERT INTO {runs} \
             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
@@ -1117,18 +1143,21 @@ where
 async fn insert_run_on_conflict_do_nothing<C>(
     conn: &C,
     tables: &WorkflowTables,
-    app_id: &Uuid,
-    workflow_name: &str,
-    deploy_id: &str,
-    input: &Value,
-    input_journal_bytes: i64,
-    dedup_key: &String,
+    run: NewRun<'_>,
     run_id: &str,
-    started_at: Option<DateTime<Utc>>,
 ) -> Result<Option<String>, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    let NewRun {
+        app_id,
+        workflow_name,
+        deploy_id,
+        input,
+        input_journal_bytes,
+        dedup_key,
+        started_at,
+    } = run;
     let sql = format!(
         "INSERT INTO {runs} \
                 (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
@@ -1180,38 +1209,29 @@ where
     Ok(rows.first().map(|row| row.get("id")))
 }
 
+/// Requires `run.dedup_key` to be `Some` — this is the "keyed" join-or-create
+/// path; an unkeyed run should call [`insert_run`] directly.
 async fn join_or_create_keyed_run<C>(
     tx: &C,
     tables: &WorkflowTables,
-    app_id: &Uuid,
-    workflow_name: &str,
-    deploy_id: &str,
-    input: &Value,
-    input_journal_bytes: i64,
-    key: &String,
-    started_at: Option<DateTime<Utc>>,
+    run: NewRun<'_>,
 ) -> Result<String, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    let app_id = run.app_id;
+    let workflow_name = run.workflow_name;
+    let input_journal_bytes = run.input_journal_bytes;
+    let key = run
+        .dedup_key
+        .expect("join_or_create_keyed_run requires a dedup_key");
     if let Some(existing) = existing_keyed_run(tx, tables, app_id, workflow_name, key).await? {
         return Ok(existing);
     }
     check_create_journal_capacity(tx, app_id, input_journal_bytes).await?;
     let candidate = typed_id::new_workflow_run_id();
-    if let Some(inserted) = insert_run_on_conflict_do_nothing(
-        tx,
-        tables,
-        app_id,
-        workflow_name,
-        deploy_id,
-        input,
-        input_journal_bytes,
-        key,
-        &candidate,
-        started_at,
-    )
-    .await?
+    if let Some(inserted) =
+        insert_run_on_conflict_do_nothing(tx, tables, run, &candidate).await?
     {
         return Ok(inserted);
     }
@@ -1252,13 +1272,15 @@ where
     join_or_create_keyed_run(
         tx,
         &tables,
-        app_id,
-        workflow_name,
-        deploy_id,
-        input,
-        input_journal_bytes,
-        &key,
-        Some(started_at),
+        NewRun {
+            app_id,
+            workflow_name,
+            deploy_id,
+            input,
+            input_journal_bytes,
+            dedup_key: Some(&key),
+            started_at: Some(started_at),
+        },
     )
     .await
     .map_err(workflow_api_error_to_registry)
@@ -1323,13 +1345,15 @@ async fn create_run_inner(
                 join_or_create_keyed_run(
                     &tx,
                     &tables,
-                    &app_id,
-                    &workflow_name,
-                    &deploy.id,
-                    &body.input,
-                    input_journal_bytes,
-                    key,
-                    None,
+                    NewRun {
+                        app_id: &app_id,
+                        workflow_name: &workflow_name,
+                        deploy_id: &deploy.id,
+                        input: &body.input,
+                        input_journal_bytes,
+                        dedup_key: Some(key),
+                        started_at: None,
+                    },
                 )
                 .await?
             }
@@ -1347,15 +1371,17 @@ async fn create_run_inner(
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
                     &tx,
                     &tables,
-                    &app_id,
-                    &workflow_name,
-                    &deploy.id,
-                    &body.input,
+                    NewRun {
+                        app_id: &app_id,
+                        workflow_name: &workflow_name,
+                        deploy_id: &deploy.id,
+                        input: &body.input,
                         input_journal_bytes,
-                        key,
-                        &candidate,
-                        None,
-                    )
+                        dedup_key: Some(key),
+                        started_at: None,
+                    },
+                    &candidate,
+                )
                 .await?
                 {
                     inserted
@@ -1405,15 +1431,17 @@ async fn create_run_inner(
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
                     &tx,
                     &tables,
-                    &app_id,
-                    &workflow_name,
-                    &deploy.id,
-                    &body.input,
+                    NewRun {
+                        app_id: &app_id,
+                        workflow_name: &workflow_name,
+                        deploy_id: &deploy.id,
+                        input: &body.input,
                         input_journal_bytes,
-                        key,
-                        &candidate,
-                        None,
-                    )
+                        dedup_key: Some(key),
+                        started_at: None,
+                    },
+                    &candidate,
+                )
                 .await?
                 {
                     inserted
@@ -1434,14 +1462,16 @@ async fn create_run_inner(
         insert_run(
             &tx,
             &tables,
-            &app_id,
-            &workflow_name,
-            &deploy.id,
-            &body.input,
-            input_journal_bytes,
-            None,
+            NewRun {
+                app_id: &app_id,
+                workflow_name: &workflow_name,
+                deploy_id: &deploy.id,
+                input: &body.input,
+                input_journal_bytes,
+                dedup_key: None,
+                started_at: None,
+            },
             &candidate,
-            None,
         )
         .await?;
         candidate
@@ -1510,13 +1540,15 @@ async fn start_many_inner(
                     let run_id = join_or_create_keyed_run(
                         &tx,
                         &tables,
-                        &app_id,
-                        &workflow_name,
-                        &deploy.id,
-                        &item.input,
-                        input_journal_bytes,
-                        key,
-                        None,
+                        NewRun {
+                            app_id: &app_id,
+                            workflow_name: &workflow_name,
+                            deploy_id: &deploy.id,
+                            input: &item.input,
+                            input_journal_bytes,
+                            dedup_key: Some(key),
+                            started_at: None,
+                        },
                     )
                     .await?;
                     results.push(json!({
@@ -1544,14 +1576,16 @@ async fn start_many_inner(
                     insert_run(
                         &tx,
                         &tables,
-                        &app_id,
-                        &workflow_name,
-                        &deploy.id,
-                        &item.input,
-                        input_journal_bytes,
-                        Some(key),
+                        NewRun {
+                            app_id: &app_id,
+                            workflow_name: &workflow_name,
+                            deploy_id: &deploy.id,
+                            input: &item.input,
+                            input_journal_bytes,
+                            dedup_key: Some(key),
+                            started_at: None,
+                        },
                         &run_id,
-                        None,
                     )
                     .await?;
                     results.push(json!({
@@ -1601,14 +1635,16 @@ async fn start_many_inner(
                     insert_run(
                         &tx,
                         &tables,
-                        &app_id,
-                        &workflow_name,
-                        &deploy.id,
-                        &item.input,
-                        input_journal_bytes,
-                        Some(key),
+                        NewRun {
+                            app_id: &app_id,
+                            workflow_name: &workflow_name,
+                            deploy_id: &deploy.id,
+                            input: &item.input,
+                            input_journal_bytes,
+                            dedup_key: Some(key),
+                            started_at: None,
+                        },
                         &run_id,
-                        None,
                     )
                     .await?;
                     results.push(json!({
@@ -1627,14 +1663,16 @@ async fn start_many_inner(
             insert_run(
                 &tx,
                 &tables,
-                &app_id,
-                &workflow_name,
-                &deploy.id,
-                &item.input,
-                input_journal_bytes,
-                None,
+                NewRun {
+                    app_id: &app_id,
+                    workflow_name: &workflow_name,
+                    deploy_id: &deploy.id,
+                    input: &item.input,
+                    input_journal_bytes,
+                    dedup_key: None,
+                    started_at: None,
+                },
                 &run_id,
-                None,
             )
             .await?;
             results.push(json!({
@@ -2261,13 +2299,15 @@ async fn publish_topic_signal_inner(
         .unwrap_or_else(typed_id::new_workflow_broadcast_id);
     insert_topic_broadcast(
         state,
-        app_id,
-        topic,
-        &body.signal_type,
-        &body.payload,
-        origin,
-        &idempotency_key,
-        Utc::now() + chrono::Duration::seconds(SIGNAL_TOKEN_MAX_TTL_SECS),
+        TopicBroadcast {
+            app_id,
+            topic,
+            signal_type: &body.signal_type,
+            payload: &body.payload,
+            origin,
+            idempotency_key: &idempotency_key,
+            expires_at: Utc::now() + chrono::Duration::seconds(SIGNAL_TOKEN_MAX_TTL_SECS),
+        },
     )
     .await
 }
@@ -2342,13 +2382,15 @@ async fn ingress_signal_inner(
             validate_topic(topic)?;
             insert_topic_broadcast(
                 state,
-                app_id,
-                topic,
-                &signal_type,
-                &body.payload,
-                "ingress",
-                &idempotency_key,
-                claims_expiry(&claims)?,
+                TopicBroadcast {
+                    app_id,
+                    topic,
+                    signal_type: &signal_type,
+                    payload: &body.payload,
+                    origin: "ingress",
+                    idempotency_key: &idempotency_key,
+                    expires_at: claims_expiry(&claims)?,
+                },
             )
             .await
         }
@@ -2474,16 +2516,33 @@ async fn deliver_ingress_run_signal(
     Ok(json!({ "id": signal_id, "runId": run_id }))
 }
 
+/// Grouped inputs for [`insert_topic_broadcast`] — kept as a struct rather
+/// than individual parameters purely to stay under clippy's
+/// `too_many_arguments` threshold; every field is still required and read
+/// exactly once.
+struct TopicBroadcast<'a> {
+    app_id: Uuid,
+    topic: &'a str,
+    signal_type: &'a str,
+    payload: &'a Value,
+    origin: &'a str,
+    idempotency_key: &'a str,
+    expires_at: DateTime<Utc>,
+}
+
 async fn insert_topic_broadcast(
     state: &AppState,
-    app_id: Uuid,
-    topic: &str,
-    signal_type: &str,
-    payload: &Value,
-    origin: &str,
-    idempotency_key: &str,
-    expires_at: DateTime<Utc>,
+    broadcast: TopicBroadcast<'_>,
 ) -> Result<Value, WorkflowApiError> {
+    let TopicBroadcast {
+        app_id,
+        topic,
+        signal_type,
+        payload,
+        origin,
+        idempotency_key,
+        expires_at,
+    } = broadcast;
     validate_topic(topic)?;
     validate_ingress_signal_type(signal_type)?;
     signal_payload_size(payload)?;
@@ -2835,7 +2894,7 @@ async fn restart_run_inner(
     tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    workflow_engine::register_run_timer(state, &run_id)
+    workflow_engine::register_run_timer(state, run_id)
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 

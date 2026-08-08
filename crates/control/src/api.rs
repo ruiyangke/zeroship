@@ -1730,16 +1730,7 @@ pub async fn grant_credit(
         return error_response(RegistryError::Database(e.to_string()));
     }
 
-    let outcome = crate::credit::grant(
-        &tx,
-        &body.creator_id,
-        body.amount_cents,
-        &body.currency,
-        &body.kind,
-        body.expires_at,
-        body.note.as_deref(),
-        &idem_key,
-    )
+    let outcome = crate::credit::grant(&tx, &body.creator_id, crate::credit::GrantRequest { amount_cents: body.amount_cents, currency: &body.currency, kind: &body.kind, expires_at: body.expires_at, note: body.note.as_deref(), idempotency_key: &idem_key })
     .await;
 
     // On a grant error, roll back (drop the tx) and surface it — never commit a

@@ -522,7 +522,7 @@ async fn sweep<S: StripeApi>(
         .as_invoicer()
         .ok_or_else(|| RegistryError::Database("billing stack has no invoicer".to_string()))?;
 
-    for (creator_id, _app_ids) in &apps_by_creator {
+    for creator_id in apps_by_creator.keys() {
         let subject = crate::metering::provider::SubjectRef(creator_id.to_string());
         match invoicer.close_period(&subject, billing_period).await.map_err(RegistryError::from)
         {

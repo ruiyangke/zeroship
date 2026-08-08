@@ -225,6 +225,7 @@ pub struct DisputeRecord {
 ///     redelivery (`ON CONFLICT DO NOTHING`),
 ///   * the dispute payment-row dedup index (0053) makes the `dispute_debit` append a
 ///     no-op on redelivery.
+///
 /// So a redelivered created event NEVER double-debits, even under a fresh `evt_id` that
 /// the `stripe_events_seen` gate would not catch.
 ///

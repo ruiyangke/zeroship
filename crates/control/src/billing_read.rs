@@ -332,11 +332,12 @@ pub struct InvoiceLineDetail {
     pub billable_units: Option<u64>,
 }
 
-/// Derive `(compute_units, billable_units)` from a frozen line's `usage_snapshot`
-/// + `weights_snapshot` + `included_units`, reusing the EXACT pricing arithmetic
-/// (`pricing::total_units`). Returns `(None, None)` if the snapshot JSON can't be
-/// parsed (an impossible state for a posted line) so the read API degrades to the
-/// existing fields rather than erroring.
+/// Derive `(compute_units, billable_units)` from a frozen line's
+/// `usage_snapshot`, `weights_snapshot`, and `included_units`, reusing the
+/// EXACT pricing arithmetic (`pricing::total_units`). Returns `(None, None)`
+/// if the snapshot JSON can't be parsed (an impossible state for a posted
+/// line) so the read API degrades to the existing fields rather than
+/// erroring.
 fn derive_line_cu(
     usage_snapshot: &serde_json::Value,
     weights_snapshot: &serde_json::Value,

@@ -322,11 +322,11 @@ impl Registry {
     /// `zeroship.oauth_clients` row (`client_id = client_id_for_app(id)`) in ONE
     /// transaction, so the real FK chain cascades every dependent row in the
     /// single `zeroship` schema in one shot:
-    ///   - apps          → {gateway_sessions, app_members, app_session_anchors
-    ///                       (by app_id), app_oauth_clients, app_usage,
-    ///                       app_vars, app_secrets, …}
-    ///   - oauth_clients → {oauth_grants, app_user_identities,
-    ///                       app_session_anchors (by client_id)}
+    /// - apps: {gateway_sessions, app_members, app_session_anchors
+    ///   (by app_id), app_oauth_clients, app_usage,
+    ///   app_vars, app_secrets, …}
+    /// - oauth_clients: {oauth_grants, app_user_identities,
+    ///   app_session_anchors (by client_id)}
     ///
     /// Deleting the per-app oauth_clients row is what closes the relay arm:
     /// `app_user_identities.app_client_id` FKs into `oauth_clients(client_id)`

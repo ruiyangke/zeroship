@@ -99,8 +99,12 @@ impl BillingNotificationKind {
     }
 
     /// Parse the domain string back to a kind (the cron reads it off the ledger).
+    ///
+    /// Named `parse_kind` rather than `from_str` — this returns `Option`, not
+    /// `Result`, so it does not implement `std::str::FromStr` and must not be
+    /// confused for it.
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_kind(s: &str) -> Option<Self> {
         Some(match s {
             "payment_failed" => Self::PaymentFailed,
             "past_due" => Self::PastDue,
@@ -506,9 +510,9 @@ mod tests {
             BillingNotificationKind::SpendDegrade,
             BillingNotificationKind::SpendBlock,
         ] {
-            assert_eq!(BillingNotificationKind::from_str(k.as_str()), Some(k));
+            assert_eq!(BillingNotificationKind::parse_kind(k.as_str()), Some(k));
         }
-        assert_eq!(BillingNotificationKind::from_str("not_a_kind"), None);
+        assert_eq!(BillingNotificationKind::parse_kind("not_a_kind"), None);
     }
 
     #[test]

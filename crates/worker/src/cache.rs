@@ -441,15 +441,16 @@ pub fn load_app(
 
         // Only mutate the cache after the new runtime has initialized. A
         // corrupt descriptor during reload must not evict the last-good isolate.
-        if cache.isolates.len() >= cache.max_size && !cache.isolates.contains_key(&app_id) {
-            if !evict_lru(cache) {
-                tracing::warn!(
-                    app_id = %app_id,
-                    max_size = cache.max_size,
-                    "worker: isolate cache full and every isolate is leased; load deferred"
-                );
-                return Err("isolate cache full and every isolate is leased; load deferred".into());
-            }
+        if cache.isolates.len() >= cache.max_size
+            && !cache.isolates.contains_key(&app_id)
+            && !evict_lru(cache)
+        {
+            tracing::warn!(
+                app_id = %app_id,
+                max_size = cache.max_size,
+                "worker: isolate cache full and every isolate is leased; load deferred"
+            );
+            return Err("isolate cache full and every isolate is leased; load deferred".into());
         }
 
         // Start pump task for async V8 ops (timers, fetch, streams) only after

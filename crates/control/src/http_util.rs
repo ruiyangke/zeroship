@@ -97,7 +97,7 @@ pub async fn rate_limit(
 
 fn retry_after_header(secs: f64) -> String {
     if secs.is_finite() {
-        format!("{:.0}", secs.ceil().max(1.0).min(3600.0))
+        format!("{:.0}", secs.ceil().clamp(1.0, 3600.0))
     } else {
         "60".to_string()
     }

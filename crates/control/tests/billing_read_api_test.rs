@@ -832,16 +832,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     seed_customer_ref(&pg, &creator_a, &format!("cus_{}", Uuid::new_v4().simple())).await;
 
     // Creator A: grant $50, then a finalized invoice consumes $20 → balance $30.
-    zeroship_control::credit::grant(
-        &*pg,
-        &creator_a,
-        5000,
-        "usd",
-        "promo",
-        None,
-        Some("seed grant A"),
-        &format!("idem-{}", Uuid::new_v4().simple()),
-    )
+    zeroship_control::credit::grant(&*pg, &creator_a, zeroship_control::credit::GrantRequest { amount_cents: 5000, currency: "usd", kind: "promo", expires_at: None, note: Some("seed grant A"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant A");
     // Seed a consume entry referencing the grant (faithful negative companion).
@@ -885,16 +876,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .expect("seed consume");
 
     // Creator B: grant $10 only → balance $10 (must NOT leak into A's read).
-    zeroship_control::credit::grant(
-        &*pg,
-        &creator_b,
-        1000,
-        "usd",
-        "grant",
-        None,
-        Some("seed grant B"),
-        &format!("idem-{}", Uuid::new_v4().simple()),
-    )
+    zeroship_control::credit::grant(&*pg, &creator_b, zeroship_control::credit::GrantRequest { amount_cents: 1000, currency: "usd", kind: "grant", expires_at: None, note: Some("seed grant B"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant B");
 

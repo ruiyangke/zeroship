@@ -429,14 +429,16 @@ pub async fn ensure_app_client(
     let sector = sector_identifier(scheme, &apex_host);
     upsert_db_rows(
         pg,
-        app_id,
-        &client_id,
-        app_name,
-        &sector,
-        &effective_uris,
-        &scope_allowlist,
-        declared_scopes,
-        first_party,
+        ClientRowInput {
+            app_id,
+            client_id: &client_id,
+            client_name: app_name,
+            sector: &sector,
+            redirect_uris: &effective_uris,
+            scope_allowlist: &scope_allowlist,
+            declared_scopes,
+            first_party,
+        },
     )
     .await?;
     Ok(client_id)
@@ -471,14 +473,16 @@ pub async fn sync_app_redirect_uris(
         let sector = sector_identifier(scheme, &apex_host);
         upsert_db_rows(
             pg,
-            app_id,
-            &client_id,
-            app_name,
-            &sector,
-            &desired_uris,
-            BASE_SCOPE,
-            &[],
-            false,
+            ClientRowInput {
+                app_id,
+                client_id: &client_id,
+                client_name: app_name,
+                sector: &sector,
+                redirect_uris: &desired_uris,
+                scope_allowlist: BASE_SCOPE,
+                declared_scopes: &[],
+                first_party: false,
+            },
         )
         .await?;
         return Ok(true);
@@ -500,17 +504,32 @@ pub async fn sync_app_redirect_uris(
 /// derived from the SAME validated `scope_allowlist` / `declared_scopes`, so
 /// the mirror and the registry can never disagree — which is what keeps the
 /// consent classifier sound.
-async fn upsert_db_rows(
-    pg: &mut Client,
-    app_id: &Uuid,
-    client_id: &str,
-    client_name: &str,
-    sector: &str,
-    redirect_uris: &[String],
-    scope_allowlist: &str,
-    declared_scopes: &[ScopeDef],
+/// Grouped inputs for [`upsert_db_rows`] — kept as a struct rather than
+/// individual parameters purely to stay under clippy's `too_many_arguments`
+/// threshold; every field is still required and read exactly once.
+#[derive(Debug)]
+struct ClientRowInput<'a> {
+    app_id: &'a Uuid,
+    client_id: &'a str,
+    client_name: &'a str,
+    sector: &'a str,
+    redirect_uris: &'a [String],
+    scope_allowlist: &'a str,
+    declared_scopes: &'a [ScopeDef],
     first_party: bool,
-) -> Result<()> {
+}
+
+async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()> {
+    let ClientRowInput {
+        app_id,
+        client_id,
+        client_name,
+        sector,
+        redirect_uris,
+        scope_allowlist,
+        declared_scopes,
+        first_party,
+    } = input;
     let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
     let created_by: Option<Uuid> = None;

@@ -213,11 +213,11 @@ impl FeePolicyStore {
                     ));
                 }
                 let cap = cap_cents
-                    .map(|c| i64::try_from(c))
+                    .map(i64::try_from)
                     .transpose()
                     .map_err(|_| StripeError::Validation("cap_cents exceeds i64::MAX".into()))?;
                 let floor = floor_cents
-                    .map(|f| i64::try_from(f))
+                    .map(i64::try_from)
                     .transpose()
                     .map_err(|_| StripeError::Validation("floor_cents exceeds i64::MAX".into()))?;
                 ("percent", None, Some(bps as i32), cap, floor)

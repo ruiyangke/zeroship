@@ -358,6 +358,6 @@ mod tests {
     #[test]
     fn default_retention_window_is_named_and_conservative() {
         assert_eq!(DEFAULT_RETENTION_WINDOW_MS, 7 * 24 * 60 * 60 * 1_000);
-        assert!(DEFAULT_RETENTION_WINDOW_MS > 0);
+        const { assert!(DEFAULT_RETENTION_WINDOW_MS > 0) };
     }
 }

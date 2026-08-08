@@ -32,6 +32,7 @@
 //!     the period (it never double-reissues);
 //!   * Phase 3's true-up is idempotency-keyed on `trueup:{invoice_id}` (it never
 //!     double-refunds).
+//!
 //! So a re-invocation observes the same `VoidReissueOutcome` and the balance is conserved.
 //!
 //! ## void_reversal — conserving consumed credit
@@ -171,7 +172,7 @@ pub async fn void_and_reissue<S: StripeApi>(
                 &[&invoice_id],
             )
             .await?;
-        if already_reversed.first().is_none() {
+        if already_reversed.is_empty() {
             // Mint the ids in Rust (no in-DB base62 generator) — one per consumed row.
             let consumed = tx
                 .query(

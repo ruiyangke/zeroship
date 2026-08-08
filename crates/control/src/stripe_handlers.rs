@@ -1827,6 +1827,7 @@ async fn settlement_ids_for(
 ///   * legacy (pre-Basil): top-level `invoice.payment_intent` / `invoice.charge`.
 ///   * modern (Basil 2025-03-31+): `invoice.payments.data[].payment.{payment_intent,charge}`
 ///     (the top-level fields were removed when multiple partial payments shipped).
+///
 /// Returns the FIRST non-empty id seen for each, preferring the top-level (older) shape and
 /// falling back to the nested entries.
 fn invoice_payment_object_ids(obj: &StripeObject) -> (Option<String>, Option<String>) {
@@ -1855,6 +1856,7 @@ fn invoice_payment_object_ids(obj: &StripeObject) -> (Option<String>, Option<Str
 ///      NEGATIVE `dispute_debit` `invoice_payments` row (= cash clawed back). The negative
 ///      row lowers `Σ(invoice_payments)`, so PR-3's over-refund cap auto-tightens — no
 ///      cross-table trigger.
+///
 /// The dispute is NEVER auto-refunded (the funds already moved) and NEVER mutates the
 /// invoice. The `disputed` notification fires once via the notify cron off the new row.
 ///

@@ -847,7 +847,7 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     let key = format!("idem-{}", Uuid::new_v4());
 
     // First grant.
-    let r1 = credit::grant(&*fx.state.control_pg, &creator, 500, "usd", "grant", None, None, &key)
+    let r1 = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 1");
     let id1 = match r1 {
@@ -856,13 +856,13 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     };
 
     // Same key + SAME body ⇒ Duplicate (the first grant id), no second row.
-    let r2 = credit::grant(&*fx.state.control_pg, &creator, 500, "usd", "grant", None, None, &key)
+    let r2 = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 2");
     assert_eq!(r2, GrantOutcome::Duplicate(id1.clone()), "same key+body returns the first grant");
 
     // Same key + DIFFERENT body ⇒ Conflict (no second grant).
-    let r3 = credit::grant(&*fx.state.control_pg, &creator, 999, "usd", "grant", None, None, &key)
+    let r3 = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 999, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 3");
     assert_eq!(r3, GrantOutcome::Conflict, "same key + different amount is a conflict");
@@ -881,16 +881,7 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     assert_eq!(n, 1, "exactly one grant for the reused key — no double grant");
 
     // A non-USD grant is rejected at the boundary.
-    let bad = credit::grant(
-        &*fx.state.control_pg,
-        &creator,
-        500,
-        "eur",
-        "grant",
-        None,
-        None,
-        &format!("idem-{}", Uuid::new_v4()),
-    )
+    let bad = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "eur", kind: "grant", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
     .await;
     assert!(bad.is_err(), "a non-USD grant is rejected at the Rust boundary (v1 USD-pinned)");
 
@@ -1094,9 +1085,7 @@ async fn grant_note_change_is_a_conflict() {
     let key = format!("idem-{}", Uuid::new_v4());
 
     // First grant carries note "promo A".
-    let r1 = credit::grant(
-        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo A"), &key,
-    )
+    let r1 = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
     .await
     .expect("grant 1");
     let id1 = match r1 {
@@ -1105,9 +1094,7 @@ async fn grant_note_change_is_a_conflict() {
     };
 
     // Same key + same body INCLUDING the note ⇒ Duplicate (safe retry).
-    let r_same = credit::grant(
-        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo A"), &key,
-    )
+    let r_same = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
     .await
     .expect("grant same");
     assert_eq!(
@@ -1117,9 +1104,7 @@ async fn grant_note_change_is_a_conflict() {
     );
 
     // Same key + DIFFERENT note ⇒ Conflict (note is in the fingerprint).
-    let r_diff = credit::grant(
-        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo B"), &key,
-    )
+    let r_diff = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo B"), idempotency_key: &key })
     .await
     .expect("grant diff note");
     assert_eq!(
@@ -1130,15 +1115,11 @@ async fn grant_note_change_is_a_conflict() {
 
     // Some("") vs None must also be distinguishable (presence byte).
     let key2 = format!("idem-{}", Uuid::new_v4());
-    let none_grant = credit::grant(
-        &*fx.state.control_pg, &creator, 100, "usd", "grant", None, None, &key2,
-    )
+    let none_grant = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key2 })
     .await
     .expect("none note");
     assert!(matches!(none_grant, GrantOutcome::Created(_)));
-    let empty_note = credit::grant(
-        &*fx.state.control_pg, &creator, 100, "usd", "grant", None, Some(""), &key2,
-    )
+    let empty_note = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: Some(""), idempotency_key: &key2 })
     .await
     .expect("empty note");
     assert_eq!(
@@ -1190,9 +1171,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
     // Both creators share the SAME idempotency key (cross-tenant reuse).
     let key = format!("idem-shared-{}", Uuid::new_v4());
 
-    let r_a = credit::grant(
-        &*fx.state.control_pg, &creator_a, 500, "usd", "grant", None, None, &key,
-    )
+    let r_a = credit::grant(&*fx.state.control_pg, &creator_a, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("grant a");
     let id_a = match r_a {
@@ -1202,9 +1181,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
 
     // Creator B reuses A's key. The globally-unique index makes the INSERT no-op;
     // the creator-scoped re-SELECT finds no row for B ⇒ Conflict (NOT A's id).
-    let r_b = credit::grant(
-        &*fx.state.control_pg, &creator_b, 500, "usd", "grant", None, None, &key,
-    )
+    let r_b = credit::grant(&*fx.state.control_pg, &creator_b, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("grant b");
     assert_eq!(
@@ -1257,9 +1234,7 @@ async fn grant_kind_is_case_insensitive() {
     ensure_creator_billing(&fx.state, creator).await;
 
     let key = format!("idem-{}", Uuid::new_v4());
-    let r = credit::grant(
-        &*fx.state.control_pg, &creator, 700, "usd", "GRANT", None, None, &key,
-    )
+    let r = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 700, currency: "usd", kind: "GRANT", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("uppercase kind accepted");
     let id = match r {
@@ -1278,16 +1253,7 @@ async fn grant_kind_is_case_insensitive() {
     assert_eq!(kind, "grant", "an uppercase kind is normalized to lowercase before INSERT");
 
     // A mixed-case "Promo" is also accepted.
-    let r2 = credit::grant(
-        &*fx.state.control_pg,
-        &creator,
-        100,
-        "usd",
-        "Promo",
-        None,
-        None,
-        &format!("idem-{}", Uuid::new_v4()),
-    )
+    let r2 = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "Promo", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
     .await
     .expect("mixed-case promo accepted");
     assert!(matches!(r2, GrantOutcome::Created(_)));
@@ -1694,16 +1660,7 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
     ensure_creator_billing(&fx.state, creator).await;
 
     for kind in ["consumed", "void_reversal", "refund_clawback"] {
-        let r = credit::grant(
-            &*fx.state.control_pg,
-            &creator,
-            500,
-            "usd",
-            kind,
-            None,
-            None,
-            &format!("idem-{}", Uuid::new_v4()),
-        )
+        let r = credit::grant(&*fx.state.control_pg, &creator, credit::GrantRequest { amount_cents: 500, currency: "usd", kind, expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
         .await;
         assert!(
             matches!(r, Err(RegistryError::InvalidInput(_))),

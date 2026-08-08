@@ -425,7 +425,7 @@ pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    if flipped.first().is_none() {
+    if flipped.is_empty() {
         // Lost a concurrent race to another reconciliation — it already reversed.
         tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
         return Ok(RefundFailureOutcome::AlreadyReversed(refund_id));
@@ -471,7 +471,7 @@ pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
                 )
                 .await
                 .map_err(|e| RegistryError::Database(e.to_string()))?;
-            clawed_back_credit = inserted.first().is_some();
+            clawed_back_credit = !inserted.is_empty();
         }
     }
 
@@ -858,7 +858,7 @@ pub async fn claim_refund_locked<C: GenericClient + Sync>(
         }
     };
 
-    if claim.first().is_none() {
+    if claim.is_empty() {
         // Key hit — compare the stored fingerprint (safe retry vs reuse-conflict).
         let existing = tx
             .query(
@@ -985,7 +985,7 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
                 )
                 .await
                 .map_err(|e| RegistryError::Database(e.to_string()))?;
-            if existing_grant.first().is_none() {
+            if existing_grant.is_empty() {
                 let grant_id = zeroship_core::typed_id::new_credit_id();
                 conn.execute(
                     "INSERT INTO zeroship.credit_ledger \

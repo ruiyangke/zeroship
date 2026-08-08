@@ -451,7 +451,7 @@ impl EnvStore {
         // Sort + dedup so rows are deterministic and the
         // PRIMARY KEY (app_id, key_name) constraint can't reject a
         // duplicate input.
-        let mut sorted: Vec<String> = keys.iter().cloned().collect();
+        let mut sorted: Vec<String> = keys.to_vec();
         sorted.sort();
         sorted.dedup();
 
