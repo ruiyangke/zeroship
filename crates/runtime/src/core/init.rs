@@ -3678,12 +3678,25 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
         //
         //     Promise.resolve().then(() => o.push("promise"));
         //     process.nextTick(() => o.push("tick"));
-        //     -> Node: ["tick","promise"]   here: ["promise","tick"]
         //
-        // and the tick does not land at all until the next macrotask boundary.
-        // Closing this needs interleaving with V8's microtask queue, not a
-        // reordering of the two drains. Pinned by the nextTickOrdering
-        // assertion in `tests/node_pg_e2e.rs`.
+        // MEASURED against node v22.22.2, because the earlier note here had
+        // Node's answer attached to the wrong arrangement:
+        //
+        //     arrangement                        Node          this runtime
+        //     CommonJS, synchronous top level    tick,promise  (n/a, ESM only)
+        //     ESM, top level                     promise,tick  tick,promise
+        //     inside a microtask                 promise,tick  promise,tick
+        //
+        // So the in-microtask case above does NOT diverge - Node defers the
+        // tick there too. `["tick","promise"]` is Node's CommonJS
+        // synchronous-top-level answer, and the previous note applied it to
+        // the microtask case, which made the pg e2e demand something Node
+        // does not do either.
+        //
+        // The real divergence is ESM TOP LEVEL: this runtime drains the tick
+        // queue first there, like Node's CommonJS, while Node's ESM does not
+        // (module evaluation is itself driven from a job). Both arrangements
+        // are pinned in `tests/next_tick_ordering.rs`, one assertion each.
         {
             let key = v8::String::new(scope, "nextTick").unwrap();
             let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
