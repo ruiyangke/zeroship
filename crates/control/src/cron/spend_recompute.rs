@@ -349,6 +349,65 @@ mod tests {
             "after the settle window closes only the current period is recomputed"
         );
     }
+
+    /// A usage event whose `event_time` belongs to another period is dropped,
+    /// however faithfully it was retained and replayed.
+    ///
+    /// This is the ENFORCEMENT half of the late-arrival gap. The producer's WAL
+    /// republishes an unpublished event verbatim, keeping its original
+    /// `event_time` - correct, and what makes publishing idempotent. But a
+    /// period leaves `periods_to_recompute` once it settles, so an event landing
+    /// after that is not counted here, and an app that overspent during a long
+    /// broker outage is never throttled for it.
+    ///
+    /// It is NOT the billing half, and the distinction is worth stating because
+    /// getting it backwards costs revenue: the provider forwarder has no age or
+    /// period gate at all, so the same late event still becomes an invoice item
+    /// with its true timestamp. Late events lose their enforcement value and
+    /// keep their billing value - expiring them on a staleness rule would throw
+    /// away money that would otherwise be invoiced.
+    ///
+    /// Every other test here uses an in-period timestamp, so this branch had no
+    /// coverage.
+    #[test]
+    fn a_usage_event_from_another_period_is_not_counted() {
+        let app = uuid::Uuid::new_v4();
+        let creator = uuid::Uuid::new_v4();
+        let period = period_start_unix(1_783_468_800);
+        let previous = period_start_unix(period - 1);
+        assert_ne!(period, previous, "the two stamps must be in different periods");
+
+        let mk = |id: &str, value: u64, event_time: i64| zeroship_core::usage_event::UsageEvent {
+            event_id: id.to_string(),
+            source: "worker-test".to_string(),
+            subject: zeroship_core::usage_event::UsageSubject {
+                app: Some(app),
+                creator,
+            },
+            meter: "requests".to_string(),
+            value,
+            event_time,
+            dims: std::collections::BTreeMap::new(),
+        };
+
+        let mut totals = HashMap::new();
+
+        assert!(
+            apply_event(&mut totals, &mk("evt_in", 100, period + 10), period),
+            "an in-period event must be counted"
+        );
+        assert_eq!(totals.get(&(app, "requests".to_string())), Some(&100));
+
+        assert!(
+            !apply_event(&mut totals, &mk("evt_late", 5_000, previous + 10), period),
+            "an event from a settled period must not be counted"
+        );
+        assert_eq!(
+            totals.get(&(app, "requests".to_string())),
+            Some(&100),
+            "a dropped event must leave the totals untouched"
+        );
+    }
 }
 
 /// The stream-recompute enforcement regression tests (event_id dedup, poison
