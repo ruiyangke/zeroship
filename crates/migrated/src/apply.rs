@@ -93,8 +93,16 @@ pub enum IrApplyError {
         source: zero_migrate::LoadAndLowerGuardedError,
     },
     /// The engine refused or failed the apply.
-    #[error("apply: {0}")]
-    Apply(#[from] DeclarativeApplyError),
+    ///
+    /// Creator fault (in the common `authorization denied` case, the engine's
+    /// own message carries no table/op detail) - the file is named so they know
+    /// which document to open, matching [`IrApplyError::Ir`].
+    #[error("apply ({file}): {source}")]
+    Apply {
+        file: String,
+        #[source]
+        source: DeclarativeApplyError,
+    },
 }
 
 impl From<zero_migrate::LoadAndLowerError> for IrApplyError {
@@ -1098,7 +1106,11 @@ async fn apply_one_ir_file_postgres(
             lock_mode,
             recovery_scope,
         )
-        .await?;
+        .await
+        .map_err(|source| IrApplyError::Apply {
+            file: file.clone(),
+            source,
+        })?;
 
     for t in created_tables {
         state
@@ -1248,9 +1260,10 @@ async fn preflight_ir_documents(
         }
         let plan = engine.plan(&migrations, &guard_cfg);
         if !plan.denied.is_empty() {
-            return Err(IrApplyError::Apply(DeclarativeApplyError::Plain(
-                EngineError::Denied(plan.denied),
-            ))
+            return Err(IrApplyError::Apply {
+                file: file.clone(),
+                source: DeclarativeApplyError::Plain(EngineError::Denied(plan.denied)),
+            }
             .into());
         }
         for item in plan.items {
@@ -1531,7 +1544,7 @@ fn sealed_apply_error_kind(err: &SealedApplyError) -> (ntex::http::StatusCode, &
 
 fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static str) {
     match err {
-        IrApplyError::Ir { .. } | IrApplyError::Apply(_) => (
+        IrApplyError::Ir { .. } | IrApplyError::Apply { .. } => (
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_failed",
         ),
@@ -1624,6 +1637,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Every `IrApplyError` a creator can provoke names the document at fault, so
+    /// they know which file to open. `Apply` is the variant most likely to carry an
+    /// otherwise contentless message - the engine's `authorization denied` names no
+    /// table and no operation - which is exactly when the filename is all they get.
+    ///
+    /// Asserts only that the message carries the filename. It does NOT check the
+    /// other variants, and it cannot catch a call site that passes the WRONG file.
+    #[test]
+    fn an_apply_failure_names_the_document_that_failed() {
+        let err = IrApplyError::Apply {
+            file: "0007_add_notes.ir.json".to_string(),
+            source: DeclarativeApplyError::Plain(EngineError::Denied(Vec::new())),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("0007_add_notes.ir.json"),
+            "apply failure must name the file; got {rendered:?}"
+        );
+    }
 
     #[test]
     fn rejects_non_bare_ir_filenames() {
