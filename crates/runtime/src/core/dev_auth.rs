@@ -7,7 +7,7 @@
 //! the request-bound `ZeroShip-User` header (`crates/core/src/auth/mod.rs`,
 //! `crates/gateway/src/oidc_rp.rs`). The worker verifies + decodes that header
 //! and threads the resulting `user_json` into
-//! [`Runtime::call_fetch_handler_with_user`], which feeds BOTH the
+//! [`crate::Runtime::call_fetch_handler_with_user`], which feeds BOTH the
 //! `env.auth.getUser()` per-request state (`crate::auth::set_request_user`) and
 //! the `currentUser()` RPC ctx (`mint_rpc_ctx(user_json)`).
 //!
@@ -67,7 +67,7 @@ const ENV_DEV_AUTH_SECRET: &str = "ZEROSHIP_DEV_AUTH_SECRET";
 ///
 /// The returned string is the canonical `ZeroShip-User` JSON body
 /// (`{id,email,name,avatar?,email_verified,scopes}`) — handed verbatim to
-/// [`Runtime::call_fetch_handler_with_user`], exactly as the worker hands the
+/// [`crate::Runtime::call_fetch_handler_with_user`], exactly as the worker hands the
 /// gateway-verified header body in production.
 #[must_use]
 pub fn resolve_dev_user_json(request_headers: &[(String, String)]) -> Option<String> {

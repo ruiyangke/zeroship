@@ -2557,7 +2557,7 @@ impl RuntimeInner {
     }
 
     /// Convert a `ResponseInfo` into a `FetchOutcome`. Mirrors
-    /// [`Self::build_http_outcome`] exactly — the writer-attachment logic
+    /// [`Self::build_fetch_outcome`] exactly — the writer-attachment logic
     /// for streaming responses is preserved verbatim. When the old HTTP
     /// path is deleted, this helper fully replaces it.
     fn build_fetch_outcome(
@@ -3854,7 +3854,7 @@ fn wait_until_noop_callback(
 
 /// Call the module.default.fetch handler with (request, env, ctx) and
 /// classify the result into a [`DispatchResult`]. Separated out for the
-/// same reason as [`dispatch_http_inner`] — avoids double-borrowing
+/// same reason as `call_fetch_inner` — avoids double-borrowing
 /// `self` while the `enter_v8!` macro already holds `&mut self.isolate`.
 ///
 /// Returns:

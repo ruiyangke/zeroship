@@ -26,9 +26,9 @@
 //! ## Storage layout (§XIII.3)
 //!
 //! Per the design's single-source slot rule:
-//!   - [[aborted]]: Rust `Cell<bool>` on the boxed state.
-//!   - [[reason]]: Rust `RefCell<Option<v8::Global<v8::Value>>>`.
-//!   - [[abort algorithms]]: Rust `RefCell<Vec<Box<dyn FnOnce()>>>`.
+//!   - `[[aborted]]`: Rust `Cell<bool>` on the boxed state.
+//!   - `[[reason]]`: Rust `RefCell<Option<v8::Global<v8::Value>>>`.
+//!   - `[[abort algorithms]]`: Rust `RefCell<Vec<Box<dyn FnOnce()>>>`.
 //!   - [[dependent signals]] / [[source signals]]: Rust
 //!     `RefCell<Vec<v8::Global<v8::Object>>>` — strong refs on both
 //!     sides because `Weak` to a JS wrapper retains nothing past GC,
