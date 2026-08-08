@@ -16,11 +16,29 @@ const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
 /// Mapping `@zeroship/migrate` to THIS file is what makes the authored envelope v1.
 ///
 /// This is the ENGINE's recorder (vendored in the submodule), NOT the monorepo's
-/// `sdks/migrate` copy: only the engine's recorder is guaranteed in lockstep with
-/// the engine's IR model, so a lexicon the monorepo bundle has not yet followed
-/// cannot produce IR the engine rejects at parse time. It is also fully
-/// self-contained (no `@zeroship/db`/`zeroship` external imports), so the authoring
-/// module graph needs no extra stubs.
+/// `sdks/migrate` copy. Recorder and IR parser ship from the same package, so a
+/// lexicon the monorepo bundle has not yet followed cannot produce IR the engine
+/// rejects at parse time. It is also fully self-contained (no
+/// `@zeroship/db`/`zeroship` external imports), so the authoring module graph
+/// needs no extra stubs.
+///
+/// PROVENANCE, not a guarantee. This said "guaranteed in lockstep", which is
+/// stronger than anything checked here. What is actually measured:
+///
+///   * this file is tracked in the submodule at 136 KB and `dist/` is not
+///     gitignored there, so it is the real build output rather than a stub
+///     (verified 2026-08-08);
+///   * this repo's only exercise of the production `author_v1_envelope` path is
+///     a single sample migration with two ops, in
+///     `tests/author_and_apply_pg.rs`;
+///   * the engine's own dedicated recorder coverage is FOUR tests
+///     (`packages/zero-migrate/tests/recorder.test.ts`), reported by that
+///     project on 2026-08-08 and NOT re-run here - this repo's CI does not
+///     build the submodule's JS suites.
+///
+/// So the same-package argument is sound and the word "guaranteed" was not.
+/// Drift between the recorder and the parser would be caught by four tests in a
+/// suite we do not run, plus a two-op smoke test here.
 const STANDALONE_RECORDER_JS: &str =
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
