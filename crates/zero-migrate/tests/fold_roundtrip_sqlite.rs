@@ -131,8 +131,41 @@ async fn apply_doc(
 ///      whereas the fold (PG-shaped) carries `<table>_pkey` for both. The PK is
 ///      platform-owned and the `id` column itself still compares, so blanking the PK
 ///      constraint + its same-named index on both sides is introspection-only noise.
-///   3. **CHECK `definition` blanked** (parity with the PG oracle; the corpus has
-///      none).
+///   3. **CHECK `definition` blanked - DEAD on both sides today.** Neither half of
+///      this oracle can produce a `CHECK` constraint, so the loop below never fires.
+///      `fold_ops` under `SqlDialect::Sqlite` REFUSES one outright: both
+///      `fold_create_table_specs` and the `Op::AddConstraint` arm return
+///      `FoldError::Unsupported` ("createTable table-level CHECK is PostgreSQL-only"
+///      / "addConstraint(check) is PostgreSQL-only"), so a corpus that authored a
+///      CHECK would panic in `assert_matches_live` at the fold, never reaching this
+///      function. On the other side `snapshot_schema_sqlite` only ever pushes
+///      `PRIMARY KEY`, `UNIQUE` and `FOREIGN KEY` into the constraint bucket.
+///      Measured: a table created with `CONSTRAINT "parts_qty_check" CHECK (("qty"
+///      >= 0))` introspects to `pk_parts` and nothing else, with the CHECK text
+///      surviving only on the excluded-from-equality `stored_create_sql`. The
+///      current corpus authors no CHECK either, but that is the weaker fact.
+///
+///      Not parity with the PG oracle in MECHANISM. `fold_roundtrip_pg.rs` (which
+///      does exercise a CHECK, at its `add check constraint` checkpoint) compares
+///      with `diff_snapshots(...).is_clean()` and inherits the exemption from the
+///      differ's `constraint_definition_is_comparable`. This oracle compares
+///      snapshots directly, and `ConstraintSnapshot::PartialEq` DOES compare
+///      `definition`, so the two exemptions are independent and this one has to be
+///      applied by hand.
+///
+///      The PG REASON for the exemption does not transfer either. PostgreSQL
+///      re-deparses through `pg_get_constraintdef`, so the fold's quoted
+///      `CHECK (("qty" >= 0))` reads back unquoted. SQLite stores the `CREATE TABLE`
+///      text verbatim in `sqlite_master`, and the same body reads back
+///      byte-identical, so a SQLite CHECK that reached comparison would need no text
+///      exemption for a re-deparse that does not happen.
+///
+///      Reviving this needs the two fold refusals lifted AND `snapshot_schema_sqlite`
+///      taught to surface CHECK constraints. Blanking `definition` alone would not
+///      be enough after only the first: a fold-emitted CHECK with no live counterpart
+///      is a MISSING constraint, which blanking a field cannot reconcile. Kept rather
+///      than deleted so the exemption is in place if SQLite CHECK folding lands
+///      before the introspection half.
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
