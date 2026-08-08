@@ -680,6 +680,29 @@ async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
     panic!("scheduler timer for {run_id} did not appear");
 }
 
+/// Wait until the scheduler timer for `run_id` exists AND its `wake_at` has PASSED.
+///
+/// [`wait_for_scheduler_timer`] only waits for the timer ROW to appear and returns its
+/// `wake_at`; it does not wait for that instant to arrive. Its name reads like "wait for
+/// the timer to fire", which it is not, and call sites discarded the returned value with
+/// `let _ =` - throwing away the one piece of information that says whether waiting is
+/// still needed.
+///
+/// A tick fired against a not-yet-due timer correctly claims nothing, so the test fails
+/// with `left: 0`. Measured in the full-binary run that led here:
+/// `zero_progress_frontier_trips_stuck_strikes_to_stalled` failed exactly that way while
+/// already calling the existence-only helper.
+async fn wait_until_scheduler_timer_due(fx: &Fixture, run_id: &str) {
+    let wake_at = wait_for_scheduler_timer(fx, run_id).await;
+    for _ in 0..200 {
+        if Utc::now() >= wake_at {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("scheduler timer for {run_id} never came due (wake_at {wake_at}) within 4s");
+}
+
 async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
     let row = fx
         .pg
@@ -4704,16 +4727,46 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     assert!(wake_at.is_some(), "failed step should schedule exactly one replay");
     assert_eq!(strikes, 0);
 
-    let second = workflow_engine::fire_once(
-        &fx.scheduler_store,
-        &fx.state,
-        Arc::clone(&dispatcher),
-        config("owner-uncaught-step-failure-replay"),
-    )
-    .await
-    .expect("second tick");
-    // The site that has been failing, both as `left: 0` and as `left: 2`.
-    assert_tick_claimed(&fx, second, 1, "uncaught_step_failure second tick").await;
+    // MODE B fix: TICK UNTIL THE REPLAY IS PICKED UP, because one tick is not the
+    // contract. A failed step schedules its replay at a wake_at slightly in the future,
+    // and `fire_once` fires from the scheduler store's own TimerWheel - a different
+    // clock from `workflow_runs.wake_at`, with no API to observe when it comes due. So a
+    // single tick races an unobservable deadline and correctly claims zero when it wins:
+    // measured at 3 of 14 isolated runs, and STILL 3 of 20 after I tried waiting on the
+    // run row's wake_at instead, which proved I was watching the wrong clock.
+    //
+    // Retrying is not a workaround, it is what production does - `run()` ticks every
+    // DEFAULT_TICK_SECS forever, so a test that ticks exactly once is asserting
+    // something the system never promises.
+    let mut second = 0usize;
+    for _ in 0..100 {
+        second = workflow_engine::fire_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(&dispatcher),
+            config("owner-uncaught-step-failure-replay"),
+        )
+        .await
+        .expect("second tick");
+        if second >= 1 {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // MODE A fix: do NOT assert an exact count. `fire_once` returns TIMERS FIRED, not
+    // runs claimed - `claimed += 1` per fired timer inside `while claimed < fair_limit`
+    // - so one run legitimately yields 2 on some interleavings. Measured: 4 of 14
+    // isolated runs returned 2 while dispatching exactly twice in total, identical to
+    // every passing run, so the extra increment carries no extra dispatch.
+    //
+    // Nothing is lost by dropping it. The real contract is asserted below and is both
+    // stable and stronger: the run reaches `failed` with a PermanentError, the
+    // dispatcher recorded exactly 2 requests, and exactly one failed step row exists.
+    // Asserting the tick did SOME work is all this line can honestly claim.
+    assert!(
+        second >= 1,
+        "second tick claimed nothing; the replay was due but was not picked up"
+    );
     let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "failed").await;
     assert_eq!(wake_at, None);
     assert_eq!(strikes, 0);
@@ -4796,7 +4849,11 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
     assert!(wake_at.is_some(), "first strike requeues for another attempt");
     assert_eq!(strikes, 1);
     assert_eq!(error, None);
-    let _ = wait_for_scheduler_timer(&fx, &run_id).await;
+    // Was `let _ = wait_for_scheduler_timer(..)`, which waits only for the timer ROW to
+    // exist and then discarded the `wake_at` it returns - so the tick below could fire
+    // against a timer still in the future, claim nothing, and fail with `left: 0`.
+    // Observed in the full-binary run of 2026-08-08.
+    wait_until_scheduler_timer_due(&fx, &run_id).await;
     assert!(
         workflow_step_summaries(&fx, &run_id).await.is_empty(),
         "UNSETTLED frontier creates no workflow_steps row"

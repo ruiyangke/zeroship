@@ -295,7 +295,12 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow_engine cron starting");
     loop {
         match tick(&state).await {
-            Ok(n) if n > 0 => tracing::info!(claimed = n, "workflow_engine tick claimed runs"),
+            // `fired_timers`, not `claimed`: the count is per fired timer and one run can
+            // contribute more than one, so labelling it a run count overstated it. See
+            // `fire_once`.
+            Ok(n) if n > 0 => {
+                tracing::info!(fired_timers = n, "workflow_engine tick fired due timers");
+            }
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow_engine tick failed"),
         }
@@ -489,6 +494,24 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
 }
 
 /// Fire due scheduler timers and dispatch claimed workflow runs.
+///
+/// Returns the number of TIMERS FIRED, which is NOT the number of distinct runs
+/// claimed and NOT the number of dispatches. The loop below increments once per fired
+/// timer and keeps pulling until the per-app fair limit, so a single run can contribute
+/// more than one - measured at 4 of 14 runs of one test, each dispatching exactly twice
+/// in total, identical to the passing runs. The extra increment carries no extra
+/// dispatch; the engine is right and the number is coarse.
+///
+/// So do not treat this as a run count. It is a liveness signal: greater than zero
+/// means the tick did work.
+///
+/// `uncaught_step_failure_fails_after_one_extra_replay` asserted it as an exact run
+/// count and failed 43 percent of isolated runs. Dropping that assertion removed only
+/// part of it - 43 percent to 15 percent - because a SECOND, independent race remained:
+/// a single tick can beat the replay's deadline in the scheduler store's own timer
+/// wheel and correctly claim nothing. That needed a retry loop, not an assertion
+/// change. Two races, not one, which is why several single-cause fixes each looked
+/// refuted.
 #[allow(clippy::future_not_send)]
 pub async fn fire_once<D>(
     scheduler_store: &WorkflowSchedulerStore,
