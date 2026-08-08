@@ -319,10 +319,21 @@ export default {{
         Some(&serde_json::json!([{ "id": 7, "label": "pool-ok" }])),
         "pool temp-table roundtrip mismatch: {body}"
     );
+    // The fixture queues both from inside `main()`'s prefix, which is itself a
+    // promise job, so the pending promise queue drains before the tick queue is
+    // revisited. MEASURED on node v22.22.2: Node does the same in that
+    // arrangement (ESM and CommonJS alike), so the old `["tick","promise"]`
+    // expectation demanded something Node does not do either - it is Node's
+    // CommonJS SYNCHRONOUS-top-level answer applied to the wrong arrangement.
+    // That single assertion held this whole e2e red.
+    //
+    // Ordering is pinned properly, per arrangement, in
+    // `tests/next_tick_ordering.rs`. This one only guards against the pg
+    // fixture silently losing the calls.
     assert_eq!(
         body.get("nextTickOrdering"),
-        Some(&serde_json::json!(["tick", "promise"])),
-        "process.nextTick did not run before Promise microtasks: {body}"
+        Some(&serde_json::json!(["promise", "tick"])),
+        "nextTick/microtask ordering changed for the in-microtask arrangement: {body}"
     );
     assert_eq!(
         body.get("concurrent"),
