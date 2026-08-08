@@ -1046,7 +1046,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .await
             .ok();
         cleanup_identities(&fx.state, &client_id).await;
-        fx.cleanup_clients(&[client_id.clone()]).await;
+        fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
         fx.state
             .control_pg
             .execute(
@@ -1127,7 +1127,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .await
             .ok();
         cleanup_identities(&fx.state, &client_id).await;
-        fx.cleanup_clients(&[client_id.clone()]).await;
+        fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
         fx.state
             .control_pg
             .execute(

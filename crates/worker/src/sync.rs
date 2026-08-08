@@ -770,10 +770,12 @@ mod tests {
                 Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
             let app_id = Uuid::new_v4();
             let descriptor_hash = "c".repeat(64);
-            let mut manifest = Manifest::default();
-            manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
-                hash: descriptor_hash.clone(),
-            });
+            let manifest = Manifest {
+                runtime_descriptor: Some(RuntimeDescriptorEntry {
+                    hash: descriptor_hash.clone(),
+                }),
+                ..Manifest::default()
+            };
 
             let err = runtime_descriptor_json(&manifest, &blob_store, &app_id)
                 .await

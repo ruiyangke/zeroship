@@ -1,7 +1,8 @@
 //! Live-Postgres integration tests for the per-app native OAuth client
-//! lifecycle. These tests exercise the authoritative `zeroship.oauth_clients`
-//! + `zeroship.app_oauth_clients` store, scope registry, route exposure, and
-//! delete cascade without any remote OAuth-admin dependency.
+//! lifecycle. These tests exercise the authoritative
+//! `zeroship.oauth_clients` + `zeroship.app_oauth_clients` store, scope
+//! registry, route exposure, and delete cascade without any remote
+//! OAuth-admin dependency.
 
 use std::sync::Arc;
 
@@ -111,7 +112,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
         &app_id,
         &app_name,
         scheme,
-        &[apex.clone()],
+        std::slice::from_ref(&apex),
         &declared,
         false,
     )
@@ -119,7 +120,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     .expect("ensure_app_client");
     assert_eq!(client_id, expected_client_id);
 
-    let want_uris = redirect_uris_for_hosts(scheme, &[apex.clone()]).unwrap();
+    let want_uris = redirect_uris_for_hosts(scheme, std::slice::from_ref(&apex)).unwrap();
     let oc = raw
         .query(
             "SELECT skip_consent, token_endpoint_auth_method, brokered, \
@@ -199,7 +200,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
         &app_id,
         &app_name,
         scheme,
-        &[apex.clone()],
+        std::slice::from_ref(&apex),
         &declared,
         false,
     )
@@ -212,7 +213,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
         &app_id,
         &app_name,
         scheme,
-        &[apex.clone()],
+        std::slice::from_ref(&apex),
         &[],
         false,
     )
@@ -265,7 +266,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
         &app_id,
         &app_name,
         scheme,
-        &[apex.clone()],
+        std::slice::from_ref(&apex),
         &[],
         false,
     )

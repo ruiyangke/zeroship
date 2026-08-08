@@ -12,6 +12,7 @@
 //!     proving provider-swappability;
 //!   * the REAL `credit::consume_at_finalize` (credit-before-tax ordering) when a credit
 //!     grant is present, so the post-credit base the tax seam taxes is the real one.
+//!
 //! Only the Stripe WIRE is a recording fake (Stripe is irrelevant to the tax math).
 //!
 //! These tests:
@@ -501,6 +502,12 @@ async fn insert_grant(
 // (a) NATIVE provider ⇒ tax_cents = 0, total = subtotal − credit (behaviour-neutral).
 // ===========================================================================
 
+// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     let url = db_url();
@@ -560,6 +567,8 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 //     leave tax_cents = 0 and total = subtotal − credit).
 // ===========================================================================
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let url = db_url();
@@ -615,6 +624,8 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 //     step masking the tax wiring.
 // ===========================================================================
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
     let url = db_url();
@@ -686,6 +697,8 @@ impl TaxProvider for ErrTaxProvider {
     }
 }
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let url = db_url();
@@ -744,6 +757,8 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 //     surfaced (the warn), never silently billed against a phantom customer.
 // ===========================================================================
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
     let url = db_url();
@@ -796,6 +811,8 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 //     credit-funded value is never refundable as cash.)
 // ===========================================================================
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     let url = db_url();
@@ -883,6 +900,8 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 //     two segments are produced by the real proration engine — no shim.
 // ===========================================================================
 
+// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let url = db_url();

@@ -9,6 +9,7 @@
 //!     scan → send → flip, the `NOTIFY_REDRIVE_HORIZON` re-drive);
 //!   * the REAL `billing_notifications` table / domains / two-phase claim;
 //!   * the REAL `invoices` / `refunds` rows for the invoice-finalized / refunded kinds.
+//!
 //! Only the EMAIL transport is a recording fake (`notify::RecordingNotifier`) so sends
 //! are asserted without real email — exactly as the brief mandates.
 //!
@@ -332,6 +333,11 @@ async fn sent_count_kind(
 /// never to a global per-tick send count. The cron, the claim-before-send, and the lock
 /// are exercised UNCHANGED — only the test waits out lock contention instead of assuming
 /// one tick wins. The bound keeps a genuine bug (rows that never settle) from hanging.
+// `lock_tick_gate()` guards `Mutex<()>` - a pure test-serialization token, not shared
+// mutable data accessed across the await. compio::test runs each test on its own
+// single-threaded runtime, so the held guard cannot deadlock another task's poll the
+// way it could under a work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &[(Uuid, i64)]) {
     for _ in 0..200 {
         {
@@ -370,6 +376,8 @@ async fn age_pending(pg: &compio_postgres::Client, creator: Uuid) {
 // ===========================================================================
 // (c) each event kind produces exactly one notification
 // ===========================================================================
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn each_kind_produces_exactly_one_notification() {
     let url = db_url();
@@ -582,6 +590,8 @@ async fn concurrent_ticks_send_each_event_once() {
 // (b) crash after send, before the `sent` flip → re-drive past the horizon, the
 //     Idempotency-Key makes the re-send effect idempotent (the key IS passed).
 // ===========================================================================
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn crash_before_flip_redrives_idempotent() {
     let url = db_url();
@@ -865,11 +875,15 @@ async fn spend_hist_count(pg: &compio_postgres::Client, app: Uuid, to_state: &st
 }
 
 /// Drive ONE gated spend-reconcile tick (serialized against sibling spend ticks).
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 async fn spend_tick(state: &AppState) {
     let _g = lock_spend_gate();
     spend_reconcile::tick(state).await.expect("spend tick");
 }
 
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn spend_band_walk_produces_one_notification_per_transition() {
     let url = db_url();
@@ -982,6 +996,8 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // Allow) via real limit-raise reconcile ticks and asserts ZERO spend notifications — it
 // FAILS against the pre-fix code (2 spurious recovery emails), passes after the SQL gate.
 // ===========================================================================
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn spend_band_recovery_walk_sends_no_notifications() {
     let url = db_url();
@@ -1086,6 +1102,8 @@ async fn age_history(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
     .expect("age history");
 }
 
+// See the allow on `tick_until_sent` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn aged_transition_past_scan_window_is_not_notified() {
     let url = db_url();

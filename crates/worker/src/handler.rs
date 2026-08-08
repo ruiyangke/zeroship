@@ -163,21 +163,6 @@ fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
 // Unified dispatch — the worker's single entry point
 // ---------------------------------------------------------------------------
 
-/// Length-prefixed dispatch frame the gateway sends. The full HTTP request
-/// shape (method, URL, headers, raw body bytes) flows in here and
-/// `Runtime::call_fetch_handler` dispatches it through the kernel's three-tier
-/// path:
-///   1. `default.rpc(name, input, ctx)` for `/__zeroship/v1/<id>` URLs.
-///   2. `default.fetchFast(method, url, bodyBytes, env)` for non-RPC traffic.
-///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
-///      everything else, including fall-through from (1) and (2).
-/// Dispatch an HTTP request through the V8 fetch handler.
-///
-/// The gateway forwards a dispatch frame (method, URL, headers, raw body
-/// bytes) and the worker hands it to `Runtime::call_fetch_handler`, which
-/// invokes the app's exported `default.fetch(req, env, ctx)`. Response may be
-/// buffered or streaming (SSE); WebSocket upgrades aren't reachable through
-/// this endpoint (the gateway uses a separate WS proxy path).
 /// Registers the dispatch surface, payload limits included.
 ///
 /// The server and the tests both go through here deliberately. These caps are
@@ -201,6 +186,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+/// Dispatch an HTTP request through the V8 fetch handler.
+///
+/// The gateway forwards a dispatch frame (method, URL, headers, raw body
+/// bytes) and the worker hands it to `Runtime::call_fetch_handler`, which
+/// invokes the app's exported `default.fetch(req, env, ctx)`. Response may be
+/// buffered or streaming (SSE); WebSocket upgrades aren't reachable through
+/// this endpoint (the gateway uses a separate WS proxy path).
+///
+/// The length-prefixed dispatch frame the gateway sends carries the full HTTP
+/// request shape (method, URL, headers, raw body bytes), and
+/// `Runtime::call_fetch_handler` dispatches it through the kernel's
+/// three-tier path:
+///   1. `default.rpc(name, input, ctx)` for `/__zeroship/v1/<id>` URLs.
+///   2. `default.fetchFast(method, url, bodyBytes, env)` for non-RPC traffic.
+///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
+///      everything else, including fall-through from (1) and (2).
 pub async fn dispatch(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
@@ -480,9 +481,10 @@ fn workflow_worker_owner_id() -> String {
 }
 
 fn workflow_worker_config() -> WorkflowEngineConfig {
-    let mut config = WorkflowEngineConfig::default();
-    config.owner_id = workflow_worker_owner_id();
-    config
+    WorkflowEngineConfig {
+        owner_id: workflow_worker_owner_id(),
+        ..WorkflowEngineConfig::default()
+    }
 }
 
 fn workflow_runtime_envelope(
@@ -968,14 +970,15 @@ async fn apply_workflow_advance_json(
 }
 
 fn workflow_apply_config_from_request(request: &StepRequest) -> WorkflowEngineConfig {
-    let mut config = WorkflowEngineConfig::default();
-    config.owner_id = request.owner_id.clone();
-    config.stuck_strike_limit = request.stuck_strike_limit;
-    config.max_child_depth = request.max_child_depth;
-    config.max_live_descendants = request.max_live_descendants;
-    config.max_start_many_batch = request.max_start_many_batch;
-    config.journal_limits = request.journal_limits;
-    config
+    WorkflowEngineConfig {
+        owner_id: request.owner_id.clone(),
+        stuck_strike_limit: request.stuck_strike_limit,
+        max_child_depth: request.max_child_depth,
+        max_live_descendants: request.max_live_descendants,
+        max_start_many_batch: request.max_start_many_batch,
+        journal_limits: request.journal_limits,
+        ..WorkflowEngineConfig::default()
+    }
 }
 
 async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Result<(), String> {
@@ -1374,6 +1377,192 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
     make_error(&DispatchError::new(msg, status))
 }
 
+/// Pull bundle from the blob store and load into cache (cold start path).
+///
+/// Order matters: fetch + verify bundle, fetch + parse env, THEN
+/// commit V8 isolate + env atomically. Doing it in the other order
+/// (commit isolate, then fetch env) would expose a window where
+/// `cache::get_runtime` returns a ready isolate but `get_env` returns
+/// None — concurrent dispatches on the same thread between the two
+/// steps would 503 unnecessarily AND the new V8 code might run
+/// against the OLD env on a later step in this function. Now we
+/// stage everything in locals first and only mutate cache at the
+/// end.
+///
+/// Bytes come from `BlobStore` keyed by
+/// `manifest.worker.modules[manifest.worker.entry]` rather than from a
+/// dedicated control-plane endpoint. The blob store enforces
+/// `sha256(bytes) == hash` on read, so the previous explicit hash
+/// re-check is redundant — `LocalDiskBlobStore::get_blob` already
+/// rejects on mismatch.
+async fn load_on_demand(
+    config: &WorkerConfig,
+    envs: &SharedEnvs,
+    app_id: &Uuid,
+) -> Result<(), String> {
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
+
+    let manifest = app_version
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
+    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id)
+        .ok_or_else(|| format!("app {app_id} has no worker code (SSG-only or malformed manifest)"))?;
+
+    let bytes = config
+        .blob_store
+        .get_blob(&bundle_hash)
+        .await
+        .map_err(|e| format!("blob fetch failed: {e}"))?;
+
+    if bytes.is_empty() {
+        return Err("empty bundle".into());
+    }
+
+    // Fetch env BEFORE committing the V8 isolate. If env fetch fails
+    // we never partially-load.
+    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+        .await
+        .map_err(|e| format!("env fetch failed: {e}"))?;
+
+    // Now commit both atomically (env first so dispatchers always see
+    // env present once runtime is present).
+    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
+        return Err(format!("env parse failed: {e}"));
+    }
+    let env_entry = crate::sync::get_env(envs, app_id)
+        .ok_or_else(|| "env cache missing after env insert".to_string())?;
+    // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
+    // sources the schema from the generated descriptor. Absent descriptor means
+    // schema-less app; expected-but-missing/corrupt descriptors are load errors.
+    let descriptor_json = match crate::sync::runtime_descriptor_json(
+        manifest,
+        &config.blob_store,
+        app_id,
+    )
+    .await
+    {
+        Ok(json) => json,
+        Err(e) => {
+            crate::sync::remove_env(envs, app_id);
+            return Err(format!("descriptor load failed: {e}"));
+        }
+    };
+    cache::load_app(
+        *app_id,
+        &bytes,
+        app_version.runtime.clone(),
+        app_version.net_policy.clone(),
+        app_version.deploy_hash.as_deref(),
+        descriptor_json.as_deref(),
+        &env_entry.snapshot,
+    )
+    .map_err(|e| {
+        crate::sync::remove_env(envs, app_id);
+        format!("failed to load bundle: {e}")
+    })?;
+    // Record what this isolate was loaded against so the reconcile loop
+    // can detect future swaps: the deploy_hash (the canonical manifest
+    // hash, NOT the per-blob bundle hash) and the env version the env we
+    // just committed was fetched at. The env half matters for SEC-7 —
+    // without it, a later env-only rotation would be invisible to
+    // `sync::needs_reload` and the isolate would keep serving revoked
+    // credentials.
+    cache::set_loaded_meta(*app_id, cache::LoadedMeta {
+        deploy_hash: app_version.deploy_hash.clone(),
+        env_version: app_version.env_version,
+        net_policy: app_version.net_policy,
+    });
+    tracing::info!(
+        app_id = %app_id,
+        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+        "worker: on-demand loaded app"
+    );
+    Ok(())
+}
+
+async fn load_pinned_workflow_on_demand(
+    config: &WorkerConfig,
+    envs: &SharedEnvs,
+    app_id: &Uuid,
+    deploy_hash: &str,
+) -> Result<(), String> {
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id)
+        .await
+        .ok();
+    let manifest_bytes = config
+        .blob_store
+        .get_manifest(app_id, deploy_hash)
+        .await
+        .map_err(|e| format!("manifest fetch failed: {e}"))?;
+    let manifest: zeroship_bundle::Manifest = serde_json::from_slice(manifest_bytes.as_ref())
+        .map_err(|e| format!("manifest parse failed: {e}"))?;
+    if manifest.deploy_hash.as_deref() != Some(deploy_hash) {
+        return Err(format!(
+            "manifest deploy_hash mismatch: expected {deploy_hash}, got {:?}",
+            manifest.deploy_hash
+        ));
+    }
+    manifest
+        .validate()
+        .map_err(|e| format!("manifest validation failed: {e}"))?;
+
+    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id)
+        .ok_or_else(|| format!("app {app_id} deploy {deploy_hash} has no worker code"))?;
+    let bytes = config
+        .blob_store
+        .get_blob(&bundle_hash)
+        .await
+        .map_err(|e| format!("blob fetch failed: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty bundle".into());
+    }
+
+    if crate::sync::get_env(envs, app_id).is_none()
+        || app_version
+            .as_ref()
+            .is_some_and(|info| crate::sync::cached_env_version(envs, app_id) != Some(info.env_version))
+    {
+        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+            .await
+            .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
+        let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
+        crate::sync::put_env_from_json(envs, *app_id, &env_json, env_version)
+            .map_err(|e| format!("env parse failed for pinned workflow load: {e}"))?;
+    }
+
+    let env_entry = crate::sync::get_env(envs, app_id)
+        .ok_or_else(|| "env unavailable for pinned workflow load".to_string())?;
+    let descriptor_json = crate::sync::runtime_descriptor_json(&manifest, &config.blob_store, app_id)
+        .await
+        .map_err(|e| format!("descriptor load failed: {e}"))?;
+    let runtime_limits = app_version
+        .as_ref()
+        .map_or_else(AppRuntimeLimits::default, |info| info.runtime.clone());
+    let net_policy = app_version
+        .as_ref()
+        .map_or_else(AppNetPolicy::default, |info| info.net_policy.clone());
+
+    cache::load_pinned_workflow_app(
+        *app_id,
+        deploy_hash,
+        &bytes,
+        runtime_limits,
+        net_policy,
+        descriptor_json.as_deref(),
+        &env_entry.snapshot,
+    )
+    .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
+
+    tracing::info!(
+        app_id = %app_id,
+        deploy_hash = %deploy_hash,
+        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+        "worker: on-demand loaded pinned workflow app"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1513,24 +1702,24 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .ok()
     }
 
-    fn workflow_test_state(
-        max_pinned_isolates_per_app: usize,
-    ) -> (
+    // (app_id, blob_store, envs, logs, config, blob_root)
+    type WorkflowTestState = (
         Uuid,
         Arc<dyn BlobStore>,
         SharedEnvs,
         crate::logs::SharedLogs,
         Arc<crate::WorkerConfig>,
         PathBuf,
-    ) {
+    );
+
+    fn workflow_test_state(max_pinned_isolates_per_app: usize) -> WorkflowTestState {
         let (app_id, blob_store, envs, logs, config, _meter, blob_root) =
             workflow_test_state_with_meter(max_pinned_isolates_per_app);
         (app_id, blob_store, envs, logs, config, blob_root)
     }
 
-    fn workflow_test_state_with_meter(
-        max_pinned_isolates_per_app: usize,
-    ) -> (
+    // (app_id, blob_store, envs, logs, config, meter, blob_root)
+    type WorkflowTestStateWithMeter = (
         Uuid,
         Arc<dyn BlobStore>,
         SharedEnvs,
@@ -1538,7 +1727,9 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         Arc<crate::WorkerConfig>,
         Arc<zeroship_metering::Meter>,
         PathBuf,
-    ) {
+    );
+
+    fn workflow_test_state_with_meter(max_pinned_isolates_per_app: usize) -> WorkflowTestStateWithMeter {
         init_runtime();
         let app_id = Uuid::new_v4();
         let meter = Arc::new(zeroship_metering::Meter::new());
@@ -2616,7 +2807,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     ///
     /// The handler below encodes exactly that. The response is gated on a REAL
     /// (>= 1 ms) timer, which is the half that makes the failure observable: a
-    /// >= 1 ms delay lands in `spawned_timers` -> `AsyncWork::pending_timers`,
+    /// delay of >= 1 ms lands in `spawned_timers` -> `AsyncWork::pending_timers`,
     /// and the ONLY place those are polled is the pump's event select, after
     /// the drain returns. With an unbounded drain the response is unreachable.
     ///
@@ -3595,8 +3786,11 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 "the mid-stream byte-threshold flush records the streamed bytes \
                  before finalize"
             );
+            // `unwrap_or(0) >= 0` on a `u64` is always true regardless of whether the
+            // metric was ever recorded (clippy::absurd_extreme_comparisons), which
+            // silently defeated the "is recorded" claim below. Assert presence instead.
             assert!(
-                usage_value(&events, app_id, "stream_wall_us").unwrap_or(0) >= 0,
+                usage_value(&events, app_id, "stream_wall_us").is_some(),
                 "stream_wall_us is recorded as a custom metric on the incremental flush"
             );
             // The drain task NEVER counts `requests` (a stream is one request,
@@ -3896,188 +4090,3 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 }
 
-/// Pull bundle from the blob store and load into cache (cold start path).
-///
-/// Order matters: fetch + verify bundle, fetch + parse env, THEN
-/// commit V8 isolate + env atomically. Doing it in the other order
-/// (commit isolate, then fetch env) would expose a window where
-/// `cache::get_runtime` returns a ready isolate but `get_env` returns
-/// None — concurrent dispatches on the same thread between the two
-/// steps would 503 unnecessarily AND the new V8 code might run
-/// against the OLD env on a later step in this function. Now we
-/// stage everything in locals first and only mutate cache at the
-/// end.
-///
-/// Bytes come from `BlobStore` keyed by
-/// `manifest.worker.modules[manifest.worker.entry]` rather than from a
-/// dedicated control-plane endpoint. The blob store enforces
-/// `sha256(bytes) == hash` on read, so the previous explicit hash
-/// re-check is redundant — `LocalDiskBlobStore::get_blob` already
-/// rejects on mismatch.
-async fn load_on_demand(
-    config: &WorkerConfig,
-    envs: &SharedEnvs,
-    app_id: &Uuid,
-) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
-
-    let manifest = app_version
-        .manifest
-        .as_ref()
-        .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
-    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} has no worker code (SSG-only or malformed manifest)"))?;
-
-    let bytes = config
-        .blob_store
-        .get_blob(&bundle_hash)
-        .await
-        .map_err(|e| format!("blob fetch failed: {e}"))?;
-
-    if bytes.is_empty() {
-        return Err("empty bundle".into());
-    }
-
-    // Fetch env BEFORE committing the V8 isolate. If env fetch fails
-    // we never partially-load.
-    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
-        .await
-        .map_err(|e| format!("env fetch failed: {e}"))?;
-
-    // Now commit both atomically (env first so dispatchers always see
-    // env present once runtime is present).
-    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
-        return Err(format!("env parse failed: {e}"));
-    }
-    let env_entry = crate::sync::get_env(envs, app_id)
-        .ok_or_else(|| "env cache missing after env insert".to_string())?;
-    // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
-    // sources the schema from the generated descriptor. Absent descriptor means
-    // schema-less app; expected-but-missing/corrupt descriptors are load errors.
-    let descriptor_json = match crate::sync::runtime_descriptor_json(
-        manifest,
-        &config.blob_store,
-        app_id,
-    )
-    .await
-    {
-        Ok(json) => json,
-        Err(e) => {
-            crate::sync::remove_env(envs, app_id);
-            return Err(format!("descriptor load failed: {e}"));
-        }
-    };
-    cache::load_app(
-        *app_id,
-        &bytes,
-        app_version.runtime.clone(),
-        app_version.net_policy.clone(),
-        app_version.deploy_hash.as_deref(),
-        descriptor_json.as_deref(),
-        &env_entry.snapshot,
-    )
-    .map_err(|e| {
-        crate::sync::remove_env(envs, app_id);
-        format!("failed to load bundle: {e}")
-    })?;
-    // Record what this isolate was loaded against so the reconcile loop
-    // can detect future swaps: the deploy_hash (the canonical manifest
-    // hash, NOT the per-blob bundle hash) and the env version the env we
-    // just committed was fetched at. The env half matters for SEC-7 —
-    // without it, a later env-only rotation would be invisible to
-    // `sync::needs_reload` and the isolate would keep serving revoked
-    // credentials.
-    cache::set_loaded_meta(*app_id, cache::LoadedMeta {
-        deploy_hash: app_version.deploy_hash.clone(),
-        env_version: app_version.env_version,
-        net_policy: app_version.net_policy,
-    });
-    tracing::info!(
-        app_id = %app_id,
-        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
-        "worker: on-demand loaded app"
-    );
-    Ok(())
-}
-
-async fn load_pinned_workflow_on_demand(
-    config: &WorkerConfig,
-    envs: &SharedEnvs,
-    app_id: &Uuid,
-    deploy_hash: &str,
-) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id)
-        .await
-        .ok();
-    let manifest_bytes = config
-        .blob_store
-        .get_manifest(app_id, deploy_hash)
-        .await
-        .map_err(|e| format!("manifest fetch failed: {e}"))?;
-    let manifest: zeroship_bundle::Manifest = serde_json::from_slice(manifest_bytes.as_ref())
-        .map_err(|e| format!("manifest parse failed: {e}"))?;
-    if manifest.deploy_hash.as_deref() != Some(deploy_hash) {
-        return Err(format!(
-            "manifest deploy_hash mismatch: expected {deploy_hash}, got {:?}",
-            manifest.deploy_hash
-        ));
-    }
-    manifest
-        .validate()
-        .map_err(|e| format!("manifest validation failed: {e}"))?;
-
-    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} deploy {deploy_hash} has no worker code"))?;
-    let bytes = config
-        .blob_store
-        .get_blob(&bundle_hash)
-        .await
-        .map_err(|e| format!("blob fetch failed: {e}"))?;
-    if bytes.is_empty() {
-        return Err("empty bundle".into());
-    }
-
-    if crate::sync::get_env(envs, app_id).is_none()
-        || app_version
-            .as_ref()
-            .is_some_and(|info| crate::sync::cached_env_version(envs, app_id) != Some(info.env_version))
-    {
-        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
-            .await
-            .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
-        let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
-        crate::sync::put_env_from_json(envs, *app_id, &env_json, env_version)
-            .map_err(|e| format!("env parse failed for pinned workflow load: {e}"))?;
-    }
-
-    let env_entry = crate::sync::get_env(envs, app_id)
-        .ok_or_else(|| "env unavailable for pinned workflow load".to_string())?;
-    let descriptor_json = crate::sync::runtime_descriptor_json(&manifest, &config.blob_store, app_id)
-        .await
-        .map_err(|e| format!("descriptor load failed: {e}"))?;
-    let runtime_limits = app_version
-        .as_ref()
-        .map_or_else(AppRuntimeLimits::default, |info| info.runtime.clone());
-    let net_policy = app_version
-        .as_ref()
-        .map_or_else(AppNetPolicy::default, |info| info.net_policy.clone());
-
-    cache::load_pinned_workflow_app(
-        *app_id,
-        deploy_hash,
-        &bytes,
-        runtime_limits,
-        net_policy,
-        descriptor_json.as_deref(),
-        &env_entry.snapshot,
-    )
-    .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
-
-    tracing::info!(
-        app_id = %app_id,
-        deploy_hash = %deploy_hash,
-        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
-        "worker: on-demand loaded pinned workflow app"
-    );
-    Ok(())
-}

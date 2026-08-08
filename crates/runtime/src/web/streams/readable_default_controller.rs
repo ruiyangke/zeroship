@@ -1155,12 +1155,23 @@ pub fn set_up_readable_stream_default_controller_native<S: NativeSource + 'stati
             let source_rc = source_rc.clone();
             // The RefMut is held across the .await below because NativeSource::pull
             // needs &mut self for its whole async body - there's no way to release
-            // it earlier without changing the trait's borrow shape. Single-threaded
-            // executor, so no data race, but a `cancel()` on this same `source_rc`
-            // firing while a pull is in flight would double-borrow and panic;
-            // that's a real, separate concern (not introduced by this lint pass)
-            // left for a future dispatch that reworks NativeSource's borrow
-            // contract.
+            // it earlier without changing the trait's borrow shape.
+            //
+            // A `cancel()` on this same `source_rc` while a pull is in flight WOULD
+            // double-borrow and panic. Driving these two closures directly does
+            // exactly that, measured: "RefCell already borrowed" from the
+            // `borrow_mut()` in the cancel closure below.
+            //
+            // It cannot happen today, and the reason is not a guard - it is that
+            // neither closure is ever invoked. `algorithm_snapshot` maps
+            // `Native`/`NativeReason` to `Noop`, and both drivers (`pull_steps` via
+            // `call_pull_if_needed`, and `cancel_steps`) go through it; a JS-driven
+            // read-then-cancel calls neither method, counted rather than inferred.
+            // `from_native_source` also has no caller in this crate at all.
+            //
+            // So this is a live hazard in inert scaffolding. Wiring up either the
+            // Native algorithm dispatch or `from_native_source` makes it reachable,
+            // and the borrow contract has to change in the same patch.
             #[allow(clippy::await_holding_refcell_ref)]
             let fut = Box::pin(async move {
                 let mut controller = NativeReadableController { controller_obj };
@@ -1184,11 +1195,9 @@ pub fn set_up_readable_stream_default_controller_native<S: NativeSource + 'stati
         let source_rc = source_rc.clone();
         AlgorithmFn::NativeReason(Box::new(move |reason| {
             let source_rc = source_rc.clone();
-            // See the matching comment on the `pull` closure above: the RefMut
-            // must stay live for the whole async body, single-threaded executor
-            // so no data race, but a concurrent pull/cancel pair on the same
-            // `source_rc` could still double-borrow and panic - a real, separate
-            // concern left for a future dispatch, not fixed by this lint pass.
+            // This `borrow_mut()` is the one that panics if a pull is in flight -
+            // see the `pull` closure above for why that is currently unreachable
+            // and what would make it reachable.
             #[allow(clippy::await_holding_refcell_ref)]
             let fut = Box::pin(async move { source_rc.borrow_mut().cancel(reason).await });
             fut

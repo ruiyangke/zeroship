@@ -1482,7 +1482,7 @@ async fn reap_unclaimed_inflight_retry<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    if claimed_by.is_some() || attempt < 8 || attempt % 8 != 0 {
+    if claimed_by.is_some() || attempt < 8 || !attempt.is_multiple_of(8) {
         return;
     }
     if scheduler_counts(fx, run_id).await != (0, 1) {
@@ -2811,7 +2811,9 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
              claimed_by={claimed_by:?} dispatch_nonce={dispatch_nonce:?}"
         );
     }
-    let child_rows: Vec<(String, String, Option<DateTime<Utc>>, Option<String>, Option<String>)> = fx
+    // (id, state, wake_at, claimed_by, dispatch_nonce)
+    type ChildRow = (String, String, Option<DateTime<Utc>>, Option<String>, Option<String>);
+    let child_rows: Vec<ChildRow> = fx
         .pg
         .query(
             "SELECT id, state, wake_at, claimed_by, dispatch_nonce \
@@ -2833,7 +2835,15 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
             )
         })
         .collect();
-    let scheduler_rows: Vec<(String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<i64>)> = fx
+    // (run_id, slot, wake_at, deadline, generation)
+    type SchedulerRow = (
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<i64>,
+    );
+    let scheduler_rows: Vec<SchedulerRow> = fx
         .pg
         .query(
             "SELECT run_id, slot, wake_at, deadline, generation \

@@ -24,7 +24,6 @@ use zeroship_control::{
 use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 
-#[allow(dead_code)]
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -694,8 +693,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         .expect("select authz decision");
     assert_eq!(
         rows.first()
-            .map(|row| row.get::<_, Option<String>>("request_id"))
-            .flatten()
+            .and_then(|row| row.get::<_, Option<String>>("request_id"))
             .as_deref(),
         Some(request_id.as_str())
     );

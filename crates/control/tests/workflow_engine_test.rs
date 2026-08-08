@@ -2212,8 +2212,7 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
         .expect("remove parent from scheduler store");
 
     let mut child_ids = Vec::new();
-    for ordinal in 0..3 {
-        let ordinal = ordinal as i32;
+    for ordinal in 0..3i32 {
         let child_id = zeroship_core::typed_id::new_workflow_run_id();
         let dedup_key = workflow_engine::child_dedup_key(&parent, ordinal);
         let signal_type = workflow_engine::child_signal_type(ordinal);
@@ -4695,7 +4694,7 @@ async fn caught_step_failure_continues_run_to_completion() {
         second >= 1,
         "second tick claimed nothing; the replay was due but was not picked up"
     );
-    wait_for_completed(&fx, &[run_id.clone()]).await;
+    wait_for_completed(&fx, std::slice::from_ref(&run_id)).await;
     assert_eq!(dispatcher.requests().len(), 2);
     assert_eq!(
         workflow_step_summaries(&fx, &run_id).await,
@@ -5092,7 +5091,7 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
     .await
     .expect("lease handoff claim");
     assert_eq!(claimed, 1, "second owner should reclaim the expired lease");
-    wait_for_completed(&fx, &[run_id.clone()]).await;
+    wait_for_completed(&fx, std::slice::from_ref(&run_id)).await;
 
     let stale = StepResult::from_checkpoints(
         run_id.clone(),
@@ -5982,7 +5981,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     )
     .await
     .expect("resume tick");
-    wait_for_completed(&fx, &[run_id.clone()]).await;
+    wait_for_completed(&fx, std::slice::from_ref(&run_id)).await;
     let rows = fx
         .pg
         .query(
@@ -6265,7 +6264,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     )
     .await
     .expect("restart tick");
-    wait_for_completed(&fx, &[run_id.clone()]).await;
+    wait_for_completed(&fx, std::slice::from_ref(&run_id)).await;
     let rows = fx
         .pg
         .query(
