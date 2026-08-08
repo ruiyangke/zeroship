@@ -110,8 +110,9 @@ fn is_header_name(b: &[u8]) -> bool {
 /// Header value (Fetch §2.2 "header value"):
 ///   - No leading or trailing 0x09 / 0x20 (TAB, SP).
 ///   - No 0x00 (NUL), 0x0A (LF), 0x0D (CR) anywhere.
-/// Other bytes — including 0x80-0xFF, 0x0B, 0x0C, 0x7F, 0x01-0x08,
-/// 0x0E-0x1F — are valid.
+///
+///     Other bytes — including 0x80-0xFF, 0x0B, 0x0C, 0x7F, 0x01-0x08,
+///     0x0E-0x1F — are valid.
 fn is_header_value(b: &[u8]) -> bool {
     !b.first().is_some_and(|c| *c == b' ' || *c == b'\t')
         && !b.last().is_some_and(|c| *c == b' ' || *c == b'\t')
@@ -131,10 +132,7 @@ fn normalize_value(v: &[u8]) -> &[u8] {
 }
 
 fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b.iter())
-            .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+    a.eq_ignore_ascii_case(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +258,10 @@ impl Headers {
     /// Fetch §2.2.4 "header list get":
     ///   1. If list does not contain name, return null.
     ///   2. Return the combined value given name and list.
-    /// Combined value: all matching values joined by 0x2C 0x20 (", ")
-    /// in list order. Note this applies to set-cookie too — getSetCookie
-    /// is the un-joined accessor.
+    ///
+    ///      Combined value: all matching values joined by 0x2C 0x20 (", ")
+    ///      in list order. Note this applies to set-cookie too — getSetCookie
+    ///      is the un-joined accessor.
     fn list_get(&self, name: &[u8]) -> Option<Vec<u8>> {
         let mut buf: Option<Vec<u8>> = None;
         for (n, v) in &self.list {
@@ -506,9 +505,9 @@ fn fill_from_iterable(
 ///   2. For each key in keys (in insertion order):
 ///      a. Let desc be ? O.`[[GetOwnProperty]]`(key).
 ///      b. If desc is not undefined and desc.`[[Enumerable]]` is true:
-///         i. Let typedKey be key converted to ByteString. Symbol → throws.
-///         ii. Let value = ? Get(O, key); convert to ByteString.
-///         iii. Append (typedKey, typedValue) to result.
+///      i. Let typedKey be key converted to ByteString. Symbol → throws.
+///      ii. Let value = ? Get(O, key); convert to ByteString.
+///      iii. Append (typedKey, typedValue) to result.
 fn fill_from_record(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,

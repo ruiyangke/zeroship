@@ -48,7 +48,7 @@ fn empty_headers_get_returns_null() {
         const h = new Headers();
         JSON.stringify({ a: h.get("x"), b: h.has("x") });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":null,"b":false}"#);
 }
@@ -60,7 +60,7 @@ fn construct_from_sequence() {
         const h = new Headers([["a", "1"], ["b", "2"]]);
         JSON.stringify({ a: h.get("a"), b: h.get("b") });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":"1","b":"2"}"#);
 }
@@ -72,7 +72,7 @@ fn construct_from_record() {
         const h = new Headers({a: "1", b: "2"});
         JSON.stringify({ a: h.get("a"), b: h.get("b") });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":"1","b":"2"}"#);
 }
@@ -86,7 +86,7 @@ fn construct_from_other_headers_via_iterable() {
         const b = new Headers(a);
         JSON.stringify({ x: b.get("x-foo") });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"x":"bar"}"#);
 }
@@ -100,7 +100,7 @@ fn construct_with_null_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -114,7 +114,7 @@ fn construct_with_number_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -128,7 +128,7 @@ fn construct_with_non_pair_sequence_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -146,7 +146,7 @@ fn append_combines_with_comma_space() {
         h.append("a", "2");
         h.get("a");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1, 2");
 }
@@ -161,7 +161,7 @@ fn set_replaces_all_existing() {
         h.set("a", "9");
         h.get("a");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "9");
 }
@@ -176,7 +176,7 @@ fn delete_removes_all() {
         h.delete("a");
         JSON.stringify({ has: h.has("a"), get: h.get("a") });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"has":false,"get":null}"#);
 }
@@ -194,7 +194,7 @@ fn append_invalid_name_throws_typeerror() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -208,7 +208,7 @@ fn append_empty_name_throws_typeerror() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -222,7 +222,7 @@ fn append_value_with_nul_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -238,7 +238,7 @@ fn append_value_with_inner_crlf_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -254,7 +254,7 @@ fn delete_invalid_name_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -268,7 +268,7 @@ fn has_invalid_name_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -282,7 +282,7 @@ fn get_invalid_name_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -298,7 +298,7 @@ fn bytestring_high_codeunit_throws_at_construct() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -312,7 +312,7 @@ fn bytestring_high_codeunit_throws_at_append_value() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -326,7 +326,7 @@ fn bytestring_high_codeunit_throws_at_append_name() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -343,7 +343,7 @@ fn append_strips_outer_whitespace() {
         h.append("x", "  hi  ");
         h.get("x");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "hi");
 }
@@ -357,7 +357,7 @@ fn append_strips_crlf_at_ends_only() {
         h.append("x", "  hello\r\n");
         h.get("x");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "hello");
 }
@@ -382,7 +382,7 @@ fn case_preserve_first_in_list_match() {
         for (const [n, v] of h) k.push(n + "=" + v);
         JSON.stringify({ joined: h.get("x-foo"), iter: k });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"joined":"1, 2","iter":["x-foo=1, 2"]}"#);
 }
@@ -403,7 +403,7 @@ fn case_reset_after_delete_then_append() {
         for (const [n, v] of h) k.push(n + "=" + v);
         JSON.stringify({ iter: k });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"iter":["y-foo=3, 4"]}"#);
 }
@@ -422,7 +422,7 @@ fn get_set_cookie_returns_unjoined_array() {
         const arr = h.getSetCookie();
         JSON.stringify(arr);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"["a=1","b=2"]"#);
 }
@@ -439,7 +439,7 @@ fn get_of_set_cookie_still_joins() {
         h.append("set-cookie", "b=2");
         h.get("set-cookie");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1, b=2");
 }
@@ -458,7 +458,7 @@ fn iteration_emits_each_set_cookie_separately() {
         for (const [n, v] of h) out.push(n + "=" + v);
         JSON.stringify(out);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -482,7 +482,7 @@ fn iteration_emits_lowercase_sorted() {
         for (const x of h.keys()) k.push(x);
         JSON.stringify(k);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"["a-bar","x-foo"]"#);
 }
@@ -501,7 +501,7 @@ fn for_each_visits_each_pair() {
         });
         JSON.stringify(out);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"["a-bar=2","x-foo=1"]"#);
 }
@@ -513,7 +513,7 @@ fn iterator_to_string_tag_is_headers_iterator() {
         r#"
         Object.prototype.toString.call(new Headers().entries());
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object Headers Iterator]");
 }
@@ -529,7 +529,7 @@ fn iterator_proto_chain_to_iterator_prototype() {
         const iterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
         next === iterProto ? "yes" : "no";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "yes");
 }
@@ -556,7 +556,7 @@ fn live_iteration_after_append_set_cookie() {
         const e3 = it.next().value;
         JSON.stringify({ e1, e2, e3 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Live: index advances past 1, then 2; mutation between calls
     // changes what each next() emits.
@@ -596,7 +596,7 @@ fn live_iteration_with_set_cookie_replacements() {
         const e2 = it.next().value;
         JSON.stringify({ e1, e2 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -622,7 +622,7 @@ fn symbol_key_record_throws_typeerror() {
         } catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -639,7 +639,7 @@ fn non_callable_iterator_throws_typeerror() {
         } catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -654,7 +654,7 @@ fn headers_to_string_tag() {
         r#"
         Object.prototype.toString.call(new Headers());
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object Headers]");
 }
@@ -668,7 +668,7 @@ fn iterator_symbol_iterator_returns_self() {
         const it = new Headers().entries();
         it[Symbol.iterator]() === it ? "self" : "other";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "self");
 }

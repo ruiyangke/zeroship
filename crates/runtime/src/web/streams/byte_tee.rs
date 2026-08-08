@@ -375,7 +375,7 @@ impl ReadRequestNative for ByteTeeDefaultReadRequest {
 
             // Clone for branch2 if both active. spec: CloneAsUint8Array.
             let cloned_for_branch2 = if !tee_state.canceled1.get() && !tee_state.canceled2.get() {
-                buf_off_len.as_ref().map(|(buf_g, off, len)| {
+                buf_off_len.as_ref().and_then(|(buf_g, off, len)| {
                     let buf_l = v8::Local::new(scope, buf_g);
                     let cloned = v8::ArrayBuffer::new(scope, *len as usize);
                     let src_bs = buf_l.get_backing_store();
@@ -386,47 +386,42 @@ impl ReadRequestNative for ByteTeeDefaultReadRequest {
                         let view: v8::Local<v8::ArrayBufferView> = v.into();
                         v8::Global::new(scope, view)
                     })
-                }).flatten()
+                })
             } else {
                 None
             };
 
             // Branch 1: enqueue original chunk (TransferArrayBuffer).
-            if !tee_state.canceled1.get() {
-                if let Some(branch1_g) = tee_state.branch1.borrow().clone() {
-                    let branch1_l = v8::Local::new(scope, &branch1_g);
-                    let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                        if is_byte_controller(scope, controller) {
-                            if let Some(view) = chunk_view {
-                                let _ = readable_byte_stream_controller_enqueue(
-                                    scope, controller, view,
-                                );
-                            }
-                        }
-                    }
+            if !tee_state.canceled1.get()
+                && let Some(branch1_g) = tee_state.branch1.borrow().clone()
+            {
+                let branch1_l = v8::Local::new(scope, &branch1_g);
+                let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
+                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                    && is_byte_controller(scope, controller)
+                    && let Some(view) = chunk_view
+                {
+                    let _ = readable_byte_stream_controller_enqueue(scope, controller, view);
                 }
             }
             // Branch 2: enqueue the cloned chunk.
-            if !tee_state.canceled2.get() {
-                if let Some(branch2_g) = tee_state.branch2.borrow().clone() {
-                    let branch2_l = v8::Local::new(scope, &branch2_g);
-                    let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                        if is_byte_controller(scope, controller) {
-                            if let Some(cloned_view_g) = cloned_for_branch2 {
-                                let cloned_view_l = v8::Local::new(scope, &cloned_view_g);
-                                let _ = readable_byte_stream_controller_enqueue(
-                                    scope, controller, cloned_view_l,
-                                );
-                            } else if tee_state.canceled1.get() {
-                                if let Some(view) = chunk_view {
-                                    let _ = readable_byte_stream_controller_enqueue(
-                                        scope, controller, view,
-                                    );
-                                }
-                            }
-                        }
+            if !tee_state.canceled2.get()
+                && let Some(branch2_g) = tee_state.branch2.borrow().clone()
+            {
+                let branch2_l = v8::Local::new(scope, &branch2_g);
+                let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
+                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                    && is_byte_controller(scope, controller)
+                {
+                    if let Some(cloned_view_g) = cloned_for_branch2 {
+                        let cloned_view_l = v8::Local::new(scope, &cloned_view_g);
+                        let _ = readable_byte_stream_controller_enqueue(
+                            scope, controller, cloned_view_l,
+                        );
+                    } else if tee_state.canceled1.get()
+                        && let Some(view) = chunk_view
+                    {
+                        let _ = readable_byte_stream_controller_enqueue(scope, controller, view);
                     }
                 }
             }
@@ -511,7 +506,7 @@ impl ReadIntoRequestNative for ByteTeeBYOBReadRequest {
 
             if !other_canceled {
                 // Clone for the OTHER branch (CloneAsUint8Array equivalent).
-                let cloned_view_g = buf_off_len.as_ref().map(|(buf_g, off, len)| {
+                let cloned_view_g = buf_off_len.as_ref().and_then(|(buf_g, off, len)| {
                     let buf_l = v8::Local::new(scope, buf_g);
                     let cloned = v8::ArrayBuffer::new(scope, *len as usize);
                     let src_bs = buf_l.get_backing_store();
@@ -522,34 +517,34 @@ impl ReadIntoRequestNative for ByteTeeBYOBReadRequest {
                         let view: v8::Local<v8::ArrayBufferView> = v.into();
                         v8::Global::new(scope, view)
                     })
-                }).flatten();
+                });
                 if !byob_canceled {
                     // respondWithNewView on byobBranch.
                     if let Some(byob_g) = byob_branch_g.clone() {
                         let branch_l = v8::Local::new(scope, &byob_g);
                         let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
-                        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                            if is_byte_controller(scope, controller) {
-                                let _ = readable_byte_stream_controller_respond_with_new_view(
-                                    scope, controller, chunk_view,
-                                );
-                            }
+                        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                            && is_byte_controller(scope, controller)
+                        {
+                            let _ = readable_byte_stream_controller_respond_with_new_view(
+                                scope, controller, chunk_view,
+                            );
                         }
                     }
                 }
                 // Enqueue cloned to other branch.
-                if let Some(other_g) = other_branch_g {
-                    if let Some(cloned_view_g) = cloned_view_g {
-                        let branch_l = v8::Local::new(scope, &other_g);
-                        let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
-                        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                            if is_byte_controller(scope, controller) {
-                                let cloned_view_l = v8::Local::new(scope, &cloned_view_g);
-                                let _ = readable_byte_stream_controller_enqueue(
-                                    scope, controller, cloned_view_l,
-                                );
-                            }
-                        }
+                if let Some(other_g) = other_branch_g
+                    && let Some(cloned_view_g) = cloned_view_g
+                {
+                    let branch_l = v8::Local::new(scope, &other_g);
+                    let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
+                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                        && is_byte_controller(scope, controller)
+                    {
+                        let cloned_view_l = v8::Local::new(scope, &cloned_view_g);
+                        let _ = readable_byte_stream_controller_enqueue(
+                            scope, controller, cloned_view_l,
+                        );
                     }
                 }
             } else if !byob_canceled {
@@ -557,12 +552,12 @@ impl ReadIntoRequestNative for ByteTeeBYOBReadRequest {
                 if let Some(byob_g) = byob_branch_g {
                     let branch_l = v8::Local::new(scope, &byob_g);
                     let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
-                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                        if is_byte_controller(scope, controller) {
-                            let _ = readable_byte_stream_controller_respond_with_new_view(
-                                scope, controller, chunk_view,
-                            );
-                        }
+                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                        && is_byte_controller(scope, controller)
+                    {
+                        let _ = readable_byte_stream_controller_respond_with_new_view(
+                            scope, controller, chunk_view,
+                        );
                     }
                 }
             }
@@ -604,26 +599,26 @@ fn close_both_branches(
     may_have_pending: bool,
     byob_close_chunk: Option<(v8::Global<v8::ArrayBufferView>, bool)>,
 ) {
-    if !tee_state.canceled1.get() {
-        if let Some(branch1_g) = tee_state.branch1.borrow().clone() {
-            let branch1_l = v8::Local::new(scope, &branch1_g);
-            let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                if is_byte_controller(scope, controller) {
-                    readable_byte_stream_controller_close(scope, controller);
-                }
-            }
+    if !tee_state.canceled1.get()
+        && let Some(branch1_g) = tee_state.branch1.borrow().clone()
+    {
+        let branch1_l = v8::Local::new(scope, &branch1_g);
+        let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+            && is_byte_controller(scope, controller)
+        {
+            readable_byte_stream_controller_close(scope, controller);
         }
     }
-    if !tee_state.canceled2.get() {
-        if let Some(branch2_g) = tee_state.branch2.borrow().clone() {
-            let branch2_l = v8::Local::new(scope, &branch2_g);
-            let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                if is_byte_controller(scope, controller) {
-                    readable_byte_stream_controller_close(scope, controller);
-                }
-            }
+    if !tee_state.canceled2.get()
+        && let Some(branch2_g) = tee_state.branch2.borrow().clone()
+    {
+        let branch2_l = v8::Local::new(scope, &branch2_g);
+        let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+            && is_byte_controller(scope, controller)
+        {
+            readable_byte_stream_controller_close(scope, controller);
         }
     }
     // Spec: if there's a BYOB-close chunk, respondWithNewView the byob
@@ -650,66 +645,66 @@ fn close_both_branches(
         } else {
             tee_state.branch2.borrow().clone()
         };
-        if !byob_canceled {
-            if let Some(byob_g) = byob_branch_g {
-                let branch_l = v8::Local::new(scope, &byob_g);
-                let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    if is_byte_controller(scope, controller) {
-                        let _ = readable_byte_stream_controller_respond_with_new_view(
-                            scope, controller, chunk_l,
-                        );
-                    }
-                }
+        if !byob_canceled
+            && let Some(byob_g) = byob_branch_g
+        {
+            let branch_l = v8::Local::new(scope, &byob_g);
+            let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                && is_byte_controller(scope, controller)
+            {
+                let _ = readable_byte_stream_controller_respond_with_new_view(
+                    scope, controller, chunk_l,
+                );
             }
         }
-        if !other_canceled {
-            if let Some(other_g) = other_branch_g {
-                let branch_l = v8::Local::new(scope, &other_g);
-                let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    if is_byte_controller(scope, controller) {
-                        let has_pending = crate::streams::readable_byte_controller::with_controller_state(
-                            scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
-                        ).unwrap_or(false);
-                        if has_pending {
-                            let _ = readable_byte_stream_controller_respond(scope, controller, 0);
-                        }
-                    }
+        if !other_canceled
+            && let Some(other_g) = other_branch_g
+        {
+            let branch_l = v8::Local::new(scope, &other_g);
+            let controller_v = slots::read_slot(scope, branch_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                && is_byte_controller(scope, controller)
+            {
+                let has_pending = crate::streams::readable_byte_controller::with_controller_state(
+                    scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
+                ).unwrap_or(false);
+                if has_pending {
+                    let _ = readable_byte_stream_controller_respond(scope, controller, 0);
                 }
             }
         }
     } else if may_have_pending {
         // Default-reader close path: respond(0) on any pending pull-intos.
-        if !tee_state.canceled1.get() {
-            if let Some(branch1_g) = tee_state.branch1.borrow().clone() {
-                let branch1_l = v8::Local::new(scope, &branch1_g);
-                let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    if is_byte_controller(scope, controller) {
-                        let has_pending = crate::streams::readable_byte_controller::with_controller_state(
-                            scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
-                        ).unwrap_or(false);
-                        if has_pending {
-                            let _ = readable_byte_stream_controller_respond(scope, controller, 0);
-                        }
-                    }
+        if !tee_state.canceled1.get()
+            && let Some(branch1_g) = tee_state.branch1.borrow().clone()
+        {
+            let branch1_l = v8::Local::new(scope, &branch1_g);
+            let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                && is_byte_controller(scope, controller)
+            {
+                let has_pending = crate::streams::readable_byte_controller::with_controller_state(
+                    scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
+                ).unwrap_or(false);
+                if has_pending {
+                    let _ = readable_byte_stream_controller_respond(scope, controller, 0);
                 }
             }
         }
-        if !tee_state.canceled2.get() {
-            if let Some(branch2_g) = tee_state.branch2.borrow().clone() {
-                let branch2_l = v8::Local::new(scope, &branch2_g);
-                let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    if is_byte_controller(scope, controller) {
-                        let has_pending = crate::streams::readable_byte_controller::with_controller_state(
-                            scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
-                        ).unwrap_or(false);
-                        if has_pending {
-                            let _ = readable_byte_stream_controller_respond(scope, controller, 0);
-                        }
-                    }
+        if !tee_state.canceled2.get()
+            && let Some(branch2_g) = tee_state.branch2.borrow().clone()
+        {
+            let branch2_l = v8::Local::new(scope, &branch2_g);
+            let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                && is_byte_controller(scope, controller)
+            {
+                let has_pending = crate::streams::readable_byte_controller::with_controller_state(
+                    scope, controller, |s| !s.pending_pull_intos.borrow().is_empty(),
+                ).unwrap_or(false);
+                if has_pending {
+                    let _ = readable_byte_stream_controller_respond(scope, controller, 0);
                 }
             }
         }
@@ -838,10 +833,10 @@ fn forward_reader_error(scope: &mut v8::PinScope, tee_state: &Rc<ByteTeeState>) 
                 let st = with_rs_state(scope, branch1_l, |s| s.state.get());
                 if matches!(st, Some(StreamState::Readable)) {
                     let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                        if is_byte_controller(scope, controller) {
-                            readable_byte_stream_controller_error(scope, controller, reason);
-                        }
+                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                        && is_byte_controller(scope, controller)
+                    {
+                        readable_byte_stream_controller_error(scope, controller, reason);
                     }
                 }
             }
@@ -850,10 +845,10 @@ fn forward_reader_error(scope: &mut v8::PinScope, tee_state: &Rc<ByteTeeState>) 
                 let st = with_rs_state(scope, branch2_l, |s| s.state.get());
                 if matches!(st, Some(StreamState::Readable)) {
                     let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                        if is_byte_controller(scope, controller) {
-                            readable_byte_stream_controller_error(scope, controller, reason);
-                        }
+                    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                        && is_byte_controller(scope, controller)
+                    {
+                        readable_byte_stream_controller_error(scope, controller, reason);
                     }
                 }
             }

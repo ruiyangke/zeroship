@@ -686,8 +686,7 @@ fn parse_min<'s>(
         .number_value(scope)
         .ok_or_else(|| {
             let msg = v8::String::new(scope, "read: min must be a number").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            exc
+            v8::Exception::type_error(scope, msg)
         })?;
     // [EnforceRange] per WebIDL: if not a finite integer in the valid
     // range, throw a TypeError. (NaN/inf, < 0, > 2^53-1 → TypeError.)
@@ -735,7 +734,7 @@ pub fn readable_stream_byob_reader_release(
     )
     .unwrap();
     let exc = v8::Exception::type_error(scope, msg);
-    let exc_l = exc.into();
+    let exc_l = exc;
     readable_stream_byob_reader_error_read_into_requests(scope, reader, exc_l);
 }
 

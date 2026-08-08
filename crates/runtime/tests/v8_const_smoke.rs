@@ -112,7 +112,7 @@ fn constants_on_constructor() {
             hi: Codes.HI,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, r#"{"lo":1,"mid":100,"hi":1000}"#);
 }
@@ -130,7 +130,7 @@ fn constants_on_prototype() {
             hi: Codes.prototype.HI,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, r#"{"lo":1,"mid":100,"hi":1000}"#);
 }
@@ -147,7 +147,7 @@ fn constants_on_instance() {
         const c = new Codes();
         JSON.stringify({ lo: c.LO, mid: c.MID, hi: c.HI });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, r#"{"lo":1,"mid":100,"hi":1000}"#);
 }
@@ -170,7 +170,7 @@ fn constant_is_read_only_strict_mode() {
         }
         kind ?? "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "TypeError");
 }
@@ -192,7 +192,7 @@ fn constant_is_read_only_on_prototype_strict_mode() {
         }
         kind ?? "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "TypeError");
 }
@@ -249,7 +249,7 @@ fn inherited_class_sees_parent_constants() {
             on_derived_ctor: Derived.LIMIT,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // The constructor function `Derived.LIMIT` does NOT inherit from
     // the parent's constructor function (constructor functions don't

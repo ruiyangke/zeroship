@@ -64,6 +64,10 @@ pub fn wrap_key<'s>(
     }
 }
 
+// unwrapKey's parameter list mirrors the WebCrypto spec's operation
+// signature 1:1; grouping them into a struct would ripple into every
+// caller for no behavioral gain, so this stays a plain allow.
+#[allow(clippy::too_many_arguments)]
 pub fn unwrap_key<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     format: KeyFormat,

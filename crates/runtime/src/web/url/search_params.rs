@@ -415,7 +415,7 @@ impl URLSearchParams {
     /// serialization of the entries.
     #[v8_method]
     #[v8_name = "toString"]
-    fn to_string(&mut self, scope: &mut v8::PinScope) -> String {
+    fn serialize_to_string(&mut self, scope: &mut v8::PinScope) -> String {
         self.sync_from_parent(scope);
         url_encoded_serialize(&self.entries)
     }

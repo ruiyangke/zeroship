@@ -2,8 +2,8 @@
 //!
 //! Uses an in-process std::net TCP server that speaks just enough HTTP/1.1
 //! + `text/event-stream` to drive the SSE parser through realistic wire
-//! shapes. The native fetch client connects to it; promise reactions
-//! drive the read loop.
+//!   shapes. The native fetch client connects to it; promise reactions
+//!   drive the read loop.
 
 mod common;
 
@@ -101,10 +101,10 @@ fn handle_connection(mut stream: TcpStream, cfg: ServerCfg) {
 
     // Capture Last-Event-ID if present.
     for line in &request_lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("last-event-id") {
-                *cfg.saw_last_event_id.lock().unwrap() = Some(value.trim().to_string());
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("last-event-id")
+        {
+            *cfg.saw_last_event_id.lock().unwrap() = Some(value.trim().to_string());
         }
     }
 

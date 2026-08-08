@@ -37,7 +37,7 @@ use std::rc::Rc;
 
 use crate::state::OpError;
 
-use super::body::{BodyImpl, BodySource};
+use super::{BodyImpl, BodySource};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -81,10 +81,10 @@ pub fn extract_body(
     // also match — leading to a body extraction that wrongly treats
     // FormData as a stream. The instanceof check is the spec-faithful
     // discriminator.
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
-        if is_readable_stream_instance(scope, obj) {
-            return extract_from_stream(scope, obj, keepalive);
-        }
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value)
+        && is_readable_stream_instance(scope, obj)
+    {
+        return extract_from_stream(scope, obj, keepalive);
     }
 
     // ArrayBuffer / ArrayBufferView (BufferSource).
@@ -95,27 +95,24 @@ pub fn extract_body(
     // Blob — native class. Per Fetch §3.2 step 11.3:
     //   - body's stream is a stream that emits the Blob's bytes,
     //   - Content-Type defaults to the Blob's `type`.
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
-        if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
-            if let Some((bytes, type_)) =
-                crate::blob_native::blob::read_blob_bytes_and_type(scope, obj)
-            {
-                let length = Some(bytes.len() as u64);
-                let content_type = if type_.is_empty() { None } else { Some(type_.clone()) };
-                let bytes_rc = Rc::new(bytes);
-                // Defer stream materialization (Fix B): consumers can drain
-                // the source bytes directly without ever constructing a
-                // ReadableStream when they know they'll fully consume.
-                return Ok(Extracted {
-                    body: BodyImpl {
-                        stream: std::cell::RefCell::new(None),
-                        source: Some(BodySource::Blob(bytes_rc, Some(type_))),
-                        length,
-                    },
-                    content_type,
-                });
-            }
-        }
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value)
+        && crate::blob_native::is_blob_instance_public(scope, obj)
+        && let Some((bytes, type_)) = crate::blob_native::read_blob_bytes_and_type(scope, obj)
+    {
+        let length = Some(bytes.len() as u64);
+        let content_type = if type_.is_empty() { None } else { Some(type_.clone()) };
+        let bytes_rc = Rc::new(bytes);
+        // Defer stream materialization (Fix B): consumers can drain
+        // the source bytes directly without ever constructing a
+        // ReadableStream when they know they'll fully consume.
+        return Ok(Extracted {
+            body: BodyImpl {
+                stream: std::cell::RefCell::new(None),
+                source: Some(BodySource::Blob(bytes_rc, Some(type_))),
+                length,
+            },
+            content_type,
+        });
     }
 
     // FormData — duck-type via `Symbol.toStringTag === "FormData"` and
@@ -233,10 +230,9 @@ fn stream_is_locked_or_disturbed(
 ) -> Result<bool, OpError> {
     if let Some(disturbed) =
         crate::streams::readable::with_rs_state(scope, stream_obj, |s| s.disturbed.get())
+        && disturbed
     {
-        if disturbed {
-            return Ok(true);
-        }
+        return Ok(true);
     }
     let key = v8::String::new(scope, "locked").unwrap();
     let v = stream_obj
@@ -430,10 +426,10 @@ fn try_extract_form_data(
 
 fn is_form_data(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     let tag = v8::Symbol::get_to_string_tag(scope);
-    if let Some(v) = obj.get(scope, tag.into()) {
-        if v.is_string() {
-            return v.to_rust_string_lossy(scope) == "FormData";
-        }
+    if let Some(v) = obj.get(scope, tag.into())
+        && v.is_string()
+    {
+        return v.to_rust_string_lossy(scope) == "FormData";
     }
     false
 }
@@ -498,12 +494,12 @@ fn read_form_data_entries(
         // the raw bytes + filename + type. For non-Blob entries we
         // USVString-coerce.
         let value: ExtractedValue = if let Ok(obj) = v8::Local::<v8::Object>::try_from(val_v) {
-            if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
-                let (bytes, content_type) = crate::blob_native::blob::read_blob_bytes_and_type(scope, obj)
+            if crate::blob_native::is_blob_instance_public(scope, obj) {
+                let (bytes, content_type) = crate::blob_native::read_blob_bytes_and_type(scope, obj)
                     .ok_or_else(|| OpError::type_error("FormData entry Blob has no bytes"))?;
                 // For File: read the .name property; for plain Blob,
                 // default filename is "blob".
-                let filename = if crate::blob_native::blob::is_file_instance_public(scope, obj) {
+                let filename = if crate::blob_native::is_file_instance_public(scope, obj) {
                     let name_key = v8::String::new(scope, "name").unwrap();
                     obj.get(scope, name_key.into())
                         .map(|v| v.to_rust_string_lossy(scope))
@@ -623,10 +619,10 @@ fn try_extract_url_search_params(
 
 fn is_url_search_params(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     let tag = v8::Symbol::get_to_string_tag(scope);
-    if let Some(v) = obj.get(scope, tag.into()) {
-        if v.is_string() {
-            return v.to_rust_string_lossy(scope) == "URLSearchParams";
-        }
+    if let Some(v) = obj.get(scope, tag.into())
+        && v.is_string()
+    {
+        return v.to_rust_string_lossy(scope) == "URLSearchParams";
     }
     false
 }
@@ -714,10 +710,9 @@ fn build_byte_stream_via_constructor<'s>(
 
     // new ReadableStream(underlying)
     let args = [underlying.into()];
-    let stream = class_fn
+    class_fn
         .new_instance(scope, &args)
-        .expect("new ReadableStream failed");
-    stream
+        .expect("new ReadableStream failed")
 }
 
 fn pull_callback(

@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn reject_oversize_ping() {
         // Ping with 200-byte payload — > 125 cap.
-        let bytes = server_frame(OPCODE_PING, true, &vec![b'x'; 200]);
+        let bytes = server_frame(OPCODE_PING, true, &[b'x'; 200]);
         let mut r: &[u8] = &bytes;
         let mut reader = FrameReader::new(1 << 20, 1 << 20);
         let err = block_on(reader.read_frame(&mut r)).unwrap_err();

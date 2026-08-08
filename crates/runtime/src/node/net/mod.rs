@@ -54,10 +54,10 @@ pub(crate) fn ensure_net_namespace<'s>(
     let context = scope.get_current_context();
     let global = context.global(scope);
     let ns_key = v8::String::new(scope, "__zsNetNs").unwrap();
-    if let Some(existing) = global.get(scope, ns_key.into()) {
-        if existing.is_object() {
-            return v8::Local::<v8::Object>::try_from(existing).ok();
-        }
+    if let Some(existing) = global.get(scope, ns_key.into())
+        && existing.is_object()
+    {
+        return v8::Local::<v8::Object>::try_from(existing).ok();
     }
 
     crate::node::events::ensure_event_emitter(scope)?;

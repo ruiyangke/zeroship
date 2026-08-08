@@ -93,7 +93,7 @@ impl AsyncTest {
     /// 5. Returns Result<bool, OpError>
     #[v8_async_method]
     async fn is_even(&self, n: u32) -> Result<bool, OpError> {
-        Ok(n % 2 == 0)
+        Ok(n.is_multiple_of(2))
     }
 
     /// 6. Synchronous throw (no .await) — exercises the early-Err

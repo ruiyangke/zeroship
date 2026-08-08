@@ -103,7 +103,7 @@ pub fn readable_stream_pipe_to<'s>(
         Err(msg) => {
             let m = v8::String::new(scope, &msg).unwrap();
             let exc = v8::Exception::type_error(scope, m);
-            return algorithms::rejected_with_promise(scope, exc.into());
+            return algorithms::rejected_with_promise(scope, exc);
         }
     };
     let writer = match acquire_writable_stream_default_writer(scope, dest_obj) {
@@ -113,7 +113,7 @@ pub fn readable_stream_pipe_to<'s>(
             readable_stream_default_reader_release(scope, reader);
             let m = v8::String::new(scope, &msg).unwrap();
             let exc = v8::Exception::type_error(scope, m);
-            return algorithms::rejected_with_promise(scope, exc.into());
+            return algorithms::rejected_with_promise(scope, exc);
         }
     };
 
@@ -346,12 +346,12 @@ fn register_abort_listener(
         scope,
         v8::String::new(scope, "addEventListener").unwrap().into(),
     );
-    if let Some(add_v) = add {
-        if let Ok(add_fn) = v8::Local::<v8::Function>::try_from(add_v) {
-            let evt = v8::String::new(scope, "abort").unwrap();
-            v8::tc_scope!(let tc, scope);
-            let _ = add_fn.call(tc, signal.into(), &[evt.into(), func.into()]);
-        }
+    if let Some(add_v) = add
+        && let Ok(add_fn) = v8::Local::<v8::Function>::try_from(add_v)
+    {
+        let evt = v8::String::new(scope, "abort").unwrap();
+        v8::tc_scope!(let tc, scope);
+        let _ = add_fn.call(tc, signal.into(), &[evt.into(), func.into()]);
     }
 }
 
@@ -867,12 +867,12 @@ fn finalize(
         let sig_l = v8::Local::new(scope, &sig_g);
         let listener_l = v8::Local::new(scope, &listener_g);
         let remove_key = v8::String::new(scope, "removeEventListener").unwrap();
-        if let Some(remove_v) = sig_l.get(scope, remove_key.into()) {
-            if let Ok(remove_fn) = v8::Local::<v8::Function>::try_from(remove_v) {
-                let evt = v8::String::new(scope, "abort").unwrap();
-                v8::tc_scope!(let tc, scope);
-                let _ = remove_fn.call(tc, sig_l.into(), &[evt.into(), listener_l.into()]);
-            }
+        if let Some(remove_v) = sig_l.get(scope, remove_key.into())
+            && let Ok(remove_fn) = v8::Local::<v8::Function>::try_from(remove_v)
+        {
+            let evt = v8::String::new(scope, "abort").unwrap();
+            v8::tc_scope!(let tc, scope);
+            let _ = remove_fn.call(tc, sig_l.into(), &[evt.into(), listener_l.into()]);
         }
     }
 

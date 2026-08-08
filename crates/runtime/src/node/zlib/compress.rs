@@ -16,7 +16,7 @@ use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
 
 /// gzip compress (RFC 1952): zlib-wrapped DEFLATE + 10-byte gzip header
 /// + 8-byte CRC/ISIZE trailer. Default level mirrors Node's
-/// `Z_DEFAULT_COMPRESSION` (~6).
+///   `Z_DEFAULT_COMPRESSION` (~6).
 pub fn gzip(input: &[u8], level: u32) -> Result<Vec<u8>, String> {
     let mut enc = GzEncoder::new(Vec::with_capacity(input.len()), Compression::new(level));
     enc.write_all(input).map_err(|e| e.to_string())?;
@@ -33,7 +33,7 @@ pub fn gunzip(input: &[u8]) -> Result<Vec<u8>, String> {
 
 /// `deflate` (zlib-wrapped, RFC 1950): 2-byte zlib header + DEFLATE
 /// + 4-byte Adler-32. This is what Node's `zlib.deflate` produces —
-/// distinct from `deflateRaw` which is bare RFC 1951.
+///   distinct from `deflateRaw` which is bare RFC 1951.
 pub fn deflate(input: &[u8], level: u32) -> Result<Vec<u8>, String> {
     let mut enc = ZlibEncoder::new(Vec::with_capacity(input.len()), Compression::new(level));
     enc.write_all(input).map_err(|e| e.to_string())?;

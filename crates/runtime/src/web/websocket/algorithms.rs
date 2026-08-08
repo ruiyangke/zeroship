@@ -61,7 +61,7 @@ pub fn clamp_unsigned_short(scope: &mut v8::PinScope, value: v8::Local<v8::Value
 
     // Step 3: clamp to [0, 65535]. Note this also handles ±∞ correctly:
     // +∞ → 65535, -∞ → 0.
-    let clamped = n.max(0.0).min(65535.0);
+    let clamped = n.clamp(0.0, 65535.0);
 
     // Step 4: round-half-to-even for the .5 tie case.
     let floor_v = clamped.floor();
@@ -110,17 +110,17 @@ pub fn validate_close_code_and_reason(
         // InvalidAccessError. NOT 1001-2999 (reserved per RFC 6455
         // §7.4.1 — only the protocol itself uses those).
         if c != 1000 && !(3000..=4999).contains(&c) {
-            return Err(OpError::error(&format!(
+            return Err(OpError::error(format!(
                 "InvalidAccessError: WebSocket.close: invalid code {c}"
             )));
         }
     }
-    if let Some(r) = reason {
-        if r.as_bytes().len() > MAX_CLOSE_REASON_BYTES {
-            return Err(OpError::error(
-                "SyntaxError: WebSocket.close: reason must not exceed 123 UTF-8 bytes",
-            ));
-        }
+    if let Some(r) = reason
+        && r.len() > MAX_CLOSE_REASON_BYTES
+    {
+        return Err(OpError::error(
+            "SyntaxError: WebSocket.close: reason must not exceed 123 UTF-8 bytes",
+        ));
     }
     Ok(())
 }
@@ -157,7 +157,8 @@ fn is_valid_subprotocol(s: &str) -> bool {
 ///   - undefined → empty list.
 ///   - String → single-element list.
 ///   - sequence-of-strings (any iterable yielding strings) → as-is.
-/// Throws SyntaxError on:
+///
+///     Throws SyntaxError on:
 ///   - duplicates (case-insensitive, ASCII-only — RFC 6455 tokens are
 ///     ASCII-only so to_ascii_lowercase is sufficient; addresses
 ///     critic MINOR #34).
@@ -202,12 +203,12 @@ pub fn parse_and_validate_protocols(
     for p in &list {
         let lowered = p.to_ascii_lowercase();
         if !seen.insert(lowered) {
-            return Err(OpError::type_error(&format!(
+            return Err(OpError::type_error(format!(
                 "SyntaxError: WebSocket: duplicate protocol '{p}'"
             )));
         }
         if !is_valid_subprotocol(p) {
-            return Err(OpError::type_error(&format!(
+            return Err(OpError::type_error(format!(
                 "SyntaxError: WebSocket: invalid protocol '{p}'"
             )));
         }

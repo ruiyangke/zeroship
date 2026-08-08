@@ -87,6 +87,12 @@ impl NativeSocketState {
     }
 }
 
+impl Default for NativeSocketState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecvBackpressure for NativeSocketState {
     fn queued_event_len(&self) -> usize {
         self.events.len()
@@ -115,8 +121,7 @@ fn socket_wrapper_cap(state: &SharedState) -> u32 {
     let max_sockets = state.borrow().net_policy.max_sockets();
     max_sockets
         .saturating_mul(SOCKET_WRAPPER_CAP_MULTIPLIER)
-        .max(SOCKET_WRAPPER_CAP_FLOOR)
-        .min(SOCKET_WRAPPER_CAP_CEILING)
+        .clamp(SOCKET_WRAPPER_CAP_FLOOR, SOCKET_WRAPPER_CAP_CEILING)
 }
 
 pub fn alloc_native_socket_id(state: &SharedState) -> Result<u32, String> {

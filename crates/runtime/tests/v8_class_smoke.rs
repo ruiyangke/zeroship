@@ -115,7 +115,7 @@ fn basic_counter_works() {
         const got = c.current;     // 16
         JSON.stringify({ a, b, got });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":11,"b":16,"got":16}"#);
 }
@@ -135,7 +135,7 @@ fn instances_are_independent() {
         b.add(50);
         JSON.stringify({ a: a.current, b: b.current });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":3,"b":150}"#);
 }
@@ -177,7 +177,7 @@ fn default_constructor_when_unspecified() {
         const after = e.touch();
         JSON.stringify({ before, after });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"before":false,"after":true}"#);
 }
@@ -240,7 +240,7 @@ fn result_err_throws_typed_exception() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"RangeError","msg":"divide by zero"}"#);
 }
@@ -290,7 +290,7 @@ fn result_unit_ok_returns_undefined() {
         const r = v.check(42);
         r === undefined ? "undefined" : `not-undefined:${r}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "undefined");
 }
@@ -308,7 +308,7 @@ fn result_unit_err_throws_typed_exception() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"RangeError","msg":"too big"}"#);
 }
@@ -353,7 +353,7 @@ fn vec_u8_returns_uint8array() {
             b4: u8[4],
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -396,7 +396,7 @@ fn option_some_returns_value() {
         const l = new Lookup("hello");
         l.get();
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "hello");
 }
@@ -412,7 +412,7 @@ fn option_none_returns_null() {
         const v = l.get();
         v === null ? "null" : `not-null:${v}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "null");
 }
@@ -486,7 +486,7 @@ fn v8_name_renames_method_on_js_surface() {
         const has_delete_ = typeof b.delete_;
         JSON.stringify({ r, count: b.count, has_delete_ });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r":3,"count":3,"has_delete_":"undefined"}"#);
 }
@@ -533,7 +533,7 @@ fn v8_to_string_tag_override_changes_default() {
         const f = new Foo();
         Object.prototype.toString.call(f);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object Custom Tag]");
 }
@@ -662,7 +662,7 @@ fn v8_inherit_chains_prototype() {
             breatheReachable: typeof dog.breathe === "function",
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["isDog"], serde_json::json!(true), "dog instanceof Dog: {parsed}");
@@ -728,7 +728,7 @@ fn bytestring_round_trip_passes_low_bytes() {
             b0: out[0], b4: out[4],
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -749,7 +749,7 @@ fn bytestring_throws_on_code_unit_above_0xff() {
         catch (err) { kind = err.constructor.name; msg = err.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert!(s.contains(r#""kind":"TypeError""#), "got: {s}");
 }
@@ -835,7 +835,7 @@ fn result_option_vec_u8_some_emits_bytestring() {
             m_is_null: m === null,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -866,7 +866,7 @@ fn vec_vec_u8_emits_array_of_bytestring() {
             c2_len: arr[2].length,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -887,7 +887,7 @@ fn bytestring_preserves_high_latin1_bytes() {
         const out = e.echo("\u0080\u00FF");
         JSON.stringify({ len: out.byteLength, b0: out[0], b1: out[1] });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"len":2,"b0":128,"b1":255}"#);
 }
@@ -908,7 +908,7 @@ fn v8_inherit_intrinsic_chains_to_iterator_prototype() {
         const same = next === iterProto;
         JSON.stringify({ same });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"same":true}"#);
 }
@@ -928,7 +928,7 @@ fn calling_method_on_non_instance_throws_typeerror() {
         } catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"TypeError","msg":"Illegal invocation"}"#);
 }
@@ -994,7 +994,7 @@ fn local_value_arg_inspects_jsvalue() {
             undef: i.kind(undefined),
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -1341,14 +1341,9 @@ use zeroship_runtime_macros::reject_shared;
 mod sab_rejection {
     use super::*;
 
+    #[derive(Default)]
     pub struct Sink {
         pub last_len: u32,
-    }
-
-    impl Default for Sink {
-        fn default() -> Self {
-            Sink { last_len: 0 }
-        }
     }
 
     #[v8_class]
@@ -1398,7 +1393,7 @@ fn reject_shared_throws_for_sab_backed_view() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["kind"].as_str(), Some("TypeError"),
@@ -1427,7 +1422,7 @@ fn reject_shared_throws_for_bare_sab_arg() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(
@@ -1453,14 +1448,9 @@ mod enforce_range_u64 {
     use super::*;
     use zeroship_runtime::EnforceRangeU64;
 
+    #[derive(Default)]
     pub struct Counter {
         pub last: u64,
-    }
-
-    impl Default for Counter {
-        fn default() -> Self {
-            Counter { last: 0 }
-        }
     }
 
     #[v8_class]
@@ -1503,7 +1493,7 @@ fn enforce_range_u64_throws_on_negative() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -1521,7 +1511,7 @@ fn enforce_range_u64_throws_on_nan() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -1539,7 +1529,7 @@ fn enforce_range_u64_throws_on_infinity() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -1560,7 +1550,7 @@ fn enforce_range_u64_throws_above_max_safe_integer() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }

@@ -279,22 +279,22 @@ fn chunk_steps<'s>(
         tee_state.read_again.set(false);
         let chunk_l = v8::Local::new(scope, &chunk_g);
 
-        if !tee_state.canceled1.get() {
-            if let Some(branch1_g) = tee_state.branch1.borrow().clone() {
-                let branch1_l = v8::Local::new(scope, &branch1_g);
-                let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    let _ = readable_stream_default_controller_enqueue(scope, controller, chunk_l);
-                }
+        if !tee_state.canceled1.get()
+            && let Some(branch1_g) = tee_state.branch1.borrow().clone()
+        {
+            let branch1_l = v8::Local::new(scope, &branch1_g);
+            let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+                let _ = readable_stream_default_controller_enqueue(scope, controller, chunk_l);
             }
         }
-        if !tee_state.canceled2.get() {
-            if let Some(branch2_g) = tee_state.branch2.borrow().clone() {
-                let branch2_l = v8::Local::new(scope, &branch2_g);
-                let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-                if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                    let _ = readable_stream_default_controller_enqueue(scope, controller, chunk_l);
-                }
+        if !tee_state.canceled2.get()
+            && let Some(branch2_g) = tee_state.branch2.borrow().clone()
+        {
+            let branch2_l = v8::Local::new(scope, &branch2_g);
+            let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+                let _ = readable_stream_default_controller_enqueue(scope, controller, chunk_l);
             }
         }
 
@@ -307,22 +307,22 @@ fn chunk_steps<'s>(
 
 fn close_steps(scope: &mut v8::PinScope, tee_state: &Rc<TeeState>) {
     tee_state.reading.set(false);
-    if !tee_state.canceled1.get() {
-        if let Some(branch1_g) = tee_state.branch1.borrow().clone() {
-            let branch1_l = v8::Local::new(scope, &branch1_g);
-            let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
-            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                readable_stream_default_controller_close(scope, controller);
-            }
+    if !tee_state.canceled1.get()
+        && let Some(branch1_g) = tee_state.branch1.borrow().clone()
+    {
+        let branch1_l = v8::Local::new(scope, &branch1_g);
+        let controller_v = slots::read_slot(scope, branch1_l, CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+            readable_stream_default_controller_close(scope, controller);
         }
     }
-    if !tee_state.canceled2.get() {
-        if let Some(branch2_g) = tee_state.branch2.borrow().clone() {
-            let branch2_l = v8::Local::new(scope, &branch2_g);
-            let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
-            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                readable_stream_default_controller_close(scope, controller);
-            }
+    if !tee_state.canceled2.get()
+        && let Some(branch2_g) = tee_state.branch2.borrow().clone()
+    {
+        let branch2_l = v8::Local::new(scope, &branch2_g);
+        let controller_v = slots::read_slot(scope, branch2_l, CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+            readable_stream_default_controller_close(scope, controller);
         }
     }
     if !tee_state.canceled1.get() || !tee_state.canceled2.get() {

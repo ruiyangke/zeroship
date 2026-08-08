@@ -124,7 +124,7 @@ fn for_of_yields_pairs() {
         }
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1=a,2=b,3=c");
 }
@@ -143,7 +143,7 @@ fn keys_yields_keys_only() {
         for (const k of c.keys()) { out.push(k); }
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1,2,3");
 }
@@ -158,7 +158,7 @@ fn values_yields_values_only() {
         for (const v of c.values()) { out.push(v); }
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a,b,c");
 }
@@ -173,7 +173,7 @@ fn entries_yields_pairs() {
         for (const [k, v] of c.entries()) { out.push(`${k}=${v}`); }
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1=a,2=b,3=c");
 }
@@ -192,7 +192,7 @@ fn for_each_invokes_callback_per_pair() {
         c.forEach((v, k) => { out.push(`${k}=${v}`); });
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1=a,2=b,3=c");
 }
@@ -208,7 +208,7 @@ fn for_each_third_arg_is_collection() {
         // The third arg is the collection itself (per WebIDL §3.7.10.3).
         third === c ? "yes" : "no";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "yes");
 }
@@ -226,7 +226,7 @@ fn for_each_this_arg_is_bound() {
         }, myThis);
         captured === myThis ? "yes" : "no";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "yes");
 }
@@ -241,7 +241,7 @@ fn for_each_callback_not_callable_throws() {
         try { c.forEach(42); } catch (e) { msg = "type-error:" + e.name; }
         msg;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -259,7 +259,7 @@ fn iterator_has_to_string_tag() {
         const it = c.entries();
         Object.prototype.toString.call(it);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object Counter Iterator]");
 }
@@ -281,7 +281,7 @@ fn next_returns_value_done_object() {
         const r4 = it.next();
         `${r1.value},${r1.done},${r2.value},${r2.done},${r3.value},${r3.done},${r4.value},${r4.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1,false,2,false,3,false,undefined,true");
 }
@@ -304,7 +304,7 @@ fn iterator_prototype_chains_to_iterator_prototype() {
         const expected = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
         Object.getPrototypeOf(Object.getPrototypeOf(it)) === expected ? "yes" : "no";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "yes");
 }
@@ -326,7 +326,7 @@ fn keys_on_plain_object_throws() {
         }
         msg;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -350,7 +350,7 @@ fn iterator_constructor_throws() {
         try { new Ctor(); } catch (e) { msg = "type-error:" + e.name; }
         msg;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -372,7 +372,7 @@ fn two_iterators_advance_independently() {
         const br = b.next();         // b → 1
         `${ar.value},${br.value}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "3,1");
 }

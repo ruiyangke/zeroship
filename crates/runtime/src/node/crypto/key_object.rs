@@ -421,7 +421,7 @@ fn vec_to_bigint<'s>(scope: &mut v8::PinScope<'s, '_>, bytes: &[u8]) -> v8::Loca
     }
     let mut le_bytes = be.to_vec();
     le_bytes.reverse();
-    let mut words = Vec::with_capacity((le_bytes.len() + 7) / 8);
+    let mut words = Vec::with_capacity(le_bytes.len().div_ceil(8));
     for chunk in le_bytes.chunks(8) {
         let mut buf = [0u8; 8];
         buf[..chunk.len()].copy_from_slice(chunk);
@@ -1117,7 +1117,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHA: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
         let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);

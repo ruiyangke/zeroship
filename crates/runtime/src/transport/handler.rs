@@ -178,24 +178,24 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
     // We try the native path first, then fall back to the polyfill
     // expando. This preserves the fallback for the old polyfill-backed
     // `_id` field.
-    if status == 101 {
-        if let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj) {
-            let ws_obj = v8::Local::new(scope, ws_g);
+    if status == 101
+        && let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj)
+    {
+        let ws_obj = v8::Local::new(scope, ws_g);
 
-            // Native path first: read ws_id from the boxed state.
-            let mut ws_id = crate::websocket_native::ws_id_of(scope, ws_obj);
+        // Native path first: read ws_id from the boxed state.
+        let mut ws_id = crate::websocket_native::ws_id_of(scope, ws_obj);
 
-            // Fallback: polyfill `_id` expando.
-            if ws_id == 0 {
-                let id_key = key(scope, &K_ID);
-                ws_id = ws_obj
-                    .get(scope, id_key.into())
-                    .and_then(|v| v.uint32_value(scope))
-                    .unwrap_or(0);
-            }
-
-            return Ok(ResponseInfo::WebSocket { ws_id, headers });
+        // Fallback: polyfill `_id` expando.
+        if ws_id == 0 {
+            let id_key = key(scope, &K_ID);
+            ws_id = ws_obj
+                .get(scope, id_key.into())
+                .and_then(|v| v.uint32_value(scope))
+                .unwrap_or(0);
         }
+
+        return Ok(ResponseInfo::WebSocket { ws_id, headers });
     }
 
     // Native Response: read the body via the public surface. For
@@ -319,8 +319,7 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
     let Some(next_fn_val) = iter_obj.get(scope, next_key.into()) else { return result };
     let Ok(next_fn) = v8::Local::<v8::Function>::try_from(next_fn_val) else { return result };
 
-    loop {
-        let Some(step_v) = next_fn.call(scope, iter_obj.into(), &[]) else { break };
+    while let Some(step_v) = next_fn.call(scope, iter_obj.into(), &[]) {
         let Some(step_obj) = step_v.to_object(scope) else { break };
         let done = step_obj.get(scope, done_key.into())
             .map(|v| v.boolean_value(scope))

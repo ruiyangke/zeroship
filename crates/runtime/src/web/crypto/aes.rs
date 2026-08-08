@@ -40,10 +40,14 @@ pub fn decrypt_gcm<'s>(
     aes_gcm_decrypt(raw_key, &iv, aad.as_deref().unwrap_or(&[]), data, tag_bits)
 }
 
+/// `(iv, additional_data, tag_length_bits)` decoded from an
+/// `AesGcmParams` dict — factored out per `clippy::type_complexity`.
+type GcmParams = (Vec<u8>, Option<Vec<u8>>, usize);
+
 fn read_gcm_params(
     scope: &mut v8::PinScope,
     alg_obj: v8::Local<v8::Object>,
-) -> Result<(Vec<u8>, Option<Vec<u8>>, usize), OpError> {
+) -> Result<GcmParams, OpError> {
     let iv_key = v8::String::new(scope, "iv").unwrap();
     let iv_v = alg_obj.get(scope, iv_key.into()).ok_or_else(|| {
         OpError::type_error("AesGcmParams: missing 'iv'")
@@ -262,7 +266,7 @@ impl GcmState {
             // Pad to 128-bit boundary.
             let pad = 16 - (iv.len() % 16);
             if pad != 16 {
-                buf.extend(std::iter::repeat(0u8).take(pad));
+                buf.extend(std::iter::repeat_n(0u8, pad));
             }
             buf.extend_from_slice(&[0u8; 8]);
             let len_bits = (iv.len() as u64) * 8;
@@ -296,10 +300,10 @@ impl GcmState {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(aad);
         let pad_a = (16 - (aad.len() % 16)) % 16;
-        buf.extend(std::iter::repeat(0u8).take(pad_a));
+        buf.extend(std::iter::repeat_n(0u8, pad_a));
         buf.extend_from_slice(ct);
         let pad_c = (16 - (ct.len() % 16)) % 16;
-        buf.extend(std::iter::repeat(0u8).take(pad_c));
+        buf.extend(std::iter::repeat_n(0u8, pad_c));
         buf.extend_from_slice(&((aad.len() as u64) * 8).to_be_bytes());
         buf.extend_from_slice(&((ct.len() as u64) * 8).to_be_bytes());
         let s = ghash(&self.h, &buf);
@@ -373,9 +377,9 @@ fn gf128_mul(x: [u8; 16], y: [u8; 16]) -> [u8; 16] {
     let r: u8 = 0xe1;
     let mut z = [0u8; 16];
     let mut v = y;
-    for i in 0..16 {
+    for &xi in &x {
         for bit in 0..8 {
-            if (x[i] >> (7 - bit)) & 1 == 1 {
+            if (xi >> (7 - bit)) & 1 == 1 {
                 for j in 0..16 {
                     z[j] ^= v[j];
                 }
@@ -593,13 +597,13 @@ fn aes_ctr(
 // =============================================================================
 
 pub fn aes_kw_wrap(key_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, OpError> {
-    if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
+    if !plaintext.len().is_multiple_of(8) || plaintext.len() < 16 {
         return Err(OpError::dom(
             "OperationError",
             "AES-KW plaintext must be ≥16 bytes and multiple of 8",
         ));
     }
-    let _kek = aes_kw_alg(key_bytes.len())?;
+    aes_kw_alg(key_bytes.len())?;
     // aws-lc-rs's AES_KW algorithm exposes `wrap` via `KeyEncryptionKey::new`;
     // older versions expose it via `aead::quic` … not portable. The
     // simplest portable path is to hand-roll RFC 3394.
@@ -607,7 +611,7 @@ pub fn aes_kw_wrap(key_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, OpErro
 }
 
 pub fn aes_kw_unwrap(key_bytes: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, OpError> {
-    if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
+    if !wrapped.len().is_multiple_of(8) || wrapped.len() < 24 {
         return Err(OpError::dom(
             "OperationError",
             "AES-KW wrapped data must be ≥24 bytes and multiple of 8",
@@ -639,18 +643,18 @@ fn rfc3394_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, OpError> {
         r.push(block);
     }
     for j in 0..6 {
-        for i in 0..n {
+        for (i, r_i) in r.iter_mut().enumerate().take(n) {
             let mut block = [0u8; 16];
             block[..8].copy_from_slice(&a);
-            block[8..].copy_from_slice(&r[i]);
+            block[8..].copy_from_slice(&r_i[..]);
             let enc = aes_ecb_encrypt_block(kek, &block)?;
             a.copy_from_slice(&enc[..8]);
             // A ^= t where t = (n*j) + i + 1
             let t: u64 = (n as u64) * (j as u64) + (i as u64) + 1;
-            for k in 0..8 {
-                a[k] ^= ((t >> (8 * (7 - k))) & 0xff) as u8;
+            for (k, a_k) in a.iter_mut().enumerate() {
+                *a_k ^= ((t >> (8 * (7 - k))) & 0xff) as u8;
             }
-            r[i].copy_from_slice(&enc[8..]);
+            r_i.copy_from_slice(&enc[8..]);
         }
     }
     let mut out = Vec::with_capacity((n + 1) * 8);
@@ -677,8 +681,8 @@ fn rfc3394_unwrap(kek: &[u8], ct: &[u8]) -> Result<Vec<u8>, OpError> {
             let t: u64 = (n as u64) * (j as u64) + (i as u64) + 1;
             let mut block = [0u8; 16];
             block[..8].copy_from_slice(&a);
-            for k in 0..8 {
-                block[k] ^= ((t >> (8 * (7 - k))) & 0xff) as u8;
+            for (k, b) in block.iter_mut().enumerate().take(8) {
+                *b ^= ((t >> (8 * (7 - k))) & 0xff) as u8;
             }
             block[8..].copy_from_slice(&r[i]);
             let dec = aes_ecb_decrypt_block(kek, &block)?;

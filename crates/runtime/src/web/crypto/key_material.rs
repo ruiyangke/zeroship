@@ -98,6 +98,10 @@ pub enum HashAlgo {
 }
 
 impl HashAlgo {
+    // Inherent constructor kept for API ergonomics (infallible-looking
+    // call sites across the crate); not intended to satisfy
+    // `std::str::FromStr` (which would require a different error type).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         // Case-insensitive per spec §18.4.4 step 1 (algorithm names are
         // matched case-insensitively against the registry).

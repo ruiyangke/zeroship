@@ -233,23 +233,13 @@ fn install_proto_method<'s>(
 // ---------------------------------------------------------------------------
 
 /// Parse the third argument of addEventListener / removeEventListener.
+#[derive(Default)]
 struct ListenerOptions {
     capture: bool,
     once: bool,
     passive: bool,
     /// The AbortSignal V8 object, if a `signal` member was provided.
     signal: Option<v8::Global<v8::Object>>,
-}
-
-impl Default for ListenerOptions {
-    fn default() -> Self {
-        ListenerOptions {
-            capture: false,
-            once: false,
-            passive: false,
-            signal: None,
-        }
-    }
 }
 
 /// Per DOM §2.7 "flatten more": addEventListener flattens `capture`,
@@ -378,16 +368,16 @@ pub fn attach_listeners(
 ) -> ListenersByType {
     let sym = get_or_create_listeners_sym(scope);
 
-    if let Some(existing) = obj.get_private(scope, sym) {
-        if let Ok(ext) = v8::Local::<v8::External>::try_from(existing) {
-            let ptr = ext.value() as *const ListenersByType;
-            if !ptr.is_null() {
-                // SAFETY: we placed this pointer ourselves. The
-                // Box's lifetime is tied to the wrapper via a
-                // guaranteed finalizer (see below).
-                let rc: &ListenersByType = unsafe { &*ptr };
-                return rc.clone();
-            }
+    if let Some(existing) = obj.get_private(scope, sym)
+        && let Ok(ext) = v8::Local::<v8::External>::try_from(existing)
+    {
+        let ptr = ext.value() as *const ListenersByType;
+        if !ptr.is_null() {
+            // SAFETY: we placed this pointer ourselves. The
+            // Box's lifetime is tied to the wrapper via a
+            // guaranteed finalizer (see below).
+            let rc: &ListenersByType = unsafe { &*ptr };
+            return rc.clone();
         }
     }
 

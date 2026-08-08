@@ -87,12 +87,16 @@ pub trait NativePlugin: Send + Sync + 'static {
 /// Plugins call `registrar.add("find", my_callback)` which stores a boxed
 /// closure that creates the V8 function when given a scope. This avoids
 /// storing V8 types (which require a scope) and avoids borrow conflicts.
+/// A single native function registration: name plus the closure that
+/// creates the V8 function on the namespace object when given a scope.
+type RegistrarEntry = (
+    &'static str,
+    Box<dyn Fn(&mut v8::PinScope, v8::Local<v8::Object>)>,
+);
+
 pub struct NativeRegistrar {
     /// Collected registration closures: each creates one V8 function on the namespace object.
-    pub(crate) entries: Vec<(
-        &'static str,
-        Box<dyn Fn(&mut v8::PinScope, v8::Local<v8::Object>)>,
-    )>,
+    pub(crate) entries: Vec<RegistrarEntry>,
 }
 
 impl NativeRegistrar {

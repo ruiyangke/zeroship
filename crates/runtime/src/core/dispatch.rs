@@ -262,10 +262,11 @@ fn escape_json_string(s: &str, out: &mut String) {
 pub fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Some(obj) = exception.to_object(scope) {
         let msg_key = v8::String::new(scope, "message").unwrap();
-        if let Some(msg_val) = obj.get(scope, msg_key.into()) {
-            if !msg_val.is_undefined() && !msg_val.is_null() {
-                return msg_val.to_rust_string_lossy(scope);
-            }
+        if let Some(msg_val) = obj.get(scope, msg_key.into())
+            && !msg_val.is_undefined()
+            && !msg_val.is_null()
+        {
+            return msg_val.to_rust_string_lossy(scope);
         }
     }
     exception
@@ -279,10 +280,11 @@ pub fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8
 pub fn v8_exception_to_name(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Some(obj) = exception.to_object(scope) {
         let name_key = v8::String::new(scope, "name").unwrap();
-        if let Some(name_val) = obj.get(scope, name_key.into()) {
-            if !name_val.is_undefined() && !name_val.is_null() {
-                return name_val.to_rust_string_lossy(scope);
-            }
+        if let Some(name_val) = obj.get(scope, name_key.into())
+            && !name_val.is_undefined()
+            && !name_val.is_null()
+        {
+            return name_val.to_rust_string_lossy(scope);
         }
     }
     "Error".to_string()

@@ -30,7 +30,7 @@
 //! more aggressively, breaking real-world flows (S3 presigned URLs,
 //! GitHub redirects).
 
-use crate::fetch_body::body::BodySource;
+use crate::fetch_body::BodySource;
 
 /// Result of inspecting a redirect response. Returned by
 /// [`apply_redirect_method`] so the caller knows whether to drop the

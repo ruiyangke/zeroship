@@ -93,10 +93,10 @@ fn current_user(scope: &mut v8::PinScope, state: &SharedState) -> Option<String>
     }
 
     let s = state.borrow();
-    if let Some(rid) = s.executing_request_id {
-        if let Some(u) = s.per_request_user.get(&rid) {
-            return Some(u.clone());
-        }
+    if let Some(rid) = s.executing_request_id
+        && let Some(u) = s.per_request_user.get(&rid)
+    {
+        return Some(u.clone());
     }
     #[cfg(feature = "runtime_native_websocket")]
     {

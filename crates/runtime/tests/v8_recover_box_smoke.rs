@@ -229,7 +229,7 @@ fn shared_self_synchronous_reentry_is_sound() {
         const outer = r.peek();
         JSON.stringify({ outer, calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // outer == 2 means: outer call bumped (depth=1) → callback fired,
     // re-entered peek which bumped (depth=2) → returned 2 to the
@@ -282,7 +282,7 @@ fn shared_self_cross_method_reentry_is_sound() {
         const finalDepth = r.peek();
         JSON.stringify({ finalDepth, cbCalls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Outer peek bumps to 1 → callback fires (cbCalls=1) → inner peek
     // bumps to 2 (its callback fires with cbCalls=2 but the if-guard

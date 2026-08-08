@@ -115,10 +115,10 @@ fn build_namespace<'s>(
     let key = v8::String::new(scope, "__zsBufferNs").unwrap();
 
     // Fast path: already built.
-    if let Some(existing) = global.get(scope, key.into()) {
-        if existing.is_object() {
-            return v8::Local::<v8::Object>::try_from(existing).ok();
-        }
+    if let Some(existing) = global.get(scope, key.into())
+        && existing.is_object()
+    {
+        return v8::Local::<v8::Object>::try_from(existing).ok();
     }
 
     // Slow path: compile + run the JS body.

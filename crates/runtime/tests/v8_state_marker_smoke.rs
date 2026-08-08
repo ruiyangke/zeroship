@@ -10,34 +10,34 @@
 //!
 //! Coverage matrix (design §6.1):
 //!   - basic_separation       — methods take `&MyState`, JS-side sees
-//!                              `MyMarker.prototype`
+//!     `MyMarker.prototype`
 //!   - constructor_returns_state — `fn new(...) -> MyState` boxed into
-//!                              internal field 0
+//!     internal field 0
 //!   - mutation_via_setter    — `&mut self` setter mutates `MyState`
-//!                              and a paired getter reflects the change
+//!     and a paired getter reflects the change
 //!   - default_constructor    — `StateTy: Default` is enough; `new
-//!                              MyMarker()` allocates a default state
+//!     MyMarker()` allocates a default state
 //!   - brand_check_cross_class — `MyMarker.prototype.method.call(other)`
-//!                              throws "Illegal invocation" before the
-//!                              unsafe deref, even when both classes
-//!                              share the same state field shape
+//!     throws "Illegal invocation" before the
+//!     unsafe deref, even when both classes
+//!     share the same state field shape
 //!   - inherit_with_state     — `#[v8_state_marker]` composes with
-//!                              `#[v8_inherit]` — derived class sees the
-//!                              parent's prototype on its chain and
-//!                              `instanceof Parent === true`
+//!     `#[v8_inherit]` — derived class sees the
+//!     parent's prototype on its chain and
+//!     `instanceof Parent === true`
 //!   - async_method_state     — `#[v8_async_method]` re-acquires
-//!                              `&StateTy` per poll and resolves a
-//!                              Promise correctly
+//!     `&StateTy` per poll and resolves a
+//!     Promise correctly
 //!   - iterable_with_state    — `#[v8_iterable]` composes; the iterable
-//!                              parent's state is `StateTy`, the iterator
-//!                              companion is named after the marker
+//!     parent's state is `StateTy`, the iterator
+//!     companion is named after the marker
 //!   - finalizer_drops_state  — finalizer drops `Box<StateTy>` (verified
-//!                              via Drop side effect on Arc<AtomicUsize>)
+//!     via Drop side effect on Arc<AtomicUsize>)
 //!   - reentrancy_guard_state — `&mut self` setter that re-enters via a
-//!                              JS callback throws TypeError before the
-//!                              second unsafe deref
+//!     JS callback throws TypeError before the
+//!     second unsafe deref
 //!   - state_isolation        — two instances keep independent state
-//!                              under the marker projection
+//!     under the marker projection
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -161,7 +161,7 @@ fn basic_separation_marker_drives_js_identity() {
         const protoIsMarker = Object.getPrototypeOf(c) === Counter.prototype;
         JSON.stringify({ a, b, got, className, isMarker, protoIsMarker });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -225,7 +225,7 @@ fn constructor_result_ok_boxes_state() {
         const v = new Validator(10, 100);
         JSON.stringify({ min: v.min, max: v.max });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"min":10,"max":100}"#);
 }
@@ -247,7 +247,7 @@ fn constructor_result_err_throws_typed_exception() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"RangeError","msg":"min must be <= max"}"#);
 }
@@ -307,7 +307,7 @@ fn setter_mutates_state_via_marker_projection() {
         const after = b.value;
         JSON.stringify({ before, after });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"before":0,"after":42}"#);
 }
@@ -359,7 +359,7 @@ fn default_constructor_uses_state_default() {
         const after = e.touch();
         JSON.stringify({ before, after });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"before":false,"after":true}"#);
 }
@@ -447,7 +447,7 @@ fn cross_class_invocation_throws_illegal_invocation() {
         catch (e) { cross = `${e.constructor.name}: ${e.message}`; }
         JSON.stringify({ ownA, ownB, cross });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -557,7 +557,7 @@ fn state_marker_composes_with_inherit() {
             bikeName: bike.constructor.name,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -587,7 +587,7 @@ fn instances_under_marker_keep_independent_state() {
         b.add(50);
         JSON.stringify({ a: a.current, b: b.current });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":3,"b":150}"#);
 }
@@ -756,7 +756,7 @@ fn async_method_compiles_under_state_projection() {
         const hasDefer = typeof w.defer === "function";
         JSON.stringify({ sync, isWorker: w instanceof Worker, hasDefer });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -838,7 +838,7 @@ fn iterable_companion_named_after_marker() {
         const iterName = iter.constructor.name;
         JSON.stringify({ hasEntries, hasKeys, hasValues, hasForEach, hasSymIter, iterName });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -909,7 +909,7 @@ fn reentrancy_guard_fires_under_state_projection() {
         const after = n.callback;
         JSON.stringify({ before, after });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"before":0,"after":1}"#);
 }
@@ -1023,7 +1023,7 @@ fn static_method_composes_with_state_marker() {
         const onInst = typeof inst.from;
         JSON.stringify({ a, b, c, kind, onInst });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         r,

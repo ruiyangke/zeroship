@@ -31,7 +31,7 @@
 //! Skipped (need IDL machinery / browser globals we don't model):
 //!   - idlharness.any.js          — IDL harness fixtures
 //!   - IdnaTestV2.any.js          — IDNA-specific (ada-url already
-//!                                  delegates to upstream IDNA tables)
+//!     delegates to upstream IDNA tables)
 //!   - historical.any.js          — tests for removed features
 //!   - urlencoded-parser.any.js   — body parser tests use FormData
 //!   - url-origin.any.js          — needs urltestdata.json (data-driven)

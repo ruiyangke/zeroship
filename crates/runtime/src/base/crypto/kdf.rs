@@ -178,7 +178,7 @@ mod tests {
 
     fn hex_decode(s: &str) -> Vec<u8> {
         let bytes = s.as_bytes();
-        assert!(bytes.len() % 2 == 0, "hex: odd length");
+        assert!(bytes.len().is_multiple_of(2), "hex: odd length");
         let mut out = Vec::with_capacity(bytes.len() / 2);
         for chunk in bytes.chunks(2) {
             let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;

@@ -90,6 +90,9 @@ impl NativeSocket {
     #[cfg(feature = "runtime_tls")]
     #[v8_method]
     #[v8_name = "connectTls"]
+    // 8 args mirrors the JS-facing `socket.connectTls(...)` call shape; splitting
+    // them into a struct would only move the arity problem to the call sites.
+    #[allow(clippy::too_many_arguments)]
     fn connect_tls(
         &self,
         scope: &mut v8::PinScope,

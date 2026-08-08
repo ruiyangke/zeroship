@@ -213,15 +213,15 @@ impl EncodeVisitor {
         // is_object so we don't fall through to the dumb-object walker.
         if value.is_date() {
             self.record(MetaTag::Date);
-            return Ok(encode_date(scope, value)?);
+            return encode_date(scope, value);
         }
         if value.is_reg_exp() {
             self.record(MetaTag::Regexp);
-            return Ok(encode_regexp(scope, value)?);
+            return encode_regexp(scope, value);
         }
         if value.is_uint8_array() {
             self.record(MetaTag::TypedArray("Uint8Array".into()));
-            return Ok(encode_uint8_array(scope, value)?);
+            return encode_uint8_array(scope, value);
         }
         // Reject other typed-array constructors. The current
         // implementation supports only Uint8Array.
@@ -510,7 +510,7 @@ fn format_iso_8601(ms: f64) -> String {
     let mp = (5 * doy + 2) / 153; // [0, 11]
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let mn = (mp + if mp < 10 { 3 } else { -9 }) as u32;
-    let year = (y + if mn <= 2 { 1 } else { 0 }) as i64;
+    let year = y + if mn <= 2 { 1 } else { 0 };
 
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",

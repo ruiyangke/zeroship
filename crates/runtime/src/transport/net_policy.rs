@@ -25,8 +25,9 @@ const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
 
 static GLOBAL_ACTIVE_SOCKETS: AtomicU32 = AtomicU32::new(0);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NetPolicy {
+    #[default]
     Denied,
     Allowlist {
         entries: ReviewedAllowlist,
@@ -37,12 +38,6 @@ pub enum NetPolicy {
         max_sockets: u32,
         egress_ceiling_bytes: u64,
     },
-}
-
-impl Default for NetPolicy {
-    fn default() -> Self {
-        Self::Denied
-    }
 }
 
 impl NetPolicy {

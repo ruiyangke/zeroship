@@ -180,7 +180,7 @@ fn post_init_basic_runs_and_writes_priv_sym() {
         const ok = (t.was_post_init_seen() === true);
         JSON.stringify({ ok, ctorOk: t instanceof Tagged });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, r#"{"ok":true,"ctorOk":true}"#);
 }
@@ -277,7 +277,7 @@ fn post_init_promise_resolver_allocated_and_stashed() {
             hasThen: typeof p.then === 'function',
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"isPromise":true,"hasThen":true}"#);
 }
@@ -552,7 +552,7 @@ fn must_new_failure_skips_post_init() {
         try { Strict(); } catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
 
     assert!(

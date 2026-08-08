@@ -134,7 +134,7 @@ fn paired_getter_setter_roundtrip() {
         const r2 = b.value;
         `${r0},${r1},${r2}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "0,42,7");
 }
@@ -155,7 +155,7 @@ fn paired_accessor_brand_check_throws() {
         catch (e) { kind = "type-error:" + e.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -174,7 +174,7 @@ fn paired_accessor_setter_brand_check_throws() {
         catch (e) { kind = "type-error:" + e.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -196,7 +196,7 @@ fn paired_accessor_descriptor_has_both_halves() {
         const hasSet = typeof desc.set === "function";
         `${hasGet},${hasSet}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "true,true");
 }
@@ -239,7 +239,7 @@ fn lone_getter_with_v8_name_works() {
         const after = r.x;
         `${v},${after}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "123,123");
 }
@@ -285,7 +285,7 @@ fn lone_setter_with_v8_name_works() {
         const after = w.y;      // still undefined
         `${typeof before},${typeof after}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "undefined,undefined");
     assert_eq!(
@@ -359,7 +359,7 @@ fn mixed_paired_and_lone_dont_collide() {
                                 && typeof dConst.set === "undefined";
         `${c0},${v0},${v1},${c1},${valueHasBoth},${constHasOnlyGet}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "42,0,99,42,true,true");
 }

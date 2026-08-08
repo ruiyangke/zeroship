@@ -339,6 +339,12 @@ pub struct WebSocketState {
     pub cached_handles: Option<WsCachedHandles>,
 }
 
+impl Default for WebSocketState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebSocketState {
     /// Create a new WebSocket state in the CONNECTING state.
     pub fn new() -> Self {
@@ -623,7 +629,7 @@ pub struct RuntimeState {
     ///
     /// Why cache: V8 allocates a fresh Object + 2 Functions for every
     /// request when constructed inline, which triggers `JSObject::MigrateToMap`
-    /// + `Object::Set` + `ApplyTransitionToDataProperty` hotspots (visible
+    /// \+ `Object::Set` \+ `ApplyTransitionToDataProperty` hotspots (visible
     /// in perf report). A cached, frozen singleton is the same V8 object
     /// every time — no new allocations, no map transitions.
     pub ctx_obj: Option<v8::Global<v8::Object>>,
@@ -903,6 +909,9 @@ pub struct SpawnedTimer {
 // Op result
 // ---------------------------------------------------------------------------
 
+/// A boxed closure run inside the pump's V8 scope by [`ResolveValue::Continuation`].
+type ResolveContinuation = Box<dyn FnOnce(&mut v8::PinScope, &SharedState)>;
+
 /// A value to resolve or reject a promise with, materialized in V8 by the
 /// runtime loop. Used by [`OpResult::JsValue`] so async class methods can
 /// hand back arbitrary V8 chunks (not just UTF-8 strings).
@@ -1003,7 +1012,7 @@ pub enum ResolveValue {
     /// this variant is unused (the continuation owns whichever resolver
     /// it intends to settle); callers pass a throwaway resolver to keep
     /// the envelope shape uniform.
-    Continuation(Box<dyn FnOnce(&mut v8::PinScope, &SharedState)>),
+    Continuation(ResolveContinuation),
 }
 
 /// Convert a Rust value into a `ResolveValue` so async methods can

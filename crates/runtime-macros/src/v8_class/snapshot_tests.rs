@@ -32,8 +32,8 @@ fn format_expansion(out: TokenStream2) -> String {
 /// Insta inline snapshot for the no-attribute (control) shape — a
 /// `#[v8_class] impl Foo { ... }` with one constructor + one method
 /// + one getter + one setter. Locks the byte-identical-emission
-/// invariant that the no-attribute path must satisfy
-/// (design §5.1 over CloseEventState / AbortSignal / Blob).
+///   invariant that the no-attribute path must satisfy
+///   (design §5.1 over CloseEventState / AbortSignal / Blob).
 #[test]
 fn snapshot_class_basic() {
     let item = quote! {

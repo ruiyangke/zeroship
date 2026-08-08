@@ -17,11 +17,11 @@
 //! - `[[flushAlgorithm]]`      → Rust enum AlgorithmFn (zero-arg → Promise)
 //! - `[[cancelAlgorithm]]`     → Rust enum AlgorithmFn (1-arg → Promise)
 //! - `[[finishPromise]]`       → Rust paired Promise+Resolver (managed via priv sym
-//!                                for the user-facing slot, resolver in Rust state).
-//!                                In v1 we keep this LIGHT: instead of sharing finishPromise
-//!                                between sink.close/abort and source.cancel, we resolve a
-//!                                fresh promise per call site (sufficient for spec compliance
-//!                                in this dispatch). The cross-coupling lands with pipeTo.
+//!   for the user-facing slot, resolver in Rust state).
+//!   In v1 we keep this LIGHT: instead of sharing finishPromise
+//!   between sink.close/abort and source.cancel, we resolve a
+//!   fresh promise per call site (sufficient for spec compliance
+//!   in this dispatch). The cross-coupling lands with pipeTo.
 //!
 //! Spec algorithms implemented (§5.4):
 //! - `TransformStreamDefaultControllerEnqueue`              → `…_enqueue`
@@ -184,7 +184,7 @@ fn controller_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );
@@ -355,7 +355,7 @@ pub fn transform_stream_default_controller_enqueue<'s>(
         )
         .unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let exc_v: v8::Local<v8::Value> = exc.into();
+        let exc_v: v8::Local<v8::Value> = exc;
         return Err(v8::Global::new(scope, exc_v));
     }
 
@@ -417,14 +417,14 @@ pub fn transform_stream_default_controller_terminate(
         None => return,
     };
     let rs_ctrl_v = slots::read_slot(scope, readable, slots::CONTROLLER);
-    if let Ok(rs_ctrl) = v8::Local::<v8::Object>::try_from(rs_ctrl_v) {
-        if crate::streams::readable_default_controller::readable_stream_default_controller_can_close_or_enqueue(
+    if let Ok(rs_ctrl) = v8::Local::<v8::Object>::try_from(rs_ctrl_v)
+        && crate::streams::readable_default_controller::readable_stream_default_controller_can_close_or_enqueue(
             scope, rs_ctrl,
-        ) {
-            crate::streams::readable_default_controller::readable_stream_default_controller_close(
-                scope, rs_ctrl,
-            );
-        }
+        )
+    {
+        crate::streams::readable_default_controller::readable_stream_default_controller_close(
+            scope, rs_ctrl,
+        );
     }
     let msg = v8::String::new(scope, "TransformStream terminated").unwrap();
     let err = v8::Exception::type_error(scope, msg);
@@ -503,10 +503,10 @@ pub fn transform_stream_default_controller_clear_algorithms(
 ///  3. If stream.`[[backpressure]]` is true:
 ///     a. backpressureChangePromise = stream.`[[backpressureChangePromise]]`.
 ///     b. Return backpressureChangePromise.then(_ => {
-///         writableState = stream.`[[writable]]`.`[[state]]`.
-///         If writableState is "erroring", throw stream.`[[writable]]`.`[[storedError]]`.
-///         Assert: writableState is "writable".
-///         Return TransformStreamDefaultControllerPerformTransform(controller, chunk).
+///     writableState = stream.`[[writable]]`.`[[state]]`.
+///     If writableState is "erroring", throw stream.`[[writable]]`.`[[storedError]]`.
+///     Assert: writableState is "writable".
+///     Return TransformStreamDefaultControllerPerformTransform(controller, chunk).
 ///     }).
 ///  4. Return TransformStreamDefaultControllerPerformTransform(controller, chunk).
 pub fn transform_stream_default_sink_write<'s>(
@@ -686,13 +686,13 @@ pub fn transform_stream_default_sink_abort<'s>(
 ///  2. flushPromise = controller.`[[flushAlgorithm]]`().
 ///  3. ClearAlgorithms.
 ///  4. flushPromise.then(
-///       _ => {
-///         if rs.state === "errored" → reject finish.
-///         else: ReadableStreamDefaultControllerClose(rs.controller); resolve finish.
-///       },
-///       reason => {
-///         ReadableStreamDefaultControllerError(rs.controller, reason); reject finish.
-///       }
+///     _ => {
+///     if rs.state === "errored" → reject finish.
+///     else: ReadableStreamDefaultControllerClose(rs.controller); resolve finish.
+///     },
+///     reason => {
+///     ReadableStreamDefaultControllerError(rs.controller, reason); reject finish.
+///     }
 ///     ).
 pub fn transform_stream_default_sink_close<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -744,14 +744,14 @@ pub fn transform_stream_default_sink_close<'s>(
                 resolver.reject(scope, stored);
                 return;
             }
-            if let Ok(rs_ctrl) = v8::Local::<v8::Object>::try_from(rs_ctrl_v) {
-                if crate::streams::readable_default_controller::readable_stream_default_controller_can_close_or_enqueue(
+            if let Ok(rs_ctrl) = v8::Local::<v8::Object>::try_from(rs_ctrl_v)
+                && crate::streams::readable_default_controller::readable_stream_default_controller_can_close_or_enqueue(
                     scope, rs_ctrl,
-                ) {
-                    crate::streams::readable_default_controller::readable_stream_default_controller_close(
-                        scope, rs_ctrl,
-                    );
-                }
+                )
+            {
+                crate::streams::readable_default_controller::readable_stream_default_controller_close(
+                    scope, rs_ctrl,
+                );
             }
             let und = v8::undefined(scope);
             resolver.resolve(scope, und.into());
@@ -785,15 +785,15 @@ pub fn transform_stream_default_sink_close<'s>(
 ///  2. cancelPromise = controller.`[[cancelAlgorithm]]`(reason).
 ///  3. ClearAlgorithms.
 ///  4. cancelPromise.then(
-///       _ => {
-///         if ws.state === "errored": reject finish with ws.storedError.
-///         else: WritableStreamDefaultControllerErrorIfNeeded(ws.ctrl, reason);
-///               TransformStreamUnblockWrite(stream); resolve finish.
-///       },
-///       reason2 => {
-///         WritableStreamDefaultControllerErrorIfNeeded(ws.ctrl, reason2);
-///         TransformStreamUnblockWrite(stream); reject finish.
-///       }
+///     _ => {
+///     if ws.state === "errored": reject finish with ws.storedError.
+///     else: WritableStreamDefaultControllerErrorIfNeeded(ws.ctrl, reason);
+///     TransformStreamUnblockWrite(stream); resolve finish.
+///     },
+///     reason2 => {
+///     WritableStreamDefaultControllerErrorIfNeeded(ws.ctrl, reason2);
+///     TransformStreamUnblockWrite(stream); reject finish.
+///     }
 ///     ).
 pub fn transform_stream_default_source_cancel<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1149,6 +1149,10 @@ fn set_up_transform_stream_default_controller<'s>(
 /// - flush missing → no-op (returns resolved Promise).
 /// - cancel missing → no-op.
 /// - start missing → returns undefined.
+// Each parameter is a distinct input of the WHATWG spec's
+// SetUpTransformStreamDefaultControllerFromTransformer algorithm; grouping
+// them into a struct would be an API redesign, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,

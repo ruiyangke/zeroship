@@ -134,12 +134,11 @@ impl AppStorage {
         let mut versions = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&builds_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Some(v) = name.strip_prefix('v') {
-                        if let Ok(n) = v.parse::<u64>() {
-                            versions.push(n);
-                        }
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && let Some(v) = name.strip_prefix('v')
+                    && let Ok(n) = v.parse::<u64>()
+                {
+                    versions.push(n);
                 }
             }
         }

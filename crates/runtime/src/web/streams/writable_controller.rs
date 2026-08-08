@@ -216,7 +216,7 @@ fn controller_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, signal_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );
@@ -378,7 +378,7 @@ pub fn writable_stream_default_controller_write<'s>(
         // is `Write` which catches and calls ErrorIfNeeded.
         let msg = v8::String::new(scope, "size returned a non-finite or negative value").unwrap();
         let exc = v8::Exception::range_error(scope, msg);
-        let exc_v: v8::Local<v8::Value> = exc.into();
+        let exc_v: v8::Local<v8::Value> = exc;
         writable_stream_default_controller_error_if_needed(scope, controller, exc_v);
         return;
     }
@@ -657,6 +657,13 @@ pub fn error_steps(
 // Algorithm snapshot — same pattern as readable_default_controller
 // ---------------------------------------------------------------------------
 
+/// Future returned by a [`AlgorithmSnapshot::Native`] one-shot closure.
+type NativeWritableFuture = Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>;
+
+/// One-shot closure shape reserved for `AlgorithmSnapshot::Native`.
+type NativeWritableOnceFn =
+    Box<dyn FnOnce(NativeWritableArg, v8::Global<v8::Object>) -> NativeWritableFuture>;
+
 enum AlgorithmSnapshot {
     Noop,
     Js {
@@ -668,9 +675,7 @@ enum AlgorithmSnapshot {
     /// invocation defers to AlgorithmSnapshot::Noop until the runtime-loop
     /// driver lands (§VII.5).
     #[allow(dead_code)]
-    Native(
-        Rc<RefCell<Option<Box<dyn FnOnce(NativeWritableArg, v8::Global<v8::Object>) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>>>>>,
-    ),
+    Native(Rc<RefCell<Option<NativeWritableOnceFn>>>),
 }
 
 impl AlgorithmSnapshot {
@@ -876,18 +881,31 @@ fn invoke_start_algorithm<'s>(
 // Setup — §4.7.14, §4.7.15
 // ---------------------------------------------------------------------------
 
+/// The four `[[...Algorithm]]` internal-slot closures set up by
+/// `SetUpWritableStreamDefaultController` — grouped so the setup function
+/// doesn't need one parameter per algorithm.
+struct WritableAlgorithms {
+    start: AlgorithmFn,
+    write: AlgorithmFn,
+    close: AlgorithmFn,
+    abort: AlgorithmFn,
+}
+
 /// `SetUpWritableStreamDefaultController(stream, controller, startAlg,
 ///  writeAlg, closeAlg, abortAlg, hwm, sizeAlg)` — §4.7.14.
 fn set_up_writable_stream_default_controller(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
-    start_algorithm: AlgorithmFn,
-    write_algorithm: AlgorithmFn,
-    close_algorithm: AlgorithmFn,
-    abort_algorithm: AlgorithmFn,
+    algos: WritableAlgorithms,
     hwm: f64,
     size_algorithm: SizeAlgorithm,
 ) -> Result<(), String> {
+    let WritableAlgorithms {
+        start: start_algorithm,
+        write: write_algorithm,
+        close: close_algorithm,
+        abort: abort_algorithm,
+    } = algos;
     // Build the controller wrapper.
     let tmpl = controller_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
@@ -1035,10 +1053,12 @@ pub fn set_up_writable_stream_default_controller_from_underlying_sink_with_strat
     set_up_writable_stream_default_controller(
         scope,
         stream,
-        start_alg,
-        write_alg,
-        close_alg,
-        abort_alg,
+        WritableAlgorithms {
+            start: start_alg,
+            write: write_alg,
+            close: close_alg,
+            abort: abort_alg,
+        },
         hwm,
         size_algo,
     )
@@ -1060,10 +1080,12 @@ pub fn set_up_writable_stream_default_controller_native<S: NativeSink + 'static>
     let _ = set_up_writable_stream_default_controller(
         scope,
         stream,
-        AlgorithmFn::Noop,
-        AlgorithmFn::Noop,
-        AlgorithmFn::Noop,
-        AlgorithmFn::Noop,
+        WritableAlgorithms {
+            start: AlgorithmFn::Noop,
+            write: AlgorithmFn::Noop,
+            close: AlgorithmFn::Noop,
+            abort: AlgorithmFn::Noop,
+        },
         hwm,
         SizeAlgorithm::DefaultCount,
     );

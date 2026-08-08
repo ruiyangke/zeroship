@@ -169,8 +169,8 @@ pub struct HttpResult {
 // `structured_clone::install_global`, and the response-body
 // forwarder via `streams::response_forwarder`. The file is gone.)
 
-/// Embedded WebSocket/WebSocketPair polyfill (depends on the native
-/// EventTarget installed by `install_dom`).
+// Embedded WebSocket/WebSocketPair polyfill (depends on the native
+// EventTarget installed by `install_dom`).
 // The websocket polyfill JS has been deleted: the
 // native WebSocket / WebSocketPair classes + native MessageEvent /
 // CloseEvent / EventTarget are the sole providers. The previous
@@ -1610,6 +1610,7 @@ pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
 ///      plants typed Collection wrappers on env.db, and the returned
 ///      `ready` promise is awaited so module evaluation gates on DDL
 ///      settling.
+///
 /// By the time the kernel reads `default.fetch` / `default.rpc` off the user
 /// namespace, the dispatcher bridge is captured privately and the schema is
 /// live on `env.db`.
@@ -2524,34 +2525,6 @@ fn process_stdio_write_callback(
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
-#[cfg(test)]
-mod console_tests {
-    use super::*;
-
-    #[test]
-    fn short_lines_untouched() {
-        assert_eq!(truncate_console_line("hello".to_string()), "hello");
-    }
-
-    #[test]
-    fn long_lines_truncated() {
-        let long = "x".repeat(CONSOLE_LINE_MAX + 100);
-        let out = truncate_console_line(long);
-        assert!(out.len() <= CONSOLE_LINE_MAX + "…[truncated]".len());
-        assert!(out.ends_with("…[truncated]"));
-    }
-
-    #[test]
-    fn truncation_respects_utf8_boundaries() {
-        // Multi-byte char right at the boundary — truncation must not split it.
-        let mut long = "x".repeat(CONSOLE_LINE_MAX - 1);
-        long.push('ñ'); // 2-byte UTF-8 char straddles the boundary
-        long.push_str(&"y".repeat(200));
-        let out = truncate_console_line(long);
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
-    }
-}
-
 // ===========================================================================
 // queueMicrotask — schedules a callback to run after current JS completes
 // ===========================================================================
@@ -3432,8 +3405,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
                 .get_slot::<crate::state::SharedState>()
                 .expect("RuntimeState not in isolate slot")
                 .clone();
-            let json = state.borrow().runtime_descriptor.clone();
-            json
+            state.borrow().runtime_descriptor.clone()
         };
         if let Some(json) = descriptor_json {
             validate_runtime_descriptor_json(&json)?;
@@ -3852,12 +3824,12 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
                     "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}].fields must contain only strings"
                 ));
             }
-            if let Some(unique) = index.get("unique") {
-                if !unique.is_boolean() {
-                    return Err(format!(
-                        "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}].unique must be boolean when present"
-                    ));
-                }
+            if let Some(unique) = index.get("unique")
+                && !unique.is_boolean()
+            {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}].unique must be boolean when present"
+                ));
             }
         }
     }
@@ -4042,5 +4014,33 @@ fn env_get_callback(
             rv.set(v_v8.into());
         }
         None => rv.set(v8::null(scope).into()),
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn short_lines_untouched() {
+        assert_eq!(truncate_console_line("hello".to_string()), "hello");
+    }
+
+    #[test]
+    fn long_lines_truncated() {
+        let long = "x".repeat(CONSOLE_LINE_MAX + 100);
+        let out = truncate_console_line(long);
+        assert!(out.len() <= CONSOLE_LINE_MAX + "…[truncated]".len());
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn truncation_respects_utf8_boundaries() {
+        // Multi-byte char right at the boundary — truncation must not split it.
+        let mut long = "x".repeat(CONSOLE_LINE_MAX - 1);
+        long.push('ñ'); // 2-byte UTF-8 char straddles the boundary
+        long.push_str(&"y".repeat(200));
+        let out = truncate_console_line(long);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }

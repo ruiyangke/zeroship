@@ -30,6 +30,10 @@ static TIMER_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// Global singleton for the CPU timer system.
 static CPU_TIMER_SYSTEM: OnceLock<CpuTimerSystem> = OnceLock::new();
 
+/// Registered isolate handles, keyed by app_id hash, alongside the flag the
+/// watchdog sets when it terminates that isolate.
+type IsolateHandles = Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>;
+
 // ---------------------------------------------------------------------------
 // Signal handler — MUST be async-signal-safe
 // ---------------------------------------------------------------------------
@@ -70,7 +74,7 @@ pub struct CpuTimerSystem {
     pipe_read: RawFd,
     #[allow(dead_code)]
     pipe_write: RawFd,
-    handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>,
+    handles: IsolateHandles,
     #[allow(dead_code)]
     _watchdog: std::thread::JoinHandle<()>,
 }
@@ -84,7 +88,7 @@ unsafe impl Sync for CpuTimerSystem {}
 impl CpuTimerSystem {
     /// Get or initialize the global CPU timer system singleton.
     pub fn get_or_init() -> &'static CpuTimerSystem {
-        CPU_TIMER_SYSTEM.get_or_init(|| CpuTimerSystem::new())
+        CPU_TIMER_SYSTEM.get_or_init(CpuTimerSystem::new)
     }
 
     /// Create the shared CPU timer system.
@@ -127,8 +131,7 @@ impl CpuTimerSystem {
             }
         }
 
-        let handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let handles: IsolateHandles = Arc::new(Mutex::new(HashMap::new()));
         let handles_clone = handles.clone();
 
         let watchdog = std::thread::Builder::new()
@@ -175,10 +178,7 @@ impl CpuTimerSystem {
 ///
 /// Runs in normal thread context, so V8 mutex acquisition is safe.
 #[allow(unsafe_code)]
-fn watchdog_loop(
-    pipe_read: RawFd,
-    handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>,
-) {
+fn watchdog_loop(pipe_read: RawFd, handles: IsolateHandles) {
     loop {
         let mut app_id: u64 = 0;
         let n = unsafe {

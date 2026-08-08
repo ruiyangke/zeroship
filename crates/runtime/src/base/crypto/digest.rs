@@ -35,6 +35,10 @@ impl KernelHashAlgo {
     /// Map a Node-style or WebCrypto-style algorithm name to the
     /// kernel enum. Case-insensitive (Node lowercases names by
     /// convention; WebCrypto uses canonical "SHA-256").
+    // Inherent constructor kept for call-site clarity (`KernelHashAlgo::from_str(name)`
+    // reads better here than a `FromStr` trait import); it returns `Option`, not
+    // `Result`, so it isn't actually FromStr-shaped.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "sha1" | "sha-1" | "rsa-sha1" => Some(Self::Sha1),

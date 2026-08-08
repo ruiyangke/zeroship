@@ -35,18 +35,29 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
+/// Marker error for an unparseable `data:` URL. Carries no detail — per
+/// the spec's "data: URL processor" this is a plain fail/success
+/// return; the caller (`data_url_fetch`) always maps it to a generic
+/// "network error: invalid data: URL" string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataUrlParseError;
+
 /// Parse a `data:` URL into `(mime, bytes)`.
 ///
-/// Returns `Err(())` for any unparseable URL — caller maps to a network
-/// error. Matches the spec's "data: URL processor" return shape.
-pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>), ()> {
+/// Returns `Err(DataUrlParseError)` for any unparseable URL — caller
+/// maps to a network error. Matches the spec's "data: URL processor"
+/// return shape.
+pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>), DataUrlParseError> {
     // Strip the "data:" scheme. Must be present and case-insensitive.
-    let rest = url.strip_prefix("data:").or_else(|| url.strip_prefix("DATA:")).ok_or(())?;
+    let rest = url
+        .strip_prefix("data:")
+        .or_else(|| url.strip_prefix("DATA:"))
+        .ok_or(DataUrlParseError)?;
 
     // Split on the FIRST comma — everything before is mediatype/flags,
     // everything after is data. Per RFC 2397 the comma is the only
     // mandatory separator.
-    let (prefix, data_str) = rest.split_once(',').ok_or(())?;
+    let (prefix, data_str) = rest.split_once(',').ok_or(DataUrlParseError)?;
 
     // Determine base64 flag and MIME from prefix.
     //
@@ -80,7 +91,7 @@ pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>), ()> {
         // shape minimally (must contain at least one `/`).
         let mt = tokens.join(";");
         if !mt.contains('/') {
-            return Err(());
+            return Err(DataUrlParseError);
         }
         mt
     };
@@ -99,7 +110,7 @@ pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>), ()> {
             Err(_) => {
                 // Try padding-tolerant: pad to length % 4 == 0.
                 let mut padded = cleaned.clone();
-                while padded.len() % 4 != 0 {
+                while !padded.len().is_multiple_of(4) {
                     padded.push(b'=');
                 }
                 match BASE64.decode(&padded) {
@@ -109,7 +120,7 @@ pub fn parse_data_url(url: &str) -> Result<(String, Vec<u8>), ()> {
                         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
                         URL_SAFE_NO_PAD
                             .decode(cleaned.iter().filter(|&&b| b != b'=').copied().collect::<Vec<u8>>())
-                            .map_err(|_| ())?
+                            .map_err(|_| DataUrlParseError)?
                     }
                 }
             }

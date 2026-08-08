@@ -1597,6 +1597,9 @@ async fn accept_loop(listener: TcpListener, runtime: Runtime, app_env: Rc<EnvSna
 /// is already in use). On success it blocks forever inside the accept loop
 /// and never returns `Ok` — the `Ok(())` arm is reached only if the accept
 /// loop itself unwinds, which the caller treats as a crash.
+// Bundling these into a params struct is a real design decision, not
+// a mechanical lint fix, so it's left for a deliberate follow-up.
+#[allow(clippy::too_many_arguments)]
 fn run_single_worker(
     port: u16,
     use_reuseport: bool,

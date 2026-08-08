@@ -76,7 +76,7 @@ pub fn deliver_to_peer(
                 // close handler fires too. We treat sender-initiated
                 // Close as "wasClean = true" since we delivered the
                 // frame to the peer in-process.
-                if let Some(_) = from_state.as_ref() {
+                if from_state.as_ref().is_some() {
                     push_peer_event(
                         state,
                         from_id,

@@ -177,7 +177,8 @@ fn bench_dispatch(c: &mut Criterion) {
         "multipart/form-data; boundary=----zsBoundaryAAAA".to_string(),
     )];
 
-    let workloads: Vec<(&str, String, &Vec<(String, String)>)> = vec![
+    type Workload<'a> = (&'a str, String, &'a Vec<(String, String)>);
+    let workloads: Vec<Workload> = vec![
         ("tiny", tiny_body(), &json_headers),
         ("small", small_body(), &json_headers),
         ("medium", medium_body(), &json_headers),

@@ -54,39 +54,41 @@ pub fn parse_jwk(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Result<JsonWebKey, OpError> {
-    let mut jwk = JsonWebKey::default();
-    jwk.kty = read_optional_string(scope, obj, "kty")?
-        .ok_or_else(|| OpError::dom("DataError", "JWK 'kty' missing"))?;
-    jwk.r#use = read_optional_string(scope, obj, "use")?;
-    jwk.key_ops = read_optional_string_array(scope, obj, "key_ops")?;
-    jwk.alg = read_optional_string(scope, obj, "alg")?;
-    jwk.ext = read_optional_bool(scope, obj, "ext");
-    jwk.k = read_optional_string(scope, obj, "k")?;
-    jwk.crv = read_optional_string(scope, obj, "crv")?;
-    jwk.x = read_optional_string(scope, obj, "x")?;
-    jwk.y = read_optional_string(scope, obj, "y")?;
-    jwk.d = read_optional_string(scope, obj, "d")?;
-    jwk.n = read_optional_string(scope, obj, "n")?;
-    jwk.e = read_optional_string(scope, obj, "e")?;
-    jwk.p = read_optional_string(scope, obj, "p")?;
-    jwk.q = read_optional_string(scope, obj, "q")?;
-    jwk.dp = read_optional_string(scope, obj, "dp")?;
-    jwk.dq = read_optional_string(scope, obj, "dq")?;
-    jwk.qi = read_optional_string(scope, obj, "qi")?;
+    let mut jwk = JsonWebKey {
+        kty: read_optional_string(scope, obj, "kty")?
+            .ok_or_else(|| OpError::dom("DataError", "JWK 'kty' missing"))?,
+        r#use: read_optional_string(scope, obj, "use")?,
+        key_ops: read_optional_string_array(scope, obj, "key_ops")?,
+        alg: read_optional_string(scope, obj, "alg")?,
+        ext: read_optional_bool(scope, obj, "ext"),
+        k: read_optional_string(scope, obj, "k")?,
+        crv: read_optional_string(scope, obj, "crv")?,
+        x: read_optional_string(scope, obj, "x")?,
+        y: read_optional_string(scope, obj, "y")?,
+        d: read_optional_string(scope, obj, "d")?,
+        n: read_optional_string(scope, obj, "n")?,
+        e: read_optional_string(scope, obj, "e")?,
+        p: read_optional_string(scope, obj, "p")?,
+        q: read_optional_string(scope, obj, "q")?,
+        dp: read_optional_string(scope, obj, "dp")?,
+        dq: read_optional_string(scope, obj, "dq")?,
+        qi: read_optional_string(scope, obj, "qi")?,
+        ..Default::default()
+    };
     // oth — sequence of {r,d,t}; we don't support multi-prime keys
     // (aws-lc-rs path doesn't expose the API). Reject if non-empty.
     let oth_key = v8::String::new(scope, "oth").unwrap();
-    if let Some(v) = obj.get(scope, oth_key.into()) {
-        if !v.is_undefined() && !v.is_null() {
-            if let Ok(arr) = v8::Local::<v8::Array>::try_from(v) {
-                jwk.oth_count = arr.length() as usize;
-                if arr.length() > 0 {
-                    return Err(OpError::dom(
-                        "DataError",
-                        "Multi-prime RSA (oth) not supported",
-                    ));
-                }
-            }
+    if let Some(v) = obj.get(scope, oth_key.into())
+        && !v.is_undefined()
+        && !v.is_null()
+        && let Ok(arr) = v8::Local::<v8::Array>::try_from(v)
+    {
+        jwk.oth_count = arr.length() as usize;
+        if arr.length() > 0 {
+            return Err(OpError::dom(
+                "DataError",
+                "Multi-prime RSA (oth) not supported",
+            ));
         }
     }
     Ok(jwk)
@@ -106,13 +108,14 @@ fn validate_key_ops(
     usages: &[KeyUsage],
     extractable: bool,
 ) -> Result<(), OpError> {
-    if let Some(ext) = jwk.ext {
-        if extractable && !ext {
-            return Err(OpError::dom(
-                "DataError",
-                "JWK 'ext' is false but extractable=true was requested",
-            ));
-        }
+    if let Some(ext) = jwk.ext
+        && extractable
+        && !ext
+    {
+        return Err(OpError::dom(
+            "DataError",
+            "JWK 'ext' is false but extractable=true was requested",
+        ));
     }
     if let Some(ops) = &jwk.key_ops {
         for u in usages {

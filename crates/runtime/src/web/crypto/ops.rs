@@ -387,14 +387,15 @@ fn compute_derived_key_length<'s>(
         AlgorithmName::Hmac => {
             let length_key = v8::String::new(scope, "length").unwrap();
             let v = obj.get(scope, length_key.into());
-            if let Some(v) = v {
-                if !v.is_undefined() && !v.is_null() {
-                    let n = read_enforce_range_u32(scope, v)?.0;
-                    if n == 0 {
-                        return Err(OpError::type_error("HMAC length must be > 0"));
-                    }
-                    return Ok(n);
+            if let Some(v) = v
+                && !v.is_undefined()
+                && !v.is_null()
+            {
+                let n = read_enforce_range_u32(scope, v)?.0;
+                if n == 0 {
+                    return Err(OpError::type_error("HMAC length must be > 0"));
                 }
+                return Ok(n);
             }
             // default: block size of hash.
             let hash = head.hash.ok_or_else(|| {
@@ -426,6 +427,10 @@ pub fn wrap_key<'s>(
     super::wrap::wrap_key(scope, format, key, wrapping_key, wrap_alg)
 }
 
+// unwrapKey's parameter list mirrors the WebCrypto spec's operation
+// signature 1:1; grouping them into a struct would ripple into every
+// caller for no behavioral gain, so this stays a plain allow.
+#[allow(clippy::too_many_arguments)]
 pub fn unwrap_key<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     format: KeyFormat,
@@ -460,8 +465,11 @@ fn alg_matches_key(name: AlgorithmName, key_state: &CryptoKeyState) -> bool {
 }
 
 // Suppress dead warning for unused enum variants in this stub-heavy
-// step. Real uses come online in steps 6-13.
+// step. Real uses come online in steps 6-13. The 8-argument shape is
+// deliberate: it's a type-anchor stub enumerating unused variant
+// types, not a real call site to slim down.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn _unused(
     _: AesKeyAlgorithm,
     _: HmacKeyAlgorithm,

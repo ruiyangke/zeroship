@@ -15,9 +15,9 @@ pub use crate::webidl::usv_string::{USVString, read_usv_string, read_usv_string_
 ///
 ///   1. Let output be the empty string.
 ///   2. For each tuple of pairs:
-///        Let outputPair be the percent-encoded name.
-///        Append "=" plus the percent-encoded value to outputPair.
-///        If output is non-empty, append "&" to it. Append outputPair.
+///      Let outputPair be the percent-encoded name.
+///      Append "=" plus the percent-encoded value to outputPair.
+///      If output is non-empty, append "&" to it. Append outputPair.
 ///   3. Return output.
 ///
 /// The byte serializer percent-encodes via the `application/x-www-form-
@@ -66,11 +66,11 @@ fn url_encoded_serialize_byte(bytes: &[u8], out: &mut String) {
 ///   3. For each byte sequence bytes in sequences:
 ///      a. If bytes is empty, continue.
 ///      b. If bytes contains "=", let name be the part before the first
-///         "=", let value be the part after. Otherwise let name be bytes
-///         and value be the empty string.
+///      "=", let value be the part after. Otherwise let name be bytes
+///      and value be the empty string.
 ///      c. Replace any 0x2B ("+") with 0x20 (SP) in name and value.
 ///      d. Let nameString be UTF-8 percent-decode of name.
-///         Let valueString be UTF-8 percent-decode of value.
+///      Let valueString be UTF-8 percent-decode of value.
 ///      e. Append (nameString, valueString) to output.
 ///
 /// Bytes that don't form valid UTF-8 after percent-decode survive via

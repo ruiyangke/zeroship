@@ -46,10 +46,10 @@ pub async fn http_network_fetch(
     }
 
     // Cancellation: pre-send check.
-    if let Some(flag) = &request.cancel {
-        if flag.is_cancelled() {
-            return Err("network error: aborted".to_string());
-        }
+    if let Some(flag) = &request.cancel
+        && flag.is_cancelled()
+    {
+        return Err("network error: aborted".to_string());
     }
 
     // Build the cyper Client (per-thread pool with SsrfResolver).
@@ -97,10 +97,10 @@ pub async fn http_network_fetch(
     }
 
     // Re-check cancellation right before sending.
-    if let Some(flag) = &request.cancel {
-        if flag.is_cancelled() {
-            return Err("network error: aborted".to_string());
-        }
+    if let Some(flag) = &request.cancel
+        && flag.is_cancelled()
+    {
+        return Err("network error: aborted".to_string());
     }
 
     // Send. cyper does not auto-follow redirects; that's our job.
@@ -109,10 +109,10 @@ pub async fn http_network_fetch(
         .await
         .map_err(|e| format!("network error: {e}"))?;
 
-    if let Some(flag) = &request.cancel {
-        if flag.is_cancelled() {
-            return Err("network error: aborted".to_string());
-        }
+    if let Some(flag) = &request.cancel
+        && flag.is_cancelled()
+    {
+        return Err("network error: aborted".to_string());
     }
 
     let status = response.status().as_u16();
@@ -132,12 +132,12 @@ pub async fn http_network_fetch(
     }
 
     // Pre-flight Content-Length cap (legacy preflight from fetch.rs).
-    if let Some(len) = response.content_length() {
-        if len > MAX_RESPONSE_SIZE as u64 {
-            return Err(format!(
-                "network error: response too large ({len} > {MAX_RESPONSE_SIZE})"
-            ));
-        }
+    if let Some(len) = response.content_length()
+        && len > MAX_RESPONSE_SIZE as u64
+    {
+        return Err(format!(
+            "network error: response too large ({len} > {MAX_RESPONSE_SIZE})"
+        ));
     }
 
     let mut body = Vec::new();

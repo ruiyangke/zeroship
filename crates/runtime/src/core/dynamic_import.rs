@@ -11,7 +11,7 @@
 //!      via `native_modules::resolve_native`, instantiated, evaluated,
 //!      then cached into the registry so future dynamic OR static
 //!      imports of the same specifier hit path 1.
-//!   2.5. Runtime-provided module (`@zeroship/bootstrap/install-schema`,
+//!      2.5. Runtime-provided module (`@zeroship/bootstrap/install-schema`,
 //!      `@zeroship/db/internal`, `zeroship`) — see `bootstrap_modules`.
 //!      The runtime injects the code that imports these (the bootstrap
 //!      `runtime-entry.js`), so it owns their resolution even when the

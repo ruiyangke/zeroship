@@ -218,9 +218,8 @@ pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, Strin
         ),
         None => format!("DNS resolve produced no addresses for {host}:{port}"),
     })
-    .map_err(|e| {
+    .inspect_err(|e| {
         let _ = Error::new(ErrorKind::PermissionDenied, e.clone());
-        e
     })
 }
 

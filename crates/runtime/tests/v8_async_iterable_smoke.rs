@@ -136,7 +136,7 @@ fn symbol_async_iterator_is_present() {
         const s = new Source();
         typeof s[Symbol.asyncIterator];
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "function");
 }
@@ -162,7 +162,7 @@ fn symbol_async_iterator_yields_same_shape_as_values() {
             b_async_iterable: typeof b[Symbol.asyncIterator] === "function",
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         r,
@@ -207,7 +207,7 @@ fn symbol_async_iterator_drives_async_iteration() {
         Promise.resolve().then(() => {});
         JSON.stringify(out);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Async generator semantics: the chain may not have completed by
     // the time we serialise (depends on microtask drain). Accept either
@@ -230,7 +230,7 @@ fn alias_function_name_matches_method() {
         const s = new Source();
         s[Symbol.asyncIterator].name;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "values");
 }

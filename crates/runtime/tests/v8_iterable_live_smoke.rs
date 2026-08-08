@@ -153,7 +153,7 @@ fn insert_during_iteration_is_observed() {
             r4: { v: r4.value, d: r4.done },
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -184,7 +184,7 @@ fn delete_past_cursor_yields_current_slot() {
         const r4 = it.next();             // done
         `${r1.value.join("=")},${r2.value.join("=")},${r3.value.join("=")},${r4.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1,b=2,d=4,true");
 }
@@ -207,7 +207,7 @@ fn shrink_below_cursor_yields_done() {
         const r2 = it.next();             // done
         `${r1.value.join("=")},${r2.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1,true");
 }
@@ -236,7 +236,7 @@ fn for_each_observes_callback_mutations() {
         });
         seen.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1,b=2");
 }
@@ -259,7 +259,7 @@ fn keys_iterator_is_live() {
         const r3 = it.next();             // done
         `${r1},${r2},${r3.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a,b,true");
 }
@@ -277,7 +277,7 @@ fn values_iterator_is_live() {
         const r2 = it.next().value;       // "2"
         `${r1},${r2}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "1,2");
 }
@@ -301,7 +301,7 @@ fn iterator_next_brand_checks() {
         catch (e) { msg = "type-error:" + e.name; }
         msg;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -320,7 +320,7 @@ fn live_factory_brand_checks() {
         catch (e) { msg = "type-error:" + e.name; }
         msg;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }
@@ -377,7 +377,7 @@ fn explicit_snapshot_mode_ignores_post_factory_mutations() {
         const r2 = it.next();              // done — snapshot didn't see "b"
         `${r1.value.join("=")},${r2.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1,true");
 }
@@ -458,7 +458,7 @@ fn mut_self_value_pairs_lazy_cache_rebuilds_after_mutation() {
         const r3 = it.next();              // rebuilds = 2 (live mode)
         `${r1.value.join("=")},${r2.value.join("=")},${r3.value.join("=")},${b.rebuilds()}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Each next() call invokes value_pairs() afresh; the FIRST and
     // THIRD calls hit a cold cache (1 + 1 = 2 rebuilds), the SECOND
@@ -486,7 +486,7 @@ fn mut_self_value_pairs_for_each_observes_mutations() {
         });
         seen.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "a=1,b=2");
 }
@@ -558,7 +558,7 @@ fn ref_self_value_pairs_with_scope_is_passed_through() {
         for (const [k, v] of b) out.push(`${k}=${v}`);
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "x=1,y=2");
 }
@@ -647,7 +647,7 @@ fn mut_self_with_scope_value_pairs_syncs_per_next() {
         // syncs() returns 2: one per next() call, both observed.
         `${r1.value.join("=")},${r2.done},${b.syncs()}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "k=v,true,2");
 }
@@ -741,7 +741,7 @@ fn value_marshal_fn_emits_arbitrary_v8_values() {
         }
         out.join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // The marshal hook produces a V8 string for the first entry and
     // a V8 number for the second — proving `value_marshal` ran on

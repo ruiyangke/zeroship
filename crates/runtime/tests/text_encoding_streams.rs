@@ -173,13 +173,13 @@ fn js_string(val: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> String {
 
 #[test]
 fn encoder_stream_constructible() {
-    let s = run_in_v8("typeof new TextEncoderStream()", |v, s| js_string(v, s));
+    let s = run_in_v8("typeof new TextEncoderStream()", js_string);
     assert_eq!(s, "object");
 }
 
 #[test]
 fn encoder_stream_encoding_is_utf8() {
-    let s = run_in_v8("new TextEncoderStream().encoding", |v, s| js_string(v, s));
+    let s = run_in_v8("new TextEncoderStream().encoding", js_string);
     assert_eq!(s, "utf-8");
 }
 
@@ -187,7 +187,7 @@ fn encoder_stream_encoding_is_utf8() {
 fn encoder_stream_to_string_tag() {
     let s = run_in_v8(
         "Object.prototype.toString.call(new TextEncoderStream())",
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "[object TextEncoderStream]");
 }
@@ -196,7 +196,7 @@ fn encoder_stream_to_string_tag() {
 fn encoder_stream_instanceof() {
     let s = run_in_v8(
         "new TextEncoderStream() instanceof TextEncoderStream",
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "true");
 }
@@ -211,7 +211,7 @@ fn encoder_stream_readable_writable_are_streams() {
             w: tes.writable instanceof WritableStream,
         });
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, r#"{"r":true,"w":true}"#);
 }
@@ -238,7 +238,7 @@ fn encoder_stream_readable_writable_are_getters_not_own_props() {
                 ) !== undefined,
         });
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(
         s,
@@ -325,7 +325,7 @@ fn encoder_stream_brand_check_on_encoding() {
         try { desc.get.call({}); } catch (_e) { threw = true; }
         threw;
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "true");
 }
@@ -336,7 +336,7 @@ fn encoder_stream_brand_check_on_encoding() {
 
 #[test]
 fn decoder_stream_default_label() {
-    let s = run_in_v8("new TextDecoderStream().encoding", |v, s| js_string(v, s));
+    let s = run_in_v8("new TextDecoderStream().encoding", js_string);
     assert_eq!(s, "utf-8");
 }
 
@@ -351,7 +351,7 @@ fn decoder_stream_label_and_options() {
             ignoreBOM: tds.ignoreBOM,
         });
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(
         s,
@@ -371,7 +371,7 @@ fn decoder_stream_invalid_label_throws_range_error() {
         }
         kind;
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "RangeError");
 }
@@ -380,7 +380,7 @@ fn decoder_stream_invalid_label_throws_range_error() {
 fn decoder_stream_to_string_tag() {
     let s = run_in_v8(
         "Object.prototype.toString.call(new TextDecoderStream())",
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "[object TextDecoderStream]");
 }
@@ -500,7 +500,7 @@ fn decoder_stream_brand_check_on_encoding() {
         try { desc.get.call({}); } catch (_e) { threw = true; }
         threw;
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "true");
 }
@@ -515,7 +515,7 @@ fn decoder_stream_readable_writable_are_streams() {
             w: tds.writable instanceof WritableStream,
         });
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, r#"{"r":true,"w":true}"#);
 }
@@ -538,7 +538,7 @@ fn decoder_stream_readable_writable_are_getters_not_own_props() {
                 ) !== undefined,
         });
         "#,
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(
         s,
@@ -550,7 +550,7 @@ fn decoder_stream_readable_writable_are_getters_not_own_props() {
 fn decoder_stream_instanceof() {
     let s = run_in_v8(
         "new TextDecoderStream() instanceof TextDecoderStream",
-        |v, s| js_string(v, s),
+        js_string,
     );
     assert_eq!(s, "true");
 }

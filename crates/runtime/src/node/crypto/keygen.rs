@@ -29,7 +29,7 @@ pub fn generate_key_sync<'s>(
     match key_type {
         "hmac" | "aes" => {
             let length_bits = read_length(scope, options)?;
-            let bytes = (length_bits as usize + 7) / 8;
+            let bytes = (length_bits as usize).div_ceil(8);
             let mut buf = vec![0u8; bytes];
             use aws_lc_rs::rand::SecureRandom;
             let rng = aws_lc_rs::rand::SystemRandom::new();

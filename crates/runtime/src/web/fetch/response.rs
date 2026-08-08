@@ -60,7 +60,7 @@ use zeroship_runtime_macros::{
 };
 
 use super::enums::ResponseType;
-use crate::fetch_body::body::{Body, BodyImpl, BodySource};
+use crate::fetch_body::{Body, BodyImpl, BodySource};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
 use crate::state::OpError;
@@ -615,14 +615,12 @@ impl ResponseState {
             build_response_headers(scope, init_headers_v).map_err(OpError::type_error)?;
 
         // webSocket extension — preserve as-is for the gateway path.
-        if let Some(o) = init_obj {
-            if let Some(ws_v) = read_init_member(scope, o, "webSocket") {
-                if !ws_v.is_null_or_undefined() {
-                    if let Ok(o) = v8::Local::<v8::Object>::try_from(ws_v) {
-                        *state.web_socket.borrow_mut() = Some(v8::Global::new(scope, o));
-                    }
-                }
-            }
+        if let Some(o) = init_obj
+            && let Some(ws_v) = read_init_member(scope, o, "webSocket")
+            && !ws_v.is_null_or_undefined()
+            && let Ok(o) = v8::Local::<v8::Object>::try_from(ws_v)
+        {
+            *state.web_socket.borrow_mut() = Some(v8::Global::new(scope, o));
         }
 
         // Step 7: null-body status check.
@@ -722,10 +720,10 @@ impl ResponseState {
         if let Some(stream_g) = self.body.borrow().stream.borrow().clone() {
             let stream = v8::Local::new(scope, stream_g);
             let key = v8::String::new(scope, "locked").unwrap();
-            if let Some(v) = stream.get(scope, key.into()) {
-                if v.boolean_value(scope) {
-                    return Err(OpError::type_error("Cannot clone a disturbed Response"));
-                }
+            if let Some(v) = stream.get(scope, key.into())
+                && v.boolean_value(scope)
+            {
+                return Err(OpError::type_error("Cannot clone a disturbed Response"));
             }
         }
 
@@ -740,7 +738,7 @@ impl ResponseState {
         // Body: tee if stream-bodied, re-build from source otherwise.
         let body_is_stream = matches!(
             self.body.borrow().source,
-            Some(crate::fetch_body::body::BodySource::Stream)
+            Some(crate::fetch_body::BodySource::Stream)
         ) && self.body.borrow().stream.borrow().is_some();
 
         let body_arg: v8::Local<v8::Value> = if body_is_stream {
@@ -757,15 +755,15 @@ impl ResponseState {
             }
         } else if let Some(src) = self.body.borrow().source.clone() {
             match src {
-                crate::fetch_body::body::BodySource::Bytes(rc)
-                | crate::fetch_body::body::BodySource::Blob(rc, _)
-                | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
-                | crate::fetch_body::body::BodySource::FormData(rc, _) => {
+                crate::fetch_body::BodySource::Bytes(rc)
+                | crate::fetch_body::BodySource::Blob(rc, _)
+                | crate::fetch_body::BodySource::UrlSearchParams(rc)
+                | crate::fetch_body::BodySource::FormData(rc, _) => {
                     let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
                     let stream_local = v8::Local::new(scope, new_stream);
                     stream_local.into()
                 }
-                crate::fetch_body::body::BodySource::Stream => v8::null(scope).into(),
+                crate::fetch_body::BodySource::Stream => v8::null(scope).into(),
             }
         } else {
             v8::null(scope).into()
@@ -875,7 +873,7 @@ impl ResponseState {
             302
         } else {
             let n = status.number_value(scope).unwrap_or(0.0);
-            if n.is_nan() || n < 0.0 || n > 65535.0 {
+            if n.is_nan() || !(0.0..=65535.0).contains(&n) {
                 return Err(OpError::range_error("Invalid status code for redirect"));
             }
             n as u16
@@ -910,12 +908,12 @@ impl ResponseState {
             if let Some(h_g) = state.headers.borrow().clone() {
                 let h = v8::Local::new(scope, h_g);
                 let set_key = v8::String::new(scope, "set").unwrap();
-                if let Some(set_v) = h.get(scope, set_key.into()) {
-                    if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
-                        let n = v8::String::new(scope, "Location").unwrap();
-                        let v = v8::String::new(scope, &url_str).unwrap();
-                        let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
-                    }
+                if let Some(set_v) = h.get(scope, set_key.into())
+                    && let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v)
+                {
+                    let n = v8::String::new(scope, "Location").unwrap();
+                    let v = v8::String::new(scope, &url_str).unwrap();
+                    let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
                 }
             }
         }
@@ -1122,12 +1120,7 @@ fn is_valid_reason_phrase(s: &str) -> bool {
     // Per Fetch spec ByteString conversion of statusText, we accept
     // each ByteString byte if it satisfies the above. Reject CR/LF/NUL.
     // WPT response-init-001 explicitly tests `String.fromCharCode(0x80)`.
-    s.bytes().all(|b| match b {
-        0x09 | 0x20 => true,
-        0x21..=0x7E => true,
-        0x80..=0xFF => true,
-        _ => false,
-    })
+    s.bytes().all(|b| matches!(b, 0x09 | 0x20 | 0x21..=0x7E | 0x80..=0xFF))
 }
 
 fn build_response_headers<'s>(

@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn read_long_form_length() {
         let mut data = vec![0x04, 0x82, 0x01, 0x00];
-        data.extend(std::iter::repeat(0xab).take(0x100));
+        data.extend(std::iter::repeat_n(0xab, 0x100));
         let (tlv, rest) = read_tlv(&data).unwrap();
         assert_eq!(tlv.tag, 0x04);
         assert_eq!(tlv.value.len(), 0x100);

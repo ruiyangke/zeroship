@@ -103,8 +103,8 @@ fn dispatch_one(
             let data_v8: v8::Local<v8::Value> = match impl_.binary_type.get() {
                 BinaryType::Blob => {
                     let blob =
-                        crate::blob_native::blob::from_bytes_owned_public(b, String::new());
-                    crate::blob_native::blob::wrap_blob_in_v8(scope, blob)
+                        crate::blob_native::from_bytes_owned_public(b, String::new());
+                    crate::blob_native::wrap_blob_in_v8(scope, blob)
                 }
                 BinaryType::ArrayBuffer => {
                     let len = b.len();

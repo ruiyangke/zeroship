@@ -219,7 +219,7 @@ fn own_iterator_next_works() {
         const r = it.next();
         `${r.value[0]},${r.value[1]},${r.done}`;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "7,alpha,false");
 }
@@ -257,7 +257,7 @@ fn next_on_foreign_class_wrapper_throws_typeerror() {
         }
         JSON.stringify({ sanity, kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Sanity == 42 confirms BoxClass wrapper is functioning. The brand
     // check then rejects it as a FakeMapAIterator receiver.
@@ -308,7 +308,7 @@ fn next_on_other_iterable_class_iterator_throws_typeerror() {
         }
         JSON.stringify({ distinct, kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -345,7 +345,7 @@ fn next_on_other_iterable_class_iterator_symmetric_throws_typeerror() {
         }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -378,7 +378,7 @@ fn next_on_plain_object_throws_typeerror() {
         catch (e) { kind = "type-error:" + e.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "type-error:TypeError");
 }

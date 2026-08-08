@@ -92,80 +92,79 @@ fn check_ko(url: &str, method: &str) -> Outcome {
 
 #[test]
 fn wpt_fetch_basic_scheme_data() {
-    let mut results: Vec<(String, Outcome)> = Vec::new();
-
     // Mirror scheme-data.any.js — `checkFetchResponse(url, body, mime)`
     // calls. WPT treats the `mode` parameter (cors, same-origin) as
     // a no-op for data: URLs in our runtime (no CORS surface).
-    results.push((
-        "data:text/plain percent-encoded GET".to_string(),
-        check_fetch(
-            "data:,response%27s%20body",
-            b"response's body",
-            "text/plain;charset=US-ASCII",
-            "GET",
+    let results: Vec<(String, Outcome)> = vec![
+        (
+            "data:text/plain percent-encoded GET".to_string(),
+            check_fetch(
+                "data:,response%27s%20body",
+                b"response's body",
+                "text/plain;charset=US-ASCII",
+                "GET",
+            ),
         ),
-    ));
-    results.push((
-        "data:text/plain percent-encoded same-origin".to_string(),
-        check_fetch(
-            "data:,response%27s%20body",
-            b"response's body",
-            "text/plain;charset=US-ASCII",
-            "GET",
+        (
+            "data:text/plain percent-encoded same-origin".to_string(),
+            check_fetch(
+                "data:,response%27s%20body",
+                b"response's body",
+                "text/plain;charset=US-ASCII",
+                "GET",
+            ),
         ),
-    ));
-    results.push((
-        "data:text/plain percent-encoded cors".to_string(),
-        check_fetch(
-            "data:,response%27s%20body",
-            b"response's body",
-            "text/plain;charset=US-ASCII",
-            "GET",
+        (
+            "data:text/plain percent-encoded cors".to_string(),
+            check_fetch(
+                "data:,response%27s%20body",
+                b"response's body",
+                "text/plain;charset=US-ASCII",
+                "GET",
+            ),
         ),
-    ));
-    results.push((
-        "data:text/plain;base64".to_string(),
-        check_fetch(
-            "data:text/plain;base64,cmVzcG9uc2UncyBib2R5",
-            b"response's body",
-            "text/plain",
-            "GET",
+        (
+            "data:text/plain;base64".to_string(),
+            check_fetch(
+                "data:text/plain;base64,cmVzcG9uc2UncyBib2R5",
+                b"response's body",
+                "text/plain",
+                "GET",
+            ),
         ),
-    ));
-    results.push((
-        "data:image/png;base64".to_string(),
-        check_fetch(
-            "data:image/png;base64,cmVzcG9uc2UncyBib2R5",
-            b"response's body",
-            "image/png",
-            "GET",
+        (
+            "data:image/png;base64".to_string(),
+            check_fetch(
+                "data:image/png;base64,cmVzcG9uc2UncyBib2R5",
+                b"response's body",
+                "image/png",
+                "GET",
+            ),
         ),
-    ));
-    results.push((
-        "data:text/plain POST".to_string(),
-        check_fetch(
-            "data:,response%27s%20body",
-            b"response's body",
-            "text/plain;charset=US-ASCII",
-            "POST",
+        (
+            "data:text/plain POST".to_string(),
+            check_fetch(
+                "data:,response%27s%20body",
+                b"response's body",
+                "text/plain;charset=US-ASCII",
+                "POST",
+            ),
         ),
-    ));
-    results.push((
-        "data:text/plain HEAD".to_string(),
-        check_fetch(
-            "data:,response%27s%20body",
-            b"",
-            "text/plain;charset=US-ASCII",
-            "HEAD",
+        (
+            "data:text/plain HEAD".to_string(),
+            check_fetch(
+                "data:,response%27s%20body",
+                b"",
+                "text/plain;charset=US-ASCII",
+                "HEAD",
+            ),
         ),
-    ));
-
-    // Bad data: URL (no comma) — must fail.
-    results.push((
-        "checkKoUrl notAdataUrl".to_string(),
-        check_ko("data:notAdataUrl.com", "GET"),
-    ));
+        // Bad data: URL (no comma) — must fail.
+        (
+            "checkKoUrl notAdataUrl".to_string(),
+            check_ko("data:notAdataUrl.com", "GET"),
+        ),
+    ];
 
     let pass = results.iter().filter(|(_, o)| matches!(o, Outcome::Pass)).count();
     let fail = results.len() - pass;

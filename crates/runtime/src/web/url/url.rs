@@ -175,10 +175,7 @@ impl URL {
                 None => None,
                 Some(input) => {
                     if !base.is_undefined() {
-                        match read_usv_string(tc, base) {
-                            Some(b) => Some((input, Some(b))),
-                            None => None,
-                        }
+                        read_usv_string(tc, base).map(|b| (input, Some(b)))
                     } else {
                         Some((input, None))
                     }
@@ -224,7 +221,7 @@ impl URL {
     /// `url.toString()` is a different beast and returns href.
     #[v8_method]
     #[v8_name = "toString"]
-    fn to_string(&self) -> String {
+    fn serialize_to_string(&self) -> String {
         self.inner.href().to_string()
     }
 
@@ -472,7 +469,7 @@ pub fn install_global<'s>(
         let key = v8::String::new(scope, "searchParams").unwrap();
         proto_tmpl.set_accessor_property(
             key.into(),
-            Some(getter.into()),
+            Some(getter),
             None,
             v8::PropertyAttribute::NONE,
         );

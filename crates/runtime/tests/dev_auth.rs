@@ -16,6 +16,7 @@
 //! user:
 //!   1. `env.auth.getUser()`  — the kernel `AuthPlugin` per-request state.
 //!   2. `currentUser()`       — the RPC ctx (`__zeroshipGetRpcCtx().user`).
+//!
 //! Both are fed by the SAME `user_json`, exactly as the gateway header is in
 //! production.
 

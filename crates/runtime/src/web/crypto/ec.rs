@@ -240,7 +240,7 @@ pub fn ecdh_derive_bits<'s>(
         .map_err(|_| OpError::dom("OperationError", "ECDH private key load"))?;
     let peer = aws_lc_rs::agreement::UnparsedPublicKey::new(alg, pub_xy.as_slice());
     let dom_err = OpError::dom("OperationError", "ECDH agreement failed");
-    let shared = aws_lc_rs::agreement::agree(&priv_key, &peer, dom_err, |z: &[u8]| {
+    let shared = aws_lc_rs::agreement::agree(&priv_key, peer, dom_err, |z: &[u8]| {
         Ok::<Vec<u8>, OpError>(z.to_vec())
     })?;
 
@@ -263,11 +263,11 @@ fn truncate_to_bits(data: &[u8], length_bits: Option<u32>) -> Result<Vec<u8>, Op
             format!("derived length {length} exceeds available {avail} bits"),
         ));
     }
-    let bytes = (length + 7) / 8;
+    let bytes = length.div_ceil(8);
     let mut out = data[..bytes].to_vec();
     let extra_bits = (bytes * 8) - length;
     if extra_bits > 0 && !out.is_empty() {
-        let mask = (0xff_u8 << extra_bits) & 0xff;
+        let mask = 0xff_u8 << extra_bits;
         let last = out.len() - 1;
         out[last] &= mask;
     }
