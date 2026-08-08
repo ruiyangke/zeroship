@@ -67,13 +67,6 @@ pub const DEFAULT_WINDOW_DAYS: i64 = 7;
 /// is not required — findings are idempotent, so order only affects latency).
 pub const DEFAULT_ENTITY_CAP: i64 = 200;
 
-/// Stable `pg_advisory_lock` key for the stripe-reconcile sweep. Distinct from every other
-/// cron's key (spend `…0001`-spend, billing `…6c6c_0001`). Two control instances racing
-/// this sweep would issue duplicate Stripe GETs and race the finding dedup; the
-/// session-scoped `pg_try_advisory_lock` single-flights it fleet-wide (a loser skips the
-/// tick). Arbitrary FIXED 64-bit constant (derived from "zsrecon1").
-const STRIPE_RECONCILE_ADVISORY_LOCK_KEY: i64 = 0x7a73_7265_636f_0001;
-
 /// Knobs for one reconcile sweep (mirrors the other crons' module constants, but bundled
 /// so a test can drive a deterministic tick with a tiny window / cap / heal stance).
 #[derive(Debug, Clone, Copy)]
@@ -173,7 +166,7 @@ pub async fn tick_with<S: StripeApi>(
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&STRIPE_RECONCILE_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::STRIPE_RECONCILE],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -189,7 +182,7 @@ pub async fn tick_with<S: StripeApi>(
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&STRIPE_RECONCILE_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::STRIPE_RECONCILE],
         )
         .await
     {
@@ -721,11 +714,5 @@ mod tests {
         assert_eq!(k1, k2, "same drift → same key (idempotent)");
         assert_ne!(k1, k3, "changed stripe value → new key (progress trail)");
         assert!(k1.starts_with("refund_status_drift:re_1:"));
-    }
-
-    #[test]
-    fn advisory_lock_key_is_distinct() {
-        // Must not collide with the other crons' keys (spend / billing).
-        assert_ne!(STRIPE_RECONCILE_ADVISORY_LOCK_KEY, 0x7a73_6269_6c6c_0001);
     }
 }

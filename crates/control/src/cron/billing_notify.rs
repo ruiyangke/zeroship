@@ -9,7 +9,7 @@
 //! ## Multi-node safety (design CRITICAL-3 / principle 7)
 //!
 //! Two guards, both required:
-//!   1. **A dedicated advisory lock** ([`NOTIFY_SWEEP_ADVISORY_LOCK_KEY`], the
+//!   1. **A dedicated advisory lock** ([`super::lock_keys::BILLING_NOTIFY`], the
 //!      "zsnotf"-family key, distinct from dunning/spend) held on a dedicated
 //!      connection for the whole tick, exactly as `dunning.rs` does — only ONE instance
 //!      sweeps per tick.
@@ -49,11 +49,6 @@ pub const NOTIFY_REDRIVE_HORIZON: Duration = Duration::from_secs(15 * 60);
 /// this whose notification never sent is abandoned (it is long past actionable). The
 /// LEFT JOIN on the ledger already excludes already-sent rows; this just caps the scan.
 const NOTIFY_SCAN_WINDOW: &str = "30 days";
-
-/// Stable `pg_advisory_lock` key for the notify sweep — the "zsnotf"-family constant,
-/// distinct from dunning (`0x7a73_6475_6e6e_0001`) and spend (`0x7a73_7370_6e64_0001`)
-/// so the sweeps never block each other.
-const NOTIFY_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6e6f_7466_0001;
 
 /// USD-launch assumption for the spend-band notifications (arm g). The spend tables
 /// (`app_spend_state`, `spend_state_history`, `app_spend_limit`) carry NO currency column —
@@ -101,7 +96,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&NOTIFY_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_NOTIFY],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -115,7 +110,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&NOTIFY_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_NOTIFY],
         )
         .await
     {
@@ -567,12 +562,6 @@ mod tests {
     #[test]
     fn redrive_horizon_is_fifteen_minutes() {
         assert_eq!(NOTIFY_REDRIVE_HORIZON, Duration::from_secs(15 * 60));
-    }
-
-    #[test]
-    fn notify_lock_key_is_distinct() {
-        assert_ne!(NOTIFY_SWEEP_ADVISORY_LOCK_KEY, 0x7a73_6475_6e6e_0001_i64); // dunning
-        assert_ne!(NOTIFY_SWEEP_ADVISORY_LOCK_KEY, 0x7a73_7370_6e64_0001_i64); // spend
     }
 
     #[test]

@@ -36,12 +36,6 @@ use crate::AppState;
 /// hour of the window elapsing without thrashing PG.
 pub const DEFAULT_TICK_SECS: u64 = 3600;
 
-/// Stable `pg_advisory_lock` key for the dunning sweep. Distinct from the
-/// spend-sweep key (`0x7a73_7370_6e64_0001`) so the two sweeps never block each
-/// other. Derived from "zsdunng1" — a fixed 64-bit constant unique to this
-/// sweep; must never collide with another advisory-lock user.
-const DUNNING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6475_6e6e_0001;
-
 /// Cron entry point. Loops forever; each iteration runs one [`tick`] then sleeps
 /// `tick_secs`. A transient PG error is logged and swallowed so the cron task
 /// survives (mirrors `spend_reconcile`).
@@ -77,7 +71,7 @@ pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, Regi
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&DUNNING_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::DUNNING_SWEEP],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -94,7 +88,7 @@ pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, Regi
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&DUNNING_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::DUNNING_SWEEP],
         )
         .await
     {
@@ -133,12 +127,5 @@ mod tests {
     #[test]
     fn default_tick_is_one_hour() {
         assert_eq!(DEFAULT_TICK_SECS, 3600);
-    }
-
-    #[test]
-    fn dunning_lock_key_differs_from_spend() {
-        // The two sweeps must never share an advisory-lock key or one would
-        // starve the other.
-        assert_ne!(DUNNING_SWEEP_ADVISORY_LOCK_KEY, 0x7a73_7370_6e64_0001_i64);
     }
 }

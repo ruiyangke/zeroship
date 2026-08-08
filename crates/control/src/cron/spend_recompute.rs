@@ -27,16 +27,6 @@ pub const DEFAULT_BATCH_MAX: usize = 10_000;
 /// empty poll right after `rewind` does not mean the topic is empty.
 const RECOMPUTE_DRAIN_EMPTY_ROUNDS: u32 = 3;
 
-/// Stable `pg_advisory_lock` key that single-flights the recompute fleet-wide.
-///
-/// Same encoding as every other sweep key in this module tree: `0x7a73` is
-/// ASCII "zs", then four bytes naming the sweep ("rcmp"), then a version
-/// nibble. The convention matters more than usual here - two sweeps sharing a
-/// key would block each other fleet-wide, and the symptom would be a cron that
-/// mysteriously never runs rather than an error. `lock_keys_do_not_collide`
-/// pins it.
-const RECOMPUTE_ADVISORY_LOCK_KEY: i64 = 0x7a73_7263_6d70_0001;
-
 #[derive(Debug, Clone)]
 pub struct SpendRecomputeConfig {
     pub interval: Duration,
@@ -171,7 +161,7 @@ pub async fn tick(
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&RECOMPUTE_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::SPEND_RECOMPUTE],
         )
         .await
         .map_err(|e| SpendRecomputeError::Registry(e.to_string()))?;
@@ -193,7 +183,7 @@ pub async fn tick(
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&RECOMPUTE_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::SPEND_RECOMPUTE],
         )
         .await
     {
@@ -416,40 +406,6 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-
-    /// Two sweeps sharing an advisory-lock key would block each other
-    /// fleet-wide, and the symptom is a cron that silently never runs rather
-    /// than anything that errors - so the collision is worth pinning.
-    ///
-    /// WHAT THIS DOES NOT CATCH, and it is most of the space: the six other
-    /// keys are `const` PRIVATE to their own modules, so they cannot be
-    /// imported and are reproduced here as literals. That means this test sees
-    /// a NEW key added in this file, and nothing else. If someone changes
-    /// `billing_notify`'s key to collide with this one, this test still
-    /// passes. Closing that needs the keys centralised in one module, which is
-    /// filed separately rather than done here.
-    ///
-    /// Values transcribed 2026-08-07 from: billing_reconcile.rs:95 and :101,
-    /// billing_notify.rs:56, stripe_reconcile.rs:75, spend_reconcile.rs:33,
-    /// dunning.rs:43.
-    #[test]
-    fn lock_keys_do_not_collide() {
-        let others: [(i64, &str); 6] = [
-            (0x7a73_6269_6c6c_0001, "billing sweep"),
-            (0x7a73_6273_6166_0001, "billing safety net"),
-            (0x7a73_6e6f_7466_0001, "billing notify"),
-            (0x7a73_7265_636f_0001, "stripe reconcile"),
-            (0x7a73_7370_6e64_0001, "spend sweep"),
-            (0x7a73_6475_6e6e_0001, "dunning sweep"),
-        ];
-        for (key, name) in others {
-            assert_ne!(
-                RECOMPUTE_ADVISORY_LOCK_KEY, key,
-                "recompute lock key collides with the {name} key; both sweeps would \
-                 block each other fleet-wide and neither would report an error"
-            );
-        }
-    }
 
     #[test]
     fn periods_to_recompute_include_previous_until_settle_window_closes() {
