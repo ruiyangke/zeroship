@@ -1653,11 +1653,32 @@ impl<T> RegisterBackend for T where
 ///   on the per-isolate context (e.g.
 ///   `IsolateDbContext::tx_conns`) for the duration
 ///   of a transaction.
-/// NOTE FOR DOC LINKS: this trait is `cfg(any(test, feature = "test-helpers"))`,
-/// so it DOES NOT EXIST in a default build. References to it elsewhere in this
-/// crate are deliberately code spans rather than intra-doc links - rustdoc
-/// cannot resolve an item that is compiled out, and 15 of them were reporting
-/// as broken links on every doc build.
+/// NOTE FOR DOC LINKS, AND AN OPEN DECISION.
+///
+/// This trait is `cfg(any(test, feature = "test-helpers"))`, so it does not
+/// exist in a DEFAULT build. References to it elsewhere in this crate are
+/// currently code spans rather than intra-doc links.
+///
+/// That choice is CONFIGURATION-DEPENDENT, and an earlier version of this note
+/// overstated it as "broken on every doc build". Measured:
+///
+///     cargo doc -p zeroship-plugin-db --document-private-items
+///       -> 27 unresolved links
+///     ... --features test-helpers --document-private-items
+///       -> 12
+///
+/// Most of this crate is `pub(crate)` by default and `pub` only under
+/// `test-helpers` - lib.rs pairs the two behind cfg for `auth`, `audit`,
+/// `crud`, `encryption` and `backend`. So under the feature these links
+/// RESOLVE, and the spans are only correct for a default-feature doc build.
+///
+/// THE UNDECIDED QUESTION: which configuration are this crate's docs for? If
+/// the answer is "with test-helpers", these spans should go back to links AND
+/// the feature belongs in whatever command CI runs, not in a contributor's
+/// memory - otherwise the next person measures the default config and
+/// re-derives the same 27. If the answer is "default", the spans are right and
+/// this crate documents a lot of prose about items its readers cannot see.
+/// zeroship has no doc gate today, so nothing currently encodes either answer.
 ///
 /// It is a conformance marker, not the production abstraction: nothing takes
 /// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
