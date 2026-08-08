@@ -139,8 +139,7 @@ async fn start_mock_stripe() -> MockStripe {
 async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
-        loop {
-            let Some((req, consumed)) = try_parse_request(&acc) else { break };
+        while let Some((req, consumed)) = try_parse_request(&acc) {
             acc.drain(0..consumed);
             let response = handle_mock_request(&req, &state);
             if stream.write_all(response).await.0.is_err() {
@@ -664,6 +663,12 @@ async fn read_event(
 ///
 /// RED→GREEN: against the pre-PR-4 segment-blind item key + 2-col line PK, the two
 /// segments collapse to ONE Stripe item / ONE line (segment 1 under-billed).
+// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let url = db_url();
@@ -795,6 +800,8 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 ///
 /// RED pre-change (description-only): the item description had NO CU suffix and the
 /// POST carried NO `compute_units`/`usage` metadata — every assertion below fails.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let url = db_url();
@@ -935,6 +942,8 @@ async fn segment_partition_invariants_hold() {
 /// (c) N=0 (no plan change) ⇒ EXACTLY ONE line per app at segment_no=0, full base
 /// fee + full quota + current plan — byte-for-byte the pre-PR-4 behaviour (one
 /// item, one line, one provider-ref).
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn no_change_yields_exactly_one_segment_zero_line() {
     let url = db_url();
@@ -981,6 +990,8 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 /// (f) Reconcile re-run does NOT double-post segments. After a full bill, a second
 /// tick is a no-op (period finalized) and the mock saw each segment item created
 /// EXACTLY once.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_rerun_does_not_double_post_segments() {
     let url = db_url();
@@ -1036,6 +1047,8 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 /// (g) set_plan snapshots usage_at_change SERVER-SIDE (from usage_aggregates), with
 /// server-derived frozen base fees, and a change whose effective period is already
 /// FINALIZED attributes to the NEXT period.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let url = db_url();
@@ -1117,6 +1130,8 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 /// (e) Past the per-period cap, set_plan still flips apps.plan_id but records NO
 /// new snapshot, and the reconcile prices the tail under the ACTUALLY-RUNNING plan
 /// (MAJOR-4) — never under a cheaper recorded plan.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let url = db_url();
@@ -1147,7 +1162,10 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
             .with_ymd_and_hms(pstart.year(), pstart.month(), d as u32, 0, 0, 0)
             .unwrap()
             .timestamp();
-        let to = if d % 2 == 0 { &cheap } else { &cheap };
+        // Both arms are the cheap plan: see the comment above the loop ("cheap↔cheap
+        // flips") — this burns the per-period cap without touching the expensive plan,
+        // which is flipped to separately below, past the cap.
+        let to = &cheap;
         record_plan_change_like_set_plan(&fx.state, app, creator, to, when).await;
     }
     // Count recorded events: capped at MAX_PLAN_CHANGES_PER_PERIOD.
@@ -1219,6 +1237,8 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 
 /// (d) An END-missing metric floors its segment delta at max(0,…) so a vanished
 /// metric never credits the bill (faithful, end-to-end through the reconcile).
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn end_missing_metric_does_not_credit_the_bill() {
     let url = db_url();
@@ -1282,6 +1302,8 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 /// (raise the base fee) BEFORE the reconcile, and assert the frozen invoice line
 /// reflects the catalog value AT RECONCILE — documenting the intended (operator-
 /// gated, open-period-floats-until-finalize) behaviour.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     let url = db_url();
@@ -1366,6 +1388,8 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 /// provider-ref + a matching Stripe item, then drive a reconcile that builds only
 /// the real (fewer) segments. Assert: the orphan Stripe item is deleted, exactly
 /// the current segment set persists, and the DB subtotal == the Stripe item total.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let url = db_url();
@@ -1474,6 +1498,8 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 /// object) must ABORT/SKIP that app's billing rather than silently becoming `{}`
 /// (which would zero the segment START and massively over-count). Assert: the
 /// creator is NOT billed, no Stripe item is posted, and no finalized invoice.
+// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let url = db_url();

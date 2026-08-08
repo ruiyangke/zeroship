@@ -183,7 +183,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     // Freeze the snapshot onto the line (exactly what bill_creator writes).
     let usage_json = serde_json::to_value(&usage).unwrap();
     let weights_json = serde_json::to_value(
-        &weights
+        weights
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect::<std::collections::BTreeMap<_, _>>(),

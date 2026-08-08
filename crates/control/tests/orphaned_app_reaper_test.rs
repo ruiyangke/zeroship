@@ -194,6 +194,12 @@ async fn seed_owner_user(state: &AppState) -> Uuid {
 // ---------------------------------------------------------------------------
 // (a) owner-less app + a bundle in the VFS → reaper deletes BOTH
 // ---------------------------------------------------------------------------
+// REAPER_TEST_LOCK guards `Mutex<()>` - a pure test-serialization token,
+// not shared mutable data accessed across the await. compio::test runs
+// each test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_deletes_ownerless_app_and_its_bundle() {
     let url = db_url();
@@ -246,6 +252,8 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
 // ---------------------------------------------------------------------------
 // (b) app WITH an owner member → untouched
 // ---------------------------------------------------------------------------
+// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_leaves_owned_app_untouched() {
     let url = db_url();
@@ -284,6 +292,8 @@ async fn reaper_leaves_owned_app_untouched() {
 // ---------------------------------------------------------------------------
 // (c) THE CONSOLE-SAFETY TEST: system = true, owner-less → NEVER reaped
 // ---------------------------------------------------------------------------
+// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_never_touches_system_app() {
     let url = db_url();
@@ -315,6 +325,8 @@ async fn reaper_never_touches_system_app() {
 // ---------------------------------------------------------------------------
 // (d) owner-less app YOUNGER than the grace → not yet reaped
 // ---------------------------------------------------------------------------
+// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_respects_grace_window() {
     let url = db_url();
@@ -344,6 +356,8 @@ async fn reaper_respects_grace_window() {
 // ---------------------------------------------------------------------------
 // (e) shared-path test: api::purge_app removes BOTH the DB row and the VFS blob
 // ---------------------------------------------------------------------------
+// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn purge_app_removes_db_row_and_vfs_blob() {
     let url = db_url();

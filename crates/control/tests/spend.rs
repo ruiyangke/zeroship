@@ -149,6 +149,12 @@ async fn read_state(
 /// signal that the projection is unsound. This asserts the signal exists; it does NOT
 /// assert any enforcement behaviour, because refusing a decrease is an operator policy
 /// call (a legitimate dedup fix or bad-event purge also lowers a total).
+// SWEEP_LOCK guards `Mutex<()>` - a pure test-serialization token (see the
+// doc comment above), not shared mutable data accessed across the await.
+// compio::test runs each test on its own single-threaded runtime, so the
+// held guard cannot deadlock another task's poll the way it could under a
+// work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn period_rewrite_reports_a_total_that_shrank() {
     let url = db_url();
@@ -215,6 +221,8 @@ async fn period_rewrite_reports_a_total_that_shrank() {
     );
 }
 
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn evaluate_all_persists_and_returns_transitions() {
     let url = db_url();
@@ -272,6 +280,8 @@ async fn evaluate_all_persists_and_returns_transitions() {
 /// `limit_cents` (they are written from the same values inside ONE
 /// transaction). A crash-induced half-write (state with no history, or vice
 /// versa) would fail this consistency check.
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
     let url = db_url();
@@ -331,6 +341,8 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
     common::drain_pg().await;
 }
 
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // MAJOR-1 REGRESSION: an app whose priced `spend_cents` overflows i64 must be
@@ -405,6 +417,8 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     common::drain_pg().await;
 }
 
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
@@ -453,6 +467,8 @@ async fn raising_limit_recovers_block_immediately() {
 // in the redesigned schema).
 // ---------------------------------------------------------------------------
 
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let url = db_url();
@@ -510,6 +526,8 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     common::drain_pg().await;
 }
 
+// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn transition_history_row_binds_non_null_period() {
     let url = db_url();

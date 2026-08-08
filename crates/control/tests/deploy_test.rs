@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -23,7 +23,6 @@ use zeroship_bundle::{
 };
 use zeroship_control::deploy::{self, IngestError};
 
-#[allow(dead_code)]
 mod common;
 
 // ---------------------------------------------------------------------------
@@ -47,8 +46,8 @@ fn tmpdir() -> PathBuf {
     p
 }
 
-fn store(root: &PathBuf) -> Arc<dyn BlobStore> {
-    Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"))
+fn store(root: &Path) -> Arc<dyn BlobStore> {
+    Arc::new(LocalDiskBlobStore::new(root.to_path_buf()).expect("blob store"))
 }
 
 fn sha256_hex(data: &[u8]) -> String {

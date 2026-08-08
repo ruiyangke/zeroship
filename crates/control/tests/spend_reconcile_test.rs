@@ -175,6 +175,12 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
 /// limit_cents}` — matching the doc on `audit::Action::SpendStateChange`.
 /// (This also exercises #2: `tick` takes + releases the advisory lock around
 /// the sweep; a single instance acquires it and proceeds.)
+// SWEEP_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_tick_writes_enriched_spend_audit() {
     let url = db_url();
@@ -227,6 +233,8 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
 /// and SKIPS (returns 0) rather than racing a duplicate sweep. We hold the lock
 /// on a side connection using the SAME key the cron uses, then assert the tick
 /// no-ops even though an over-limit app is present.
+// See the allow on `reconcile_tick_writes_enriched_spend_audit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_tick_skips_when_advisory_lock_held() {
     let url = db_url();
@@ -299,6 +307,8 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
 /// spend percent. We position spend at each boundary by writing usage_aggregates directly
 /// (an authoritative DB write the cron reads — the same row metering ingest would write),
 /// then tick and assert the persisted state advanced + the history row was appended.
+// See the allow on `reconcile_tick_writes_enriched_spend_audit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_walks_spend_bands_and_holds_deadband() {
     let url = db_url();

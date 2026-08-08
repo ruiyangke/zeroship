@@ -86,6 +86,12 @@ async fn count_builder_rows(pg: &Client) -> i64 {
     rows[0].get("n")
 }
 
+// `bootstrap_guard()` returns a `MutexGuard` over a `Mutex<()>` - a pure
+// test-serialization token (see the doc comment above), not shared mutable
+// data accessed across the await. compio::test runs each test on its own
+// single-threaded runtime, so the held guard cannot deadlock another
+// task's poll the way it could under a work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn bootstrap_inserts_builder_client_first_run() {
     let db_url = db_url();
@@ -161,6 +167,8 @@ async fn bootstrap_inserts_builder_client_first_run() {
     common::drain_pg().await;
 }
 
+// See the allow on `bootstrap_inserts_builder_client_first_run` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn bootstrap_is_idempotent_on_second_run() {
     let db_url = db_url();
@@ -191,6 +199,8 @@ async fn bootstrap_is_idempotent_on_second_run() {
     common::drain_pg().await;
 }
 
+// See the allow on `bootstrap_inserts_builder_client_first_run` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn bootstrap_disabled_does_nothing() {
     let db_url = db_url();

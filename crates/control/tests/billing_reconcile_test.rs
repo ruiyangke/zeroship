@@ -285,8 +285,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
         // Parse as many complete requests as `acc` holds, draining each.
-        loop {
-            let Some((req, consumed)) = try_parse_request(&acc) else { break };
+        while let Some((req, consumed)) = try_parse_request(&acc) {
             acc.drain(0..consumed);
             let response = handle_mock_request(&req, &state);
             if stream.write_all(response).await.0.is_err() {
@@ -1106,6 +1105,12 @@ async fn read_line_snapshot(
 /// The reconciler builds Stripe invoice items per owned app from REAL
 /// aggregates, then creates + finalizes an invoice — all through the real cyper
 /// client hitting the mock server. Records on `billing_runs`.
+// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let url = db_url();
@@ -1165,6 +1170,8 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 /// usage — app … — YYYY-MM"` with NO CU suffix and NO `compute_units`/`usage`
 /// metadata — every CU/metadata assertion below fails (the amount assertion held
 /// before and after: the money is provably unchanged).
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let url = db_url();
@@ -1256,6 +1263,8 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 /// RED pre-change: no enriched description / no usage metadata at all — the
 /// description-length + per-value-cap + truncation-flag assertions have nothing to
 /// check (the keys are absent), so the test fails on the first metadata lookup.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let url = db_url();
@@ -1401,6 +1410,8 @@ async fn every_stripe_call_pins_the_api_version() {
 /// RED→GREEN: remove the `billing_runs` ON CONFLICT claim and the second run
 /// re-bills (the mock sees 4 invoice-item creates, not 2). The blueprint's
 /// idempotency guard is what makes this GREEN.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_is_idempotent_per_period() {
     let url = db_url();
@@ -1651,8 +1662,7 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
         .mock
         .requests()
         .into_iter()
-        .filter(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
-        .last()
+        .rfind(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
         .expect("second refund POST");
     assert!(
         last.body.contains("payment_intent=pi_frominvoice"),
@@ -1710,6 +1720,8 @@ async fn setup_session_creates_customer_once() {
 /// Two apps owned by the SAME user_id roll into ONE creator invoice spanning
 /// both apps (proves the owner-join grouping). Apps with no owner row are
 /// skipped (an unowned app gets no invoice).
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_groups_apps_by_owner_via_app_members() {
     let url = db_url();
@@ -1768,6 +1780,8 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
 /// `stripe_invoice_id IS NULL` (the run was claimed but the process died before
 /// Stripe responded). The next tick RE-DRIVES it — the Stripe call fires with
 /// the SAME deterministic idempotency key and the row is completed.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
     let url = db_url();
@@ -1841,6 +1855,8 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// RED→GREEN: under the old `charge_cents` (fx None ⇒ 0 ⇒ base-only), this
 /// creator with 600 requests would bill $0 silently and `tick_with` would return
 /// `Ok`; here it returns `Err` and writes nothing.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let url = db_url();
@@ -2041,6 +2057,8 @@ impl StripeApi for FailAfterFirstItem {
 /// not skip ledgered apps), the second drive re-posts app A and the mock — with
 /// dedupe OFF — creates a SECOND item for A (double-bill). The ledger makes it
 /// GREEN: count_created == 2 total (A once + B once), never 3.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let url = db_url();
@@ -2192,6 +2210,8 @@ impl StripeApi for PostThenCrash {
 /// intent row, no zs_item_key metadata), the crashed drive leaves NO ledger row,
 /// so the >24h re-drive (key expired) re-POSTs the SAME app → count_created == 2
 /// (double-bill). The claim-then-call fix makes it count_created == 1.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let url = db_url();
@@ -2267,6 +2287,8 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 /// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
 /// dedupe ON, the re-driven POST replays Stripe's original object (no new item),
 /// so the deterministic Idempotency-Key path also yields exactly one created item.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let url = db_url();
@@ -2391,6 +2413,8 @@ impl StripeApi for CrashOnFinalize {
 /// sweeps NO pending items (they're on the orphaned first draft) ⇒ finalizes a $0
 /// invoice (under-bill). Persisting the draft id before finalize + re-finalizing
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn crash_before_finalize_finalizes_original_draft_after_24h() {
     let url = db_url();
@@ -2598,6 +2622,8 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 /// RED→GREEN: drop the `check_auth` call from `force_reconcile` and the
 /// no-bearer request would 200 + bill — a privilege bypass. Keeping the gate
 /// makes the no-bearer case 401 while the keyed case still reconciles.
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
     let url = db_url();
@@ -2680,6 +2706,8 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 // iterating usage keys.
 // ===========================================================================
 
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() {
     let url = db_url();
@@ -2857,6 +2885,8 @@ impl StripeApi for FinalizeAlreadyFinalized {
 // makes the re-drive converge to 'finalized' with the invoice ref recorded.
 // ===========================================================================
 
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn refinalize_already_finalized_converges_locally() {
     let url = db_url();
@@ -2995,6 +3025,8 @@ impl StripeApi for FinalizeReturnsFixedId {
 // retry) and is NEVER finalized-without-ref.
 // ===========================================================================
 
+// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn finalize_and_invoice_ref_commit_atomically() {
     let url = db_url();

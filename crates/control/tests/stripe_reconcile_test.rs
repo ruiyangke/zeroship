@@ -171,8 +171,7 @@ async fn start_mock_stripe() -> MockStripe {
 async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
-        loop {
-            let Some((method, path, version_pinned, consumed)) = try_parse(&acc) else { break };
+        while let Some((method, path, version_pinned, consumed)) = try_parse(&acc) {
             acc.drain(0..consumed);
             let response = handle(&method, &path, version_pinned, &state);
             if stream.write_all(response).await.0.is_err() {
@@ -505,6 +504,12 @@ fn now() -> i64 {
 // (a) missed invoice payment.
 // ===========================================================================
 
+// `serialize_sweeps()` returns a `MutexGuard` over `RECONCILE_LOCK` - a pure
+// test-serialization token (see the doc comment above), not shared mutable
+// data accessed across the await. compio::test runs each test on its own
+// single-threaded runtime, so the held guard cannot deadlock another
+// task's poll the way it could under a work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn missed_invoice_payment_is_flagged() {
     let url = db_url();
@@ -540,6 +545,8 @@ async fn missed_invoice_payment_is_flagged() {
 // (b) refund status drift.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
     let url = db_url();
@@ -569,6 +576,8 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
 // (c) missing dispute (+ gated backstop park).
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn stripe_dispute_with_no_internal_row_is_flagged() {
     let url = db_url();
@@ -612,6 +621,8 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
 // resolved, so this test would find a `pending_disputes` row and NO `billing_disputes` row /
 // NO `dispute_debit` — every assert below fails. GREEN post-fix: the dispute is applied
 // directly and Σ(invoice_payments) tightens by the disputed amount.
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
     let url = db_url();
@@ -701,6 +712,8 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 // would never promote and the cap would stay permanently under-tightened.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn missing_dispute_backstop_does_not_park_when_unresolved() {
     let url = db_url();
@@ -749,6 +762,8 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
 // backstop already applied it. Idempotency is the du_… dedup index (0053) shared by both rails.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn backstop_then_live_webhook_does_not_double_apply() {
     let url = db_url();
@@ -837,6 +852,8 @@ async fn side_conn(url: &str) -> compio_postgres::Client {
 // still hold open — a missed `.closed`).
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
     let url = db_url();
@@ -879,6 +896,8 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
 // (d) fully-consistent — NO false positives.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn fully_consistent_state_produces_no_findings() {
     let url = db_url();
@@ -928,6 +947,8 @@ async fn fully_consistent_state_produces_no_findings() {
 // (e) idempotency — a second sweep does not duplicate.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn second_sweep_does_not_duplicate_findings() {
     let url = db_url();
@@ -958,6 +979,8 @@ async fn second_sweep_does_not_duplicate_findings() {
 // (f) advisory-lock single-flight.
 // ===========================================================================
 
+// See the allow on `missed_invoice_payment_is_flagged` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn concurrent_tick_single_flights_under_advisory_lock() {
     let url = db_url();

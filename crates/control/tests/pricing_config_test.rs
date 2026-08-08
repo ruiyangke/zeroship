@@ -295,6 +295,12 @@ async fn current_fx(state: &AppState) -> u64 {
 
 /// PUT as an operator updates the global FX; GET reflects it; an audit row with
 /// the actor + old→new is written.
+// `lock_fx()` returns a `MutexGuard` over a `Mutex<()>` - a pure
+// test-serialization token, not shared mutable data accessed across the
+// await. compio::test runs each test on its own single-threaded runtime,
+// so the held guard cannot deadlock another task's poll the way it could
+// under a work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn operator_put_updates_and_get_reflects_with_audit() {
     let db = db_url();
@@ -382,6 +388,8 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
 
 /// PUT as a creator (app-scoped principal, NOT Resource::Any) → 403, and the
 /// stored value is unchanged. This is the operator-only invariant.
+// See the allow on `operator_put_updates_and_get_reflects_with_audit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn creator_put_is_forbidden_and_value_unchanged() {
     let db = db_url();
@@ -438,6 +446,8 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
 
 /// PUT a below-floor value → 400, and the stored value is unchanged (fail
 /// closed — the floor is enforced at the handler, not just the DB CHECK).
+// See the allow on `operator_put_updates_and_get_reflects_with_audit` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn below_floor_put_is_rejected_400_value_unchanged() {
     let db = db_url();
@@ -457,7 +467,14 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
     )
     .await;
 
-    assert!(FLOOR >= 1, "floor sanity");
+    // FLOOR is imported from the production crate (MIN_FX_PICO_CENTS_PER_UNIT), not a
+    // local literal: clippy sees today's value and calls this always-true, but the guard
+    // is real — it turns a future redefinition down to 0 into a clear panic here instead
+    // of a silent `FLOOR - 1` underflow (wrapping to u64::MAX in release builds).
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(FLOOR >= 1, "floor sanity");
+    }
     let below = FLOOR - 1;
 
     let put = test::TestRequest::put()

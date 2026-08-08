@@ -12,6 +12,7 @@
 //!     reissue (so credit consume / finalize-in-one-UPDATE / balance CHECK all validate);
 //!   * the REAL `api::refund_invoice` / `api::void_invoice` HTTP handlers via an `ntex`
 //!     test app (operator authz, idempotency-key header, body fingerprint, 403/409).
+//!
 //! Only the Stripe WIRE is a recording fake (it records every `create_refund` call so the
 //! cash-leg `re_…` ref assertions are real, but no HTTP leaves the process).
 //!
@@ -535,6 +536,12 @@ async fn set_customer(state: &AppState, creator: Uuid) {
 //     Σ(invoice_payments) = $60, NOT total_cents.
 // ===========================================================================
 
+// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let url = db_url();
@@ -703,6 +710,8 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 //     destination='credit' appends a refund_to_credit grant, NO Stripe charge reversal.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let url = db_url();
@@ -822,6 +831,8 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 //     refund and ONE Stripe Refund; the ref is written after success.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn refund_replay_is_idempotent_exactly_one() {
     let url = db_url();
@@ -1039,6 +1050,8 @@ fn billing_self() -> Policy {
     }
 }
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let url = db_url();
@@ -1161,6 +1174,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
 //     Net balance == had the invoice been correct the first time.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn void_reversal_conserves_credit_balance() {
     let url = db_url();
@@ -1232,6 +1247,8 @@ async fn void_reversal_conserves_credit_balance() {
 //     refunds exactly Σpayments − Σcash-refunds-issued − total(new), NOT double.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn true_up_subtracts_already_issued_cash_refunds() {
     let url = db_url();
@@ -1335,6 +1352,8 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 //     under/over-refund. Post-fix the recompute under the lock yields the correct $30.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn true_up_recomputes_over_collection_under_the_lock() {
     let url = db_url();
@@ -1476,6 +1495,8 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 //     the claim for reissue.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn one_active_invoice_per_period_void_releases_claim() {
     let url = db_url();
@@ -1546,6 +1567,8 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 //  was defeatable by concurrency.)
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn issue_refund_takes_per_creator_advisory_lock() {
     let url = db_url();
@@ -1634,6 +1657,8 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
 //     allowed, a second $40 (Σ=$80 > $50) is rejected.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn two_refunds_summing_over_cash_second_is_rejected() {
     let url = db_url();
@@ -1699,6 +1724,8 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 //  so we assert the constraint directly: a direct second INSERT of the same note RAISEs.)
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let url = db_url();
@@ -1781,6 +1808,8 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 //     and the balance conserved.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn void_reissue_is_redrivable_after_phase1_crash() {
     let url = db_url();
@@ -2181,6 +2210,8 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 //     And the void+reissue bridge reports `true_up_refund_id == None && true_up_cents == 0`.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn true_up_noop_when_over_collection_not_positive() {
     let url = db_url();
@@ -2296,6 +2327,8 @@ async fn true_up_noop_when_over_collection_not_positive() {
 //       second true-up.
 // ===========================================================================
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn true_up_redrive_converges_noop_after_issue() {
     let url = db_url();
@@ -2373,6 +2406,8 @@ async fn true_up_redrive_converges_noop_after_issue() {
     common::drain_pg().await;
 }
 
+// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn true_up_claim_key_conflict_on_moved_anchor() {
     let url = db_url();

@@ -13,6 +13,7 @@
 //! REQUIRES a Postgres migrated by the platform migrate one-shot
 //! (`zeroship-platform-migrate --migrations-dir db/migrations-ts`):
 //!   - `CONTROL_TEST_DB` / `AUTH_DB_URL` / `PG_TEST_URL` — the DSN.
+//!
 //! Skips (prints why, returns) when absent. The pure derivation logic is covered
 //! by the crate's `bootstrap_console` unit tests, which run without infra.
 
@@ -473,7 +474,8 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
 
     // (5b) Non-secret config → plaintext VAR (always in process.env; no expose
     //      entry needed), retrievable server-side, NOT stored as a secret.
-    for (key, expected) in [("SANDBOX_URL", &sandbox_url_val)] {
+    {
+        let (key, expected) = ("SANDBOX_URL", &sandbox_url_val);
         assert!(
             vars.iter().any(|(k, v)| k == key && v == expected),
             "{key} stored as a plaintext var with the forwarded value: {vars:?}"

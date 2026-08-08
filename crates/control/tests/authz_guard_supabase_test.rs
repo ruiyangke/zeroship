@@ -20,7 +20,6 @@ use zeroship_core::auth_provider::{
     AuthProvider, SupabaseConfig, SupabaseProvider,
 };
 
-#[allow(dead_code)]
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

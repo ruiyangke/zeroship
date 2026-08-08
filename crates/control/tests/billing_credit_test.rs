@@ -10,6 +10,7 @@
 //!   * the REAL `credit::grant` / `credit::consume_at_finalize` Rust helpers;
 //!   * the REAL `api::grant_credit` HTTP handler via an `ntex` test app (operator authz,
 //!     idempotency-key header, body fingerprint, 403/409).
+//!
 //! Only the Stripe WIRE is a recording fake (Stripe is irrelevant to credit math; the
 //! Stripe path is covered by `billing_reconcile_test`).
 //!
@@ -558,6 +559,12 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
 //     per-grant consumed entries; total = subtotal − credit + tax (tax=0).
 // ===========================================================================
 
+// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
+// shared mutable data accessed across the await. compio::test runs each
+// test on its own single-threaded runtime, so the held guard cannot
+// deadlock another task's poll the way it could under a work-stealing
+// executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn finalize_consumes_oldest_first_and_balances() {
     let url = db_url();
@@ -636,6 +643,8 @@ async fn finalize_consumes_oldest_first_and_balances() {
 // (c) a reconcile RE-RUN of the same period does NOT double-consume.
 // ===========================================================================
 
+// See the allow on `finalize_consumes_oldest_first_and_balances` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reconcile_rerun_does_not_double_consume() {
     let url = db_url();
@@ -745,6 +754,8 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 // (d) an expires_at-expired grant is NOT consumed.
 // ===========================================================================
 
+// See the allow on `finalize_consumes_oldest_first_and_balances` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn expired_grant_is_not_consumed() {
     let url = db_url();
@@ -788,6 +799,8 @@ async fn expired_grant_is_not_consumed() {
 // (f) a non-USD grant is NOT drawn against a USD bill (currency filter).
 // ===========================================================================
 
+// See the allow on `finalize_consumes_oldest_first_and_balances` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     let url = db_url();

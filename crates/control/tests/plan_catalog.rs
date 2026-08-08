@@ -466,6 +466,12 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
     common::drain_pg().await;
 }
 
+// `lock_fx()` returns a `MutexGuard` over a `Mutex<()>` - a pure
+// test-serialization token, not shared mutable data accessed across the
+// await. compio::test runs each test on its own single-threaded runtime,
+// so the held guard cannot deadlock another task's poll the way it could
+// under a work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn charge_from_real_aggregates_uses_weight_table() {
     // End-to-end of the CU pricing path against REAL usage_aggregates rows +
@@ -535,6 +541,8 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     common::drain_pg().await;
 }
 
+// See the allow on `charge_from_real_aggregates_uses_weight_table` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn charge_uses_only_db_weight_table_and_default_fx() {
     // Prove the global weight table + default FX are actually loaded from the DB
@@ -591,6 +599,8 @@ async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
     common::drain_pg().await;
 }
 
+// See the allow on `charge_from_real_aggregates_uses_weight_table` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     // MAJOR-3 REGRESSION. Two arms:
