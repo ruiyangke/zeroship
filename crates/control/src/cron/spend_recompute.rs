@@ -385,6 +385,14 @@ mod tests {
     /// keep their billing value - expiring them on a staleness rule would throw
     /// away money that would otherwise be invoiced.
     ///
+    /// That billing half is a HOLE, not a handoff: nothing asserts it anywhere.
+    /// `event_forwarder` has no inline test module, and every event in
+    /// `tests/stream_forwarder_recompute_test.rs` is stamped in-period
+    /// (`period + 10/20/30`), so no test drives a late event through the
+    /// forwarder to see it billed. Said plainly because an exclusion that does
+    /// not name where the class IS covered leaves a reader unable to tell a gap
+    /// from a delegation.
+    ///
     /// Every other test here uses an in-period timestamp, so this branch had no
     /// coverage.
     #[test]

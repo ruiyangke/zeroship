@@ -1764,6 +1764,13 @@ mod tests {
     /// leaves it green, because the vector still grows; that mutation was tried
     /// first and passed, so this test does not cover it.
     ///
+    /// That uncovered case is a HOLE, not a handoff - nothing else in this
+    /// crate asserts the reservation size, and no assertion here could: the
+    /// malformed frame below errors identically whether the capacity came from
+    /// the frame or from the wire count. Stated rather than left implicit,
+    /// because an exclusion that does not say where the class IS covered leaves
+    /// a reader unable to tell a gap from a delegation.
+    ///
     /// `TRUNCATE ... CASCADE` on a heavily partitioned table emits one id per
     /// partition and PostgreSQL enforces no ceiling, so a rejecting limit
     /// refuses valid input - and the WAL consumer propagates a decode error out
