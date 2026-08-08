@@ -173,6 +173,21 @@ enum CallOutcome {
 // AlgorithmFn — pull / cancel / start
 // ---------------------------------------------------------------------------
 
+/// Pull-algorithm future returned by [`AlgorithmFn::Native`]'s closure:
+/// resolves to the chunk/value produced, or rejects with the error value.
+type NativePullFuture =
+    Pin<Box<dyn Future<Output = Result<v8::Global<v8::Value>, v8::Global<v8::Value>>>>>;
+
+/// Closure type backing [`AlgorithmFn::Native`].
+type NativePullFn = Box<dyn FnMut(v8::Global<v8::Object>) -> NativePullFuture>;
+
+/// Cancel-algorithm future returned by [`AlgorithmFn::NativeReason`]'s
+/// closure: resolves on success, or rejects with the error value.
+type NativeCancelFuture = Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>;
+
+/// Closure type backing [`AlgorithmFn::NativeReason`].
+type NativeCancelFn = Box<dyn FnMut(Option<v8::Global<v8::Value>>) -> NativeCancelFuture>;
+
 /// Pull / cancel / start algorithm — variants:
 ///  - `Js`: user-supplied JS function from underlyingSource.
 ///  - `Native`: Rust trait method (NativeSource).
@@ -191,25 +206,11 @@ pub enum AlgorithmFn {
     /// future is driven by the runtime loop; this dispatch sets up the
     /// type surface but defers wiring to the next chunk.
     #[allow(dead_code)]
-    Native(
-        Box<
-            dyn FnMut(
-                v8::Global<v8::Object>,
-            )
-                -> Pin<Box<dyn Future<Output = Result<v8::Global<v8::Value>, v8::Global<v8::Value>>>>>,
-        >,
-    ),
+    Native(NativePullFn),
     /// Native (Rust closure) for cancel — accepts the reason as
     /// Option<Global>.
     #[allow(dead_code)]
-    NativeReason(
-        Box<
-            dyn FnMut(
-                Option<v8::Global<v8::Value>>,
-            )
-                -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>,
-        >,
-    ),
+    NativeReason(NativeCancelFn),
 }
 
 impl AlgorithmFn {
@@ -369,7 +370,7 @@ fn controller_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );
@@ -752,7 +753,7 @@ pub fn readable_stream_default_controller_enqueue<'s>(
         if !is_non_negative_number(size) {
             let msg = v8::String::new(scope, "size returned a non-finite or negative value").unwrap();
             let exc = v8::Exception::range_error(scope, msg);
-            let exc_v: v8::Local<v8::Value> = exc.into();
+            let exc_v: v8::Local<v8::Value> = exc;
             let exc_g = v8::Global::new(scope, exc_v);
             let exc_l = v8::Local::new(scope, &exc_g);
             readable_stream_default_controller_error(scope, controller, exc_l);
@@ -1152,7 +1153,16 @@ pub fn set_up_readable_stream_default_controller_native<S: NativeSource + 'stati
         let source_rc = source_rc.clone();
         AlgorithmFn::Native(Box::new(move |controller_obj| {
             let source_rc = source_rc.clone();
-            Box::pin(async move {
+            // The RefMut is held across the .await below because NativeSource::pull
+            // needs &mut self for its whole async body - there's no way to release
+            // it earlier without changing the trait's borrow shape. Single-threaded
+            // executor, so no data race, but a `cancel()` on this same `source_rc`
+            // firing while a pull is in flight would double-borrow and panic;
+            // that's a real, separate concern (not introduced by this lint pass)
+            // left for a future dispatch that reworks NativeSource's borrow
+            // contract.
+            #[allow(clippy::await_holding_refcell_ref)]
+            let fut = Box::pin(async move {
                 let mut controller = NativeReadableController { controller_obj };
                 let res = source_rc.borrow_mut().pull(&mut controller).await;
                 // Sentinel: NativeSource pull resolves to undefined
@@ -1166,14 +1176,22 @@ pub fn set_up_readable_stream_default_controller_native<S: NativeSource + 'stati
                     Ok(()) => Err(unreachable_sentinel()),
                     Err(e) => Err(e),
                 }
-            })
+            });
+            fut
         }))
     };
     let cancel = {
         let source_rc = source_rc.clone();
         AlgorithmFn::NativeReason(Box::new(move |reason| {
             let source_rc = source_rc.clone();
-            Box::pin(async move { source_rc.borrow_mut().cancel(reason).await })
+            // See the matching comment on the `pull` closure above: the RefMut
+            // must stay live for the whole async body, single-threaded executor
+            // so no data race, but a concurrent pull/cancel pair on the same
+            // `source_rc` could still double-borrow and panic - a real, separate
+            // concern left for a future dispatch, not fixed by this lint pass.
+            #[allow(clippy::await_holding_refcell_ref)]
+            let fut = Box::pin(async move { source_rc.borrow_mut().cancel(reason).await });
+            fut
         }))
     };
     // start: synchronous Noop here. The async start hook ships in a

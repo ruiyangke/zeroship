@@ -178,6 +178,12 @@ pub struct AsyncWork {
     pub pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
 }
 
+impl Default for AsyncWork {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsyncWork {
     pub fn new() -> Self {
         Self {
@@ -444,6 +450,9 @@ impl Runtime {
 
     /// Variant of [`Runtime::call_fetch_handler`] used by the worker once it
     /// has verified the gateway-issued `ZeroShip-User` envelope.
+    // Public API consumed by crates/worker; bundling these into a request
+    // struct would ripple across a crate outside this lint pass's scope.
+    #[allow(clippy::too_many_arguments)]
     pub fn call_fetch_handler_with_user(
         &self,
         method: &str,
@@ -1021,6 +1030,9 @@ impl Drop for RuntimeInner {
 impl RuntimeInner {
     /// Create a new runtime with plugins.
     /// Plugins register native functions on `zeroship.{namespace}.*`.
+    // Bundling these into a params struct is a real design decision, not
+    // a mechanical lint fix, so it's left for a deliberate follow-up.
+    #[allow(clippy::too_many_arguments)]
     fn new_with_plugins(
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
@@ -1707,67 +1719,48 @@ impl RuntimeInner {
                 let ns_local = v8::Local::new(scope, &ns_global);
                 if let Some(ns_obj) = ns_local.to_object(scope) {
                     let default_key = v8::String::new(scope, "default").unwrap();
-                    if let Some(default_val) = ns_obj.get(scope, default_key.into()) {
-                        if !default_val.is_undefined() && !default_val.is_null() {
-                            if let Some(default_obj) = default_val.to_object(scope) {
-                                let fetch_key = v8::String::new(scope, "fetch").unwrap();
-                                if let Some(fetch_val) =
-                                    default_obj.get(scope, fetch_key.into())
-                                {
-                                    if fetch_val.is_function() {
-                                        let func =
-                                            v8::Local::<v8::Function>::try_from(fetch_val)
-                                                .unwrap();
-                                        self.fetch_handler_fn =
-                                            Some(v8::Global::new(scope, func));
-                                    }
-                                }
-                                // Zeroship extension: cache default.fetchFast
-                                // for the non-RPC HTTP fast-path. Null when
-                                // the user module doesn't opt into the
-                                // extension.
-                                let ff_key = v8::String::new(scope, "fetchFast").unwrap();
-                                if let Some(ff_val) =
-                                    default_obj.get(scope, ff_key.into())
-                                {
-                                    if ff_val.is_function() {
-                                        let func =
-                                            v8::Local::<v8::Function>::try_from(ff_val)
-                                                .unwrap();
-                                        self.fetch_fast_fn =
-                                            Some(v8::Global::new(scope, func));
-                                    }
-                                }
-                                // RPC standalone entry point: cache
-                                // default.rpc for the kernel-side RPC
-                                // fast path. When set, /__zeroship/v1/<id>
-                                // requests skip Request construction
-                                // and call rpc(id, input, ctx) directly.
-                                let rpc_key = v8::String::new(scope, "rpc").unwrap();
-                                if let Some(rpc_val) =
-                                    default_obj.get(scope, rpc_key.into())
-                                {
-                                    if rpc_val.is_function() {
-                                        let func =
-                                            v8::Local::<v8::Function>::try_from(rpc_val)
-                                                .unwrap();
-                                        self.rpc_fn =
-                                            Some(v8::Global::new(scope, func));
-                                    }
-                                }
-                                let workflow_key = v8::String::new(scope, "workflow").unwrap();
-                                if let Some(workflow_val) =
-                                    default_obj.get(scope, workflow_key.into())
-                                {
-                                    if workflow_val.is_function() {
-                                        let func =
-                                            v8::Local::<v8::Function>::try_from(workflow_val)
-                                                .unwrap();
-                                        self.workflow_fn =
-                                            Some(v8::Global::new(scope, func));
-                                    }
-                                }
-                            }
+                    if let Some(default_val) = ns_obj.get(scope, default_key.into())
+                        && !default_val.is_undefined()
+                        && !default_val.is_null()
+                        && let Some(default_obj) = default_val.to_object(scope)
+                    {
+                        let fetch_key = v8::String::new(scope, "fetch").unwrap();
+                        if let Some(fetch_val) = default_obj.get(scope, fetch_key.into())
+                            && fetch_val.is_function()
+                        {
+                            let func = v8::Local::<v8::Function>::try_from(fetch_val).unwrap();
+                            self.fetch_handler_fn = Some(v8::Global::new(scope, func));
+                        }
+                        // Zeroship extension: cache default.fetchFast
+                        // for the non-RPC HTTP fast-path. Null when
+                        // the user module doesn't opt into the
+                        // extension.
+                        let ff_key = v8::String::new(scope, "fetchFast").unwrap();
+                        if let Some(ff_val) = default_obj.get(scope, ff_key.into())
+                            && ff_val.is_function()
+                        {
+                            let func = v8::Local::<v8::Function>::try_from(ff_val).unwrap();
+                            self.fetch_fast_fn = Some(v8::Global::new(scope, func));
+                        }
+                        // RPC standalone entry point: cache
+                        // default.rpc for the kernel-side RPC
+                        // fast path. When set, /__zeroship/v1/<id>
+                        // requests skip Request construction
+                        // and call rpc(id, input, ctx) directly.
+                        let rpc_key = v8::String::new(scope, "rpc").unwrap();
+                        if let Some(rpc_val) = default_obj.get(scope, rpc_key.into())
+                            && rpc_val.is_function()
+                        {
+                            let func = v8::Local::<v8::Function>::try_from(rpc_val).unwrap();
+                            self.rpc_fn = Some(v8::Global::new(scope, func));
+                        }
+                        let workflow_key = v8::String::new(scope, "workflow").unwrap();
+                        if let Some(workflow_val) = default_obj.get(scope, workflow_key.into())
+                            && workflow_val.is_function()
+                        {
+                            let func =
+                                v8::Local::<v8::Function>::try_from(workflow_val).unwrap();
+                            self.workflow_fn = Some(v8::Global::new(scope, func));
                         }
                     }
                 }
@@ -1775,12 +1768,11 @@ impl RuntimeInner {
 
             // Compile a small JS helper that constructs a Request from Rust-supplied params.
             let helper_src = v8::String::new(scope, HTTP_CREATE_REQUEST_JS).unwrap();
-            if let Some(script) = v8::Script::compile(scope, helper_src, None) {
-                if let Some(val) = script.run(scope) {
-                    if let Ok(func) = v8::Local::<v8::Function>::try_from(val) {
-                        self.http_create_request_fn = Some(v8::Global::new(scope, func));
-                    }
-                }
+            if let Some(script) = v8::Script::compile(scope, helper_src, None)
+                && let Some(val) = script.run(scope)
+                && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
+            {
+                self.http_create_request_fn = Some(v8::Global::new(scope, func));
             }
 
             // Build the shared `ctx` object once. Frozen so the user's
@@ -1870,11 +1862,11 @@ impl RuntimeInner {
 
     fn arm_cpu_timer(&mut self) {
         #[cfg(target_os = "linux")]
-        if !self.cpu_timer_active {
-            if let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit) {
-                timer.arm(limit);
-                self.cpu_timer_active = true;
-            }
+        if !self.cpu_timer_active
+            && let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit)
+        {
+            timer.arm(limit);
+            self.cpu_timer_active = true;
         }
     }
 
@@ -2071,6 +2063,9 @@ impl RuntimeInner {
     /// (AsyncIterator from rpc, `null` from fetchFast). Pending Promises
     /// from any tier hand off to the pump. The result is classified as
     /// a `FetchOutcome`.
+    // Mirrors the outer Runtime::call_fetch_handler_with_user wrapper's
+    // params one-for-one; same rationale as that allow.
+    #[allow(clippy::too_many_arguments)]
     pub fn call_fetch_handler(
         &mut self,
         modules: &[crate::ModuleEntry],
@@ -2498,6 +2493,9 @@ impl RuntimeInner {
     /// Track a pending fetch promise and return a `FetchOutcome::Pending`
     /// whose receiver is settled by the pump via `send_settled_reply_any`
     /// once the promise resolves or rejects.
+    // Bundling these into a params struct is a real design decision, not
+    // a mechanical lint fix, so it's left for a deliberate follow-up.
+    #[allow(clippy::too_many_arguments)]
     fn store_fetch_pending(
         &mut self,
         request_id: u64,
@@ -2746,10 +2744,10 @@ impl RuntimeInner {
 
                 if self.check_v8_terminated() {
                     // Only error the request whose JS was executing when the timer fired
-                    if let Some(rid) = request_id {
-                        if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, self.termination_message());
-                        }
+                    if let Some(rid) = request_id
+                        && let Some(req) = self.pending_requests.remove(&rid)
+                    {
+                        send_pending_error(req, self.termination_message());
                     }
                     self.clear_executing_request();
                     self.drain_new_tasks_into(work);
@@ -2758,10 +2756,10 @@ impl RuntimeInner {
 
                 let cpu_elapsed = start.elapsed();
 
-                if let Some(rid) = request_id {
-                    if let Some(req) = self.pending_requests.get_mut(&rid) {
-                        req.cpu_accumulated += cpu_elapsed;
-                    }
+                if let Some(rid) = request_id
+                    && let Some(req) = self.pending_requests.get_mut(&rid)
+                {
+                    req.cpu_accumulated += cpu_elapsed;
                 }
 
                 for (id, req, settled) in settled_results {
@@ -2808,10 +2806,10 @@ impl RuntimeInner {
                 self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
-                    if let Some(rid) = request_id {
-                        if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, self.termination_message());
-                        }
+                    if let Some(rid) = request_id
+                        && let Some(req) = self.pending_requests.remove(&rid)
+                    {
+                        send_pending_error(req, self.termination_message());
                     }
                     self.clear_executing_request();
                     self.drain_new_tasks_into(work);
@@ -2820,10 +2818,10 @@ impl RuntimeInner {
 
                 let cpu_elapsed = start.elapsed();
 
-                if let Some(rid) = request_id {
-                    if let Some(req) = self.pending_requests.get_mut(&rid) {
-                        req.cpu_accumulated += cpu_elapsed;
-                    }
+                if let Some(rid) = request_id
+                    && let Some(req) = self.pending_requests.get_mut(&rid)
+                {
+                    req.cpu_accumulated += cpu_elapsed;
                 }
 
                 for (id, req, settled) in settled_results {
@@ -2972,10 +2970,10 @@ impl RuntimeInner {
                 self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
-                    if let Some(rid) = request_id {
-                        if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, self.termination_message());
-                        }
+                    if let Some(rid) = request_id
+                        && let Some(req) = self.pending_requests.remove(&rid)
+                    {
+                        send_pending_error(req, self.termination_message());
                     }
                     self.clear_executing_request();
                     self.drain_new_tasks_into(work);
@@ -2984,10 +2982,10 @@ impl RuntimeInner {
 
                 let cpu_elapsed = start.elapsed();
 
-                if let Some(rid) = request_id {
-                    if let Some(req) = self.pending_requests.get_mut(&rid) {
-                        req.cpu_accumulated += cpu_elapsed;
-                    }
+                if let Some(rid) = request_id
+                    && let Some(req) = self.pending_requests.get_mut(&rid)
+                {
+                    req.cpu_accumulated += cpu_elapsed;
                 }
 
                 for (id, req, settled) in settled_results {
@@ -3137,10 +3135,10 @@ impl RuntimeInner {
 
         if self.check_v8_terminated() {
             // Only error the request whose timer callback was executing
-            if let Some(rid) = owner_request_id {
-                if let Some(req) = self.pending_requests.remove(&rid) {
-                    send_pending_error(req, self.termination_message());
-                }
+            if let Some(rid) = owner_request_id
+                && let Some(req) = self.pending_requests.remove(&rid)
+            {
+                send_pending_error(req, self.termination_message());
             }
             self.clear_executing_request();
             self.drain_new_tasks_into(work);
@@ -3149,10 +3147,10 @@ impl RuntimeInner {
 
         let cpu_elapsed = start.elapsed();
 
-        if let Some(rid) = owner_request_id {
-            if let Some(req) = self.pending_requests.get_mut(&rid) {
-                req.cpu_accumulated += cpu_elapsed;
-            }
+        if let Some(rid) = owner_request_id
+            && let Some(req) = self.pending_requests.get_mut(&rid)
+        {
+            req.cpu_accumulated += cpu_elapsed;
         }
 
         // CPU limit check for the owning request
@@ -3232,10 +3230,10 @@ impl RuntimeInner {
 
             if self.check_v8_terminated() {
                 // Only error the request whose timer callback was executing
-                if let Some(rid) = owner_request_id {
-                    if let Some(req) = self.pending_requests.remove(&rid) {
-                        send_pending_error(req, self.termination_message());
-                    }
+                if let Some(rid) = owner_request_id
+                    && let Some(req) = self.pending_requests.remove(&rid)
+                {
+                    send_pending_error(req, self.termination_message());
                 }
                 self.clear_executing_request();
                 self.drain_new_tasks_into(work);
@@ -3244,10 +3242,10 @@ impl RuntimeInner {
 
             let cpu_elapsed = start.elapsed();
 
-            if let Some(rid) = owner_request_id {
-                if let Some(req) = self.pending_requests.get_mut(&rid) {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
+            if let Some(rid) = owner_request_id
+                && let Some(req) = self.pending_requests.get_mut(&rid)
+            {
+                req.cpu_accumulated += cpu_elapsed;
             }
 
             // CPU limit check for the owning request
@@ -3507,7 +3505,6 @@ impl RuntimeInner {
             use crate::websocket_native::network as nw;
             let state = self.state.clone();
             nw::push_event_pub(&state, ws_id, nw::WsEvent::MessageText(data.to_string()));
-            return;
         }
         #[cfg(not(feature = "runtime_native_websocket"))]
         {
@@ -3547,7 +3544,6 @@ impl RuntimeInner {
                     was_clean: code == 1000,
                 },
             );
-            return;
         }
         #[cfg(not(feature = "runtime_native_websocket"))]
         {
@@ -3869,6 +3865,7 @@ fn wait_until_noop_callback(
 /// - `Err(v8::Global<v8::Promise>)` — handler returned a still-pending
 ///   promise. The real async path lands in Task B4; caller serves 501
 ///   in the meantime.
+///
 /// Outcome of the `fetchFast(method, url, bodyBytes, env)` extension.
 ///
 /// `Handled` means the user produced a definitive result (sync or
@@ -4077,7 +4074,7 @@ fn extract_zs_v1_id<'a>(method: &str, url: &'a str) -> Option<&'a str> {
     const TAG: &str = "/__zeroship/v1/";
     let start = url.find(TAG)? + TAG.len();
     let rest = &url[start..];
-    let end = start + rest.find(|c: char| c == '?' || c == '#').unwrap_or(rest.len());
+    let end = start + rest.find(['?', '#']).unwrap_or(rest.len());
     if start >= end { return None; }
     Some(&url[start..end])
 }
@@ -4096,7 +4093,7 @@ enum InputParse<'s> {
 ///
 /// Wire shapes:
 ///   - POST:  body is superjson, expected canonical shape
-///            `{"json":<v>,"meta"?:...}`.
+///     `{"json":<v>,"meta"?:...}`.
 ///   - GET:   query string carries `?input=<base64url-of-JSON-body>`.
 ///
 /// Empty body / missing query param → `undefined` (Ok). Malformed JSON

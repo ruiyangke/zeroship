@@ -201,10 +201,10 @@ fn get_or_create_shared_size_fn<'s>(
     let global = scope.get_current_context().global(scope);
     let priv_ = crate::streams::slots::private_sym(scope, slot_name);
 
-    if let Some(cached) = global.get_private(scope, priv_) {
-        if !cached.is_undefined() {
-            return cached;
-        }
+    if let Some(cached) = global.get_private(scope, priv_)
+        && !cached.is_undefined()
+    {
+        return cached;
     }
 
     // First call in this realm: build the Function and cache.

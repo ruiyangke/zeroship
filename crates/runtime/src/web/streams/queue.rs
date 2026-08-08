@@ -252,6 +252,12 @@ pub fn is_non_negative_number(v: f64) -> bool {
     !v.is_nan() && v >= 0.0
 }
 
+// QueueContainer trait stub — the controllers use ValueQueue / ByteQueue
+// directly. The trait stays here as documentation; uncomment if a generic
+// algorithm needs to abstract over both.
+#[allow(dead_code)]
+pub(crate) const _QUEUE_CONTAINER_DOC: () = ();
+
 // ---------------------------------------------------------------------------
 // Tests — pure-Rust, no V8 needed
 // ---------------------------------------------------------------------------
@@ -307,9 +313,3 @@ mod tests {
         assert_eq!(q.total_size(), 0.0);
     }
 }
-
-// QueueContainer trait stub — the controllers use ValueQueue / ByteQueue
-// directly. The trait stays here as documentation; uncomment if a generic
-// algorithm needs to abstract over both.
-#[allow(dead_code)]
-pub(crate) const _QUEUE_CONTAINER_DOC: () = ();

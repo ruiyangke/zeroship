@@ -5,7 +5,7 @@
 //! ## Module structure
 //!
 //! - `algorithms`     — main_fetch / scheme_fetch / http_fetch /
-//!                      http_redirect_fetch (no V8 entry)
+//!   http_redirect_fetch (no V8 entry)
 //! - `http_network`   — http_network_fetch wrapper around cyper
 //! - `redirect`       — method/body mutation + same-origin checks
 //! - `content_encoding` — Content-Encoding decode hook
@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::channel::CancelFlag;
-use crate::fetch_body::body::BodySource;
+use crate::fetch_body::BodySource;
 use crate::state::{
     OpResult, ResolveValue, SharedState, MAX_PENDING_FETCHES, MAX_PENDING_OPS,
 };
@@ -347,16 +347,16 @@ fn fetch_callback(
         // Step 2: synchronous abort check. Fetch §5.1 step 7.
         let signal_obj_opt = read_request_signal(scope, req_obj);
 
-        if let Some(sig) = signal_obj_opt {
-            if crate::dom::abort_signal::is_aborted(scope, sig) {
-                let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
-                    let m = v8::String::new(scope, "The operation was aborted.").unwrap();
-                    v8::Exception::error(scope, m)
-                });
-                resolver.reject(scope, reason);
-                rv.set(promise.into());
-                return;
-            }
+        if let Some(sig) = signal_obj_opt
+            && crate::dom::abort_signal::is_aborted(scope, sig)
+        {
+            let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
+                let m = v8::String::new(scope, "The operation was aborted.").unwrap();
+                v8::Exception::error(scope, m)
+            });
+            resolver.reject(scope, reason);
+            rv.set(promise.into());
+            return;
         }
 
         Some((req_obj, signal_obj_opt))
@@ -719,10 +719,10 @@ pub fn materialise_pending<'s>(
             // signal.reason as the rejection.
             if let Some(sig_g) = signal {
                 let sig = v8::Local::new(scope, sig_g);
-                if crate::dom::abort_signal::is_aborted(scope, sig) {
-                    if let Some(reason) = read_signal_reason(scope, sig) {
-                        return Err(reason);
-                    }
+                if crate::dom::abort_signal::is_aborted(scope, sig)
+                    && let Some(reason) = read_signal_reason(scope, sig)
+                {
+                    return Err(reason);
                 }
             }
             let m = v8::String::new(scope, &format!("Network request failed: {msg}")).unwrap();
@@ -847,9 +847,9 @@ fn build_response_object<'s>(
         if !matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
             let len = alg.body.len() as u64;
             let body_rc = std::rc::Rc::new(alg.body);
-            *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+            *state.body.borrow_mut() = crate::fetch_body::BodyImpl {
                 stream: std::cell::RefCell::new(None),
-                source: Some(crate::fetch_body::body::BodySource::Bytes(body_rc)),
+                source: Some(crate::fetch_body::BodySource::Bytes(body_rc)),
                 length: Some(len),
             };
         }

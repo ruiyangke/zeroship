@@ -337,29 +337,29 @@ fn run_scrypt(
     let mut r: u64 = 8;
     let mut p: u64 = 1;
     let mut max_mem: usize = 32 * 1024 * 1024;
-    if let Some(opt) = options_v {
-        if !opt.is_undefined() && !opt.is_null() {
-            if let Ok(obj) = v8::Local::<v8::Object>::try_from(opt) {
-                let read_u64 = |scope: &mut v8::PinScope, k: &str| -> Option<u64> {
-                    let key = v8::String::new(scope, k).unwrap();
-                    obj.get(scope, key.into())
-                        .and_then(|v| if v.is_undefined() { None } else { Some(v) })
-                        .and_then(|v| v.number_value(scope))
-                        .map(|f| f as u64)
-                };
-                if let Some(v) = read_u64(scope, "N").or_else(|| read_u64(scope, "cost")) {
-                    n = v;
-                }
-                if let Some(v) = read_u64(scope, "r").or_else(|| read_u64(scope, "blockSize")) {
-                    r = v;
-                }
-                if let Some(v) = read_u64(scope, "p").or_else(|| read_u64(scope, "parallelization")) {
-                    p = v;
-                }
-                if let Some(v) = read_u64(scope, "maxmem") {
-                    max_mem = v as usize;
-                }
-            }
+    if let Some(opt) = options_v
+        && !opt.is_undefined()
+        && !opt.is_null()
+        && let Ok(obj) = v8::Local::<v8::Object>::try_from(opt)
+    {
+        let read_u64 = |scope: &mut v8::PinScope, k: &str| -> Option<u64> {
+            let key = v8::String::new(scope, k).unwrap();
+            obj.get(scope, key.into())
+                .and_then(|v| if v.is_undefined() { None } else { Some(v) })
+                .and_then(|v| v.number_value(scope))
+                .map(|f| f as u64)
+        };
+        if let Some(v) = read_u64(scope, "N").or_else(|| read_u64(scope, "cost")) {
+            n = v;
+        }
+        if let Some(v) = read_u64(scope, "r").or_else(|| read_u64(scope, "blockSize")) {
+            r = v;
+        }
+        if let Some(v) = read_u64(scope, "p").or_else(|| read_u64(scope, "parallelization")) {
+            p = v;
+        }
+        if let Some(v) = read_u64(scope, "maxmem") {
+            max_mem = v as usize;
         }
     }
     kdf::scrypt(&password, &salt, n, r, p, max_mem, keylen).map_err(map_kdf_err)

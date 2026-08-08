@@ -209,10 +209,10 @@ impl EventSourceState {
         let mut with_credentials = false;
         if let Ok(init_obj) = v8::Local::<v8::Object>::try_from(init_arg) {
             let key = v8::String::new(scope, "withCredentials").unwrap();
-            if let Some(v) = init_obj.get(scope, key.into()) {
-                if !v.is_undefined() {
-                    with_credentials = v.boolean_value(scope);
-                }
+            if let Some(v) = init_obj.get(scope, key.into())
+                && !v.is_undefined()
+            {
+                with_credentials = v.boolean_value(scope);
             }
         }
 
@@ -348,11 +348,11 @@ impl EventSourceState {
         if let Some(ctl_g) = self.abort_controller.borrow().clone() {
             let ctl = v8::Local::new(scope, ctl_g);
             let key = v8::String::new(scope, "abort").unwrap();
-            if let Some(abort_v) = ctl.get(scope, key.into()) {
-                if let Ok(abort_fn) = v8::Local::<v8::Function>::try_from(abort_v) {
-                    let und: v8::Local<v8::Value> = v8::undefined(scope).into();
-                    let _ = abort_fn.call(scope, ctl.into(), &[und]);
-                }
+            if let Some(abort_v) = ctl.get(scope, key.into())
+                && let Ok(abort_fn) = v8::Local::<v8::Function>::try_from(abort_v)
+            {
+                let und: v8::Local<v8::Value> = v8::undefined(scope).into();
+                let _ = abort_fn.call(scope, ctl.into(), &[und]);
             }
         }
     }
@@ -698,10 +698,8 @@ fn on_response_resolved(
     let reader_global_opt: Option<v8::Global<v8::Object>> = {
         v8::tc_scope!(let tc, scope);
         let r = get_reader_fn.call(tc, body.into(), &[]);
-        match r.and_then(|v| v8::Local::<v8::Object>::try_from(v).ok()) {
-            Some(reader_local) => Some(v8::Global::new(tc, reader_local)),
-            None => None,
-        }
+        r.and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+            .map(|reader_local| v8::Global::new(tc, reader_local))
     };
     let Some(reader_global) = reader_global_opt else {
         on_io_error(scope, &captures, "getReader failed");
@@ -967,10 +965,10 @@ fn process_line(line: &[u8], parser: &mut ParserState, state: &EventSourceState)
             }
         }
         b"retry" => {
-            if let Ok(s) = std::str::from_utf8(value) {
-                if let Ok(ms) = s.parse::<u32>() {
-                    state.retry_ms.set(ms);
-                }
+            if let Ok(s) = std::str::from_utf8(value)
+                && let Ok(ms) = s.parse::<u32>()
+            {
+                state.retry_ms.set(ms);
             }
         }
         _ => {
@@ -1306,12 +1304,12 @@ pub fn install_global<'s>(
     install_constant(scope, class_fn.into(), "OPEN", READY_OPEN);
     install_constant(scope, class_fn.into(), "CLOSED", READY_CLOSED);
     let proto_key = v8::String::new(scope, "prototype").unwrap();
-    if let Some(proto_v) = class_fn.get(scope, proto_key.into()) {
-        if let Ok(proto) = v8::Local::<v8::Object>::try_from(proto_v) {
-            install_constant(scope, proto, "CONNECTING", READY_CONNECTING);
-            install_constant(scope, proto, "OPEN", READY_OPEN);
-            install_constant(scope, proto, "CLOSED", READY_CLOSED);
-        }
+    if let Some(proto_v) = class_fn.get(scope, proto_key.into())
+        && let Ok(proto) = v8::Local::<v8::Object>::try_from(proto_v)
+    {
+        install_constant(scope, proto, "CONNECTING", READY_CONNECTING);
+        install_constant(scope, proto, "OPEN", READY_OPEN);
+        install_constant(scope, proto, "CLOSED", READY_CLOSED);
     }
 
     let key = v8::String::new(scope, "EventSource").unwrap();

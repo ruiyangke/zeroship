@@ -319,57 +319,48 @@ fn build_entry(
     value_v: v8::Local<v8::Value>,
     filename_v: v8::Local<v8::Value>,
 ) -> Result<FormDataValue, String> {
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value_v) {
-        if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
-            // Determine the filename arg (USVString-coerced).
-            let filename: Option<String> = if filename_v.is_undefined() {
-                None
-            } else {
-                Some(filename_v.to_rust_string_lossy(scope))
-            };
-            let is_file = crate::blob_native::blob::is_file_instance_public(scope, obj);
-            // Identity preservation: File without filename override.
-            if is_file && filename.is_none() {
-                return Ok(FormDataValue::File(v8::Global::new(scope, obj)));
-            }
-            // Mint a new File from the Blob/File's bytes + type.
-            let (bytes, blob_type) =
-                match crate::blob_native::blob::read_blob_bytes_and_type(scope, obj) {
-                    Some(p) => p,
-                    None => {
-                        return Err(
-                            "FormData append/set: Blob value has no readable bytes".into()
-                        )
-                    }
-                };
-            let final_filename = filename.unwrap_or_else(|| "blob".to_string());
-            // Preserve lastModified for File→File rewraps; default to
-            // current time for Blob→File.
-            let last_modified: Option<i64> = if is_file {
-                let lm_key = v8::String::new(scope, "lastModified").unwrap();
-                obj.get(scope, lm_key.into())
-                    .and_then(|v| v.number_value(scope))
-                    .map(|n| n as i64)
-            } else {
-                None
-            };
-            let file_v = crate::blob_native::file::create_file_with_last_modified(
-                scope,
-                bytes,
-                final_filename,
-                &blob_type,
-                last_modified,
-            );
-            let file_obj: v8::Local<v8::Object> = match file_v.try_into() {
-                Ok(o) => o,
-                Err(_) => {
-                    return Err(
-                        "FormData append/set: minted File is not an object".into()
-                    )
-                }
-            };
-            return Ok(FormDataValue::File(v8::Global::new(scope, file_obj)));
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value_v)
+        && crate::blob_native::is_blob_instance_public(scope, obj)
+    {
+        // Determine the filename arg (USVString-coerced).
+        let filename: Option<String> = if filename_v.is_undefined() {
+            None
+        } else {
+            Some(filename_v.to_rust_string_lossy(scope))
+        };
+        let is_file = crate::blob_native::is_file_instance_public(scope, obj);
+        // Identity preservation: File without filename override.
+        if is_file && filename.is_none() {
+            return Ok(FormDataValue::File(v8::Global::new(scope, obj)));
         }
+        // Mint a new File from the Blob/File's bytes + type.
+        let (bytes, blob_type) = match crate::blob_native::read_blob_bytes_and_type(scope, obj) {
+            Some(p) => p,
+            None => return Err("FormData append/set: Blob value has no readable bytes".into()),
+        };
+        let final_filename = filename.unwrap_or_else(|| "blob".to_string());
+        // Preserve lastModified for File→File rewraps; default to
+        // current time for Blob→File.
+        let last_modified: Option<i64> = if is_file {
+            let lm_key = v8::String::new(scope, "lastModified").unwrap();
+            obj.get(scope, lm_key.into())
+                .and_then(|v| v.number_value(scope))
+                .map(|n| n as i64)
+        } else {
+            None
+        };
+        let file_v = crate::blob_native::file::create_file_with_last_modified(
+            scope,
+            bytes,
+            final_filename,
+            &blob_type,
+            last_modified,
+        );
+        let file_obj: v8::Local<v8::Object> = match file_v.try_into() {
+            Ok(o) => o,
+            Err(_) => return Err("FormData append/set: minted File is not an object".into()),
+        };
+        return Ok(FormDataValue::File(v8::Global::new(scope, file_obj)));
     }
     // USVString fallback. Spec requires USVString conversion (lone
     // surrogates → U+FFFD); to_rust_string_lossy does this.

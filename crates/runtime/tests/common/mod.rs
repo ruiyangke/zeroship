@@ -249,14 +249,14 @@ fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> 
 /// already its own framing. Falls back to the raw body if it's not a
 /// JSON object with a `json` key.
 fn unwrap_json_envelope(body: &str) -> String {
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(inner) = map.get("json") {
-            if let Some(s) = inner.as_str() {
-                // Re-stringify so callers see a JSON string.
-                return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-            }
-            return serde_json::to_string(inner).unwrap_or_else(|_| body.to_string());
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(inner) = map.get("json")
+    {
+        if let Some(s) = inner.as_str() {
+            // Re-stringify so callers see a JSON string.
+            return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
         }
+        return serde_json::to_string(inner).unwrap_or_else(|_| body.to_string());
     }
     body.to_string()
 }
@@ -481,10 +481,10 @@ fn url_path_encode(s: &str) -> String {
 /// Extract a usable "message" string from a JSON error body. Falls back to
 /// the raw body if it's not parseable.
 fn parse_error_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            return msg.to_string();
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(msg) = v.get("message").and_then(|m| m.as_str())
+    {
+        return msg.to_string();
     }
     body.to_string()
 }
@@ -570,13 +570,17 @@ pub fn dispatch_with_env(
 /// headers into the `call_fetch_handler` contract. Returns `None` for the
 /// "no handler" case to mirror the old "no onRequest" behavior (for tests
 /// that negate the presence of a handler).
+/// Status, response headers, and body of a synchronous dispatch — `None`
+/// when the module has no `default.fetch` handler.
+type HttpSyncResponse = Option<(u16, Vec<(String, String)>, String)>;
+
 pub fn dispatch_http_sync(
     modules: Vec<ModuleEntry>,
     method: &str,
     url: &str,
     headers_json: &str,
     body: &str,
-) -> Option<(u16, Vec<(String, String)>, String)> {
+) -> HttpSyncResponse {
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
 

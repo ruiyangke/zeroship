@@ -123,10 +123,10 @@ fn read_buffer_source(
     val: v8::Local<v8::Value>,
 ) -> Result<Vec<u8>, &'static str> {
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(val) {
-        if let Some(buf) = view.buffer(scope) {
-            if buf.is_shared_array_buffer() {
-                return Err("SharedArrayBuffer-backed views are not allowed");
-            }
+        if let Some(buf) = view.buffer(scope)
+            && buf.is_shared_array_buffer()
+        {
+            return Err("SharedArrayBuffer-backed views are not allowed");
         }
         let mut out = vec![0u8; view.byte_length()];
         view.copy_contents(&mut out);

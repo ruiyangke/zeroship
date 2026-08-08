@@ -3,6 +3,15 @@ name = "zeroship-runtime"
 version = "0.1.0"
 edition = "2024"
 description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, fetch, streaming"
+# Cargo's bench auto-discovery picks up ANY benches/**/main.rs or benches/*.rs
+# even when [[bench]] entries are declared explicitly below. `benches/ntex-bench/`
+# depends on the `ntex` crate, which isn't (and hasn't been, since at least the
+# 2026-04-10 workspace-refactor commit) a workspace dependency - it's a dead,
+# never-compiling A/B-comparison harness left over from an earlier benchmark
+# round. Disabling autodiscovery keeps it around for reference without letting
+# it break `cargo build/clippy --all-targets`; the four real benches are still
+# built via the explicit [[bench]] entries below.
+autobenches = false
 
 [dependencies]
 # V8
@@ -154,6 +163,14 @@ harness = false
 
 [[bench]]
 name = "node_net_read"
+harness = false
+
+# Declared explicitly because `autobenches = false` above turns off the
+# discovery that used to pick this up. Without an entry here it is not a
+# disabled bench, it is an invisible one - it stops being built and nothing
+# reports that it stopped.
+[[bench]]
+name = "sse_bench"
 harness = false
 
 [lints]

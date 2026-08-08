@@ -18,7 +18,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use crate::fetch_body::body::{Body, BodyImpl};
+use crate::fetch_body::{Body, BodyImpl};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
 use super::enums::{
@@ -57,6 +57,10 @@ const DEFAULT_BASE_URL: &str = "http://localhost/";
 /// the `WebIdlConvertible::from_v8` paths reject unknown values with a
 /// TypeError, so by the time a value lands in the cell it's a valid
 /// spec variant.
+/// Shared, kernel-provided raw header list — see `raw_headers` below.
+/// Factored into a named alias per `clippy::type_complexity`.
+type RawHeaderList = Arc<Vec<(String, String)>>;
+
 #[allow(missing_debug_implementations)]
 pub struct RequestState {
     pub body: RefCell<BodyImpl>,
@@ -83,7 +87,7 @@ pub struct RequestState {
     /// `headers`. Held as `Arc` so the kernel can share the same backing
     /// `Vec` it already allocated for RPC dispatch without an extra
     /// O(N) clone.
-    pub raw_headers: RefCell<Option<Arc<Vec<(String, String)>>>>,
+    pub raw_headers: RefCell<Option<RawHeaderList>>,
     /// AbortSignal Global. Always present per spec — `request.signal`
     /// returns a fresh signal even when the user didn't pass one. We
     /// lazily mint on first access if none was provided.
@@ -508,13 +512,13 @@ impl RequestState {
                 }
             }
             match other_source {
-                Some(crate::fetch_body::body::BodySource::Bytes(rc))
-                | Some(crate::fetch_body::body::BodySource::Blob(rc, _))
-                | Some(crate::fetch_body::body::BodySource::UrlSearchParams(rc))
-                | Some(crate::fetch_body::body::BodySource::FormData(rc, _)) => {
+                Some(crate::fetch_body::BodySource::Bytes(rc))
+                | Some(crate::fetch_body::BodySource::Blob(rc, _))
+                | Some(crate::fetch_body::BodySource::UrlSearchParams(rc))
+                | Some(crate::fetch_body::BodySource::FormData(rc, _)) => {
                     InheritMode::BytesSource(rc)
                 }
-                Some(crate::fetch_body::body::BodySource::Stream) => InheritMode::StreamSource,
+                Some(crate::fetch_body::BodySource::Stream) => InheritMode::StreamSource,
                 None => InheritMode::None,
             }
         } else {
@@ -550,44 +554,44 @@ impl RequestState {
         }
 
         // Process explicit init.body if any.
-        if let Some(b) = body_input {
-            if !b.is_null_or_undefined() {
-                // Per Fetch §5.4 step 36: when body is a ReadableStream,
-                // init["duplex"] must exist (since the body is half-duplex
-                // by default — full-duplex is opt-in). The spec's exact
-                // wording: "If body is a ReadableStream and init["duplex"]
-                // does not exist, throw a TypeError."
-                //
-                // We match Chrome / Deno here: only validate when body is
-                // a ReadableStream. URLSearchParams / Blob / etc. don't
-                // need duplex.
-                if init_obj.is_some() {
-                    let body_is_stream = if let Ok(obj) = v8::Local::<v8::Object>::try_from(b) {
-                        is_readable_stream_global_instance(scope, obj)
-                    } else {
-                        false
-                    };
-                    if body_is_stream && init_dict.duplex.is_none() {
-                        return Err(crate::state::OpError::type_error(
-                            "Request with ReadableStream body requires init.duplex = 'half'",
-                        ));
+        if let Some(b) = body_input
+            && !b.is_null_or_undefined()
+        {
+            // Per Fetch §5.4 step 36: when body is a ReadableStream,
+            // init["duplex"] must exist (since the body is half-duplex
+            // by default — full-duplex is opt-in). The spec's exact
+            // wording: "If body is a ReadableStream and init["duplex"]
+            // does not exist, throw a TypeError."
+            //
+            // We match Chrome / Deno here: only validate when body is
+            // a ReadableStream. URLSearchParams / Blob / etc. don't
+            // need duplex.
+            if init_obj.is_some() {
+                let body_is_stream = if let Ok(obj) = v8::Local::<v8::Object>::try_from(b) {
+                    is_readable_stream_global_instance(scope, obj)
+                } else {
+                    false
+                };
+                if body_is_stream && init_dict.duplex.is_none() {
+                    return Err(crate::state::OpError::type_error(
+                        "Request with ReadableStream body requires init.duplex = 'half'",
+                    ));
+                }
+            }
+            let keepalive = state.keepalive.get();
+            match extract_body(scope, b, keepalive) {
+                Ok(extracted) => {
+                    *state.body.borrow_mut() = extracted.body;
+                    if let Some(ct) = extracted.content_type {
+                        // Stash for later: we'll set on Headers after
+                        // the headers init step, but only if the user
+                        // didn't already set one. PENDING_CT lives as
+                        // a local variable rather than a thread-local
+                        // (see top-of-fn comment).
+                        pending_ct = Some(ct);
                     }
                 }
-                let keepalive = state.keepalive.get();
-                match extract_body(scope, b, keepalive) {
-                    Ok(extracted) => {
-                        *state.body.borrow_mut() = extracted.body;
-                        if let Some(ct) = extracted.content_type {
-                            // Stash for later: we'll set on Headers after
-                            // the headers init step, but only if the user
-                            // didn't already set one. PENDING_CT lives as
-                            // a local variable rather than a thread-local
-                            // (see top-of-fn comment).
-                            pending_ct = Some(ct);
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
+                Err(e) => return Err(e),
             }
         }
 
@@ -603,9 +607,9 @@ impl RequestState {
                 // FIX B: defer stream construction. The body getter
                 // builds a ReadableStream lazily from the source.
                 let length = Some(rc.len() as u64);
-                *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                *state.body.borrow_mut() = crate::fetch_body::BodyImpl {
                     stream: std::cell::RefCell::new(None),
-                    source: Some(crate::fetch_body::body::BodySource::Bytes(rc.clone())),
+                    source: Some(crate::fetch_body::BodySource::Bytes(rc.clone())),
                     length,
                 };
             } else if let InheritMode::StreamSource = &inherit_mode {
@@ -621,9 +625,9 @@ impl RequestState {
                     let stream_local = v8::Local::new(scope, stream_g);
                     if let Some((branch_a, branch_b)) = tee_stream(scope, stream_local) {
                         *other.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, branch_a));
-                        *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                        *state.body.borrow_mut() = crate::fetch_body::BodyImpl {
                             stream: std::cell::RefCell::new(Some(v8::Global::new(scope, branch_b))),
-                            source: Some(crate::fetch_body::body::BodySource::Stream),
+                            source: Some(crate::fetch_body::BodySource::Stream),
                             length: None,
                         };
                     }
@@ -880,7 +884,7 @@ impl RequestState {
 
         let body_is_stream = matches!(
             self.body.borrow().source,
-            Some(crate::fetch_body::body::BodySource::Stream)
+            Some(crate::fetch_body::BodySource::Stream)
         ) && self.body.borrow().stream.borrow().is_some();
 
         // Tee the stream so original + clone share both halves and remain
@@ -918,15 +922,11 @@ impl RequestState {
         // If the V8 Headers wrapper hasn't been materialised yet (lazy
         // kernel path), build one from raw_headers so the clone gets a
         // copy of the kernel-supplied list.
-        if self.headers.borrow().is_none() {
-            if let Some(arc) = self.raw_headers.borrow_mut().take() {
-                if let Some(h_obj) =
-                    crate::headers::build_kernel_headers(scope, arc.as_slice())
-                {
-                    *self.headers.borrow_mut() =
-                        Some(v8::Global::new(scope, h_obj));
-                }
-            }
+        if self.headers.borrow().is_none()
+            && let Some(arc) = self.raw_headers.borrow_mut().take()
+            && let Some(h_obj) = crate::headers::build_kernel_headers(scope, arc.as_slice())
+        {
+            *self.headers.borrow_mut() = Some(v8::Global::new(scope, h_obj));
         }
         if let Some(h_g) = self.headers.borrow().clone() {
             let h_local = v8::Local::new(scope, h_g);
@@ -941,16 +941,16 @@ impl RequestState {
             }
         } else if let Some(src) = self.body.borrow().source.clone() {
             match src {
-                crate::fetch_body::body::BodySource::Bytes(rc)
-                | crate::fetch_body::body::BodySource::Blob(rc, _)
-                | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
-                | crate::fetch_body::body::BodySource::FormData(rc, _) => {
+                crate::fetch_body::BodySource::Bytes(rc)
+                | crate::fetch_body::BodySource::Blob(rc, _)
+                | crate::fetch_body::BodySource::UrlSearchParams(rc)
+                | crate::fetch_body::BodySource::FormData(rc, _) => {
                     let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
                     let stream_local = v8::Local::new(scope, new_stream);
                     let key = v8::String::new(scope, "body").unwrap();
                     init.set(scope, key.into(), stream_local.into());
                 }
-                crate::fetch_body::body::BodySource::Stream => {}
+                crate::fetch_body::BodySource::Stream => {}
             }
         }
 
@@ -1106,13 +1106,13 @@ pub fn build_kernel_request<'s>(
     // BodySource::Bytes path so consumer methods (`text` / `json` /
     // etc.) can short-circuit without materializing a stream.
     let body_impl = if body.is_empty() || method == "GET" || method == "HEAD" {
-        crate::fetch_body::body::BodyImpl::null()
+        crate::fetch_body::BodyImpl::null()
     } else {
         let bytes = std::rc::Rc::new(body.to_vec());
         let length = Some(bytes.len() as u64);
-        crate::fetch_body::body::BodyImpl {
+        crate::fetch_body::BodyImpl {
             stream: std::cell::RefCell::new(None),
-            source: Some(crate::fetch_body::body::BodySource::Bytes(bytes)),
+            source: Some(crate::fetch_body::BodySource::Bytes(bytes)),
             length,
         }
     };
@@ -1312,15 +1312,11 @@ fn build_request_headers<'s>(
         // it directly. Otherwise mint one from the kernel-supplied raw
         // header list and cache it on the input so future reads stay
         // identity-stable per [SameObject].
-        if other.headers.borrow().is_none() {
-            if let Some(arc) = other.raw_headers.borrow_mut().take() {
-                if let Some(h_obj) =
-                    crate::headers::build_kernel_headers(scope, arc.as_slice())
-                {
-                    *other.headers.borrow_mut() =
-                        Some(v8::Global::new(scope, h_obj));
-                }
-            }
+        if other.headers.borrow().is_none()
+            && let Some(arc) = other.raw_headers.borrow_mut().take()
+            && let Some(h_obj) = crate::headers::build_kernel_headers(scope, arc.as_slice())
+        {
+            *other.headers.borrow_mut() = Some(v8::Global::new(scope, h_obj));
         }
         match other.headers.borrow().as_ref() {
             Some(g) => v8::Local::new(scope, g.clone()).into(),
@@ -1359,21 +1355,21 @@ fn build_request_signal<'s>(
     // If init.signal is provided, run AbortSignal.any([init.signal])
     // so the request's signal aborts when init.signal does. If no
     // init.signal, just `new AbortController().signal`.
-    if let Some(sig_v) = init_signal {
-        if !sig_v.is_null_or_undefined() {
-            // AbortSignal.any([sig_v]) — returns a fresh signal.
-            let any_key = v8::String::new(scope, "any").unwrap();
-            if let Some(any_fn_v) = class_obj.get(scope, any_key.into()) {
-                if let Ok(any_fn) = v8::Local::<v8::Function>::try_from(any_fn_v) {
-                    let arr = v8::Array::new(scope, 1);
-                    arr.set_index(scope, 0, sig_v);
-                    let args = [arr.into()];
-                    if let Some(result) = any_fn.call(scope, class_obj.into(), &args) {
-                        if let Ok(o) = v8::Local::<v8::Object>::try_from(result) {
-                            return o;
-                        }
-                    }
-                }
+    if let Some(sig_v) = init_signal
+        && !sig_v.is_null_or_undefined()
+    {
+        // AbortSignal.any([sig_v]) — returns a fresh signal.
+        let any_key = v8::String::new(scope, "any").unwrap();
+        if let Some(any_fn_v) = class_obj.get(scope, any_key.into())
+            && let Ok(any_fn) = v8::Local::<v8::Function>::try_from(any_fn_v)
+        {
+            let arr = v8::Array::new(scope, 1);
+            arr.set_index(scope, 0, sig_v);
+            let args = [arr.into()];
+            if let Some(result) = any_fn.call(scope, class_obj.into(), &args)
+                && let Ok(o) = v8::Local::<v8::Object>::try_from(result)
+            {
+                return o;
             }
         }
     }

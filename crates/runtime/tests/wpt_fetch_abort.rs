@@ -76,11 +76,7 @@ fn start_server(delay_ms: u64) -> Server {
         // Read request.
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
-        loop {
-            let n = match stream.read(&mut tmp) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
+        while let Ok(n) = stream.read(&mut tmp) {
             if n == 0 {
                 break;
             }
@@ -94,12 +90,12 @@ fn start_server(delay_ms: u64) -> Server {
         }
 
         // Capture method.
-        if let Ok(s) = std::str::from_utf8(&buf) {
-            if let Some(m) = s.split_whitespace().next() {
-                req_clone.lock().unwrap().push(CapturedReq {
-                    method: m.to_string(),
-                });
-            }
+        if let Ok(s) = std::str::from_utf8(&buf)
+            && let Some(m) = s.split_whitespace().next()
+        {
+            req_clone.lock().unwrap().push(CapturedReq {
+                method: m.to_string(),
+            });
         }
 
         let _ = counter.fetch_add(1, Ordering::Relaxed);
@@ -186,7 +182,7 @@ fn wpt_fetch_abort_pre_aborted() {
         flag.cancel();
         let mut r = req("POST", &server.url(), Some(flag));
         r.body = Some(b"hello".to_vec());
-        r.body_source = Some(zeroship_runtime::fetch_body::body::BodySource::Bytes(
+        r.body_source = Some(zeroship_runtime::fetch_body::BodySource::Bytes(
             std::rc::Rc::new(b"hello".to_vec()),
         ));
         r.headers.push(("Content-Length".to_string(), "5".to_string()));

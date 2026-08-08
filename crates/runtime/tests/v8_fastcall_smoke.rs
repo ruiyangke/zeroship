@@ -136,7 +136,7 @@ fn fastcall_bool_getter_via_optimised_call() {
         const r2 = read(f);
         JSON.stringify({ r1, r2 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r1":true,"r2":true}"#);
 }
@@ -154,7 +154,7 @@ fn fastcall_bool_getter_pre_optimisation_takes_slow_path() {
         const r = f.is_on;  // Direct getter access, no Turbofan
         JSON.stringify({ r });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r":false}"#);
 }
@@ -202,7 +202,7 @@ fn fastcall_u32_method_via_optimised_call() {
         const r2 = call(a, 23);
         JSON.stringify({ r1, r2 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r1":101,"r2":123}"#);
 }
@@ -299,7 +299,7 @@ fn fastcall_onebyte_arg_ascii_returns_correct() {
         const r2 = call(p, "world");
         JSON.stringify({ r1, r2 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r1":true,"r2":false}"#);
 }
@@ -327,7 +327,7 @@ fn fastcall_onebyte_arg_multibyte_still_correct() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Multibyte input throws TypeError via the slow-path WebIDL
     // ByteString conversion. The fast path never runs (V8 routes
@@ -390,7 +390,7 @@ fn fastcall_receiver_lookup_keeps_state_isolated() {
         const r2 = read(b);
         JSON.stringify({ r1, r2 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"r1":11,"r2":99}"#);
 }
@@ -448,7 +448,7 @@ fn fastcall_coexists_with_regular_methods() {
         const c = m.name();
         JSON.stringify({ a, b, c });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":7,"b":7,"c":"mixed"}"#);
 }
@@ -534,7 +534,7 @@ fn fastcall_runs_user_body_under_optimisation() {
         const still_optimized = (status & (1 << 3)) !== 0;
         JSON.stringify({ total, still_optimized });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     // Sanity: the user body ran for every call (3 warm-up + 1000 hot).
@@ -589,7 +589,7 @@ fn fastcall_method_foreign_receiver_throws_not_crash() {
         legit = call(a);
         JSON.stringify({ k_plain, k_proto, legit });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["k_plain"], serde_json::json!("TypeError"),
@@ -620,7 +620,7 @@ fn fastcall_getter_foreign_receiver_throws_not_crash() {
         legit = read(f);
         JSON.stringify({ k_plain, legit });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["k_plain"], serde_json::json!("TypeError"),
@@ -657,7 +657,7 @@ fn fastcall_method_compiles_via_turbofan() {
         const is_optimized = (status & (1 << 3)) !== 0;
         JSON.stringify({ result, is_optimized, status });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["result"], serde_json::json!(11), "got: {s}");

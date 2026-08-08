@@ -4,13 +4,13 @@
 //! task. SSRF discipline mirrors fetch's two-step guard:
 //!
 //!   1. String-level validation: `crate::fetch::validate_url` rejects
-//!     literal private / loopback / link-local IPs in the URL itself.
+//!      literal private / loopback / link-local IPs in the URL itself.
 //!   2. DNS resolution: `crate::fetch::resolve_and_check_ssrf`
-//!     resolves the hostname and revalidates each candidate against
-//!     the blocklist; the returned `SocketAddr` is what we hand
-//!     `TcpStream::connect`. This closes the "DNS rebinding" hole
-//!     where a public hostname resolves to `127.0.0.1` between the
-//!     URL check and the actual connect.
+//!      resolves the hostname and revalidates each candidate against
+//!      the blocklist; the returned `SocketAddr` is what we hand
+//!      `TcpStream::connect`. This closes the "DNS rebinding" hole
+//!      where a public hostname resolves to `127.0.0.1` between the
+//!      URL check and the actual connect.
 //!
 //! Header validation:
 //!   - Sec-WebSocket-Accept: COMPUTE the expected digest ourselves and
@@ -62,7 +62,11 @@ use super::constants::RFC6455_GUID;
 /// and channel-driven writes over the chosen variant.
 pub enum EstablishedStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    // Boxed: `TlsStream` carries a much larger inline TLS session state
+    // than `TcpStream`, so an unboxed variant would inflate every
+    // `EstablishedStream` (including the `Plain` case) to the TLS
+    // variant's size.
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 /// The result of a successful client handshake.
@@ -274,7 +278,7 @@ pub async fn run_handshake(
             let (tls, outcome) =
                 exchange_handshake_inner(tls, request_bytes, &sec_websocket_key, &opts).await?;
             Ok(Established {
-                stream: EstablishedStream::Tls(tls),
+                stream: EstablishedStream::Tls(Box::new(tls)),
                 leftover: outcome.leftover,
                 protocol: outcome.protocol,
                 extensions: outcome.extensions,

@@ -47,7 +47,7 @@ use super::redirect::{
 };
 
 use crate::channel::CancelFlag;
-use crate::fetch_body::body::BodySource;
+use crate::fetch_body::BodySource;
 
 // ---------------------------------------------------------------------------
 // FetchParams — the shared state passed down the algorithm chain
@@ -93,6 +93,9 @@ pub enum RedirectMode {
 }
 
 impl RedirectMode {
+    // Inherent constructor kept for API ergonomics (infallible mapping
+    // from a wire string); not intended to satisfy `std::str::FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "manual" => RedirectMode::Manual,
@@ -110,6 +113,9 @@ pub enum CredentialsMode {
 }
 
 impl CredentialsMode {
+    // Inherent constructor kept for API ergonomics (infallible mapping
+    // from a wire string); not intended to satisfy `std::str::FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "omit" => CredentialsMode::Omit,
@@ -211,9 +217,7 @@ async fn http_fetch(
     request: FetchRequest,
 ) -> Result<AlgorithmResponse, String> {
     // Step 2.2: bad-port check.
-    if let Err(e) = check_bad_port(&request.url) {
-        return Err(e);
-    }
+    check_bad_port(&request.url)?;
     http_redirect_fetch(request).await
 }
 
@@ -247,12 +251,12 @@ fn check_bad_port(url: &str) -> Result<(), String> {
 ///      `http_network_fetch` since we don't cache).
 ///   2. If the response is a redirect status (301/302/303/307/308) and
 ///      `redirect_mode == "follow"`:
-///        a. Increment redirect_count; bail at 20.
-///        b. Parse the Location header; resolve relative to current URL.
-///        c. Apply method/body mutation per status.
-///        d. Strip Authorization on cross-origin hops.
-///        e. Strip Content-* request headers when body is dropped.
-///        f. Recurse.
+///      a. Increment redirect_count; bail at 20.
+///      b. Parse the Location header; resolve relative to current URL.
+///      c. Apply method/body mutation per status.
+///      d. Strip Authorization on cross-origin hops.
+///      e. Strip Content-* request headers when body is dropped.
+///      f. Recurse.
 async fn http_redirect_fetch(
     mut request: FetchRequest,
 ) -> Result<AlgorithmResponse, String> {
@@ -376,9 +380,7 @@ async fn http_redirect_fetch(
                 }
 
                 // Bad-port re-check on next hop.
-                if let Err(e) = check_bad_port(&request.url) {
-                    return Err(e);
-                }
+                check_bad_port(&request.url)?;
 
                 // Loop.
             }
@@ -402,8 +404,7 @@ async fn http_network_or_cache_fetch(
     // Content-Encoding was present. Run the decompression hook here
     // so the response the
     // caller sees has decoded body + clean headers.
-    let decoded = decompress_response_body(resp.body, &resp.headers)
-        .map_err(|e| e)?;
+    let decoded = decompress_response_body(resp.body, &resp.headers)?;
     Ok(NetworkResponse {
         status: resp.status,
         status_text: resp.status_text,

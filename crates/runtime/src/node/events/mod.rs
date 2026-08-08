@@ -27,10 +27,10 @@ pub(crate) fn ensure_event_emitter<'s>(
     let context = scope.get_current_context();
     let global = context.global(scope);
     let key = v8::String::new(scope, "__zsEventsNs").unwrap();
-    if let Some(existing) = global.get(scope, key.into()) {
-        if existing.is_object() {
-            return v8::Local::<v8::Object>::try_from(existing).ok();
-        }
+    if let Some(existing) = global.get(scope, key.into())
+        && existing.is_object()
+    {
+        return v8::Local::<v8::Object>::try_from(existing).ok();
     }
 
     let src = v8::String::new(scope, EVENTS_JS)?;

@@ -131,7 +131,7 @@ fn must_new_without_new_throws_typeerror() {
         }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // The class name is interpolated into the message so WPT can
     // diagnose mistakes per-class.
@@ -165,7 +165,7 @@ fn must_new_function_call_via_call_throws() {
         }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -230,7 +230,7 @@ fn must_new_default_ctor_without_new_throws() {
         try { Bare(); } catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }

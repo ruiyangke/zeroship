@@ -384,6 +384,10 @@ fn bigint_to_u64(bytes: &[u8]) -> Option<u64> {
 // importKey / exportKey
 // =============================================================================
 
+// importKey's parameter list mirrors the WebCrypto spec's operation
+// signature 1:1; grouping them into a struct would ripple into every
+// caller for no behavioral gain, so this stays a plain allow.
+#[allow(clippy::too_many_arguments)]
 pub fn import_key<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     alg: AlgorithmName,

@@ -324,7 +324,8 @@ fn set_up_default_reader_internal(
 ///    a. Set reader.`[[closedPromise]]` to a Promise resolved with undefined.
 /// 5. Else (errored):
 ///    a. Set reader.`[[closedPromise]]` to a Promise rejected with stream.`[[storedError]]`.
-///       (and PromiseIsHandled = true).
+///
+/// (Both PromiseIsHandled = true).
 fn readable_stream_reader_generic_initialize<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     reader: v8::Local<v8::Object>,
@@ -487,11 +488,11 @@ pub fn readable_stream_default_reader_read(
             // their own pull_steps that handles auto-allocate-chunk-size
             // and queue-fill paths.
             let controller_v = slots::read_slot(scope, stream, crate::streams::slots::CONTROLLER);
-            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-                if crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
-                    crate::streams::readable_byte_controller::pull_steps(scope, stream, request);
-                    return;
-                }
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+                && crate::streams::readable_byte_controller::is_byte_controller(scope, controller)
+            {
+                crate::streams::readable_byte_controller::pull_steps(scope, stream, request);
+                return;
             }
             crate::streams::readable_default_controller::pull_steps(scope, stream, request);
         }
@@ -628,7 +629,7 @@ pub fn readable_stream_default_reader_release(
     readable_stream_reader_generic_release(scope, reader);
     let msg = v8::String::new(scope, "Reader released; outstanding read() requests rejected").unwrap();
     let exc = v8::Exception::type_error(scope, msg);
-    let exc_l = exc.into();
+    let exc_l = exc;
     readable_stream_default_reader_error_read_requests(scope, reader, exc_l);
 }
 
@@ -655,10 +656,10 @@ pub fn readable_stream_reader_generic_release(
     // marks the front pendingPullInto.readerType="none" so the
     // descriptor — possibly auto-allocated — survives the release.
     let controller_v = slots::read_slot(scope, stream, CONTROLLER);
-    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
-        if crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
-            crate::streams::readable_byte_controller::release_steps(scope, stream);
-        }
+    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v)
+        && crate::streams::readable_byte_controller::is_byte_controller(scope, controller)
+    {
+        crate::streams::readable_byte_controller::release_steps(scope, stream);
     }
 
     let st = crate::streams::readable::with_rs_state(scope, stream, |s| s.state.get());

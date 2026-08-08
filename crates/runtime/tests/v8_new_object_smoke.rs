@@ -150,7 +150,7 @@ fn default_getter_mints_fresh_object_each_read() {
                               && a.mintedAt !== d.mintedAt,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"distinctRefs":true,"distinctMintedAt":true}"#);
     let after = new_object_class::MINTS.load(Ordering::SeqCst);
@@ -191,7 +191,7 @@ fn default_getter_two_instances_get_distinct_objects() {
             crossInstanceDistinct: a !== b,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"crossInstanceDistinct":true}"#);
     let after = new_object_class::MINTS.load(Ordering::SeqCst);

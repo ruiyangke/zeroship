@@ -28,8 +28,8 @@
 //! - `[[writable]]`                   → V8 priv sym `[[writable]]` (SLOT)
 //! - `[[controller]]` (TS controller) → V8 priv sym `[[ts.controller]]` (SLOT)
 //! - `[[Detached]]`                   → not supported yet
-//! - `transformerCodec` (compression dep #5) → V8 priv sym holding External
-//!                                              (lands with compression — not in v1)
+//! - `transformerCodec` (compression dep #5) → V8 priv sym holding External —
+//!   lands with compression, not in v1.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;

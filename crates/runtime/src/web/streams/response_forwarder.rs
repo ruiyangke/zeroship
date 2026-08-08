@@ -51,6 +51,7 @@ use crate::state::SharedState;
 /// `Rc<RefCell<>>` so the JS callbacks (which V8 keeps alive via the
 /// pending `read()` Promise's reaction list) can mutate it without
 /// crossing thread boundaries.
+#[derive(Default)]
 pub struct ResponseForwarderInner {
     /// Buffered chunks not yet drained into a `direct_writer`. Empty
     /// once a writer is attached and chunks flow direct.
@@ -82,20 +83,6 @@ pub struct ResponseForwarderInner {
     /// re-arm, so it must keep the original eager read loop (overflow-capped),
     /// never pausing.
     pub backpressure: bool,
-}
-
-impl Default for ResponseForwarderInner {
-    fn default() -> Self {
-        Self {
-            buffer: VecDeque::new(),
-            closed: false,
-            direct_writer: None,
-            reader: None,
-            paused: false,
-            continuation_context: None,
-            backpressure: false,
-        }
-    }
 }
 
 /// Resume the read loop on a forwarder that paused for backpressure. Called
@@ -167,14 +154,12 @@ pub fn begin_forward(
     // matches the JS shim's behaviour — `inspect_response` may run twice
     // on the same Response during cancel/replay paths.
     let id_key = v8::String::new(scope, "_streamId").unwrap();
-    if let Some(existing) = response_obj.get(scope, id_key.into()) {
-        if !existing.is_undefined() {
-            if let Some(id) = existing.uint32_value(scope) {
-                if id != u32::MAX {
-                    return Ok(id);
-                }
-            }
-        }
+    if let Some(existing) = response_obj.get(scope, id_key.into())
+        && !existing.is_undefined()
+        && let Some(id) = existing.uint32_value(scope)
+        && id != u32::MAX
+    {
+        return Ok(id);
     }
 
     // Read response.body.

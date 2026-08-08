@@ -381,7 +381,7 @@ pub fn x25519_derive_bits<'s>(
         pub_x.as_slice(),
     );
     let dom_err = OpError::dom("OperationError", "X25519 agreement");
-    let shared = aws_lc_rs::agreement::agree(&priv_key, &peer, dom_err, |z: &[u8]| {
+    let shared = aws_lc_rs::agreement::agree(&priv_key, peer, dom_err, |z: &[u8]| {
         Ok::<Vec<u8>, OpError>(z.to_vec())
     })?;
     truncate_bits(&shared, length_bits)

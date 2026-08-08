@@ -57,7 +57,7 @@ fn js_string(val: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> String {
 fn encoder_encoding_property_is_utf8() {
     let s = run_in_v8(
         "new TextEncoder().encoding",
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "utf-8");
 }
@@ -74,7 +74,7 @@ fn encoder_returns_uint8array() {
             len: out.byteLength,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"Uint8Array","isView":true,"len":2}"#);
 }
@@ -85,7 +85,7 @@ fn encoder_encodes_ascii() {
         r#"
         Array.from(new TextEncoder().encode("hello")).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "104,101,108,108,111");
 }
@@ -97,7 +97,7 @@ fn encoder_encodes_multibyte() {
         r#"
         Array.from(new TextEncoder().encode("你好")).map(b => b.toString(16)).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "e4,bd,a0,e5,a5,bd");
 }
@@ -109,7 +109,7 @@ fn encoder_encodes_emoji() {
         r#"
         Array.from(new TextEncoder().encode("😀")).map(b => b.toString(16)).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "f0,9f,98,80");
 }
@@ -138,7 +138,7 @@ fn encode_into_coerces_non_string_source_via_tostring() {
         // "42" → 2 ASCII bytes → r.read=2, r.written=2, dest[0]='4'
         JSON.stringify({ read: r.read, written: r.written, b0: dest[0], b1: dest[1] });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"read":2,"written":2,"b0":52,"b1":50}"#);
 }
@@ -154,7 +154,7 @@ fn encode_into_throws_on_symbol_source() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // V8's ToString(Symbol) throws TypeError natively; our
     // `Value::to_string` returns None and we surface a TypeError too.
@@ -169,7 +169,7 @@ fn encode_into_throws_on_symbol_source() {
 fn decoder_default_encoding_is_utf8() {
     let s = run_in_v8(
         "new TextDecoder().encoding",
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "utf-8");
 }
@@ -182,7 +182,7 @@ fn decoder_accepts_utf8_label_aliases() {
         const labels = ["utf-8", "UTF-8", "utf8", "Utf8", "  utf-8  ", "unicode-1-1-utf-8", "unicode11utf8"];
         labels.map(l => new TextDecoder(l).encoding).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8");
 }
@@ -197,7 +197,7 @@ fn decoder_rejects_unknown_encoding() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "RangeError");
 }
@@ -213,7 +213,7 @@ fn decoder_accepts_legacy_encodings() {
                         "shift_jis", "gb18030", "utf-16le", "utf-16be"];
         labels.map(l => new TextDecoder(l).encoding).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // ASCII-canonical names per WHATWG; encoding_rs returns
     // canonical-but-mixed-case for some, then we lowercase.
@@ -235,7 +235,7 @@ fn decoder_rejects_replacement_encoding_label() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "RangeError");
 }
@@ -248,7 +248,7 @@ fn decoder_decodes_ascii() {
         const bytes = new Uint8Array([104, 101, 108, 108, 111]);
         dec.decode(bytes);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "hello");
 }
@@ -261,7 +261,7 @@ fn decoder_decodes_multibyte() {
         const bytes = new Uint8Array([0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD]);
         dec.decode(bytes);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "你好");
 }
@@ -287,7 +287,7 @@ fn decoder_streams_multibyte_split_across_chunks() {
         const c = dec.decode();
         JSON.stringify({ a, b, c, joined: a + b + c });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // First chunk has incomplete sequence — produces empty string,
     // bytes are buffered. Second chunk completes the codepoint.
@@ -307,7 +307,7 @@ fn decoder_streams_emoji_split_across_chunks() {
         const b = dec.decode(chunk2, { stream: true });
         a + b;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "😀");
 }
@@ -322,7 +322,7 @@ fn decoder_non_streaming_replaces_incomplete_tail() {
         const bytes = new Uint8Array([0xE4]);  // only 1st byte of 3-byte seq
         dec.decode(bytes);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "\u{FFFD}");
 }
@@ -339,7 +339,7 @@ fn decoder_streaming_then_flush_emits_replacement_for_unfinished_tail() {
         const b = dec.decode();  // flush, no more bytes
         a + "|" + b;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "|\u{FFFD}");
 }
@@ -359,7 +359,7 @@ fn decoder_fatal_throws_on_invalid_sequence() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg, fatal: dec.fatal });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert!(s.contains(r#""kind":"TypeError""#), "got: {s}");
     assert!(s.contains(r#""fatal":true"#), "got: {s}");
@@ -373,7 +373,7 @@ fn decoder_non_fatal_substitutes_invalid_sequence() {
         const bytes = new Uint8Array([0x68, 0xC0, 0x69]);  // 'h' + bad + 'i'
         dec.decode(bytes);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "h\u{FFFD}i");
 }
@@ -390,7 +390,7 @@ fn decoder_strips_bom_by_default() {
         const bytes = new Uint8Array([0xEF, 0xBB, 0xBF, 0x68, 0x69]);  // BOM + "hi"
         JSON.stringify({ ignoreBOM: dec.ignoreBOM, decoded: dec.decode(bytes) });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert!(s.contains(r#""ignoreBOM":false"#), "got: {s}");
     assert!(s.contains(r#""decoded":"hi""#), "got: {s}");
@@ -415,7 +415,7 @@ fn decoder_keeps_bom_when_ignoreBOM_set() {
             cp2: out.codePointAt(2),
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Length 3: BOM + 'h' + 'i'. cp0 = 0xFEFF, cp1 = 0x68, cp2 = 0x69.
     assert_eq!(
@@ -440,7 +440,7 @@ fn decoder_strips_bom_on_every_non_streaming_call() {
         const b = dec.decode(bom);  // second call → ALSO stripped
         JSON.stringify({ aLen: a.length, bLen: b.length });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aLen":0,"bLen":0}"#);
 }
@@ -470,7 +470,7 @@ fn decoder_strips_bom_split_across_streaming_chunks() {
         const out = a + b;
         JSON.stringify({ length: out.length, value: out });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"length":2,"value":"hi"}"#);
 }
@@ -488,7 +488,7 @@ fn decoder_empty_call_does_not_consume_bom_state() {
         const out = dec.decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x68]));
         JSON.stringify({ length: out.length, value: out });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"length":1,"value":"h"}"#);
 }
@@ -505,7 +505,7 @@ fn decoder_constructor_rejects_non_object_options() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -520,7 +520,7 @@ fn decode_rejects_non_object_options() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -539,7 +539,7 @@ fn decode_rejects_non_buffer_input() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -556,7 +556,7 @@ fn decoder_constructor_rejects_null_label() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "RangeError");
 }
@@ -575,7 +575,7 @@ fn decoder_label_uses_ascii_only_normalization() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "RangeError");
 }
@@ -595,7 +595,7 @@ fn decoder_accepts_full_utf8_label_table() {
         ];
         labels.map(l => new TextDecoder(l).encoding).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8");
 }
@@ -610,7 +610,7 @@ fn decoder_has_correct_string_tag() {
         r#"
         Object.prototype.toString.call(new TextDecoder());
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object TextDecoder]");
 }
@@ -621,7 +621,7 @@ fn encoder_has_correct_string_tag() {
         r#"
         Object.prototype.toString.call(new TextEncoder());
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object TextEncoder]");
 }
@@ -641,6 +641,7 @@ fn encoder_has_correct_string_tag() {
 ///     forbidden as overlong), so emit U+FFFD and back up to `C0`.
 ///   - `C0` is invalid as a lead byte → emit U+FFFD.
 ///   - `10` is ASCII → passthrough.
+///
 /// Result: `"\uFFFD\uFFFD\uFFFD\u0010"` — 4 codepoints. Rust's
 /// `std::str::from_utf8` produces fewer FFFDs because its error
 /// grouping isn't the WHATWG state machine.
@@ -655,7 +656,7 @@ fn decoder_ufffd_count_matches_whatwg_spec() {
             cps: Array.from(out, c => c.codePointAt(0)),
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"len":4,"cps":[65533,65533,65533,16]}"#);
 }
@@ -679,7 +680,7 @@ fn decoder_trailing_partial_4byte_sequence() {
             JSON.stringify({{ len: out.length, cp0: out.codePointAt(0) }});
             "#
         );
-        let s = run_in_v8(&src, |val, scope| js_string(val, scope));
+        let s = run_in_v8(&src, js_string);
         let expected = format!(r#"{{"len":{expected_len},"cp0":65533}}"#);
         assert_eq!(s, expected, "input {input}");
     }
@@ -696,7 +697,7 @@ fn encoder_replaces_unpaired_surrogates() {
         const out = new TextEncoder().encode("\uD800");
         Array.from(out).map(b => b.toString(16)).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "ef,bf,bd");
 }
@@ -717,7 +718,7 @@ fn encode_decode_round_trip_preserves_strings() {
         const round = inputs.map(s => dec.decode(enc.encode(s)));
         JSON.stringify(inputs.map((s, i) => s === round[i]));
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[true,true,true,true,true]");
 }

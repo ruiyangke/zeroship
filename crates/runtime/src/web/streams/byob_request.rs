@@ -74,7 +74,7 @@ fn request_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, view_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );
@@ -214,15 +214,14 @@ fn respond_method_callback<'s>(
     };
     // Detached check on the request's view buffer.
     let view_v = slots::read_slot(scope, this, VIEW);
-    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(view_v) {
-        if let Some(buffer) = view.buffer(scope) {
-            if buffer.was_detached() {
-                let msg = v8::String::new(scope, "respond: request's view buffer is detached").unwrap();
-                let exc = v8::Exception::type_error(scope, msg);
-                scope.throw_exception(exc);
-                return;
-            }
-        }
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(view_v)
+        && let Some(buffer) = view.buffer(scope)
+        && buffer.was_detached()
+    {
+        let msg = v8::String::new(scope, "respond: request's view buffer is detached").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
     }
     // Convert bytesWritten — [EnforceRange] unsigned long long.
     let bw_v = args.get(0);
@@ -272,13 +271,13 @@ fn respond_with_new_view_callback<'s>(
         return;
     };
     // Detached check.
-    if let Some(buf) = view.buffer(scope) {
-        if buf.was_detached() {
-            let msg = v8::String::new(scope, "respondWithNewView: view's buffer is detached").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
+    if let Some(buf) = view.buffer(scope)
+        && buf.was_detached()
+    {
+        let msg = v8::String::new(scope, "respondWithNewView: view's buffer is detached").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
     }
     if let Err(exc_g) = crate::streams::readable_byte_controller::readable_byte_stream_controller_respond_with_new_view(
         scope,
@@ -296,8 +295,7 @@ fn parse_enforce_range_u64<'s>(
 ) -> Result<u64, v8::Local<'s, v8::Value>> {
     let n = v.number_value(scope).ok_or_else(|| {
         let msg = v8::String::new(scope, "bytesWritten must be a number").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        exc
+        v8::Exception::type_error(scope, msg)
     })?;
     if !n.is_finite() {
         let msg = v8::String::new(scope, "bytesWritten is not finite").unwrap();

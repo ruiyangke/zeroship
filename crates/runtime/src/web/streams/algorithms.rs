@@ -95,6 +95,7 @@ pub fn readable_stream_get_num_read_requests(
 /// the three steps:
 ///   - `done == true`  → `closeSteps()`
 ///   - `done == false` → `chunkSteps(chunk)`
+///
 /// The `errorSteps` path is fired separately via the
 /// `ReadableStreamDefaultReaderErrorReadRequests` algorithm.
 pub fn readable_stream_fulfill_read_request<'s>(
@@ -491,17 +492,17 @@ pub fn writable_stream_update_backpressure(
     let prev = crate::streams::writable::with_ws_state(scope, stream, |s| s.backpressure.get())
         .unwrap_or(false);
     let writer_v = slots::read_slot(scope, stream, WRITER);
-    if let Ok(writer) = v8::Local::<v8::Object>::try_from(writer_v) {
-        if backpressure != prev {
-            if backpressure {
-                crate::streams::writable_writer::writable_stream_default_writer_reset_ready_promise(
-                    scope, writer,
-                );
-            } else {
-                crate::streams::writable_writer::writable_stream_default_writer_resolve_ready_promise(
-                    scope, writer,
-                );
-            }
+    if let Ok(writer) = v8::Local::<v8::Object>::try_from(writer_v)
+        && backpressure != prev
+    {
+        if backpressure {
+            crate::streams::writable_writer::writable_stream_default_writer_reset_ready_promise(
+                scope, writer,
+            );
+        } else {
+            crate::streams::writable_writer::writable_stream_default_writer_resolve_ready_promise(
+                scope, writer,
+            );
         }
     }
     crate::streams::writable::with_ws_state(scope, stream, |s| s.backpressure.set(backpressure));
@@ -834,10 +835,10 @@ pub fn writable_stream_abort<'s>(
     // the same Promise (the spec says abort() returns the same Promise as
     // the original pending abort).
     let abort_promise_v = slots::read_slot(scope, stream, "[[ws.pendingAbortPromise]]");
-    if !abort_promise_v.is_undefined() {
-        if let Ok(p) = v8::Local::<v8::Promise>::try_from(abort_promise_v) {
-            return p;
-        }
+    if !abort_promise_v.is_undefined()
+        && let Ok(p) = v8::Local::<v8::Promise>::try_from(abort_promise_v)
+    {
+        return p;
     }
 
     debug_assert!(st == WSState::Writable || st == WSState::Erroring);
@@ -892,7 +893,7 @@ pub fn writable_stream_close<'s>(
         );
         let v8_msg = v8::String::new(scope, &msg).unwrap();
         let exc = v8::Exception::type_error(scope, v8_msg);
-        return rejected_with_promise(scope, exc.into());
+        return rejected_with_promise(scope, exc);
     }
 
     debug_assert!(st == WSState::Writable || st == WSState::Erroring);

@@ -354,10 +354,10 @@ fn settle_with_error(
 fn release_lock(scope: &mut v8::PinScope, reader_global: &v8::Global<v8::Object>) {
     let reader = v8::Local::new(scope, reader_global.clone());
     let key = v8::String::new(scope, "releaseLock").unwrap();
-    if let Some(fn_v) = reader.get(scope, key.into()) {
-        if let Ok(fn_l) = v8::Local::<v8::Function>::try_from(fn_v) {
-            let _ = fn_l.call(scope, reader.into(), &[]);
-        }
+    if let Some(fn_v) = reader.get(scope, key.into())
+        && let Ok(fn_l) = v8::Local::<v8::Function>::try_from(fn_v)
+    {
+        let _ = fn_l.call(scope, reader.into(), &[]);
     }
 }
 

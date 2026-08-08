@@ -878,7 +878,7 @@ fn onabort_setter_callback(
         };
         let mut map = listeners_rc.borrow_mut();
         if let Some(list) = map.get_mut("abort") {
-            list.retain(|l| !(l.callback == *prev_global && !l.capture));
+            list.retain(|l| l.callback != *prev_global || l.capture);
         }
     }
 

@@ -287,6 +287,9 @@ fn get_or_init_template_slot<'s>(
 ///
 /// Returns `(holder, Option<controller>)`; the second slot is `None`
 /// when `eager_abort_controller` is false.
+// 9 args, one per RpcCtx field this materializes - bundling them into a params
+// struct would only move the arity problem to every call site's construction.
+#[allow(clippy::too_many_arguments)]
 pub fn mint_rpc_ctx<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     request_id: String,

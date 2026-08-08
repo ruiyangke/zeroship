@@ -779,11 +779,11 @@ fn parse_oaep_key(
         if obj.has(scope, key_attr.into()).unwrap_or(false) {
             let key_v = obj.get(scope, key_attr.into()).unwrap();
             let oaep_hash_attr = v8::String::new(scope, "oaepHash").unwrap();
-            if let Some(h) = obj.get(scope, oaep_hash_attr.into()) {
-                if h.is_string() {
-                    let s = h.to_rust_string_lossy(scope);
-                    hash = HashAlgo::from_str(&s).unwrap_or(HashAlgo::Sha1);
-                }
+            if let Some(h) = obj.get(scope, oaep_hash_attr.into())
+                && h.is_string()
+            {
+                let s = h.to_rust_string_lossy(scope);
+                hash = HashAlgo::from_str(&s).unwrap_or(HashAlgo::Sha1);
             }
             return Ok((extract_key_material(scope, key_v, public)?, hash));
         }

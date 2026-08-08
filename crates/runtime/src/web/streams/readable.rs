@@ -237,7 +237,7 @@ fn stream_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, locked_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );
@@ -656,7 +656,7 @@ fn pipe_to_method_callback<'s>(
     if !is_readable_stream(scope, this) {
         let msg = v8::String::new(scope, "pipeTo: receiver is not a ReadableStream").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc);
         rv.set(p.into());
         return;
     }
@@ -664,14 +664,14 @@ fn pipe_to_method_callback<'s>(
     let Ok(dest) = v8::Local::<v8::Object>::try_from(dest_v) else {
         let msg = v8::String::new(scope, "pipeTo: argument 1 must be a WritableStream").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc);
         rv.set(p.into());
         return;
     };
     if !crate::streams::writable::is_writable_stream(scope, dest) {
         let msg = v8::String::new(scope, "pipeTo: argument 1 must be a WritableStream").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc);
         rv.set(p.into());
         return;
     }
@@ -688,14 +688,14 @@ fn pipe_to_method_callback<'s>(
     if crate::streams::algorithms::is_readable_stream_locked(scope, this) {
         let msg = v8::String::new(scope, "pipeTo: source is locked").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc);
         rv.set(p.into());
         return;
     }
     if crate::streams::algorithms::is_writable_stream_locked(scope, dest) {
         let msg = v8::String::new(scope, "pipeTo: destination is locked").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc);
         rv.set(p.into());
         return;
     }
@@ -966,7 +966,7 @@ fn parse_pipe_options<'s>(
         let exc = v8::Exception::type_error(scope, msg);
         return Err(crate::streams::algorithms::rejected_with_promise(
             scope,
-            exc.into(),
+            exc,
         ));
     };
     let prevent_close = bool_field(scope, obj, "preventClose");
@@ -980,10 +980,10 @@ fn parse_pipe_options<'s>(
         let signal_result = {
             v8::tc_scope!(let tc, scope);
             let r = signal_field(tc, obj);
-            if r.is_err() {
-                if let Some(exc) = tc.exception() {
-                    captured = Some(v8::Global::new(tc, exc));
-                }
+            if r.is_err()
+                && let Some(exc) = tc.exception()
+            {
+                captured = Some(v8::Global::new(tc, exc));
             }
             r
         };

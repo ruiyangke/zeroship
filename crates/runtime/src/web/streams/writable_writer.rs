@@ -560,7 +560,7 @@ pub fn writable_stream_default_writer_release(
     )
     .unwrap();
     let exc = v8::Exception::type_error(scope, msg);
-    let exc_l: v8::Local<v8::Value> = exc.into();
+    let exc_l: v8::Local<v8::Value> = exc;
 
     writable_stream_default_writer_ensure_ready_promise_rejected(scope, writer, exc_l);
     writable_stream_default_writer_ensure_closed_promise_rejected(scope, writer, exc_l);
@@ -670,7 +670,7 @@ pub fn writable_stream_default_writer_close_with_error_propagation<'s>(
     let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
         let msg = v8::String::new(scope, "Cannot close a stream using a released writer").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     };
     let st = with_ws_state(scope, stream, |s| s.state.get()).unwrap_or(WSState::Closed);
     if algorithms::writable_stream_close_queued_or_in_flight(scope, stream) || st == WSState::Closed {
@@ -694,7 +694,7 @@ pub fn writable_stream_default_writer_write<'s>(
     let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
         let msg = v8::String::new(scope, "Cannot write to a stream using a released writer").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     };
     let controller_v = slots::read_slot(scope, stream, slots::CONTROLLER);
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
@@ -712,7 +712,7 @@ pub fn writable_stream_default_writer_write<'s>(
     if !same_value(scope, stream_v_after, stream.into()) {
         let msg = v8::String::new(scope, "Cannot write to a stream using a released writer").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     }
 
     let st = with_ws_state(scope, stream, |s| s.state.get()).unwrap_or(WSState::Errored);
@@ -727,7 +727,7 @@ pub fn writable_stream_default_writer_write<'s>(
         )
         .unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     }
     if st == WSState::Erroring {
         let stored = slots::read_slot(scope, stream, slots::STORED_ERROR);

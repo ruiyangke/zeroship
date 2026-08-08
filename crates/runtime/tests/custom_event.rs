@@ -50,7 +50,7 @@ fn custom_event_construct_basic() {
             composed: e.composed,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -65,7 +65,7 @@ fn custom_event_detail_string() {
         const e = new CustomEvent("foo", { detail: "bar" });
         JSON.stringify({ type: e.type, detail: e.detail });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"type":"foo","detail":"bar"}"#);
 }
@@ -77,7 +77,7 @@ fn custom_event_detail_object() {
         const e = new CustomEvent("foo", { detail: { x: 1, y: "two" } });
         JSON.stringify({ x: e.detail.x, y: e.detail.y });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"x":1,"y":"two"}"#);
 }
@@ -102,7 +102,7 @@ fn custom_event_inherited_event_init_fields() {
             d: e.detail,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -121,7 +121,7 @@ fn custom_event_instanceof_event() {
             isCustomEvent: e instanceof CustomEvent,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"isEvent":true,"isCustomEvent":true}"#);
 }
@@ -143,7 +143,7 @@ fn custom_event_dispatched_via_event_target() {
         const r = t.dispatchEvent(ce);
         JSON.stringify({ r, received });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -158,7 +158,7 @@ fn custom_event_to_string_tag() {
         const e = new CustomEvent("foo");
         Object.prototype.toString.call(e);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object CustomEvent]");
 }
@@ -178,7 +178,7 @@ fn custom_event_detail_undefined_is_null() {
             d3: e3.detail,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // null serialises to JSON null in all three cases.
     assert_eq!(s, r#"{"d1":null,"d2":null,"d3":null}"#);
@@ -207,7 +207,7 @@ fn custom_event_detail_arbitrary_values() {
             symTypeof: typeof eSym.detail,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -233,7 +233,7 @@ fn custom_event_detail_held_strongly() {
         for (let i = 0; i < 1000; i++) arr.push({ junk: i });
         JSON.stringify({ x: e.detail.x });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"x":1}"#);
 }
@@ -256,7 +256,7 @@ fn custom_event_inherits_event_methods() {
         };
         JSON.stringify(out);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -278,7 +278,7 @@ fn custom_event_constructor_name_and_length() {
             isFn: typeof CustomEvent === "function",
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"name":"CustomEvent","isFn":true}"#);
 }
@@ -295,7 +295,7 @@ fn custom_event_missing_type_throws() {
         catch (e) { threw = true; msg = e instanceof TypeError ? "TypeError" : "Error"; }
         JSON.stringify({ threw, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"threw":true,"msg":"TypeError"}"#);
 }

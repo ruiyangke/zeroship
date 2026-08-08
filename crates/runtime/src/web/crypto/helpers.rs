@@ -297,7 +297,7 @@ pub fn base64url_decode(s: &str) -> Result<Vec<u8>, OpError> {
             _ => converted.push(c),
         }
     }
-    while converted.len() % 4 != 0 {
+    while !converted.len().is_multiple_of(4) {
         converted.push('=');
     }
     base64::engine::general_purpose::STANDARD

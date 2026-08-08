@@ -47,7 +47,7 @@ fn event_target_construct_and_identity() {
             isET: t instanceof EventTarget,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -76,7 +76,7 @@ fn event_construct_basic() {
             bp: Event.BUBBLING_PHASE,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(parsed["type"], "test");
@@ -103,7 +103,7 @@ fn event_construct_with_init() {
             t: e.type, b: e.bubbles, c: e.cancelable, comp: e.composed,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"t":"click","b":true,"c":true,"comp":true}"#);
 }
@@ -131,7 +131,7 @@ fn add_dispatch_remove_round_trip() {
 
         JSON.stringify({ calls, r1 });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":["ping","ping"],"r1":true}"#);
 }
@@ -149,7 +149,7 @@ fn dispatch_sets_target_and_current_target() {
         t.dispatchEvent(new Event("x"));
         JSON.stringify({ target_match, current_match });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"target_match":true,"current_match":true}"#);
 }
@@ -166,7 +166,7 @@ fn dispatch_phase_is_at_target() {
         phase_after = ev.eventPhase;
         JSON.stringify({ during: phase_during, after: phase_after });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"during":2,"after":0}"#);
 }
@@ -191,7 +191,7 @@ fn dispatch_returns_false_when_prevented() {
             noncancel_dp: noncancel.defaultPrevented,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -215,7 +215,7 @@ fn once_listener_removes_after_first_fire() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":1}"#);
 }
@@ -233,7 +233,7 @@ fn signal_option_removes_listener_on_abort() {
         t.dispatchEvent(new Event("e"));     // skipped
         JSON.stringify({ calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":1}"#);
 }
@@ -250,7 +250,7 @@ fn aborted_signal_skips_initial_registration() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":0}"#);
 }
@@ -272,7 +272,7 @@ fn duplicate_add_is_dedup_by_callback_and_capture() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":2}"#);
 }
@@ -288,7 +288,7 @@ fn stop_immediate_propagation_halts_remaining_listeners() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ order });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"order":["a"]}"#);
 }
@@ -303,7 +303,7 @@ fn passive_listener_blocks_prevent_default() {
         const r = t.dispatchEvent(ev);
         JSON.stringify({ r, dp: ev.defaultPrevented });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // r = !defaultPrevented = true, dp = false (passive blocked it)
     assert_eq!(s, r#"{"r":true,"dp":false}"#);
@@ -320,7 +320,7 @@ fn listener_throwing_does_not_crash_dispatch() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ later });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // The first listener throws but the dispatcher swallows the
     // exception and continues with the second listener.
@@ -341,7 +341,7 @@ fn redispatch_during_dispatch_throws() {
         t.dispatchEvent(ev);
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
     // kind is "Error" because we don't have native DOMException yet;
@@ -376,7 +376,7 @@ fn listeners_added_mid_dispatch_are_not_invoked() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ after_first, after_second: calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"after_first":0,"after_second":1}"#);
 }
@@ -396,7 +396,7 @@ fn listeners_removed_mid_dispatch_are_skipped() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ order });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // a fires, b fires (and removes c), c is skipped.
     assert_eq!(s, r#"{"order":["a","b"]}"#);
@@ -416,7 +416,7 @@ fn init_event_resets_type_and_flags() {
             t: e.type, b: e.bubbles, c: e.cancelable,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"t":"b","b":false,"c":false}"#);
 }
@@ -441,7 +441,7 @@ fn composed_path_returns_target_after_dispatch() {
             after_is_target: after[0] === t,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,

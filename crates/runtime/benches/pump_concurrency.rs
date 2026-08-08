@@ -53,7 +53,7 @@ fn prepare_pending_requests(
     for i in 0..request_count {
         let ctx = RequestCtx::new(CancelFlag::new());
         let url = format!("http://localhost/pump-concurrency/{i}");
-        let outcome = runtime.call_fetch_handler("GET", &url, &[], "", &env, ctx);
+        let outcome = runtime.call_fetch_handler("GET", &url, &[], "", env, ctx);
 
         match outcome {
             FetchOutcome::Pending { rx, .. } => receivers.push(rx),

@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::codec::{make_codec, CodecMode, CompressionFormat};
-use zeroship_runtime::fetch_body::body::BodySource;
+use zeroship_runtime::fetch_body::BodySource;
 use zeroship_runtime::fetch_native::algorithms::{
     main_fetch, CredentialsMode, FetchRequest, RedirectMode,
 };

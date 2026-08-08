@@ -483,25 +483,25 @@ pub fn readable_byte_stream_controller_close(
 ///   3. If IsDetachedBuffer(buffer) → throw TypeError.
 ///   4. transferredBuffer = TransferArrayBuffer(buffer).
 ///   5. If pendingPullIntos non-empty:
-///        firstPending = front; if its buffer is detached → TypeError.
-///        InvalidateBYOBRequest; firstPending.buffer = TransferArrayBuffer(firstPending.buffer).
-///        if firstPending.readerType is "none":
-///           EnqueueDetachedPullIntoToQueue(controller, firstPending).
+///      firstPending = front; if its buffer is detached → TypeError.
+///      InvalidateBYOBRequest; firstPending.buffer = TransferArrayBuffer(firstPending.buffer).
+///      if firstPending.readerType is "none":
+///      EnqueueDetachedPullIntoToQueue(controller, firstPending).
 ///   6. If ReadableStreamHasDefaultReader:
-///        a. ProcessReadRequestsUsingQueue. (drain controller queue into
-///           outstanding default-reader read requests.)
-///        b. If GetNumReadRequests == 0:
-///             EnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength).
-///           Else:
-///             debug_assert!(queue is empty).
-///             debug_assert!(no pendingPullIntos with readerType == "none").
-///             let view = Uint8Array(transferredBuffer, byteOffset, byteLength);
-///             FulfillReadRequest(stream, view, false).
+///      a. ProcessReadRequestsUsingQueue. (drain controller queue into
+///      outstanding default-reader read requests.)
+///      b. If GetNumReadRequests == 0:
+///      EnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength).
+///      Else:
+///      debug_assert!(queue is empty).
+///      debug_assert!(no pendingPullIntos with readerType == "none").
+///      let view = Uint8Array(transferredBuffer, byteOffset, byteLength);
+///      FulfillReadRequest(stream, view, false).
 ///   7. Else if HasBYOBReader:
-///        EnqueueChunkToQueue, then ProcessPullIntoDescriptorsUsingQueue.
-///        (The BYOB reads expect descriptors filled from the queue.)
+///      EnqueueChunkToQueue, then ProcessPullIntoDescriptorsUsingQueue.
+///      (The BYOB reads expect descriptors filled from the queue.)
 ///   8. Else:
-///        EnqueueChunkToQueue.
+///      EnqueueChunkToQueue.
 ///   9. CallPullIfNeeded.
 pub fn readable_byte_stream_controller_enqueue<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1338,12 +1338,12 @@ pub fn readable_byte_stream_controller_respond_internal(
 /// Spec steps:
 ///   1. assert descriptor.bytesFilled mod descriptor.elementSize == 0
 ///   2. If descriptor.readerType is "none":
-///        ShiftPendingPullInto(controller)
+///      ShiftPendingPullInto(controller)
 ///   3. stream = controller.`[[stream]]`
 ///   4. If ReadableStreamHasBYOBReader(stream):
-///        While ReadableStreamGetNumReadIntoRequests(stream) > 0:
-///          d = ShiftPendingPullInto(controller)
-///          CommitPullIntoDescriptor(stream, d)
+///      While ReadableStreamGetNumReadIntoRequests(stream) > 0:
+///      d = ShiftPendingPullInto(controller)
+///      CommitPullIntoDescriptor(stream, d)
 pub fn readable_byte_stream_controller_respond_in_closed_state(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
@@ -1398,17 +1398,17 @@ pub fn readable_byte_stream_controller_respond_in_closed_state(
 ///   1. assert descriptor.bytesFilled + bytesWritten <= descriptor.byteLength
 ///   2. FillHeadPullIntoDescriptor(controller, bytesWritten, descriptor)
 ///   3. If descriptor.readerType is "none":
-///        a. If descriptor.bytesFilled > 0: EnqueueDetachedPullIntoToQueue(controller, descriptor)
-///        b. Else: ShiftPendingPullInto(controller)
-///        c. ProcessPullIntoDescriptorsUsingQueue(controller)
-///        d. Return
+///      a. If descriptor.bytesFilled > 0: EnqueueDetachedPullIntoToQueue(controller, descriptor)
+///      b. Else: ShiftPendingPullInto(controller)
+///      c. ProcessPullIntoDescriptorsUsingQueue(controller)
+///      d. Return
 ///   4. If descriptor.bytesFilled < descriptor.minimumFill → return (wait)
 ///   5. ShiftPendingPullInto(controller)
 ///   6. remainderSize = descriptor.bytesFilled mod descriptor.elementSize
 ///   7. If remainderSize > 0:
-///        a. end = descriptor.byteOffset + descriptor.bytesFilled
-///        b. EnqueueClonedChunkToQueue(controller, descriptor.buffer, end-remainderSize, remainderSize)
-///        c. descriptor.bytesFilled -= remainderSize
+///      a. end = descriptor.byteOffset + descriptor.bytesFilled
+///      b. EnqueueClonedChunkToQueue(controller, descriptor.buffer, end-remainderSize, remainderSize)
+///      c. descriptor.bytesFilled -= remainderSize
 ///   8. CommitPullIntoDescriptor(stream, descriptor)
 ///   9. ProcessPullIntoDescriptorsUsingQueue(controller)
 pub fn readable_byte_stream_controller_respond_in_readable_state(
@@ -1950,12 +1950,12 @@ fn controller_class_template<'s>(
     {
         let key = v8::String::new(scope, "byobRequest").unwrap();
         let getter_tmpl = v8::FunctionTemplate::new(scope, byob_request_getter_callback);
-        proto.set_accessor_property(key.into(), Some(getter_tmpl.into()), None, v8::PropertyAttribute::NONE);
+        proto.set_accessor_property(key.into(), Some(getter_tmpl), None, v8::PropertyAttribute::NONE);
     }
     {
         let key = v8::String::new(scope, "desiredSize").unwrap();
         let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
-        proto.set_accessor_property(key.into(), Some(getter_tmpl.into()), None, v8::PropertyAttribute::NONE);
+        proto.set_accessor_property(key.into(), Some(getter_tmpl), None, v8::PropertyAttribute::NONE);
     }
 
     install_proto_method(scope, proto, "close", close_method_callback);

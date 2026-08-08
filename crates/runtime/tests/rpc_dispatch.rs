@@ -49,10 +49,10 @@ fn parse_message(body: &str) -> String {
 }
 
 fn unwrap_json_envelope(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(inner) = v.get("json") {
-            return serde_json::to_string(inner).unwrap_or_else(|_| body.to_string());
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(inner) = v.get("json")
+    {
+        return serde_json::to_string(inner).unwrap_or_else(|_| body.to_string());
     }
     body.to_string()
 }

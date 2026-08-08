@@ -37,7 +37,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::body::Body;
+use super::Body;
 use super::body_stream::read_all_bytes;
 
 /// Maximum body size for `arrayBuffer()` — 2 GiB minus 1 byte. V8's
@@ -168,16 +168,15 @@ pub fn stream_disturbed_or_used(
     // accidentally — defensively).
     if let Some(disturbed) =
         crate::streams::readable::with_rs_state(scope, stream, |s| s.disturbed.get())
+        && disturbed
     {
-        if disturbed {
-            return true;
-        }
+        return true;
     }
     let key = v8::String::new(scope, "locked").unwrap();
-    if let Some(v) = stream.get(scope, key.into()) {
-        if v.boolean_value(scope) {
-            return true;
-        }
+    if let Some(v) = stream.get(scope, key.into())
+        && v.boolean_value(scope)
+    {
+        return true;
     }
     false
 }
@@ -243,10 +242,10 @@ fn body_getter<T: Body + BodyMarker + 'static>(
     }
     let source_snapshot = body.source.clone();
     match source_snapshot {
-        Some(crate::fetch_body::body::BodySource::Bytes(rc))
-        | Some(crate::fetch_body::body::BodySource::Blob(rc, _))
-        | Some(crate::fetch_body::body::BodySource::UrlSearchParams(rc))
-        | Some(crate::fetch_body::body::BodySource::FormData(rc, _)) => {
+        Some(crate::fetch_body::BodySource::Bytes(rc))
+        | Some(crate::fetch_body::BodySource::Blob(rc, _))
+        | Some(crate::fetch_body::BodySource::UrlSearchParams(rc))
+        | Some(crate::fetch_body::BodySource::FormData(rc, _)) => {
             // Materialize. If the wrapper was already consumed via
             // a fast-path consumer (set_body_used_marker), we still
             // build a stream so observation of `.body` returns a
@@ -266,7 +265,7 @@ fn body_getter<T: Body + BodyMarker + 'static>(
             *body.stream.borrow_mut() = Some(stream_global);
             rv.set(local.into());
         }
-        Some(crate::fetch_body::body::BodySource::Stream) | None => {
+        Some(crate::fetch_body::BodySource::Stream) | None => {
             rv.set(v8::null(scope).into());
         }
     }
@@ -373,9 +372,9 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
 /// Returns Some(rc) when the body source is a rewindable byte
 /// sequence safe to drain directly. Stream → None (no fast path).
 fn source_bytes_for_fast_path(
-    source: Option<crate::fetch_body::body::BodySource>,
+    source: Option<crate::fetch_body::BodySource>,
 ) -> Option<Rc<Vec<u8>>> {
-    use crate::fetch_body::body::BodySource;
+    use crate::fetch_body::BodySource;
     match source {
         Some(BodySource::Bytes(rc))
         | Some(BodySource::Blob(rc, _))
@@ -743,7 +742,7 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
             let blob =
-                crate::blob_native::blob::create_blob(scope, Vec::new(), &content_type);
+                crate::blob_native::create_blob(scope, Vec::new(), &content_type);
             resolver.resolve(scope, blob);
             rv.set(promise.into());
         }
@@ -752,7 +751,7 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
             // source bytes without going through a stream read.
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
-            let blob = crate::blob_native::blob::create_blob(
+            let blob = crate::blob_native::create_blob(
                 scope,
                 (*rc).clone(),
                 &content_type,
@@ -1195,12 +1194,13 @@ fn percent_decode_form_field(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -1548,7 +1548,7 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
             // Construct a native Blob whose `type` is the body's
             // Content-Type. The Blob constructor's normalize step
             // lowercases printable-ASCII content.
-            let blob = crate::blob_native::blob::create_blob(scope, bytes, content_type);
+            let blob = crate::blob_native::create_blob(scope, bytes, content_type);
             resolver.resolve(scope, blob);
         }
         MapKind::MultipartFormData { boundary } => {
@@ -1655,14 +1655,13 @@ fn url_decode_form(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) =
-                (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
-            {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

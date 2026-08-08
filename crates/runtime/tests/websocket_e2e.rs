@@ -110,6 +110,10 @@ fn handle_connection(stream: TcpStream, cfg: ServerCfg) {
     let server_extensions = cfg.server_extensions.clone();
     let captured_headers = cfg.captured_headers.clone();
 
+    // The Result<Response, ErrorResponse> shape is dictated by tungstenite's
+    // `Callback` trait (accept_hdr's second argument) - we can't box the Err
+    // variant without breaking that external trait's signature.
+    #[allow(clippy::result_large_err)]
     let callback = |req: &Request, mut resp: Response| {
         for (name, value) in req.headers() {
             captured.push((
@@ -292,8 +296,10 @@ fn ws_echo_text_roundtrip() {
 /// Server returns deflate extension — native MUST reject.
 #[test]
 fn ws_extensions_rejected() {
-    let mut cfg = ServerCfg::default();
-    cfg.server_extensions = Some("permessage-deflate".to_string());
+    let cfg = ServerCfg {
+        server_extensions: Some("permessage-deflate".to_string()),
+        ..Default::default()
+    };
     let server = start_server(cfg);
     let url = server.url();
     let result = run_js_with_runtime(
@@ -324,8 +330,10 @@ fn ws_extensions_rejected() {
 ///.
 #[test]
 fn ws_unrequested_subprotocol_rejected() {
-    let mut cfg = ServerCfg::default();
-    cfg.server_protocol = Some("evil.proto".to_string());
+    let cfg = ServerCfg {
+        server_protocol: Some("evil.proto".to_string()),
+        ..Default::default()
+    };
     let server = start_server(cfg);
     let url = server.url();
     let result = run_js_with_runtime(
@@ -444,8 +452,10 @@ fn ws_graceful_close_code_1000() {
 /// Server sends Ping; tungstenite auto-pongs. Verify the server saw a Pong.
 #[test]
 fn ws_ping_keepalive_pongs() {
-    let mut cfg = ServerCfg::default();
-    cfg.send_pings = true;
+    let cfg = ServerCfg {
+        send_pings: true,
+        ..Default::default()
+    };
     let server = start_server(cfg);
     let url = server.url();
     let _ = run_js_with_runtime(

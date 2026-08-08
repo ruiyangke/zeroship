@@ -440,6 +440,12 @@ struct CancelInner {
 #[derive(Clone)]
 pub struct CancelFlag(Rc<CancelInner>);
 
+impl Default for CancelFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CancelFlag {
     pub fn new() -> Self {
         Self(Rc::new(CancelInner {

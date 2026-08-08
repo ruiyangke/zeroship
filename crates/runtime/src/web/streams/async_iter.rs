@@ -397,7 +397,7 @@ fn sequenced_call<'s>(
         };
         let msg = v8::String::new(scope, msg_text).unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     }
 
     let ongoing = with_state(scope, iter, |s| s.ongoing_promise.borrow().clone()).flatten();
@@ -456,10 +456,10 @@ fn sequenced_call<'s>(
             let iter = v8::Local::new(scope, &iter_g3);
             with_state(scope, iter, |s| {
                 let mut ongoing = s.ongoing_promise.borrow_mut();
-                if let Some(cur) = ongoing.as_ref() {
-                    if cur == &new_g_for_clear {
-                        *ongoing = None;
-                    }
+                if let Some(cur) = ongoing.as_ref()
+                    && cur == &new_g_for_clear
+                {
+                    *ongoing = None;
                 }
             });
         })),
@@ -492,7 +492,7 @@ fn run_op<'s>(
 ///   4. Else: issue a Native ReadRequest:
 ///      - chunkSteps(chunk): resolve promise with `{value: chunk, done: false}`.
 ///      - closeSteps:        release reader; resolve promise with
-///                           `{value: undefined, done: true}`.
+///        `{value: undefined, done: true}`.
 ///      - errorSteps(reason): release reader; reject promise with reason.
 fn next_impl<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -502,7 +502,7 @@ fn next_impl<'s>(
         let msg = v8::String::new(scope, "ReadableStreamAsyncIterator.next: invalid receiver")
             .unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     }
 
     let reader_v = slots::read_slot(scope, this, ITER_READER);
@@ -606,12 +606,12 @@ fn return_method_callback<'s>(
 ///      `{value, done: true}`.
 ///   3. Let preventCancel be this.`[[preventCancel]]`.
 ///   4. If preventCancel is true:
-///        a. ReadableStreamReaderGenericRelease(reader).
-///        b. Return promiseResolvedWith `{value, done: true}`.
+///      a. ReadableStreamReaderGenericRelease(reader).
+///      b. Return promiseResolvedWith `{value, done: true}`.
 ///   5. Else:
-///        a. cancelPromise = ReadableStreamReaderGenericCancel(reader, value).
-///        b. ReadableStreamReaderGenericRelease(reader).
-///        c. Return cancelPromise.then(_ => {value, done: true}).
+///      a. cancelPromise = ReadableStreamReaderGenericCancel(reader, value).
+///      b. ReadableStreamReaderGenericRelease(reader).
+///      c. Return cancelPromise.then(_ => {value, done: true}).
 fn return_impl<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     this: v8::Local<v8::Object>,
@@ -621,7 +621,7 @@ fn return_impl<'s>(
         let msg = v8::String::new(scope, "ReadableStreamAsyncIterator.return: invalid receiver")
             .unwrap();
         let exc = v8::Exception::type_error(scope, msg);
-        return algorithms::rejected_with_promise(scope, exc.into());
+        return algorithms::rejected_with_promise(scope, exc);
     }
 
     let reader_v = slots::read_slot(scope, this, ITER_READER);

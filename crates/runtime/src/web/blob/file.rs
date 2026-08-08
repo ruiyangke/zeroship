@@ -34,7 +34,7 @@
 
 use std::rc::Rc;
 
-use crate::blob_native::blob::Blob;
+use crate::blob_native::Blob;
 use crate::state::OpError;
 
 
@@ -54,6 +54,7 @@ use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, We
 /// `*mut Blob`. With `#[repr(C)]` we guarantee that field offsets are
 /// the source-order ones, and the Blob lives at offset 0.
 #[repr(C)]
+#[derive(Default)]
 pub struct File {
     /// Inherited Blob state. **Must be first.** Code that walks the
     /// prototype chain reaches Blob's getter callbacks, which cast
@@ -68,16 +69,6 @@ pub struct File {
     /// Unix epoch. Default is "the current time" if the user's
     /// FilePropertyBag doesn't carry one (§4.3 step 5).
     pub(crate) last_modified: i64,
-}
-
-impl Default for File {
-    fn default() -> Self {
-        File {
-            blob: Blob::default(),
-            name: String::new(),
-            last_modified: 0,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +106,7 @@ fn parse_file_property_bag(
 ) -> Result<(String, i64), OpError> {
     let bag = FilePropertyBag::from_v8(scope, init)?;
     let type_ =
-        crate::blob_native::blob::normalize_type_public(bag.type_.as_deref().unwrap_or(""));
+        crate::blob_native::normalize_type_public(bag.type_.as_deref().unwrap_or(""));
     // Spec §4.3 step 5: missing `lastModified` defaults to "the
     // current time". We surface that defaulting at the call site
     // (Option::None → current_time_ms) rather than baking it into
@@ -192,8 +183,8 @@ impl File {
         // Build the Blob portion via the same algorithm Blob's
         // constructor uses. We re-use Blob's helpers via the public
         // `parse_parts_for_file` thin wrapper.
-        let bytes = crate::blob_native::blob::collect_parts_public(scope, file_bits)?;
-        let blob = crate::blob_native::blob::from_bytes_owned_public(bytes, type_);
+        let bytes = crate::blob_native::collect_parts_public(scope, file_bits)?;
+        let blob = crate::blob_native::from_bytes_owned_public(bytes, type_);
 
         Ok(File {
             blob,
@@ -252,7 +243,7 @@ impl File {
         let start: i64 = if start_arg.is_undefined() {
             0
         } else {
-            crate::blob_native::blob::clamp_long_long_public(
+            crate::blob_native::clamp_long_long_public(
                 start_arg.number_value(scope).unwrap_or(0.0),
             )
         };
@@ -264,7 +255,7 @@ impl File {
         let end: i64 = if end_arg.is_undefined() {
             size
         } else {
-            crate::blob_native::blob::clamp_long_long_public(
+            crate::blob_native::clamp_long_long_public(
                 end_arg.number_value(scope).unwrap_or(0.0),
             )
         };
@@ -278,7 +269,7 @@ impl File {
         let content_type = if content_type_arg.is_undefined() {
             String::new()
         } else {
-            crate::blob_native::blob::normalize_type_public(
+            crate::blob_native::normalize_type_public(
                 &content_type_arg.to_rust_string_lossy(scope),
             )
         };
@@ -288,7 +279,7 @@ impl File {
             span,
             content_type,
         );
-        crate::blob_native::blob::wrap_blob_in_v8(scope, new_blob)
+        crate::blob_native::wrap_blob_in_v8(scope, new_blob)
     }
 
     /// `text() -> Promise<USVString>` — delegates to inner Blob bytes.
@@ -342,7 +333,7 @@ impl File {
     /// `stream() -> ReadableStream` — delegates to inner Blob bytes.
     #[v8_method]
     fn stream<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        crate::blob_native::blob::build_blob_stream_public(scope, self.blob.as_bytes())
+        crate::blob_native::build_blob_stream_public(scope, self.blob.as_bytes())
     }
 }
 
@@ -378,8 +369,8 @@ pub fn create_file_with_last_modified<'s>(
     content_type: &str,
     last_modified: Option<i64>,
 ) -> v8::Local<'s, v8::Value> {
-    let normalized_type = crate::blob_native::blob::normalize_type_public(content_type);
-    let blob = crate::blob_native::blob::from_bytes_owned_public(bytes, normalized_type);
+    let normalized_type = crate::blob_native::normalize_type_public(content_type);
+    let blob = crate::blob_native::from_bytes_owned_public(bytes, normalized_type);
     let file = File {
         blob,
         name,

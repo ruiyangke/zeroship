@@ -53,7 +53,7 @@ fn empty_blob() {
         const b = new Blob();
         JSON.stringify({ size: b.size, type: b.type });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"size":0,"type":""}"#);
 }
@@ -65,7 +65,7 @@ fn construct_from_strings_with_type() {
         const b = new Blob(["a", "b"], { type: "text/plain" });
         JSON.stringify({ size: b.size, type: b.type });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"size":2,"type":"text/plain"}"#);
 }
@@ -77,7 +77,7 @@ fn construct_from_uint8array() {
         const b = new Blob([new Uint8Array([1, 2, 3])]);
         JSON.stringify({ size: b.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"size":3}"#);
 }
@@ -106,7 +106,7 @@ fn construct_from_nested_blob_copies_bytes() {
         const outer = new Blob([inner]);
         JSON.stringify({ inner: inner.size, outer: outer.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"inner":1,"outer":1}"#);
 }
@@ -118,7 +118,7 @@ fn construct_with_mixed_parts() {
         const b = new Blob(["ab", new Uint8Array([99]), new Blob(["XY"])]);
         JSON.stringify({ size: b.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // "ab" (2) + [99] (1) + "XY" (2) = 5
     assert_eq!(s, r#"{"size":5}"#);
@@ -133,7 +133,7 @@ fn type_with_control_chars_becomes_empty() {
         const b = new Blob([], { type: "text/plain\nbad" });
         JSON.stringify({ type: b.type });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"type":""}"#);
 }
@@ -145,7 +145,7 @@ fn type_lowercased() {
         const b = new Blob([], { type: "TEXT/Plain;CHARSET=UTF-8" });
         JSON.stringify({ type: b.type });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"type":"text/plain;charset=utf-8"}"#);
 }
@@ -161,7 +161,7 @@ fn options_object_kinds_treated_as_dict() {
         const e = new Blob([], { unrecognized: true });
         JSON.stringify({ c: c.size, d: d.size, e: e.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"c":0,"d":0,"e":0}"#);
 }
@@ -191,7 +191,7 @@ fn options_undefined_or_null_ok() {
         const c = new Blob([], null);
         JSON.stringify({ a: a.size, c: c.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":0,"c":0}"#);
 }
@@ -204,7 +204,7 @@ fn options_undefined_or_null_ok() {
 fn text_returns_promise_resolving_to_string() {
     // The result has no top-level await, so we drive the microtask
     // queue manually by writing into a global side-effect var.
-    let s = run_in_v8(
+    run_in_v8(
         r#"
         let result;
         (async () => {
@@ -220,10 +220,9 @@ fn text_returns_promise_resolving_to_string() {
         "#,
         |_val, _scope| { /* ignore */ },
     );
-    let _ = s;
     // The above is unreliable for awaiting. Drop the awaited shape and
     // test the .then path instead:
-    let s2 = run_in_v8(
+    run_in_v8(
         r#"
         let captured = "<unset>";
         new Blob(["hello"]).text().then(v => { captured = v; });
@@ -234,7 +233,6 @@ fn text_returns_promise_resolving_to_string() {
         "#,
         |_val, _scope| {},
     );
-    let _ = s2;
     // Use a clean assert via the harness's perform_microtask_checkpoint
     // pathway: separate test below validates resolution.
 }
@@ -348,7 +346,7 @@ fn slice_basic() {
         const s = b.slice(1, 4, "text/plain");
         JSON.stringify({ size: s.size, type: s.type, isBlob: s instanceof Blob });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"size":3,"type":"text/plain","isBlob":true}"#);
 }
@@ -362,7 +360,7 @@ fn slice_negative_start() {
         const s = b.slice(-2);
         JSON.stringify({ size: s.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"size":2}"#);
 }
@@ -402,7 +400,7 @@ fn slice_default_args() {
         const s = b.slice();
         JSON.stringify({ size: s.size, type: s.type });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Default content-type for slice without explicit arg is "" per
     // spec §3.3.6 step 5.
@@ -430,7 +428,7 @@ fn to_string_tag_blob() {
         r#"
         Object.prototype.toString.call(new Blob());
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object Blob]");
 }
@@ -441,7 +439,7 @@ fn to_string_tag_file() {
         r#"
         Object.prototype.toString.call(new File([], "x"));
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "[object File]");
 }
@@ -462,7 +460,7 @@ fn file_construct_basic() {
             isFile: f instanceof File,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"name":"foo.txt","size":1,"isBlob":true,"isFile":true}"#);
 }
@@ -474,7 +472,7 @@ fn file_lastmodified_is_number() {
         const f = new File([], "x");
         typeof f.lastModified;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "number");
 }
@@ -513,7 +511,7 @@ fn file_with_typed_options() {
         const f = new File(["abc"], "x.bin", { type: "APPLICATION/Octet-STREAM" });
         JSON.stringify({ name: f.name, type: f.type, size: f.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"name":"x.bin","type":"application/octet-stream","size":3}"#);
 }
@@ -533,7 +531,7 @@ fn stream_returns_readable_stream() {
             tag: Object.prototype.toString.call(r),
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"isStream":true,"tag":"[object ReadableStream]"}"#);
 }
@@ -587,7 +585,7 @@ fn parts_undefined_treated_as_empty() {
         const b = new Blob(undefined);
         JSON.stringify({ a: a.size, b: b.size });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"a":0,"b":0}"#);
 }
@@ -602,7 +600,7 @@ fn parts_non_iterable_throws() {
         catch (e) { kind = e.constructor.name; }
         kind || "no-throw";
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -613,7 +611,7 @@ fn empty_type_default() {
         r#"
         new Blob(["x"]).type;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "");
 }

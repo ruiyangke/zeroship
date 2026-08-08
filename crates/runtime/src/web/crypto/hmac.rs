@@ -68,7 +68,7 @@ pub fn generate_key<'s>(
         }
         _ => hash.block_size_bits(),
     };
-    let bytes_len = ((length_bits as usize) + 7) / 8;
+    let bytes_len = (length_bits as usize).div_ceil(8);
     let mut bytes = vec![0u8; bytes_len];
     super::helpers::fill_random(&mut bytes);
     let state = CryptoKeyState {

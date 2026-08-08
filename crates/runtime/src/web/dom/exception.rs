@@ -288,12 +288,11 @@ pub fn install_global<'s>(
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
 
     let error_key = v8::String::new(scope, "Error").unwrap();
-    if let Some(error_v) = global.get(scope, error_key.into()) {
-        if let Ok(error_fn) = v8::Local::<v8::Function>::try_from(error_v) {
-            if let Some(error_proto_v) = error_fn.get(scope, proto_key.into()) {
-                proto.set_prototype(scope, error_proto_v);
-            }
-        }
+    if let Some(error_v) = global.get(scope, error_key.into())
+        && let Ok(error_fn) = v8::Local::<v8::Function>::try_from(error_v)
+        && let Some(error_proto_v) = error_fn.get(scope, proto_key.into())
+    {
+        proto.set_prototype(scope, error_proto_v);
     }
 
     // Per WebIDL §3.7.5: legacy code constants live on BOTH the

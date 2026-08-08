@@ -46,33 +46,23 @@ use crate::state::OpError;
 // ---------------------------------------------------------------------------
 
 /// Spec `[[readyState]]` — WHATWG §3.1.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[repr(u16)]
 pub enum ReadyState {
+    #[default]
     Connecting = 0,
     Open = 1,
     Closing = 2,
     Closed = 3,
 }
 
-impl Default for ReadyState {
-    fn default() -> Self {
-        ReadyState::Connecting
-    }
-}
-
 /// `BinaryType` enum per WHATWG §3.1. Default is `"blob"`, not
 /// `"arraybuffer"`.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub enum BinaryType {
+    #[default]
     Blob,
     ArrayBuffer,
-}
-
-impl Default for BinaryType {
-    fn default() -> Self {
-        BinaryType::Blob
-    }
 }
 
 /// Send queue entry — one entry per `send()` call until the send pump
@@ -321,7 +311,7 @@ impl WebSocketImpl {
         let mut url_record = match url::Url::parse(&url_input) {
             Ok(u) => u,
             Err(e) => {
-                return Err(OpError::type_error(&format!(
+                return Err(OpError::type_error(format!(
                     "WebSocket: invalid URL: {e}"
                 )))
             }
@@ -341,7 +331,7 @@ impl WebSocketImpl {
             }
             "ws" | "wss" => {}
             scheme => {
-                return Err(OpError::type_error(&format!(
+                return Err(OpError::type_error(format!(
                     "WebSocket: scheme must be 'ws' or 'wss', got '{scheme}'"
                 )))
             }
@@ -659,15 +649,15 @@ impl WebSocketImpl {
             return Ok(());
         }
 
-        if let Ok(blob_obj) = v8::Local::<v8::Object>::try_from(data) {
-            if crate::blob_native::blob::is_blob_instance_public(scope, blob_obj) {
-                // Per spec step 4: bufferedAmount jumps by Blob.size synchronously,
-                // bytes are extracted asynchronously by the send pump.
-                let blob_size = crate::blob_native::blob::blob_size_public(scope, blob_obj);
-                self.queue_blob(scope, blob_obj, blob_size);
-                self.flush_to_network(scope);
-                return Ok(());
-            }
+        if let Ok(blob_obj) = v8::Local::<v8::Object>::try_from(data)
+            && crate::blob_native::is_blob_instance_public(scope, blob_obj)
+        {
+            // Per spec step 4: bufferedAmount jumps by Blob.size synchronously,
+            // bytes are extracted asynchronously by the send pump.
+            let blob_size = crate::blob_native::blob_size_public(scope, blob_obj);
+            self.queue_blob(scope, blob_obj, blob_size);
+            self.flush_to_network(scope);
+            return Ok(());
         }
 
         if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data) {
@@ -780,7 +770,7 @@ impl WebSocketImpl {
     pub fn close_internal(&self, scope: &mut v8::PinScope, code: u16, reason: String) {
         use ReadyState::*;
         match self.ready_state.get() {
-            Closing | Closed => return,
+            Closing | Closed => (),
             Connecting => {
                 self.ready_state.set(Closing);
                 #[cfg(feature = "runtime_native_websocket")]
@@ -936,10 +926,10 @@ fn estimate_send_bytes(scope: &mut v8::PinScope, data: v8::Local<v8::Value>) -> 
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(data) {
         return view.byte_length() as u64;
     }
-    if let Ok(blob_obj) = v8::Local::<v8::Object>::try_from(data) {
-        if crate::blob_native::blob::is_blob_instance_public(scope, blob_obj) {
-            return crate::blob_native::blob::blob_size_public(scope, blob_obj);
-        }
+    if let Ok(blob_obj) = v8::Local::<v8::Object>::try_from(data)
+        && crate::blob_native::is_blob_instance_public(scope, blob_obj)
+    {
+        return crate::blob_native::blob_size_public(scope, blob_obj);
     }
     0
 }

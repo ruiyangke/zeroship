@@ -194,6 +194,12 @@ impl NativeWsState {
     }
 }
 
+impl Default for NativeWsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecvBackpressure for NativeWsState {
     fn queued_event_len(&self) -> usize {
         self.events.len()
@@ -297,27 +303,27 @@ pub fn spawn_connect_task(
 ) {
     let state_for_task = state.clone();
     let task = async move {
-        if let Some(ws) = lookup_native_ws_state(&state_for_task, ws_id) {
-            if ws.borrow().cancel {
-                let reason = ws.borrow().cancel_reason.clone();
-                push_event(
-                    &state_for_task,
-                    ws_id,
-                    WsEvent::Error {
-                        reason: format!("aborted: {reason}"),
-                    },
-                );
-                push_event(
-                    &state_for_task,
-                    ws_id,
-                    WsEvent::Close {
-                        code: 1006,
-                        reason,
-                        was_clean: false,
-                    },
-                );
-                return;
-            }
+        if let Some(ws) = lookup_native_ws_state(&state_for_task, ws_id)
+            && ws.borrow().cancel
+        {
+            let reason = ws.borrow().cancel_reason.clone();
+            push_event(
+                &state_for_task,
+                ws_id,
+                WsEvent::Error {
+                    reason: format!("aborted: {reason}"),
+                },
+            );
+            push_event(
+                &state_for_task,
+                ws_id,
+                WsEvent::Close {
+                    code: 1006,
+                    reason,
+                    was_clean: false,
+                },
+            );
+            return;
         }
 
         let max_frame_size = opts.max_frame_size;
@@ -434,7 +440,7 @@ async fn run_socket_driver(
             run_tls_driver(
                 state,
                 ws_id,
-                SocketStream::Tls(tls),
+                SocketStream::Tls(*tls),
                 leftover,
                 rx,
                 tx,

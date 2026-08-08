@@ -61,7 +61,7 @@ fn abort_controller_construct_signal_is_abortsignal() {
             isEventTarget: c.signal instanceof EventTarget,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -83,7 +83,7 @@ fn abort_controller_abort_sets_aborted_and_reason() {
             code: c.signal.reason.code,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted":true,"same":true,"code":42}"#);
 }
@@ -103,7 +103,7 @@ fn abort_without_reason_uses_aborterror_default() {
             msg_starts_with_op: r.message.startsWith("The operation"),
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -125,7 +125,7 @@ fn abort_is_idempotent() {
             same: c.signal.reason === r1,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"first","same":true}"#);
 }
@@ -150,7 +150,7 @@ fn abort_fires_abort_event_synchronously() {
         c.abort();
         JSON.stringify({ fired, event_type, target_match });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -181,7 +181,7 @@ fn abort_fires_event_after_algorithms() {
         c.abort();
         JSON.stringify({ aborted_in_listener });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted_in_listener":true}"#);
 }
@@ -201,7 +201,7 @@ fn already_aborted_signal_does_not_fire_abort_event_on_listener_add() {
         Promise.resolve().then(() => {});
         JSON.stringify({ fired });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"fired":0}"#);
 }
@@ -220,7 +220,7 @@ fn throw_if_aborted_no_throw_before() {
         catch (e) { threw = true; }
         JSON.stringify({ threw });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"threw":false}"#);
 }
@@ -237,7 +237,7 @@ fn throw_if_aborted_throws_reason_after() {
         catch (e) { caught_kind = e.kind; }
         JSON.stringify({ caught_kind });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"caught_kind":"custom"}"#);
 }
@@ -258,7 +258,7 @@ fn abort_signal_abort_returns_already_aborted() {
             name: sig.reason.name,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -274,7 +274,7 @@ fn abort_signal_abort_uses_provided_reason() {
         const sig = AbortSignal.abort(r);
         JSON.stringify({ aborted: sig.aborted, reason: sig.reason });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted":true,"reason":"string-reason"}"#);
 }
@@ -296,7 +296,7 @@ fn any_with_already_aborted_returns_aborted() {
             same: sig.reason === r,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted":true,"same":true}"#);
 }
@@ -315,7 +315,7 @@ fn any_aborts_when_first_input_aborts() {
             reason: sig.reason,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted":true,"reason":"from-c1"}"#);
 }
@@ -330,7 +330,7 @@ fn any_aborts_when_second_input_aborts() {
         c2.abort("from-c2");
         JSON.stringify({ aborted: sig.aborted, reason: sig.reason });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"aborted":true,"reason":"from-c2"}"#);
 }
@@ -346,7 +346,7 @@ fn any_fires_abort_event_on_dependent() {
         c.abort();
         JSON.stringify({ fired, sig_aborted: sig.aborted });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"fired":1,"sig_aborted":true}"#);
 }
@@ -380,7 +380,7 @@ fn any_flattens_through_dependent_inputs() {
             leaf_aborted: leaf.aborted,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -419,7 +419,7 @@ fn dependent_reasons_collected_before_signal_steps_run() {
             dep2_reason: dep2.reason,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Per spec step 3: dependents' reason is set BEFORE running
     // signal's abort steps (which include firing the abort event).
@@ -446,7 +446,7 @@ fn dependent_event_order_after_root_event() {
         root.abort();
         JSON.stringify({ order });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"order":["root","dep"]}"#);
 }
@@ -477,7 +477,7 @@ fn add_event_listener_with_aborted_signal_no_op() {
         t.dispatchEvent(new Event("e"));
         JSON.stringify({ calls });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"calls":0}"#);
 }

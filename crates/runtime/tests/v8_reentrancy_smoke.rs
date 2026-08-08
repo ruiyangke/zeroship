@@ -216,7 +216,7 @@ fn reentry_same_method_same_instance_throws_typeerror() {
             innerMsgHasMutSelf: innerMsg.indexOf("&mut self") !== -1,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -322,7 +322,7 @@ fn guard_releases_after_throw() {
         const second = r.tickle();
         JSON.stringify({ first, second });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"first":42,"second":42}"#);
 }
@@ -374,7 +374,7 @@ fn nested_cross_instance_then_same_instance_throws() {
             innerHasMethod: innerMsg && innerMsg.indexOf("Reenterable::tickle") !== -1,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -418,7 +418,7 @@ fn slot_clears_after_nested_unwind() {
         const third = b.tickle();
         JSON.stringify({ first, second, third });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"first":11,"second":11,"third":22}"#);
 }

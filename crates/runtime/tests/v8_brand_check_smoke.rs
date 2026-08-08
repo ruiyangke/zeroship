@@ -177,7 +177,7 @@ fn same_class_call_via_prototype_works() {
         // r is a Uint8Array
         Array.from(r).join(",");
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "1,2,3");
 }
@@ -216,7 +216,7 @@ fn cross_class_method_call_throws() {
         } catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"TypeError","msg":"Illegal invocation"}"#);
 }
@@ -234,7 +234,7 @@ fn cross_class_getter_call_throws() {
         } catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, r#"{"kind":"TypeError","msg":"Illegal invocation"}"#);
 }
@@ -258,7 +258,7 @@ fn cross_class_mutator_call_throws() {
         } catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -278,7 +278,7 @@ fn plain_object_receiver_throws() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }
@@ -319,7 +319,7 @@ fn js_subclass_passes_brand_check() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     // Either the second-stage External check throws TypeError, or the
     // brand check itself fails (the prototype chain DOES match, so we

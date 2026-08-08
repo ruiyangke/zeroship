@@ -30,6 +30,12 @@ pub struct ModuleRegistry {
 
 pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
 
+impl Default for ModuleRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
@@ -283,11 +289,11 @@ pub fn load_modules(
         );
         if let Some(obj) = local.to_object(scope) {
             let stack_key = v8::String::new(scope, "stack").unwrap();
-            if let Some(stack_val) = obj.get(scope, stack_key.into()) {
-                if !stack_val.is_undefined() {
-                    detail = stack_val.to_rust_string_lossy(scope);
-                    tracing::error!(stack = %stack_val.to_rust_string_lossy(scope), "v8 evaluate rejected stack");
-                }
+            if let Some(stack_val) = obj.get(scope, stack_key.into())
+                && !stack_val.is_undefined()
+            {
+                detail = stack_val.to_rust_string_lossy(scope);
+                tracing::error!(stack = %stack_val.to_rust_string_lossy(scope), "v8 evaluate rejected stack");
             }
         }
         return Err(format!("Evaluate rejected: {entrypoint}: {detail}"));

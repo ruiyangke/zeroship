@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use zeroship_runtime::fetch_body::body::BodySource;
+use zeroship_runtime::fetch_body::BodySource;
 use zeroship_runtime::fetch_native::algorithms::{
     main_fetch, CredentialsMode, FetchRequest, RedirectMode,
 };

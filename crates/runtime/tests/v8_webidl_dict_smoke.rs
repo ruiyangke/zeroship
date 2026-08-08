@@ -9,7 +9,7 @@
 //!   - `undefined` → all defaults
 //!   - `42` (primitive) → TypeError
 //!   - `{a:Symbol()}` → TypeError on member coercion (Symbol cannot
-//!      ToString)
+//!     ToString)
 //!   - `#[webidl_name = "..."]` rename works
 //!   - Nested dict (dict-as-member) reads recursively
 //!   - Local<Value> field carries raw V8 handle through

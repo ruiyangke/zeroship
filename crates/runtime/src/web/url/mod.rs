@@ -36,6 +36,11 @@
 
 pub mod helpers;
 pub mod search_params;
+// Flattening this into `mod.rs` (as done for `web::blob` /
+// `web::fetch::body`) would ripple into `crate::url_native::url::URL`
+// call sites outside this crate slice (e.g. `rpc/superjson.rs`), which
+// is out of scope for this pass.
+#[allow(clippy::module_inception)]
 pub mod url;
 
 /// Per-isolate slot storing the URLSearchParams class function and the

@@ -268,7 +268,7 @@ fn stream_class_template<'s>(
         let getter_tmpl = v8::FunctionTemplate::new(scope, locked_getter_callback);
         proto.set_accessor_property(
             key.into(),
-            Some(getter_tmpl.into()),
+            Some(getter_tmpl),
             None,
             v8::PropertyAttribute::NONE,
         );

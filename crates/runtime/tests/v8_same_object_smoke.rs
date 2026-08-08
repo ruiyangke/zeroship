@@ -187,7 +187,7 @@ fn same_object_returns_same_reference() {
                                  && b.mintedAt === d.mintedAt,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -233,7 +233,7 @@ fn distinct_getters_cache_independently() {
             kinds:              [h1.kind, sp1.kind],
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -280,7 +280,7 @@ fn different_instances_have_different_cached_objects() {
             crossInstanceDistinct: ha !== hb,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         s,
@@ -317,7 +317,7 @@ fn same_object_getter_brand_checks() {
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(s, "TypeError");
 }

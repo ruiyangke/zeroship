@@ -138,7 +138,7 @@ fn static_method_callable_on_class() {
         r#"
         Crate.from("hi", 5);
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "hi-5");
 }
@@ -155,7 +155,7 @@ fn static_method_not_on_instance() {
         const b = new Crate();
         typeof b.from;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "undefined");
 }
@@ -169,7 +169,7 @@ fn static_method_not_on_prototype() {
         r#"
         typeof Crate.prototype.from;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "undefined");
 }
@@ -190,7 +190,7 @@ fn static_method_result_err_throws() {
         catch (e) { kind = e.constructor.name; msg = e.message; }
         JSON.stringify({ kind, msg });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         r,
@@ -236,7 +236,7 @@ fn static_getter_not_on_instance() {
         const b = new Crate();
         typeof b.DEFAULT_TIMEOUT;
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(r, "undefined");
 }
@@ -257,7 +257,7 @@ fn instance_method_still_works_with_statics() {
             cls_default: Crate.DEFAULT_TIMEOUT,
         });
         "#,
-        |val, scope| js_string(val, scope),
+        js_string,
     );
     assert_eq!(
         r,
