@@ -371,8 +371,16 @@ impl LiveSchema {
     /// introspection for renames. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
     /// to render the post-rename `CREATE TABLE`, and that `Value` is NOT recoverable
     /// from a raw SQLite-catalog introspection (masks/encryption/ref facets are not
-    /// in `sqlite_master`); the descriptor set IS the authoritative source, so the
-    /// dev/CLI deploy path threads it here. Routes through the SAME
+    /// in `sqlite_master`); the descriptor set IS the authoritative source, so a caller
+    /// has to thread one in. No caller does today: the only call site in the workspace is
+    /// this file's `#[cfg(test)]` module. The last non-test call site was
+    /// `apply/ir_apply.rs`'s `apply_bundle_ir_sqlite`, removed in 8a212fb with the
+    /// file-based envelope execution model, and that entry point was itself a library
+    /// surface no deploy path called, so this constructor has never been reachable from a
+    /// dev/CLI deploy. What it is FOR is to give whatever caller eventually supplies
+    /// PRE-rename column facts (a pre-deploy SQLite catalog/snapshot read, or the
+    /// pre-rename column carried in the IR) one shared way to build them; until such a
+    /// caller exists the path stays test-only. Routes through the SAME
     /// [`crate::render::declarative::desired_snapshot_for_dialect`] the differ uses, so the
     /// live facts the rename rebuild consumes are byte-identical to a `t.*`-diff's
     /// desired snapshot. Every table is owned by `owner_app` (the deploying app).
