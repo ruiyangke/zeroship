@@ -164,8 +164,14 @@ function checkField(
       return;
     }
   } else if (type === "number") {
-    if (typeof value !== "number" || isNaN(value as number)) {
-      errors[key] = { path: key, message: `${key} must be a number` };
+    // `Number.isFinite` rather than `!isNaN`: the old guard caught NaN and let both
+    // infinities through, and the two fail identically downstream - `JSON.stringify`
+    // encodes NaN, Infinity and -Infinity all as `null`. So a column that accepts
+    // NULL silently stores NULL for a value validation just approved, and one that
+    // does not gets a database error instead of a field-level message. Catching NaN
+    // alone covered one third of the same defect.
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      errors[key] = { path: key, message: `${key} must be a finite number` };
       return;
     }
     if (min !== undefined && (value as number) < min) {
