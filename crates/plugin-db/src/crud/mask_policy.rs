@@ -6,13 +6,14 @@
 //! (`IsolateDbContext::mask_policies`). The cache is
 //! seeded from durable storage:
 //!
-//! - **PG** (`feature = "pg"`): `__zeroship_admin.mask_policies`
+//! - **PG** (selected at runtime by a `postgres://` url):
+//!   `__zeroship_admin.mask_policies`
 //!   table; read via the SECURITY DEFINER `get_mask_policy(app_id)`
 //!   helper, written via the SECURITY DEFINER `set_mask_policy(app_id,
 //!   policy)` helper. The admin schema mirrors the `column_keys`
 //!   pattern used for column encryption.
 //!
-//! - **SQLite** (`feature = "sqlite"`): a sidecar JSON file at
+//! - **SQLite** (selected at runtime by a `sqlite://` url): a sidecar JSON file at
 //!   `<db_dir>/mask_policies.json`. Reads/writes run off-thread via
 //!   `compio::runtime::spawn_blocking`, and a per-file process-local
 //!   mutex serialises concurrent writers so the read/modify/write cycle

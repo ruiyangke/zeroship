@@ -2591,11 +2591,11 @@ pub async fn prepare_upsert_doc_for_write(
 /// Run the write-side encryption pass over `doc` using the
 /// backend-arm `EncryptedColumn` impl.
 ///
-/// - **PG arm** (gated on `feature = "pg"`): goes through
+/// - **PG arm** (chosen at runtime, not compiled in): goes through
 ///   `PostgresBackend`'s `EncryptedColumn` impl. The SQL builder
 ///   emits `decode($N, 'base64')::bytea` so the BYTEA column receives
 ///   raw bytes.
-/// - **SQLite arm** (gated on `feature = "sqlite"`): goes through
+/// - **SQLite arm** (chosen at runtime, not compiled in): goes through
 ///   `SqliteBackend`'s `EncryptedColumn` impl using env-var-sourced
 ///   keys. The SQL builder (when called with `SqlDialect::Sqlite`)
 ///   emits `$N` and tags the encrypted-column param with
