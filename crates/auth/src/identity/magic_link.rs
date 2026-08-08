@@ -229,7 +229,7 @@ pub async fn redeem_pending(
         .map_err(|e| {
             RedeemError::Store(AuthError::Db(format!("magic_link redeem stale: {e}")))
         })?;
-    if stale.first().is_some() {
+    if !stale.is_empty() {
         return Err(RedeemError::AlreadyConsumed);
     }
 
@@ -248,7 +248,7 @@ pub async fn redeem_pending(
         .map_err(|e| {
             RedeemError::Store(AuthError::Db(format!("magic_link redeem in-flight: {e}")))
         })?;
-    if in_flight.first().is_some() {
+    if !in_flight.is_empty() {
         return Err(RedeemError::InFlight);
     }
 

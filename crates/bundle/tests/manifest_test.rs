@@ -41,8 +41,10 @@ fn old_manifest_without_exports_round_trips() {
 #[test]
 fn empty_exports_serializes_to_no_field() {
     // Case A: brand-new manifest with explicit empty exports.
-    let mut a = Manifest::default();
-    a.exports = Some(ManifestExports::default());
+    let a = Manifest {
+        exports: Some(ManifestExports::default()),
+        ..Default::default()
+    };
     let a_json = serde_json::to_value(&a).expect("serialize A");
 
     // Case B: brand-new manifest with no exports at all.
@@ -65,11 +67,13 @@ fn empty_exports_serializes_to_no_field() {
 /// losslessly — the path stays the same string before and after.
 #[test]
 fn schema_path_round_trips() {
-    let mut m = Manifest::default();
-    m.exports = Some(ManifestExports {
-        schema: Some("src/schema.ts".to_string()),
-        handlers: Vec::new(),
-    });
+    let m = Manifest {
+        exports: Some(ManifestExports {
+            schema: Some("src/schema.ts".to_string()),
+            handlers: Vec::new(),
+        }),
+        ..Default::default()
+    };
     let json_str = serde_json::to_string(&m).expect("serialize");
     let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
     assert_eq!(
@@ -89,15 +93,17 @@ fn schema_path_round_trips() {
 /// blowing up.
 #[test]
 fn handler_entries_round_trip() {
-    let mut m = Manifest::default();
-    m.exports = Some(ManifestExports {
-        schema: None,
-        handlers: vec![HandlerEntry {
-            path: "src/api/query/listTodos.ts".to_string(),
-            capability: "query".to_string(),
-            name: "listTodos".to_string(),
-        }],
-    });
+    let m = Manifest {
+        exports: Some(ManifestExports {
+            schema: None,
+            handlers: vec![HandlerEntry {
+                path: "src/api/query/listTodos.ts".to_string(),
+                capability: "query".to_string(),
+                name: "listTodos".to_string(),
+            }],
+        }),
+        ..Default::default()
+    };
     let json_str = serde_json::to_string(&m).expect("serialize");
     let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
     let handlers = &m2.exports.as_ref().expect("exports").handlers;
@@ -109,8 +115,10 @@ fn handler_entries_round_trip() {
 
 #[test]
 fn workflow_declarations_round_trip() {
-    let mut m = Manifest::default();
-    m.workflows = Some(json!(["Checkout", {"name": "Fulfillment"}]));
+    let m = Manifest {
+        workflows: Some(json!(["Checkout", {"name": "Fulfillment"}])),
+        ..Default::default()
+    };
 
     let json_str = serde_json::to_string(&m).expect("serialize");
     let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
@@ -136,20 +144,22 @@ fn empty_workflow_declarations_omit_field() {
 /// `{ id, label, description }` field intact.
 #[test]
 fn auth_scopes_round_trip() {
-    let mut m = Manifest::default();
-    m.auth = AuthConfig {
-        scopes: vec![
-            ScopeDef {
-                id: "read:billing".to_string(),
-                label: "View billing".to_string(),
-                description: Some("See invoices and plan.".to_string()),
-            },
-            ScopeDef {
-                id: "write:projects".to_string(),
-                label: "Manage projects".to_string(),
-                description: None,
-            },
-        ],
+    let m = Manifest {
+        auth: AuthConfig {
+            scopes: vec![
+                ScopeDef {
+                    id: "read:billing".to_string(),
+                    label: "View billing".to_string(),
+                    description: Some("See invoices and plan.".to_string()),
+                },
+                ScopeDef {
+                    id: "write:projects".to_string(),
+                    label: "Manage projects".to_string(),
+                    description: None,
+                },
+            ],
+        },
+        ..Default::default()
     };
     let json_str = serde_json::to_string(&m).expect("serialize");
     let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
@@ -188,13 +198,15 @@ fn empty_auth_omits_the_key() {
 /// platform-vocab collision is the control plane's job).
 #[test]
 fn validate_rejects_malformed_scope_id() {
-    let mut m = Manifest::default();
-    m.auth = AuthConfig {
-        scopes: vec![ScopeDef {
-            id: "Read:Billing".to_string(), // uppercase ⇒ rejected
-            label: "x".to_string(),
-            description: None,
-        }],
+    let m = Manifest {
+        auth: AuthConfig {
+            scopes: vec![ScopeDef {
+                id: "Read:Billing".to_string(), // uppercase ⇒ rejected
+                label: "x".to_string(),
+                description: None,
+            }],
+        },
+        ..Default::default()
     };
     let err = m.validate().expect_err("uppercase scope id must be rejected");
     assert!(err.contains("Read:Billing"), "{err}");
@@ -203,13 +215,15 @@ fn validate_rejects_malformed_scope_id() {
 /// `Manifest::validate()` accepts well-formed `verb:resource` ids.
 #[test]
 fn validate_accepts_wellformed_scope_id() {
-    let mut m = Manifest::default();
-    m.auth = AuthConfig {
-        scopes: vec![
-            ScopeDef { id: "read:billing".to_string(), label: "x".to_string(), description: None },
-            ScopeDef { id: "manage_team".to_string(), label: "y".to_string(), description: None },
-            ScopeDef { id: "a:b:c".to_string(), label: "z".to_string(), description: None },
-        ],
+    let m = Manifest {
+        auth: AuthConfig {
+            scopes: vec![
+                ScopeDef { id: "read:billing".to_string(), label: "x".to_string(), description: None },
+                ScopeDef { id: "manage_team".to_string(), label: "y".to_string(), description: None },
+                ScopeDef { id: "a:b:c".to_string(), label: "z".to_string(), description: None },
+            ],
+        },
+        ..Default::default()
     };
     m.validate().expect("well-formed scope ids accepted");
 }
@@ -217,16 +231,18 @@ fn validate_accepts_wellformed_scope_id() {
 /// Build a one-resource manifest with the given `required_scopes` on a
 /// `User` route, and the given set of declared `auth.scopes`.
 fn manifest_requiring(required: &[&str], declared: &[&str]) -> Manifest {
-    let mut m = Manifest::default();
-    m.auth = AuthConfig {
-        scopes: declared
-            .iter()
-            .map(|id| ScopeDef {
-                id: id.to_string(),
-                label: "label".to_string(),
-                description: None,
-            })
-            .collect(),
+    let mut m = Manifest {
+        auth: AuthConfig {
+            scopes: declared
+                .iter()
+                .map(|id| ScopeDef {
+                    id: id.to_string(),
+                    label: "label".to_string(),
+                    description: None,
+                })
+                .collect(),
+        },
+        ..Default::default()
     };
     let mut resources = HashMap::new();
     resources.insert(

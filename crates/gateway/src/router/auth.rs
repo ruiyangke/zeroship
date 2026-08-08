@@ -856,8 +856,8 @@ fn split_scope_claim(scope: &str) -> Vec<String> {
 /// Outcome of the cookie arm ([`resolve_app_session_user_header_inner`]).
 #[derive(Debug)]
 enum CookieOutcome {
-    /// A valid SIGNED session cookie verified LOCALLY (signature + `kid` + `exp`
-    /// + `app` == route client) and its `(client_id, pws_)` family is not
+    /// A valid SIGNED session cookie verified LOCALLY (signature, `kid`, `exp`,
+    /// and `app` == route client) and its `(client_id, pws_)` family is not
     /// revoked. Carries the signed `ZeroShip-User` header built directly from
     /// the cookie claims (NO DB read for identity).
     Allowed(String),

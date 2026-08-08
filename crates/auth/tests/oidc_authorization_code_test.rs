@@ -611,9 +611,8 @@ async fn send_authorize(
         "openid profile email",
     )
     .await
-    .map(|resp| {
+    .inspect(|_resp| {
         let _ = state;
-        resp
     })
 }
 

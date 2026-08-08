@@ -175,9 +175,7 @@ enum BearerToken<'a> {
 fn bearer_token(req: &HttpRequest) -> Option<BearerToken<'_>> {
     let raw = req.headers().get(AUTHORIZATION)?.to_str().ok()?.trim();
     let mut parts = raw.split_ascii_whitespace();
-    let Some(scheme) = parts.next() else {
-        return None;
-    };
+    let scheme = parts.next()?;
     if !scheme.eq_ignore_ascii_case("Bearer") {
         // A different auth scheme is not a Bearer credential for us.
         return None;

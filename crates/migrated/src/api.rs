@@ -274,7 +274,7 @@ async fn verify_apps_migrate(
     };
     state
         .authenticator
-        .verify_action(token, app_id, Action::AppsDeploy, &request_id(&req))
+        .verify_action(token, app_id, Action::AppsDeploy, &request_id(req))
         .await
         .map_err(auth_error_response)
 }

@@ -780,7 +780,7 @@ async fn same_device_finish(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..AuditEvent::from_request(&req)
+            ..AuditEvent::from_request(req)
         },
     )
     .await;
@@ -905,6 +905,11 @@ pub(crate) async fn finish_after_second_factor(
 /// Cross-device path: stash a fresh 6-digit code in
 /// `zeroship.magic_completions`, render the code on this (redeeming) device.
 #[allow(clippy::future_not_send)]
+// Private helper with a single call site; each parameter is an independent
+// piece of already-loaded request/DB state. Bundling into a params struct is
+// a real refactor, not a mechanical lint fix - not doing that as part of a
+// lint sweep.
+#[allow(clippy::too_many_arguments)]
 async fn cross_device_show_code(
     db: &compio_postgres::Client,
     token_hash: &[u8],
@@ -947,7 +952,7 @@ async fn cross_device_show_code(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..AuditEvent::from_request(&req)
+            ..AuditEvent::from_request(req)
         },
     )
     .await;
@@ -1475,7 +1480,7 @@ pub mod completions_store {
                     "magic_completions consume in-flight: {e}"
                 )))
             })?;
-        if in_flight.first().is_some() {
+        if !in_flight.is_empty() {
             return Err(ConsumeError::InFlight);
         }
 
@@ -1503,7 +1508,7 @@ pub mod completions_store {
                 )))
             })?;
 
-        if wrong_rows.first().is_none() {
+        if wrong_rows.is_empty() {
             return Err(ConsumeError::WrongCode);
         }
 

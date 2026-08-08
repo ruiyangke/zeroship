@@ -489,9 +489,9 @@ fn resolve_effective_policy(
         if let Some(a) = node.auth {
             auth_declared = true;
             // stricter wins — child only weakens via override (validated).
-            if a.rank() > auth.rank() {
-                auth = a;
-            } else if is_self && node.r#override.iter().any(|f| f == "auth") {
+            if a.rank() > auth.rank()
+                || (is_self && node.r#override.iter().any(|f| f == "auth"))
+            {
                 auth = a;
             }
         }

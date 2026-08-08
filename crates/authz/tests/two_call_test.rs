@@ -375,7 +375,7 @@ where
 }
 
 async fn pg(dsn: &str) -> Client {
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    let (client, connection) = connect(dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

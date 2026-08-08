@@ -79,7 +79,7 @@ async fn logout_route_is_registered_returns_not_404() {
     // The regression-failing assertion is on the absence of 404.
     let http = cyper::Client::new();
     let resp = http
-        .request(http::Method::GET, &format!("{auth_base}/logout"))
+        .request(http::Method::GET, format!("{auth_base}/logout"))
         .expect("build GET /logout")
         .send()
         .await
@@ -168,7 +168,7 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     let http = cyper::Client::new();
     let body = "csrf=missing";
     let resp = http
-        .request(http::Method::POST, &format!("{auth_base}/logout"))
+        .request(http::Method::POST, format!("{auth_base}/logout"))
         .expect("build POST /logout")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")

@@ -198,6 +198,11 @@ pub enum ApplyRequestError {
     Apply(#[from] SealedApplyError),
 }
 
+// 8 distinct parameters (DSN, tmp root, app/policy/store context, principal) -
+// each is independently meaningful at call sites; bundling into a params
+// struct is a real refactor, not a mechanical lint fix, so this is a
+// site-scoped allow rather than a signature change.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
@@ -226,6 +231,8 @@ pub async fn apply_ir_documents(
     .await
 }
 
+// See the `apply_ir_documents` allow above - same rationale applies here.
+#[allow(clippy::too_many_arguments)]
 pub async fn approve_pending_migration(
     provision_dsn: &str,
     tmp_root: &Path,
@@ -848,6 +855,11 @@ async fn apply_sealed(
 
 /// Discover `*.ir.json` files in a directory, deterministically ordered by path
 /// (the service-owned replacement for the engine's removed `discover_ir_files`).
+// `IrApplyError` is ~152 bytes wide because it carries the vendored engine's
+// own error enums verbatim (`zero_migrate::LoadAndLowerGuardedError` etc).
+// Boxing it would ripple through every `IrApplyError::Read { .. }` match arm
+// in this file and its callers; not doing that as part of a lint sweep.
+#[allow(clippy::result_large_err)]
 fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError> {
     let mut ir_files: Vec<PathBuf> = Vec::new();
     let read = std::fs::read_dir(migrations_dir).map_err(|e| IrApplyError::Read {
@@ -890,6 +902,9 @@ fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError
 /// content, so both surface as [`IrApplyError::Malformed`] (422) naming the file. The
 /// final re-serialize is of a value this function just built, so a failure there is
 /// ours and stays [`IrApplyError::Read`] (503).
+// See the `discover_ir_files` allow above - same `IrApplyError` size, same
+// rationale.
+#[allow(clippy::result_large_err)]
 fn resolve_shape_bytes(
     raw_bytes: &str,
     policy: &PdpPolicy,
@@ -1343,6 +1358,11 @@ fn dedupe(values: &mut Vec<String>) {
     values.retain(|value| seen.insert(value.clone()));
 }
 
+// `ApplyRequestError` is ~152 bytes wide because it wraps `IrApplyError` /
+// `SealedApplyError` (themselves wide - see the allows on `discover_ir_files`
+// above). Boxing it would ripple through every match arm on this type in
+// `apply.rs` and `api.rs`; not doing that as part of a lint sweep.
+#[allow(clippy::result_large_err)]
 fn write_ir_documents(
     tmp_root: &Path,
     request: &ApplyMigrationsRequest,
@@ -1370,6 +1390,9 @@ fn write_ir_documents(
     Ok(dir)
 }
 
+// See the `write_ir_documents` allow above - same `ApplyRequestError` size,
+// same rationale.
+#[allow(clippy::result_large_err)]
 fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyRequestError> {
     match request.kind {
         ApplyKind::Ir => {}
@@ -1425,6 +1448,9 @@ async fn mark_migration_failed(
     }
 }
 
+// See the `write_ir_documents` allow above - same `ApplyRequestError` size,
+// same rationale.
+#[allow(clippy::result_large_err)]
 fn validate_filename(filename: &str) -> Result<(), ApplyRequestError> {
     let path = Path::new(filename);
     if filename.is_empty()

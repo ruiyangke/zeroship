@@ -11,10 +11,10 @@
 //! Submodules:
 //!
 //! * [`dispatch`]      — request entry, resource-tree dispatch, idempotency,
-//!                       worker forwarding, subscription dispatch.
+//!   worker forwarding, subscription dispatch.
 //! * [`auth`]          — auth gate + JWT subject / session cookie parsers.
 //! * [`static_serve`]  — three-tier blob fetch + buffered/streaming
-//!                       response building.
+//!   response building.
 //! * [`streaming`]     — chunk readers + the `STREAM_*` consts.
 //! * [`cors`]          — preflight + actual-response header injection.
 //! * [`conditional`]   — `If-None-Match` matching and `Range:` parsing.

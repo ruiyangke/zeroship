@@ -29,8 +29,8 @@
 //!
 //! ## Revocation: per-app family marker (one DB read, NOT cached)
 //!
-//! Identity verification is stateless (local signature + `kid` + `iss` + `exp`
-//! + `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
+//! Identity verification is stateless (local signature, `kid`, `iss`, `exp`,
+//! and `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
 //! SAME per-app family-marker check the Bearer arm uses —
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
 //! ([`zeroship_authz::wrapper_revocation`]) — and that is a direct

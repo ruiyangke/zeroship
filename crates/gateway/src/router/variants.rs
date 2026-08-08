@@ -9,10 +9,10 @@
 /// `variants` map. Three shapes:
 ///
 /// * `(hash, size, None)`         — identity body. The caller emits no
-///                                  `Content-Encoding` and no `Vary`.
+///   `Content-Encoding` and no `Vary`.
 /// * `(hash, size, Some(enc))`    — variant body. Caller sets
-///                                  `Content-Encoding: <enc>` and
-///                                  `Vary: Accept-Encoding`.
+///   `Content-Encoding: <enc>` and
+///   `Vary: Accept-Encoding`.
 #[derive(Debug, Clone)]
 pub(super) struct ChosenVariant {
     pub(super) hash: String,

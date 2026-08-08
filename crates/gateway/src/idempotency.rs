@@ -451,6 +451,11 @@ pub async fn pre_dispatch(
 /// in-flight lock. Called after the worker responds (success or
 /// declared error). The caller passes the post-flight metadata from
 /// the `Proceed` decision.
+// 9 independent pieces of post-flight response metadata; bundling into a
+// params struct is a real refactor touching every call site (including
+// tests below), not a mechanical lint fix - not doing that as part of a
+// lint sweep.
+#[allow(clippy::too_many_arguments)]
 pub async fn capture_response(
     store: &dyn IdempotencyStore,
     app_id: &Uuid,

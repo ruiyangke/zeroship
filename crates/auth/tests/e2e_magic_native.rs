@@ -201,7 +201,7 @@ async fn start_magic(
         .finish();
     let resp = fx
         .http
-        .request(http::Method::POST, &format!("{}/magic/start", fx.auth_base))
+        .request(http::Method::POST, format!("{}/magic/start", fx.auth_base))
         .expect("build /magic/start")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -299,7 +299,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
 
     let verify_resp = fx
         .http
-        .request(http::Method::GET, &fx.magic_url(&link))
+        .request(http::Method::GET, fx.magic_url(&link))
         .expect("build /magic/verify")
         .header("cookie", format!("zsidp_magic_csrf={magic_cookie}"))
         .expect("cookie")
@@ -318,7 +318,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
         .http
         .request(
             http::Method::POST,
-            &format!("{}/magic/verify/redeem", fx.auth_base),
+            format!("{}/magic/verify/redeem", fx.auth_base),
         )
         .expect("build /magic/verify/redeem")
         .header("content-type", "application/x-www-form-urlencoded")
@@ -357,7 +357,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
 
     let verify_resp = fx
         .http
-        .request(http::Method::GET, &fx.magic_url(&link))
+        .request(http::Method::GET, fx.magic_url(&link))
         .expect("build cross-device /magic/verify")
         .send()
         .await
@@ -377,7 +377,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .http
         .request(
             http::Method::POST,
-            &format!("{}/magic/verify/redeem", fx.auth_base),
+            format!("{}/magic/verify/redeem", fx.auth_base),
         )
         .expect("build cross-device redeem")
         .header("content-type", "application/x-www-form-urlencoded")
@@ -408,7 +408,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .finish();
     let complete_resp = fx
         .http
-        .request(http::Method::POST, &format!("{}/magic/complete", fx.auth_base))
+        .request(http::Method::POST, format!("{}/magic/complete", fx.auth_base))
         .expect("build /magic/complete")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")

@@ -3,9 +3,9 @@
 //!
 //! # The model (Phase 3 of the policy redesign)
 //!
-//! The engine's old `PolicyProfile` value-struct + its `meet_ceiling_draft` compose
-//! + its `seal_effective_profile` HMAC are DELETED. This module rebuilds the managed
-//! server on the engine's surviving PDP:
+//! The engine's old `PolicyProfile` value-struct, its `meet_ceiling_draft` compose,
+//! and its `seal_effective_profile` HMAC are DELETED. This module rebuilds the
+//! managed server on the engine's surviving PDP:
 //!
 //! - the OPERATOR CEILING is a [`zero_migrate_policy::RootCharter`] — a [`PolicyDoc`]
 //!   loaded [`LoadContext::RootCharter`] (the only layer that may carry a `mandatory`

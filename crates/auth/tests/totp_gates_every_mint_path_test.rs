@@ -169,7 +169,7 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn post_form(&self, path: &str, cookie: &str, body: String) -> cyper::Response {
         self.http
-            .request(http::Method::POST, &self.url(path))
+            .request(http::Method::POST, self.url(path))
             .expect("build request")
             .header("content-type", "application/x-www-form-urlencoded")
             .expect("content-type")
@@ -363,7 +363,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
     // The redeeming browser presents the requesting device's nonce -> same-device.
     let verify = fx
         .http
-        .request(http::Method::GET, &fx.magic_url(&link))
+        .request(http::Method::GET, fx.magic_url(&link))
         .expect("build /magic/verify")
         .header("cookie", format!("zsidp_magic_csrf={magic_nonce}"))
         .expect("cookie")
@@ -455,7 +455,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
     // A DIFFERENT browser opens the link (no matching nonce) -> cross-device.
     let verify = fx
         .http
-        .request(http::Method::GET, &fx.magic_url(&link))
+        .request(http::Method::GET, fx.magic_url(&link))
         .expect("build /magic/verify")
         .send()
         .await

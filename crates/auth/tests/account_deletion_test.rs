@@ -149,6 +149,12 @@ async fn cancel_within_grace_restores_account() {
     cleanup(&db, &[user.id]).await;
 }
 
+// REAPER_LOCK guards `Mutex<()>` - a pure test-serialization token (see the
+// doc comment above), not shared mutable data accessed across the await.
+// compio::test runs each test on its own single-threaded runtime, so the
+// held guard cannot deadlock another task's poll the way it could under a
+// work-stealing executor.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     let Some(db) = pg().await else {
@@ -195,6 +201,8 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     cleanup(&db, &[user.id]).await;
 }
 
+// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     let Some(db) = pg().await else {
@@ -274,6 +282,8 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     cleanup(&db, &[user.id]).await;
 }
 
+// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     let Some(db) = pg().await else {
@@ -344,6 +354,8 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     cleanup(&db, &[victim.id, bystander.id]).await;
 }
 
+// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_skips_cancelled_request() {
     let Some(db) = pg().await else {
@@ -385,6 +397,8 @@ async fn reaper_skips_cancelled_request() {
 // creator would be hard-deleted and the CASCADE would reap the invoice.)
 // ---------------------------------------------------------------------------
 
+// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
     let Some(db) = pg().await else {
