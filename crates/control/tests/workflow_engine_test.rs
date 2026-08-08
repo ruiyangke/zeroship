@@ -1554,6 +1554,63 @@ async fn wait_for_cancelled_without_steps(fx: &Fixture, run_id: &str) {
     panic!("late outcome after cancel was not stably discarded: {last_state:?}");
 }
 
+/// Assert how many runs a tick claimed, and on mismatch say what is in the database.
+///
+/// `fire_once` returns only a `usize`, so the fifteen bare `assert_eq!(second, 1)`
+/// call sites in this file all fail the same uninformative way: `left: 2, right: 1`
+/// and nothing else. That tells you a tick claimed a number nobody expected. It does
+/// not tell you WHICH runs, in what state, when they were due, or who holds the
+/// claim - which is exactly the information needed to tell "mine was taken" apart
+/// from "I took someone else's".
+///
+/// That gap is not hypothetical. An intermittent failure in this file has now
+/// survived three separate explanations (a missing due-timer wait, concurrent
+/// interference through the process-global inflight counter, and a counter leak on an
+/// unpolled future - refuted by a passing wait, a serialised run, and a run that
+/// changed the symptom from `left: 0` to `left: 2` respectively). Each round cost a
+/// full-binary run to learn one bit, because the assertion discards everything except
+/// the count.
+///
+/// Dumps the whole `workflow_runs` table rather than the run under test: the
+/// interesting case is a tick claiming a row the test did not seed, and filtering to
+/// the expected run id would hide precisely that.
+async fn assert_tick_claimed(fx: &Fixture, claimed: usize, expected: usize, label: &str) {
+    if claimed == expected {
+        return;
+    }
+    let rows = fx
+        .pg
+        .query(
+            "SELECT id, state, wake_at, claimed_by, dispatch_nonce, stuck_strikes, app_id \
+               FROM zeroship.workflow_runs ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("dump workflow_runs for the claim-count diagnostic");
+    let mut dump = String::new();
+    for row in &rows {
+        let id: String = row.get("id");
+        let state: String = row.get("state");
+        let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+        let claimed_by: Option<String> = row.get("claimed_by");
+        let nonce: Option<String> = row.get("dispatch_nonce");
+        let strikes: i16 = row.get("stuck_strikes");
+        let app_id: uuid::Uuid = row.get("app_id");
+        dump.push_str(&format!(
+            "  id={id} state={state} wake_at={wake_at:?} claimed_by={claimed_by:?} \
+             nonce={nonce:?} strikes={strikes} app={app_id}\n"
+        ));
+    }
+    panic!(
+        "{label}: tick claimed {claimed} runs, expected {expected}.\n\
+         All {} row(s) in this fixture's OWN database:\n{dump}\
+         If a row appears here that this test did not seed, the tick is claiming \
+         across fixtures. If only the seeded row appears, it was claimed a different \
+         number of times than expected - compare claimed_by and dispatch_nonce.",
+        rows.len(),
+    );
+}
+
 async fn wait_for_run_state(
     fx: &Fixture,
     run_id: &str,
@@ -4642,7 +4699,7 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     )
     .await
     .expect("first tick");
-    assert_eq!(first, 1);
+    assert_tick_claimed(&fx, first, 1, "uncaught_step_failure first tick").await;
     let (wake_at, strikes, _) = wait_for_run_state(&fx, &run_id, "queued").await;
     assert!(wake_at.is_some(), "failed step should schedule exactly one replay");
     assert_eq!(strikes, 0);
@@ -4655,7 +4712,8 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     )
     .await
     .expect("second tick");
-    assert_eq!(second, 1);
+    // The site that has been failing, both as `left: 0` and as `left: 2`.
+    assert_tick_claimed(&fx, second, 1, "uncaught_step_failure second tick").await;
     let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "failed").await;
     assert_eq!(wake_at, None);
     assert_eq!(strikes, 0);
