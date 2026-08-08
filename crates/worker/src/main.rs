@@ -233,6 +233,32 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
     zeroship_core::db_url::is_sqlite_url(db_url)
 }
 
+/// Whether `bind_host` reaches only this machine.
+///
+/// String comparison, not a parse, because this compares against the value the
+/// operator supplied rather than a resolved socket address - `--bind localhost` is
+/// loopback in intent and does not parse as an `IpAddr` at all. It is therefore
+/// deliberately conservative: an unusual spelling of loopback (`127.1`,
+/// `::ffff:127.0.0.1`) reads as routable and is refused, which fails in the safe
+/// direction for both callers.
+///
+/// Extracted so the two guards that need it cannot drift apart. The set used to be
+/// inlined at the `WORKER_KEY` guard only; a second copy at the unsigned-advance
+/// guard would have been one edit away from disagreeing about what counts as local.
+fn is_loopback_bind(bind_host: &str) -> bool {
+    bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost"
+}
+
+/// Whether the worker may bind `bind_host` given the unsigned-workflow-advance flag.
+///
+/// With the flag off - the default, and what every deployment under `deploy/` uses -
+/// any bind is fine, because the endpoint answers 403. With it on, the endpoint
+/// replays workflow state with no signature or nonce check, so it must not be
+/// reachable from off-box.
+fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> bool {
+    !unsigned_advance || is_loopback_bind(bind_host)
+}
+
 // The usage-stream producer wiring (`UsageStreamSettings::from_env` +
 // `build_usage_outbox`) is shared with the gateway producer; it lives in
 // `zeroship_metering`.
@@ -383,7 +409,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if worker_key.is_empty() {
-        if bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost" {
+        if is_loopback_bind(&bind_host) {
             tracing::warn!(
                 bind = %bind_host,
                 "WORKER_KEY not set — dispatch endpoints unauthenticated (loopback-only, dev mode)"
@@ -395,7 +421,32 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
-    } else if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+    }
+
+    // `--workflow-advance-unsigned` makes POST /internal/workflow/advance-unsigned
+    // live. That route is registered unconditionally (handler.rs) and performs NO
+    // signature or nonce verification - its own doc records that DW-05 deferred
+    // that - so the flag is the only thing standing between an unauthenticated
+    // caller and workflow state replay.
+    //
+    // Same posture as the empty-WORKER_KEY guard above, because it is the same
+    // hazard: unauthenticated mutation reachable over the network. Loopback is a
+    // developer running the durable-workflow e2e; anything else is an accident.
+    //
+    // Deliberately keyed on the FLAG, not on --dev-insecure. The e2e sets
+    // ZEROSHIP_DEV=1, which is a different variable from ZEROSHIP_DEV_INSECURE, so
+    // binding this to the dev-insecure posture would force every legitimate user of
+    // the flag to also waive the security posture - a strictly worse trade.
+    if !unsigned_advance_bind_allowed(&bind_host, cli.workflow_advance_unsigned) {
+        tracing::error!(
+            bind = %bind_host,
+            "refusing to bind non-loopback with --workflow-advance-unsigned — would expose \
+             unauthenticated workflow replay"
+        );
+        std::process::exit(1);
+    }
+
+    if !worker_key.is_empty() && (!cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key)) {
         // L6: a present-but-weak WORKER_KEY skips the empty-key loopback guard
         // above, can bind any interface, and is brute-forceable for the
         // ZeroShip-User HMAC. Hold a NON-EMPTY worker_key to the same ≥32-byte
@@ -770,6 +821,50 @@ mod tests {
     #[test]
     fn worker_control_key_allows_missing_in_insecure_dev() {
         assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
+    }
+
+    /// `--workflow-advance-unsigned` must not be combined with a routable bind.
+    ///
+    /// The flag turns POST `/internal/workflow/advance-unsigned` from a 403 into a
+    /// live endpoint that replays workflow state with NO signature or nonce check
+    /// (the handler says so: DW-05 left verification to a later task). The route is
+    /// registered unconditionally, so the flag is the only thing between an
+    /// unauthenticated caller and workflow replay.
+    ///
+    /// This mirrors the guard three checks up for an empty `WORKER_KEY`: loopback
+    /// warns, non-loopback exits. Same hazard class - unauthenticated mutation
+    /// reachable over the network - so the same posture.
+    ///
+    /// Cost of the guard measured, not assumed: nothing under `deploy/` passes the
+    /// flag, and the one caller that does (`tests/e2e_durable_workflows.sh`) passes
+    /// no `--bind` at all, so it takes the `127.0.0.1` default and stays allowed.
+    /// Compose binds the worker to `0.0.0.0` but never sets this flag.
+    #[test]
+    fn unsigned_advance_refused_on_a_routable_bind() {
+        // The dangerous combination, in the three spellings a routable bind takes.
+        assert!(!unsigned_advance_bind_allowed("0.0.0.0", true));
+        assert!(!unsigned_advance_bind_allowed("::", true));
+        assert!(!unsigned_advance_bind_allowed("10.0.0.7", true));
+    }
+
+    #[test]
+    fn unsigned_advance_allowed_on_loopback() {
+        for host in ["127.0.0.1", "::1", "localhost"] {
+            assert!(
+                unsigned_advance_bind_allowed(host, true),
+                "{host} is loopback and must stay allowed"
+            );
+        }
+    }
+
+    /// POSITIVE CONTROL. Both assertions above are satisfied by a predicate that
+    /// refuses every bind, which would stop the worker booting anywhere. With the
+    /// flag OFF - the default, and what every deployment uses - any bind is fine.
+    #[test]
+    fn a_routable_bind_is_fine_without_the_flag() {
+        assert!(unsigned_advance_bind_allowed("0.0.0.0", false));
+        assert!(unsigned_advance_bind_allowed("10.0.0.7", false));
+        assert!(unsigned_advance_bind_allowed("127.0.0.1", false));
     }
 
     #[test]
