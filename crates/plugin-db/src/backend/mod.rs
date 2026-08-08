@@ -1684,8 +1684,10 @@ impl<T> RegisterBackend for T where
 /// the same question has much smaller but much sharper stakes, measured
 /// 2026-08-07 over all 26 workspace members from a clean `cargo clean --doc`:
 ///
-///     cargo doc --no-deps --workspace                 -> 1 unresolved
-///     cargo doc --no-deps --workspace --all-features  -> 0
+/// ```text
+/// cargo doc --no-deps --workspace                 -> 1 unresolved
+/// cargo doc --no-deps --workspace --all-features  -> 0
+/// ```
 ///
 /// That single link is `cross_app_fk.rs`'s citation of
 /// `register_model::bootstrap::build_ctx`, whose module is
