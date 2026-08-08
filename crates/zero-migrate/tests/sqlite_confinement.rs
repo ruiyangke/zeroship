@@ -16,14 +16,26 @@
 //!   (h) cross-tenant: a backend for app A cannot reach app B's file
 //! Plus: direct UPDATE/DELETE on _mig rejected by the trigger; DETACH denied;
 //! version floor satisfied.
+//!
+//! Two of the hardened open sequence's dbconfig settings are pinned here rather
+//! than in `sqlite_dqs_hardening.rs`, because what they buy is confinement (what a
+//! hostile creator `up` may reach) rather than identifier resolution:
+//!   `SQLITE_DBCONFIG_DEFENSIVE` - a creator write to an FTS5 SHADOW TABLE
+//!   `SQLITE_DBCONFIG_TRUSTED_SCHEMA` - a creator VIEW body invoking a virtual
+//!   table, including one that reads the `_mig` journal's catalog
+//! Both carry a positive control on a raw connection, which ships DEFENSIVE off
+//! and TRUSTED_SCHEMA on, so each of those two lines is the whole guard.
 
 use std::path::PathBuf;
 
+use rusqlite::config::DbConfig;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::actor::SqliteActorError;
+use zero_migrate::apply::backend::sqlite::authorizer::Mode;
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
+use zero_migrate::schema::fts_sqlite;
 use zero_migrate::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.
@@ -49,7 +61,25 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn mig(up: &str) -> Migration {
-    let flags = MigrationFlags::default();
+    mig_with_flags(up, MigrationFlags::default())
+}
+
+/// An ENGINE-GOODIE `up`: descriptor-derived DDL the engine authored itself, which
+/// the apply path runs under `EngineJournal` instead of `CreatorUp`. It is the only
+/// way a virtual table can be created on this connection - the authorizer denies
+/// `CREATE VIRTUAL TABLE` outright in creator mode - and therefore the only way an
+/// FTS5 index and its shadow tables come to exist in a tenant's app file.
+fn mig_engine_goodie(up: &str) -> Migration {
+    mig_with_flags(
+        up,
+        MigrationFlags {
+            engine_goodie_ddl: true,
+            ..MigrationFlags::default()
+        },
+    )
+}
+
+fn mig_with_flags(up: &str, flags: MigrationFlags) -> Migration {
     let checksum = Checksum::of(&ChecksumInput {
         up,
         down: None,
@@ -447,12 +477,23 @@ async fn confine_detach_denied() {
 // Regression: the authorizer now ALLOWS a write to `sqlite_master` /
 // `sqlite_temp_master` as an action (so SQLite's INTERNAL ALTER machinery can run
 // `ALTER TABLE … DROP COLUMN`). This must NOT open a DIRECT-write hole: a creator
-// `up` issuing `UPDATE main.sqlite_master …` directly is still blocked by
-// DEFENSIVE=ON (set at open, BEFORE the authorizer), so defense-in-depth holds —
-// the only path that reaches the allowed action is SQLite's own ALTER executor.
+// `up` issuing `UPDATE main.sqlite_master ...` directly is still rejected, so
+// defense-in-depth holds - the only path that reaches the allowed action is
+// SQLite's own ALTER executor.
+//
+// WHAT REJECTS IT, measured rather than assumed. `sqlite_master` is writable only
+// while `writable_schema` is ON, and it is OFF by default on every connection; the
+// authorizer independently denies the `PRAGMA writable_schema=ON` that would turn
+// it on (proven by `confine_b_writable_schema_denied`). So the rejection here is
+// the default plus that PRAGMA deny, NOT `SQLITE_DBCONFIG_DEFENSIVE`: flipping
+// DEFENSIVE to false leaves this test green and the error text byte-identical
+// (`table sqlite_master may not be modified`). This test was previously named for
+// DEFENSIVE, which overstated what it holds. DEFENSIVE is pinned separately by
+// `confine_creator_write_to_an_fts5_shadow_table_denied_by_defensive`, on the
+// vector where it is the only guard.
 // ---------------------------------------------------------------------------
 #[compio::test]
-async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
+async fn confine_direct_sqlite_master_write_blocked_by_writable_schema_off() {
     let p = paths("master_write");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
@@ -460,26 +501,41 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
     be.apply_one_additive(&mig("CREATE TABLE t (id INTEGER PRIMARY KEY);"), "d")
         .await
         .expect("seed table");
-    // A direct creator write to sqlite_master — DEFENSIVE blocks it (the authorizer
-    // would ALLOW the action now, but DEFENSIVE rejects the actual write, so this is
-    // an Exec/defensive block, not a silent success).
+    // A direct creator write to sqlite_master. The authorizer would ALLOW the
+    // action, but SQLite rejects the write itself because `writable_schema` is off,
+    // so this is a statement error and not a silent success.
     let attack = "UPDATE main.sqlite_master SET sql = 'CREATE TABLE t (id INTEGER, pwned TEXT)' WHERE name = 't';";
     let m = mig(attack);
     let err = be
         .apply_one_additive(&m, "attacker")
         .await
         .expect_err("direct sqlite_master write must be blocked");
-    // DEFENSIVE surfaces as an Exec error (not a silent apply); the table's real
-    // schema is untouched.
     assert!(
         matches!(
             err,
             SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)
         ),
-        "direct sqlite_master write must be rejected by DEFENSIVE, got: {err}"
+        "direct sqlite_master write must be rejected at statement execution, got: {err}"
     );
-    // Positive control: with DEFENSIVE off + writable_schema on, a raw connection
-    // CAN edit sqlite_master — proving the hardened block is DEFENSIVE, not an
+    // The error names the schema table and says it may not be modified. A bare
+    // is_err would also pass on a syntax error or a missing table.
+    let text = err.to_string();
+    assert!(
+        text.contains("sqlite_master") && text.contains("may not be modified"),
+        "the rejection must be the read-only-schema one naming sqlite_master: {text}"
+    );
+    // The schema row is untouched: no `pwned` column was smuggled in.
+    let sql = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE name = 't'")
+        .await
+        .expect("read back the schema row");
+    assert!(
+        !format!("{sql:?}").contains("pwned"),
+        "the rejected write must not have edited the stored schema: {sql:?}"
+    );
+    // Positive control: with writable_schema ON a raw connection CAN edit
+    // sqlite_master - proving the hardened block is that setting being off, not an
     // unrelated error.
     {
         let cdir = tempfile::tempdir().expect("control tempdir");
@@ -497,6 +553,382 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
             "control: raw sqlite_master edit succeeds: {res:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// SQLITE_DBCONFIG_DEFENSIVE: a creator `up` may not write an FTS5 SHADOW TABLE.
+//
+// The reachable shape, end to end on the real backend. The engine creates an FTS5
+// index in the tenant's app file from a `.fts` descriptor, as an engine-goodie
+// `up` (the authorizer admits `CREATE VIRTUAL TABLE ... USING fts5(...)` only in
+// EngineJournal mode). FTS5 lays down its b-tree in ORDINARY tables next to it -
+// `<name>_data`, `<name>_idx`, `<name>_docsize`, `<name>_config` - in `main`. A
+// LATER ordinary creator `up` then runs in CreatorUp against that same `main`,
+// where the authorizer's own rules permit creator DML on any table that is neither
+// a schema table nor in `_mig`. Those shadow tables are exactly that, so the
+// authorizer ALLOWS the write and DEFENSIVE is the only thing that refuses it.
+//
+// A FAILURE HERE means a creator `up` can rewrite the internal b-tree of an FTS5
+// index, which is database corruption reachable from tenant-authored SQL. The
+// control demonstrates that outcome rather than asserting it: on a raw connection
+// (which ships DEFENSIVE off) the same DELETE succeeds and the next MATCH query
+// fails with `fts5: corruption found reading blob ...`.
+// ---------------------------------------------------------------------------
+
+/// The FTS5 shadow table holding the index b-tree for `docs__fts`. Writing it is
+/// what DEFENSIVE refuses; FTS5 itself reaches it through the virtual table.
+const FTS_SHADOW_TABLE: &str = "docs__fts_data";
+
+/// Build the engine's own FTS5 create DDL for `docs(body)`, so the vtable under
+/// test is the one the engine actually emits and not a hand-rolled lookalike.
+fn fts_create_ddl() -> String {
+    format!(
+        "{};",
+        fts_sqlite::build_create_fts_table_sql(None, "docs", &["body".to_string()])
+    )
+}
+
+#[compio::test]
+async fn confine_creator_write_to_an_fts5_shadow_table_denied_by_defensive() {
+    let p = paths("fts_shadow");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    be.apply_one_additive(
+        &mig("CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);"),
+        "deployer",
+    )
+    .await
+    .expect("the tenant table applies");
+    be.apply_one_additive(&mig_engine_goodie(&fts_create_ddl()), "deployer")
+        .await
+        .expect("the engine-goodie FTS5 create applies under EngineJournal");
+
+    // The shadow tables now exist in `main`, reachable by name from creator SQL.
+    let shadow = be
+        .actor()
+        .query(&format!(
+            "SELECT name FROM main.sqlite_master WHERE name = '{FTS_SHADOW_TABLE}'"
+        ))
+        .await
+        .expect("read main schema");
+    assert_eq!(
+        shadow.len(),
+        1,
+        "the FTS5 shadow table must exist for this attack to be the one under test: {shadow:?}"
+    );
+    let before = be
+        .actor()
+        .query(&format!("SELECT count(*) FROM \"{FTS_SHADOW_TABLE}\""))
+        .await
+        .expect("read the shadow table");
+
+    // NEIGHBOUR EXCLUSION, first half: the authorizer does NOT deny creator DML on
+    // `main`. An ordinary creator write to the tenant table succeeds on this exact
+    // connection, so a rejection below cannot be "creator writes are denied".
+    be.apply_one_additive(
+        &mig("INSERT INTO docs (body) VALUES ('hello world');"),
+        "creator",
+    )
+    .await
+    .expect("an ordinary creator write to a main table must succeed");
+
+    // The attack: a creator `up` rewriting the FTS5 index b-tree directly.
+    let attack = format!("DELETE FROM \"{FTS_SHADOW_TABLE}\";");
+    let m = mig(&attack);
+    let err = be
+        .apply_one_additive(&m, "attacker")
+        .await
+        .expect_err("a creator write to an FTS5 shadow table must be refused");
+    // NEIGHBOUR EXCLUSION, second half: this is NOT an authorizer deny. If it were,
+    // the test would pass with DEFENSIVE off and pin nothing.
+    assert!(
+        !err.is_authorizer_denied(),
+        "the shadow-table write must be refused by DEFENSIVE, not by the authorizer: {err}"
+    );
+    assert!(
+        matches!(err, SqliteActorError::Exec(_)),
+        "the refusal must come from statement execution, not a dead actor: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains(FTS_SHADOW_TABLE) && text.contains("may not be modified"),
+        "the refusal must NAME the shadow table (a syntax or missing-table error \
+         would pass a bare is_err check but proves nothing): {text}"
+    );
+    // The write did not land, and it did not journal.
+    let after = be
+        .actor()
+        .query(&format!("SELECT count(*) FROM \"{FTS_SHADOW_TABLE}\""))
+        .await
+        .expect("read the shadow table back");
+    assert_eq!(
+        before, after,
+        "the refused DELETE must leave the FTS5 index b-tree untouched"
+    );
+    let applied = be.applied_sqlite().await.expect("journal readable");
+    let v = m.version.as_str();
+    assert!(
+        !applied.iter().any(|e| e.version == v),
+        "a refused shadow-table write must not leave a journal row for {v}"
+    );
+
+    // POSITIVE CONTROL on a raw connection, which is what the engine would be
+    // talking to without the DEFENSIVE line: the same DELETE succeeds and CORRUPTS
+    // the index, so the setting is preventing corruption and not merely an error.
+    let cdir = tempfile::tempdir().expect("control tempdir");
+    let conn =
+        rusqlite::Connection::open(cdir.path().join("control.sqlite")).expect("control open");
+    assert_eq!(
+        conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).ok(),
+        Some(false),
+        "the bundled library ships DEFENSIVE OFF, so the open sequence line is the whole guard"
+    );
+    conn.execute_batch(
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT); \
+         INSERT INTO docs (body) VALUES ('hello world');",
+    )
+    .expect("control seed");
+    conn.execute_batch(&fts_create_ddl())
+        .expect("control FTS5 create");
+    conn.execute_batch(&format!(
+        "{};",
+        fts_sqlite::build_initial_population_sql(None, "docs", &["body".to_string()])
+    ))
+    .expect("control FTS5 population");
+    let matched: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM \"docs__fts\" WHERE \"docs__fts\" MATCH 'hello'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("control: the index answers a MATCH before the attack");
+    assert_eq!(matched, 1, "control: the FTS5 index is populated");
+    conn.execute_batch(&attack)
+        .expect("control: with DEFENSIVE off the shadow-table DELETE SUCCEEDS");
+    let corrupted = conn
+        .query_row(
+            "SELECT count(*) FROM \"docs__fts\" WHERE \"docs__fts\" MATCH 'hello'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect_err("control: the index is corrupt after the shadow-table write");
+    assert!(
+        corrupted.to_string().contains("corruption"),
+        "control: the shadow-table write DEFENSIVE prevents leaves a corrupt index: {corrupted}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SQLITE_DBCONFIG_TRUSTED_SCHEMA: a creator VIEW body may not invoke a virtual
+// table.
+//
+// The setting gates USE, not creation: the `CREATE VIEW` naming a virtual table is
+// ACCEPTED, and the refusal arrives when something later READS the view. That is
+// the whole point - the view is stored in the tenant's schema, and its body then
+// runs inside whatever statement touches it, under whatever authorizer mode that
+// statement is running in. TRUSTED_SCHEMA=false is what stops a creator-authored
+// schema object from being a deferred-execution device for virtual tables.
+//
+// The mode is set EXPLICITLY here rather than inherited from the last apply, so
+// the test states which mode it is measuring instead of depending on leftover
+// state. EngineJournal is the mode under test because it is the one where the
+// pragma virtual table is reachable at all: the authorizer denies PRAGMA outright
+// in CreatorUp, and admits a small read-only introspection allowlist (`table_info`
+// among them) in engine mode.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn confine_creator_view_cannot_invoke_a_virtual_table() {
+    let p = paths("trusted_schema");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    be.apply_one_additive(&mig("CREATE TABLE t (id INTEGER, body TEXT);"), "deployer")
+        .await
+        .expect("the tenant table applies");
+    // Creation is ALLOWED. Asserting this is what makes the refusal below a
+    // statement about USE rather than about the view being rejected outright.
+    let created = be
+        .apply_one_additive(
+            &mig("CREATE VIEW v AS SELECT * FROM pragma_table_info('t');"),
+            "creator",
+        )
+        .await
+        .expect("TRUSTED_SCHEMA gates USE of a virtual table, so the CREATE VIEW is accepted");
+    assert!(created, "the view migration must be newly-applied");
+
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("select the mode under test");
+    // NEIGHBOUR EXCLUSION: the SAME virtual table, in the SAME mode, invoked
+    // DIRECTLY, SUCCEEDS. So the refusal below is not the vtable being unavailable,
+    // not an authorizer deny, and not a missing table.
+    let direct = be
+        .actor()
+        .query("SELECT count(*) FROM pragma_table_info('t')")
+        .await
+        .expect("the pragma virtual table is reachable by a direct statement in engine mode");
+    assert_eq!(
+        direct,
+        vec![vec![Some("2".to_string())]],
+        "the direct read must return the tenant table's two columns: {direct:?}"
+    );
+
+    let err = be
+        .actor()
+        .query("SELECT count(*) FROM v")
+        .await
+        .expect_err("a creator view body must not be allowed to invoke a virtual table");
+    assert!(
+        !err.is_authorizer_denied(),
+        "the refusal must come from TRUSTED_SCHEMA, not the authorizer: {err}"
+    );
+    assert!(
+        matches!(err, SqliteActorError::Exec(_)),
+        "the refusal must come from statement execution, not a dead actor: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("unsafe use of virtual table") && text.contains("pragma_table_info"),
+        "the refusal must be the untrusted-schema one NAMING the virtual table: {text}"
+    );
+
+    // POSITIVE CONTROL: a raw connection ships TRUSTED_SCHEMA ON, so the same view
+    // body executes and returns rows. That is the capability the open sequence
+    // removes, and it is why a bare is_err assertion above would not be enough.
+    let cdir = tempfile::tempdir().expect("control tempdir");
+    let conn =
+        rusqlite::Connection::open(cdir.path().join("control.sqlite")).expect("control open");
+    assert_eq!(
+        conn.db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA)
+            .ok(),
+        Some(true),
+        "the bundled library ships TRUSTED_SCHEMA ON, so the open sequence line is the whole guard"
+    );
+    conn.execute_batch(
+        "CREATE TABLE t (id INTEGER, body TEXT); \
+         CREATE VIEW v AS SELECT * FROM pragma_table_info('t');",
+    )
+    .expect("control seed");
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM v", [], |row| row.get(0))
+        .expect("control: with TRUSTED_SCHEMA on the view body executes the virtual table");
+    assert_eq!(
+        n, 2,
+        "control: the view TRUSTED_SCHEMA would let run reads the schema through the vtable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TRUSTED_SCHEMA, the confinement half: the creator view aimed at `_mig`.
+//
+// This is why the setting belongs in this file and not with the DQS pins. The
+// two-argument pragma virtual table takes a SCHEMA, so a creator view can name the
+// journal alias. Against that view the authorizer offers no protection in engine
+// mode: the pragma-vtable route presents as an `AuthAction::Pragma`, which is on
+// the engine allowlist, and never as an action whose database_name is `_mig` - so
+// neither the journal-immutability arm nor the `_mig` backstop arm sees it. With
+// TRUSTED_SCHEMA relaxed, reading this creator-authored view returns the journal
+// catalog on the very connection that answers the creator's own direct attempt
+// with an authorizer deny.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtable() {
+    let p = paths("trusted_schema_mig");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    let probe = "SELECT count(*) FROM pragma_table_info('schema_migrations','_mig')";
+    be.apply_one_additive(
+        &mig("CREATE VIEW vm AS SELECT * FROM pragma_table_info('schema_migrations','_mig');"),
+        "creator",
+    )
+    .await
+    .expect("TRUSTED_SCHEMA gates USE, so the CREATE VIEW naming _mig is accepted");
+
+    // In creator mode the DIRECT read is an authorizer deny. This is the baseline
+    // the view must not be able to route around.
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("select creator mode");
+    let denied = be
+        .actor()
+        .query(probe)
+        .await
+        .expect_err("a creator may not read the journal catalog directly");
+    assert!(
+        denied.is_authorizer_denied(),
+        "the direct creator read of _mig must be an AUTHORIZER deny: {denied}"
+    );
+
+    // In engine mode the engine legitimately reads its own journal catalog, so the
+    // route the view takes is open to the statement it would run inside.
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("select engine mode");
+    let engine_direct = be
+        .actor()
+        .query(probe)
+        .await
+        .expect("the engine reads its own journal catalog directly");
+    let columns: i64 = engine_direct[0][0]
+        .as_deref()
+        .expect("a count row")
+        .parse()
+        .expect("a numeric count");
+    assert!(
+        columns > 0,
+        "the journal catalog read must return the schema_migrations columns: {engine_direct:?}"
+    );
+
+    // The pin: the creator's stored view cannot take that route.
+    let err = be
+        .actor()
+        .query("SELECT count(*) FROM vm")
+        .await
+        .expect_err("a creator view must not read the journal catalog through a virtual table");
+    assert!(
+        !err.is_authorizer_denied(),
+        "the refusal must come from TRUSTED_SCHEMA, not the authorizer: {err}"
+    );
+    assert!(
+        matches!(err, SqliteActorError::Exec(_)),
+        "the refusal must come from statement execution, not a dead actor: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("unsafe use of virtual table") && text.contains("pragma_table_info"),
+        "the refusal must be the untrusted-schema one NAMING the virtual table: {text}"
+    );
+
+    // POSITIVE CONTROL: on a raw connection with a journal-shaped `_mig` attached,
+    // the identical view reads the journal's catalog. That is the leak the setting
+    // closes.
+    let cdir = tempfile::tempdir().expect("control tempdir");
+    let conn =
+        rusqlite::Connection::open(cdir.path().join("control-main.sqlite")).expect("control open");
+    conn.execute(
+        "ATTACH DATABASE ?1 AS \"_mig\"",
+        [cdir
+            .path()
+            .join("control-mig.sqlite")
+            .to_str()
+            .expect("control path")],
+    )
+    .expect("attach control _mig");
+    conn.execute_batch(CONTROL_JOURNAL_SETUP)
+        .expect("control journal setup");
+    conn.execute_batch(
+        "CREATE VIEW vm AS SELECT * FROM pragma_table_info('schema_migrations','_mig');",
+    )
+    .expect("control view");
+    let leaked: i64 = conn
+        .query_row("SELECT count(*) FROM vm", [], |row| row.get(0))
+        .expect("control: with TRUSTED_SCHEMA on the view reads the journal catalog");
+    assert_eq!(
+        leaked, 9,
+        "control: the view reports every column of the control journal table"
+    );
 }
 
 // ---------------------------------------------------------------------------

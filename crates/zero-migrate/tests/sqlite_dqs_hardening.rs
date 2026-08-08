@@ -34,15 +34,11 @@
 //! these tests.
 //!
 //! SCOPE. `SQLITE_DBCONFIG_DEFENSIVE` and `SQLITE_DBCONFIG_TRUSTED_SCHEMA` are set
-//! by the same open sequence and are BOTH still unpinned: relaxing either one
-//! leaves the whole workspace green, and
-//! `sqlite_confinement::confine_direct_sqlite_master_write_still_blocked_by_defensive`
-//! passes with DEFENSIVE off (the direct `sqlite_master` write it asserts is
-//! blocked by `writable_schema` being off, which the authorizer's PRAGMA deny
-//! already guarantees). They are deliberately NOT pinned here: both are
-//! confinement properties - what a hostile creator `up` may reach - and their home
-//! is `sqlite_confinement.rs`, whose register is "attack X is denied". Folding
-//! them in here would make this file's subject, name, and failure message lie.
+//! by the same open sequence and are pinned in `sqlite_confinement.rs`, not here.
+//! Both are confinement properties - what a hostile creator `up` may reach, whose
+//! failure is sandbox escape rather than wrong data - and that file's register is
+//! "attack X is denied". Folding them in here would make this file's subject,
+//! name, and failure message lie.
 
 use std::path::PathBuf;
 
