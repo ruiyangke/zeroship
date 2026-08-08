@@ -8806,6 +8806,20 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 ///
 /// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] replays a
 /// `createIndex` op through the SAME index-shaping the lower uses (no re-spell).
+///
+/// This is also where [`IndexSnapshot::expr_cascade_columns`] is collected. An
+/// expression key and a partial predicate arrive here as closed [`Expr`] ASTs and
+/// leave as rendered SQL text, so it is the only place holding the structure a
+/// cascade decision needs: the column set is read with
+/// [`crate::render::dml::expr_column_refs`], which descends ONLY the leg the target
+/// dialect selects - the same walk the CHECK cascade uses, and the same reason
+/// (a column named solely by an inactive `dialect()` leg never reaches the database
+/// and must not cascade).
+///
+/// It records the EXPRESSION sites only. Key and `INCLUDE` columns are exact names
+/// the snapshot already carries, and repeating them here would give a plain
+/// column-list index a provenance the declarative snapshot builder has no way to
+/// produce - breaking the debug-byte convergence the two paths are held to.
 pub(crate) fn create_index_snapshot(
     table: &str,
     columns: &[IndexElement],
@@ -8836,6 +8850,8 @@ pub(crate) fn create_index_snapshot(
     let mut plain_columns = Vec::new();
     let mut elements = Vec::with_capacity(columns.len());
     let mut name_parts = Vec::with_capacity(columns.len());
+    let mut expr_cascade_columns = std::collections::BTreeSet::new();
+    let mut has_expr_site = predicate.is_some();
     for element in columns {
         match element {
             IndexElement::Column {
@@ -8867,10 +8883,21 @@ pub(crate) fn create_index_snapshot(
             IndexElement::Expr { expr } => {
                 let rendered = crate::render::dml::render_expr_inline(expr, dialect)
                     .map_err(IrLowerError::DmlAssemble)?;
+                has_expr_site = true;
+                expr_cascade_columns.extend(
+                    crate::render::dml::expr_column_refs(expr, dialect)
+                        .map_err(IrLowerError::DmlAssemble)?,
+                );
                 elements.push(IndexElementSnapshot::expr(rendered));
                 name_parts.push("expr".to_string());
             }
         }
+    }
+    if let Some(expr) = predicate {
+        expr_cascade_columns.extend(
+            crate::render::dml::expr_column_refs(expr, dialect)
+                .map_err(IrLowerError::DmlAssemble)?,
+        );
     }
     let idx_name = name.map_or_else(
         || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", name_parts.join("_"))),
@@ -8890,6 +8917,10 @@ pub(crate) fn create_index_snapshot(
     idx.with = with.cloned();
     idx.only = only.unwrap_or(false);
     idx.nulls_not_distinct = nulls_not_distinct.unwrap_or(false);
+    // `Some(vec![])` on an index that HAS an expression site reading no column at all
+    // (`WHERE (true)`); `None` when there is no such site to record.
+    idx.expr_cascade_columns =
+        has_expr_site.then(|| expr_cascade_columns.into_iter().collect::<Vec<_>>());
     Ok(idx)
 }
 

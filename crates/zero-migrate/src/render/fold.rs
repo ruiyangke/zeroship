@@ -1551,30 +1551,39 @@ pub fn fold_ops_onto(
                 //     the column is dropped whole, identically. This mirrors the three
                 //     fields the `RenameColumn` arm below rewrites.
                 //
-                //     NOT matched, and a KNOWN GAP: `IndexSnapshot::predicate` (a
-                //     partial index's `WHERE`) and the `Expr` variant of `elements` (an
-                //     expression key). Both cascade in PG - measured on PG 18.4, both
-                //     `CREATE INDEX i ON t (b) WHERE (a > 0)` and
+                //     The other two column-bearing sites - `IndexSnapshot::predicate`
+                //     (a partial index's `WHERE`) and the `Expr` variant of `elements`
+                //     (an expression key) - cascade in PG too: measured on PG 18.4,
+                //     both `CREATE INDEX i ON t (b) WHERE (a > 0)` and
                 //     `CREATE INDEX i ON t ((a + 1))` vanish from `pg_indexes` on
-                //     `DROP COLUMN a` - so the fold keeps a phantom index for either
-                //     shape. They are RENDERED SQL TEXT here, not names, and matching a
-                //     name inside rendered SQL is the trap the CHECK cascade below
-                //     exists to avoid: measured on PG 18.4,
+                //     `DROP COLUMN a`. They are RENDERED SQL TEXT here, not names, and
+                //     matching a name inside rendered SQL is the trap the CHECK cascade
+                //     below exists to avoid: measured on PG 18.4,
                 //     `CREATE INDEX i ON t (note) WHERE (note <> 'a')` SURVIVES
                 //     `DROP COLUMN a`, so a text match would drop an index PG KEPT -
-                //     worse than the phantom it fixes. The fix is the same discipline
-                //     `cascade_columns` already uses for a CHECK: have
-                //     `create_index_snapshot` record the columns the predicate and each
-                //     expression key read via `render::dml::expr_column_refs` over the
-                //     CLOSED `Expr`, and cascade on that provenance instead of the
-                //     text. Deliberately left for that change rather than guessed at
-                //     here.
+                //     worse than the phantom it fixes. So they cascade off
+                //     `IndexSnapshot::expr_cascade_columns`, the structural column set
+                //     `create_index_snapshot` collects from the CLOSED `Expr` via
+                //     `render::dml::expr_column_refs` - the same discipline
+                //     `ConstraintSnapshot::cascade_columns` uses for a CHECK, and the
+                //     same selected-leg-only walk, so a column named solely by an
+                //     inactive `dialect()` leg never cascades.
+                //
+                //     The provenance covers ONLY those two sites and is UNIONED with
+                //     the three exact-name lists rather than replacing them: it is
+                //     `None` on every plain column-list index and on every producer
+                //     that cannot record it (live introspection), and those must keep
+                //     cascading on the names exactly as before.
                 snap.indexes.retain(|i| {
                     !i.columns.iter().any(|c| c == column)
                         && !i.elements.iter().any(|e| {
                             matches!(e, IndexElementSnapshot::Column { name, .. } if name == column)
                         })
                         && !i.include.iter().any(|c| c == column)
+                        && !i
+                            .expr_cascade_columns
+                            .as_ref()
+                            .is_some_and(|cols| cols.iter().any(|c| c == column))
                 });
                 // (2) Drop every constraint whose LOCAL column list contains the
                 //     column. A producer that recorded `cascade_columns` is believed
@@ -1714,10 +1723,25 @@ pub fn fold_ops_onto(
                 // INCLUDE lists are POSITIONAL, so they are rewritten in place and never
                 // re-sorted - unlike `cascade_columns`, whose order carries no meaning.
                 //
-                // NOT rewritten, and known to go stale: a partial-index `predicate` and
-                // an `IndexElementSnapshot::Expr` key are RENDERED SQL text rather than
-                // structured names, and PG rewrites both on rename. Swapping a name
-                // inside that text needs real expression rewriting, not a string compare.
+                // `IndexSnapshot::expr_cascade_columns` names columns too, and follows
+                // the rename for the same reason the constraint provenance does: PG
+                // keeps `indpred` / `indexprs` pointing at the renamed attribute, so a
+                // later drop of the NEW name still cascades the index. Without this,
+                // `createIndex WHERE a > 0; rename a -> b; drop b` leaves a PHANTOM
+                // partial index - measured against live PG 18.4. Order carries no
+                // meaning here (unlike the positional key and INCLUDE lists), so it is
+                // re-sorted back to the canonical form `create_index_snapshot` emits.
+                //
+                // STILL NOT rewritten, and measured stale on PG 18.4: the rendered text
+                // in `predicate` and in an `IndexElementSnapshot::Expr` key, both of
+                // which drift DOES compare. After `rename a -> b` the fold keeps
+                // `("a" > 0)` / `expr:("a" + 1)` while live reports `(b > 0)` /
+                // `expr:(b + 1)`. A column LIST cannot fix that - re-rendering needs the
+                // `Expr` the snapshot discarded - and swapping the name inside the text
+                // is the exact false-positive the provenance above exists to avoid
+                // (`WHERE (note <> 'a')` would become `WHERE (note <> 'b')`). Same shape
+                // as the `ConstraintSnapshot::definition` staleness noted above, and
+                // left to the same separate change.
                 for index in &mut snap.indexes {
                     for column in &mut index.columns {
                         if column == from {
@@ -1735,6 +1759,14 @@ pub fn fold_ops_onto(
                         if column == from {
                             column.clone_from(to);
                         }
+                    }
+                    if let Some(expr_cascade_columns) = &mut index.expr_cascade_columns {
+                        for local in expr_cascade_columns.iter_mut() {
+                            if local == from {
+                                local.clone_from(to);
+                            }
+                        }
+                        expr_cascade_columns.sort();
                     }
                 }
             }

@@ -237,6 +237,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                         opclass: None,
                         nulls_not_distinct: false,
                         comment: None,
+                        expr_cascade_columns: None,
                     },
                 ));
                 continue;
@@ -632,6 +633,9 @@ async fn introspect_indexes_and_unique(
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            // Provenance-only; introspection reads the predicate back as text and
+            // never recovers the column set behind it.
+            expr_cascade_columns: None,
         });
     }
     Ok(())

@@ -437,6 +437,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
                 opclass: None,
                 nulls_not_distinct: false,
                 comment: None,
+                expr_cascade_columns: None,
             });
         }
     }

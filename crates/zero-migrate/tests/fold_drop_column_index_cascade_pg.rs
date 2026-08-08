@@ -20,9 +20,19 @@
 //! introspection does not have, making `fold_ops != snapshot_schema(live)`.
 //!
 //! The other two column-bearing fields, `IndexSnapshot::predicate` and the
-//! `IndexElementSnapshot::Expr` key, also cascade in PostgreSQL but are RENDERED SQL
-//! TEXT in the snapshot rather than structured names, so they are not matched here -
-//! see the `DropColumn` arm of `render/fold.rs` for why and for the shape of the fix.
+//! `IndexElementSnapshot::Expr` key, cascade in PostgreSQL for the same reason but
+//! are RENDERED SQL TEXT in the snapshot rather than structured names. They cascade
+//! off `IndexSnapshot::expr_cascade_columns` instead - the column set
+//! `create_index_snapshot` collects from the closed `Expr` AST - and the guards
+//! below pin why the text itself must never be matched:
+//!
+//! ```text
+//! CREATE INDEX i_lit  ON t_lit  (note) WHERE (note <> 'a');  DROP COLUMN a -> SURVIVES
+//! CREATE INDEX i_lit2 ON t_lit2 ((note || 'a'));             DROP COLUMN a -> SURVIVES
+//! ```
+//!
+//! A name-shaped token inside rendered SQL is not a column reference, so a text
+//! match would drop indexes PostgreSQL KEPT - worse drift than the phantom it fixes.
 
 mod support;
 
@@ -203,5 +213,192 @@ async fn drop_of_an_unrelated_column_keeps_an_index_with_an_include_list() {
         drift.is_clean(),
         "an index that names neither the dropped column as a key nor in its INCLUDE \
          list survives in PostgreSQL and must survive the fold: {drift:#?}"
+    );
+}
+
+/// A partial index whose `WHERE` reads the dropped column. PostgreSQL records the
+/// predicate as `pg_index.indpred`, a parse tree over the same attributes, so
+/// `DROP COLUMN` finds the dependency and removes the whole index. The predicate is
+/// rendered SQL TEXT in the snapshot, so the cascade has to read the structural
+/// column set the snapshot recorded instead.
+#[compio::test]
+async fn drop_column_cascades_a_partial_index_whose_predicate_reads_it() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "drop_column_predicate_index_cascade",
+      "owner_app": "app_fold_drop_index_pg",
+      "ops": [
+        {"op":"createTable","name":"pred_cascade","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"pred_cascade","name":"pred_cascade_note_key",
+         "columns":[{"kind":"column","name":"note"}],"unique":false,
+         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                  "rhs":{"node":"literal","value":0}}},
+        {"op":"dropColumn","table":"pred_cascade","column":"a"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_after_applying(source).await else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "PostgreSQL drops a partial index when its WHERE predicate reads the dropped \
+         column; a fold that matches only the structured name lists keeps a phantom \
+         index: {drift:#?}"
+    );
+}
+
+/// An index whose KEY is an expression over the dropped column. The expression is
+/// `pg_index.indexprs`, another parse tree over the table's attributes, so the drop
+/// cascades exactly as a plain key column would.
+#[compio::test]
+async fn drop_column_cascades_an_index_keyed_on_an_expression_over_it() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "drop_column_expr_index_cascade",
+      "owner_app": "app_fold_drop_index_pg",
+      "ops": [
+        {"op":"createTable","name":"expr_cascade","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"expr_cascade","name":"expr_cascade_key",
+         "columns":[{"kind":"expr","expr":{"node":"binOp","op":"add",
+           "lhs":{"node":"colRef","name":"a"},"rhs":{"node":"literal","value":1}}}],
+         "unique":false},
+        {"op":"dropColumn","table":"expr_cascade","column":"a"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_after_applying(source).await else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "PostgreSQL drops an index whose expression key reads the dropped column; a \
+         fold that matches only the structured name lists keeps a phantom index: \
+         {drift:#?}"
+    );
+}
+
+/// The false-positive guard for the predicate. The dropped column is `a`; the
+/// predicate contains the STRING LITERAL `'a'` and reads no column but `note`.
+/// Measured on PostgreSQL 18.4, `DROP COLUMN a` leaves the index standing - so a
+/// cascade that greps the rendered text would delete an index the database KEPT.
+///
+/// Asserts SURVIVAL rather than full drift cleanliness. PostgreSQL deparses a bare
+/// string literal with its inferred cast (`'a'` comes back as `'a'::text`), so the
+/// rendered predicate text differs from the offline rendering on every partial index
+/// carrying one. Measured to be present with NO `dropColumn` in the history at all,
+/// so it is independent of the cascade under test - the same rendered-text
+/// divergence `ConstraintSnapshot::definition` already carries for a CHECK.
+#[compio::test]
+async fn drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_literal() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "drop_column_predicate_literal_guard",
+      "owner_app": "app_fold_drop_index_pg",
+      "ops": [
+        {"op":"createTable","name":"pred_literal","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"pred_literal","name":"pred_literal_note_key",
+         "columns":[{"kind":"column","name":"note"}],"unique":false,
+         "where":{"node":"binOp","op":"ne","lhs":{"node":"colRef","name":"note"},
+                  "rhs":{"node":"literal","value":"a"}}},
+        {"op":"dropColumn","table":"pred_literal","column":"a"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_after_applying(source).await else {
+        return;
+    };
+    assert!(
+        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        "a predicate that merely SPELLS the dropped column inside a string literal \
+         references no such column; PostgreSQL keeps the index and so must the fold: \
+         {drift:#?}"
+    );
+}
+
+/// The same guard for the expression key: `(note || 'a')` reads `note` only. The
+/// index survives `DROP COLUMN a` in PostgreSQL and must survive the fold. Asserts
+/// survival for the same reason as the predicate guard above: PostgreSQL deparses
+/// the literal as `'a'::text`, a rendered-text divergence unrelated to the cascade.
+#[compio::test]
+async fn drop_column_keeps_an_expression_index_whose_literal_spells_it() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "drop_column_expr_literal_guard",
+      "owner_app": "app_fold_drop_index_pg",
+      "ops": [
+        {"op":"createTable","name":"expr_literal","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"expr_literal","name":"expr_literal_key",
+         "columns":[{"kind":"expr","expr":{"node":"binOp","op":"concat",
+           "lhs":{"node":"colRef","name":"note"},
+           "rhs":{"node":"literal","value":"a"}}}],
+         "unique":false},
+        {"op":"dropColumn","table":"expr_literal","column":"a"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_after_applying(source).await else {
+        return;
+    };
+    assert!(
+        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        "an expression key that merely SPELLS the dropped column inside a string \
+         literal references no such column; PostgreSQL keeps the index and so must \
+         the fold: {drift:#?}"
+    );
+}
+
+/// The dialect-leg guard. The predicate is a `dialect()` node whose PostgreSQL leg
+/// reads `a` and whose SQLite leg reads `b`; only the PostgreSQL leg is rendered
+/// into the database, so `DROP COLUMN b` leaves the index standing. The provenance
+/// walk has to descend the SELECTED leg only - unioning every leg reintroduces the
+/// false positive `gen_types_drop_column_dialect_legs.rs` pins offline.
+#[compio::test]
+async fn drop_column_keeps_a_partial_index_whose_predicate_leg_never_reads_it() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "drop_column_predicate_leg_guard",
+      "owner_app": "app_fold_drop_index_pg",
+      "ops": [
+        {"op":"createTable","name":"pred_legs","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"b","type":"int","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"pred_legs","name":"pred_legs_id_key",
+         "columns":[{"kind":"column","name":"id"}],"unique":false,
+         "where":{"node":"dialect",
+           "pg":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                 "rhs":{"node":"literal","value":0}},
+           "sqlite":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"b"},
+                     "rhs":{"node":"literal","value":0}}}},
+        {"op":"dropColumn","table":"pred_legs","column":"b"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_after_applying(source).await else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "only the PostgreSQL leg of a dialectal predicate reaches the database, so a \
+         column named solely by the inactive leg never cascades; the fold must read \
+         the selected leg alone: {drift:#?}"
     );
 }

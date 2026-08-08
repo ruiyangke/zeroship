@@ -20,6 +20,19 @@
 //! and the index NAME does NOT. The fold has to do both: rewrite the key columns
 //! and leave the name alone.
 //!
+//! The same holds for the two column-bearing sites that are RENDERED SQL TEXT - a
+//! partial index's `WHERE` and an expression key - which follow the rename in
+//! `pg_index.indpred` / `pg_index.indexprs` and cascade on a later drop. The fold
+//! carries those through `IndexSnapshot::expr_cascade_columns`, the structural
+//! column set collected from the closed `Expr` at snapshot time, so
+//! `rename a -> b; drop b` cascades the index instead of leaving a phantom.
+//!
+//! What those arms do NOT pin, because a column list cannot fix it: the rendered
+//! TEXT still names the old column after a pure rename. Measured on PostgreSQL 18.4,
+//! `rename a -> b` leaves the fold holding `("a" > 0)` / `expr:("a" + 1)` against
+//! live's `(b > 0)` / `expr:(b + 1)`. Re-rendering needs the `Expr` the snapshot
+//! discarded; see the `Op::RenameColumn` arm of `render/fold.rs`.
+//!
 //! The renames here run as native `ALTER TABLE ... RENAME COLUMN` rather than
 //! through the engine's `renameColumn` op - see `drift_between_fold_and_live` for
 //! why.
@@ -418,6 +431,132 @@ async fn rename_column_carries_an_index_include_column() {
         drift.is_clean(),
         "an INCLUDE payload column follows the rename in PostgreSQL; the fold must \
          rewrite it too: {drift:#?}"
+    );
+}
+
+/// The table every partial-index case below starts from: an index on `note` whose
+/// `WHERE` reads `a`.
+const CREATE_PARTIAL_INDEXED_TABLE: &str = r#"{
+  "ir_version": 1,
+  "name": "rename_partial_index_create",
+  "owner_app": "app_fold_rename_index_pg",
+  "ops": [
+    {"op":"createTable","name":"rename_pred","columns":[
+      {"name":"id","type":"int","nullable":false},
+      {"name":"a","type":"int","nullable":true},
+      {"name":"note","type":"text","nullable":true}
+    ],"primaryKey":["id"]},
+    {"op":"createIndex","table":"rename_pred","name":"rename_pred_note_key",
+     "columns":[{"kind":"column","name":"note"}],"unique":false,
+     "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+              "rhs":{"node":"literal","value":0}}}
+  ]
+}"#;
+
+/// The table every expression-key case below starts from: an index keyed on
+/// `(a + 1)`.
+const CREATE_EXPR_INDEXED_TABLE: &str = r#"{
+  "ir_version": 1,
+  "name": "rename_expr_index_create",
+  "owner_app": "app_fold_rename_index_pg",
+  "ops": [
+    {"op":"createTable","name":"rename_expr","columns":[
+      {"name":"id","type":"int","nullable":false},
+      {"name":"a","type":"int","nullable":true},
+      {"name":"note","type":"text","nullable":true}
+    ],"primaryKey":["id"]},
+    {"op":"createIndex","table":"rename_expr","name":"rename_expr_key",
+     "columns":[{"kind":"expr","expr":{"node":"binOp","op":"add",
+       "lhs":{"node":"colRef","name":"a"},"rhs":{"node":"literal","value":1}}}],
+     "unique":false}
+  ]
+}"#;
+
+/// `createIndex WHERE a > 0; rename a -> b; drop b`. PostgreSQL keeps `indpred`
+/// pointing at the renamed attribute, so the drop cascades the whole index away. A
+/// fold whose predicate provenance still names `a` matches nothing and keeps a
+/// phantom index live introspection does not have.
+#[compio::test]
+async fn drop_of_a_renamed_column_cascades_its_partial_index() {
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "rename_then_drop_partial_index",
+      "owner_app": "app_fold_rename_index_pg",
+      "ops": [
+        {"op":"createTable","name":"rename_pred","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"rename_pred","name":"rename_pred_note_key",
+         "columns":[{"kind":"column","name":"note"}],"unique":false,
+         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                  "rhs":{"node":"literal","value":0}}},
+        {"op":"renameColumn","table":"rename_pred","from":"a","to":"b","type":"int"},
+        {"op":"dropColumn","table":"rename_pred","column":"b"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        CREATE_PARTIAL_INDEXED_TABLE,
+        &[
+            "ALTER TABLE {schema}.\"rename_pred\" RENAME COLUMN \"a\" TO \"b\"",
+            "ALTER TABLE {schema}.\"rename_pred\" DROP COLUMN \"b\"",
+        ],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "dropping a renamed column cascades the partial index whose predicate reads \
+         it; a fold whose predicate provenance still names the OLD column finds no \
+         index to cascade and keeps a phantom: {drift:#?}"
+    );
+}
+
+/// The same for an expression KEY: `createIndex ON ((a + 1)); rename a -> b;
+/// drop b`. `pg_index.indexprs` follows the attribute, so the drop cascades.
+#[compio::test]
+async fn drop_of_a_renamed_column_cascades_its_expression_index() {
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "rename_then_drop_expr_index",
+      "owner_app": "app_fold_rename_index_pg",
+      "ops": [
+        {"op":"createTable","name":"rename_expr","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"rename_expr","name":"rename_expr_key",
+         "columns":[{"kind":"expr","expr":{"node":"binOp","op":"add",
+           "lhs":{"node":"colRef","name":"a"},"rhs":{"node":"literal","value":1}}}],
+         "unique":false},
+        {"op":"renameColumn","table":"rename_expr","from":"a","to":"b","type":"int"},
+        {"op":"dropColumn","table":"rename_expr","column":"b"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        CREATE_EXPR_INDEXED_TABLE,
+        &[
+            "ALTER TABLE {schema}.\"rename_expr\" RENAME COLUMN \"a\" TO \"b\"",
+            "ALTER TABLE {schema}.\"rename_expr\" DROP COLUMN \"b\"",
+        ],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "dropping a renamed column cascades the index keyed on an expression over it; \
+         a fold whose expression provenance still names the OLD column keeps a \
+         phantom: {drift:#?}"
     );
 }
 

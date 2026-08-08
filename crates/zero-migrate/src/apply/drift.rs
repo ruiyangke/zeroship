@@ -1137,6 +1137,11 @@ pub async fn snapshot_schema<D: SqlSession>(
                 opclass: None,
                 nulls_not_distinct: false,
                 comment: r.try_get("comment").ok().flatten(),
+                // Provenance-only. Recovering the column set behind `indexprs` /
+                // `indpred` would mean re-parsing the deparsed SQL, which is exactly
+                // what the provenance exists to avoid; the offline producer is its
+                // authority and the cascade falls back to the exact names here.
+                expr_cascade_columns: None,
             });
         }
     }

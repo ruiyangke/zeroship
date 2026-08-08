@@ -4049,6 +4049,9 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
         nulls_not_distinct: false,
         comment: None,
+        // No predicate and no expression key, so every column this index depends on
+        // is already an exact name in `columns` - nothing for the provenance to add.
+        expr_cascade_columns: None,
     })
 }
 
@@ -4079,6 +4082,7 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
         opclass: None,
         nulls_not_distinct: false,
         comment: None,
+        expr_cascade_columns: None,
     })
 }
 
@@ -4172,6 +4176,7 @@ fn fts_objects_pg(
         opclass: None,
         nulls_not_distinct: false,
         comment: None,
+        expr_cascade_columns: None,
     };
     Some((col, idx))
 }
@@ -4228,6 +4233,7 @@ fn fts_index_snapshot_sqlite(table: &str, fields: &[FieldDescriptor]) -> Option<
         opclass: None,
         nulls_not_distinct: false,
         comment: None,
+        expr_cascade_columns: None,
     })
 }
 

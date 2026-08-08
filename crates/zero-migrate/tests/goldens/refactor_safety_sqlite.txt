@@ -238,6 +238,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_author_slug_idx",
@@ -268,6 +269,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_created_by_idx",
@@ -291,6 +293,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_deleted_at_idx",
@@ -314,6 +317,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_pkey",
@@ -337,6 +341,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_slug_key",
@@ -360,6 +365,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
         IndexSnapshot {
             name: "articles_updated_at_idx",
@@ -383,6 +389,7 @@ TableSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         },
     ],
     constraints: [

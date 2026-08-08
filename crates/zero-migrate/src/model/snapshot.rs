@@ -595,6 +595,33 @@ pub struct IndexSnapshot {
     pub nulls_not_distinct: bool,
     /// User-authored catalog comment on this index.
     pub comment: Option<String>,
+    /// **Provenance-only** local columns read by this index's RENDERED-SQL sites -
+    /// `predicate` and the `Expr` variant of `elements` - recorded structurally by
+    /// the producer rather than read back out of that text.
+    ///
+    /// PostgreSQL drops an index when ANY column it references is dropped, and it
+    /// references columns at four sites: the key columns (`indkey` up to
+    /// `indnkeyatts`), the `INCLUDE` payload (`indkey` past it), an expression key
+    /// (`indexprs`), and a partial predicate (`indpred`). The first two are exact
+    /// names in `columns` / `elements` / `include`, so a cascade compares them
+    /// directly and this field deliberately does NOT repeat them. The last two are
+    /// rendered SQL TEXT, and a name-shaped token inside rendered SQL is not a
+    /// reference - measured on PostgreSQL 18.4,
+    /// `CREATE INDEX i ON t (note) WHERE (note <> 'a')` and
+    /// `CREATE INDEX i ON t ((note || 'a'))` both SURVIVE `DROP COLUMN a`. So the
+    /// producer walks the closed `Expr` instead, descending only the leg the target
+    /// dialect selects, exactly as `ConstraintSnapshot::cascade_columns` does for a
+    /// CHECK.
+    ///
+    /// `None` on an index that HAS no such site (every plain column-list index) and
+    /// on any producer that cannot record it - live introspection, which would have
+    /// to re-parse the deparsed SQL to recover the set. Both mean the same thing to a
+    /// consumer: cascade on the exact names alone.
+    ///
+    /// EXCLUDED from equality / hashing for the same reason as `opclass` and
+    /// `nulls_not_distinct`: it is provenance rather than identity, and comparing a
+    /// field one side never populates would report drift on every index that has one.
+    pub expr_cascade_columns: Option<Vec<String>>,
 }
 
 impl PartialEq for IndexSnapshot {
@@ -667,6 +694,7 @@ impl IndexSnapshot {
             opclass: None,
             nulls_not_distinct: false,
             comment: None,
+            expr_cascade_columns: None,
         }
     }
 }
