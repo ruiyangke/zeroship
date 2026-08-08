@@ -69,9 +69,19 @@ pub struct ApplyMigrationsResponse {
 /// map to distinct HTTP statuses (see [`ir_apply_error_kind`]).
 #[derive(Debug, thiserror::Error)]
 pub enum IrApplyError {
-    /// Reading a `.ir.json` file failed.
+    /// Reading a `.ir.json` file off disk failed - a real I/O fault on OUR side.
+    ///
+    /// This is infrastructure (503). It must not carry creator-content failures: a
+    /// document that does not parse is the creator's to fix, and answering 5xx tells
+    /// a retrying client to try again forever. Those go to [`IrApplyError::Malformed`].
     #[error("read IR file ({file}): {message}")]
     Read { file: String, message: String },
+    /// A `.ir.json` the creator authored is not a valid IR envelope, or its declared
+    /// shape cannot be resolved under the app's policy.
+    ///
+    /// Creator fault (422), and the file is named so they know which one.
+    #[error("malformed IR document ({file}): {message}")]
+    Malformed { file: String, message: String },
     /// Introspecting the live schema failed.
     #[error("read Postgres catalog for live facts: {0}")]
     Snapshot(#[source] zero_migrate::DriftError),
@@ -876,21 +886,22 @@ fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError
 /// re-serialize. The result is the self-contained managed table shape the
 /// fail-closed load gate accepts under a `forbid` `author_primary_key` profile.
 ///
-/// A malformed envelope surfaces as an `IrApplyError::Read` for the file (the
-/// fail-closed load gate would report the same shape); a policy that cannot
-/// resolve the createTable surfaces as an `Ir`-class failure via `Read` text.
+/// A malformed envelope and an unresolvable `createTable` are both the creator's
+/// content, so both surface as [`IrApplyError::Malformed`] (422) naming the file. The
+/// final re-serialize is of a value this function just built, so a failure there is
+/// ours and stays [`IrApplyError::Read`] (503).
 fn resolve_shape_bytes(
     raw_bytes: &str,
     policy: &PdpPolicy,
     default_schema: &str,
     file: &str,
 ) -> Result<String, IrApplyError> {
-    let ir: MigrationIr = serde_json::from_str(raw_bytes).map_err(|e| IrApplyError::Read {
+    let ir: MigrationIr = serde_json::from_str(raw_bytes).map_err(|e| IrApplyError::Malformed {
         file: file.to_string(),
         message: format!("deserialize IR envelope: {e}"),
     })?;
     let resolved = resolve_create_table_policy(&ir, policy, default_schema).map_err(|e| {
-        IrApplyError::Read {
+        IrApplyError::Malformed {
             file: file.to_string(),
             message: format!("resolve table-shape policy: {e}"),
         }
@@ -1172,7 +1183,7 @@ async fn preflight_ir_documents(
         // whether these OPS require approval (`migration_requires_approval`) — the
         // engine only DECLARES the obligation; this host is its enforcer.
         let ir: MigrationIr =
-            serde_json::from_str(&raw_bytes).map_err(|e| IrApplyError::Read {
+            serde_json::from_str(&raw_bytes).map_err(|e| IrApplyError::Malformed {
                 file: file.clone(),
                 message: format!("deserialize IR envelope: {e}"),
             })?;
@@ -1497,6 +1508,12 @@ fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static 
         IrApplyError::Ir { .. } | IrApplyError::Apply(_) => (
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_failed",
+        ),
+        // Creator content that never parsed gets its own code, not `migration_failed`:
+        // the engine did not refuse this migration, it never saw one.
+        IrApplyError::Malformed { .. } => (
+            ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "migration_invalid",
         ),
         IrApplyError::Read { .. } | IrApplyError::Snapshot(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,

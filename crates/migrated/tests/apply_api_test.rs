@@ -1825,6 +1825,84 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
+/// A `.ir.json` body the creator wrote wrong is the CREATOR's fault, not the
+/// service's.
+///
+/// `validate_request_shape` only checks that each document is a JSON object, so
+/// `{"foo": 1}` passes it and fails later at the envelope parse. That parse failure
+/// used to become `IrApplyError::Read`, which classifies as 503
+/// `migration_infrastructure` - the same variant a genuine disk read failure produces.
+/// The 5xx arm of `apply_error_response` then logs at ERROR and REPLACES the detail
+/// with "migration service unavailable", so the creator learned neither what was wrong
+/// nor which file, an operator got paged for a typo, and any client retrying on 5xx
+/// retried a request that can never succeed.
+///
+/// The suppression of detail on 5xx is correct and stays; what was wrong is calling
+/// this a 5xx.
+#[ntex::test]
+async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrated::configure),
+    )
+    .await;
+
+    // A JSON object, so it clears validate_request_shape, but not an IR envelope.
+    let malformed = json!({
+        "kind": "ir",
+        "documents": [{
+            "filename": "0001_broken.ir.json",
+            "body": {"foo": 1}
+        }]
+    });
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&malformed)
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "creator-authored IR that does not parse is a 422, not a 503"
+    );
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("0001_broken.ir.json"),
+        "the creator must be told WHICH file failed, got: {body}"
+    );
+
+    // POSITIVE CONTROL for the classification, not for the request path: a well-formed
+    // request against this same fixture succeeds. Without it, "422" is also what a
+    // service that rejected everything would return.
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a well-formed migration must still apply"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
+
 #[ntex::test]
 async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     let app_id = Uuid::now_v7();
