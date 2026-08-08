@@ -1286,8 +1286,8 @@ async fn create_index_with_recovery_audited(
 //     with an env-var fallback for dev parity.
 //   * `Backup` -- the PITR placeholder writes to
 //     `__zeroship_admin.pitr_targets`. Snapshot / restore themselves don't strictly
-//     need the admin schema; `BackendHandle::as_backup_pg` matches the
-//     `as_encrypted_column_pg` shape.
+//     need the admin schema. The impl is unconditional, but nothing outside
+//     this crate's own tests reaches it.
 
 // Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
@@ -1352,9 +1352,11 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 // Notes:
 //   1. The PITR placeholder writes to the `__zeroship_admin` schema,
 //      provisioned by the auth/bootstrap subtree.
-//   2. `Backup` is admin-tier surface — app code never reaches it; the
-//      `BackendHandle::as_backup_pg` accessor is the only entry point and
-//      mirrors the `as_encrypted_column_pg` shape.
+//   2. `Backup` is admin-tier surface — app code never reaches it. Nor does
+//      anything else: there is no accessor and no consumer, so today the impl
+//      is exercised only by this crate's tests through the trait. Whether the
+//      capability ships or goes is an open operator decision, not a claim this
+//      comment should keep making on its behalf.
 //
 // Both `pg_dump` and `pg_restore` need to be on `PATH` in the deployment
 // environment. The integration tests `#[ignore]` themselves when the
