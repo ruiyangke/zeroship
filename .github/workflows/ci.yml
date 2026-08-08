@@ -108,6 +108,20 @@ jobs:
             exit 1
           fi
           [ "$missing" -eq 0 ]
+      # The step above resolves citations that name a FILE. This one resolves
+      # citations that name an ITEM, which nothing checked until now: no job ran
+      # `cargo doc`, so a rustdoc link pointing at a deleted or renamed symbol
+      # was invisible. Two survived that way until 2026-08-07 - `refund.rs`
+      # citing a provider module deleted in f975eae8b, and `billing_read.rs`
+      # promising a `RegistryError::Pricing` variant that never existed.
+      #
+      # Runs through a script rather than inline because the measurement has
+      # three failure modes that each produce a confident wrong number (warm
+      # cache, `-D` truncating the count, and a build that did not run reporting
+      # zero warnings). The script's header documents all three and asserts the
+      # documented-crate count as the control; see it before touching the floors.
+      - name: Doc links resolve
+        run: tests/run_doc_gate.sh
       - name: Test-target enumeration floor
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
