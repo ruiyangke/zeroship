@@ -100,6 +100,38 @@ describe("validateDoc", () => {
     assert.doesNotThrow(() => validateDoc({ age: 25 }, schema));
   });
 
+  // The number arm rejected only non-numbers and NaN. `typeof Infinity === "number"`
+  // and `isNaN(Infinity)` is false, so both infinities passed validation and reached
+  // the wire - where `JSON.stringify(Infinity)` is `null` (measured on node v22.22.2).
+  //
+  // On a NOT NULL column that surfaces as a database error, which is at least loud.
+  // On a nullable one the row silently holds NULL: the creator wrote a number,
+  // validation approved it, and the value is gone with nothing reported. NaN was
+  // already rejected, and NaN and Infinity fail identically on the wire - so the
+  // existing guard covered one half of one problem.
+  //
+  // A `min`/`max` bound does not close this: bounds are optional, and `Infinity > max`
+  // only catches a column that declared a max. The unbounded column is the common case.
+  test("number: rejects Infinity, which JSON encodes as null", () => {
+    const schema = normalizeSchema({ score: t.number() });
+    assert.throws(() => validateDoc({ score: Infinity }, schema), ValidationError);
+  });
+
+  test("number: rejects -Infinity", () => {
+    const schema = normalizeSchema({ score: t.number() });
+    assert.throws(() => validateDoc({ score: -Infinity }, schema), ValidationError);
+  });
+
+  // POSITIVE CONTROL. The two assertions above are satisfied by a number arm that
+  // rejects every number, so pin that finite values - including the boundary the
+  // guard is most likely to get wrong - still pass.
+  test("number: finite values still pass, including MAX_VALUE", () => {
+    const schema = normalizeSchema({ score: t.number() });
+    assert.doesNotThrow(() => validateDoc({ score: 0 }, schema));
+    assert.doesNotThrow(() => validateDoc({ score: -1.5 }, schema));
+    assert.doesNotThrow(() => validateDoc({ score: Number.MAX_VALUE }, schema));
+  });
+
   test("enum: valid value passes", () => {
     const schema = normalizeSchema({
       role: t.string().enum("user", "admin"),
