@@ -12,25 +12,31 @@
 //! forwarder dedups on, and the same `event_time` that decides which billing
 //! period the usage lands in.
 //!
-//! It does NOT survive a process restart in the shipped configuration, and an
-//! earlier version of this comment claimed it did. The default WAL path is
-//! derived from `producer_source`, and both binaries that use it mint that
-//! source with a fresh UUID per boot - `crates/worker/src/main.rs` builds
-//! `{hostname}-{uuid}`, `crates/gateway/src/main.rs` builds
-//! `gate-{hostname}-{uuid}`. A restart therefore opens a DIFFERENT, empty redb
-//! file, orphaning whatever was unpublished and leaving the old file on disk
-//! with nothing that reads it. Nothing in `deploy/` overrides the path;
-//! `USAGE_OUTBOX_WAL_PATH` is set only by the e2e scripts.
+//! It DOES survive a process restart. It did not until 2026-08-07, and the
+//! reason is worth keeping because the mechanism was not the obvious one.
 //!
-//! `zeroship-control` does not share the defect: it passes a stable constant
+//! redb's `Database::create` opens an existing file rather than truncating it,
+//! and `load_pending` already ran on every publish cycle, so the replay
+//! machinery was complete and working the whole time. What broke was the KEY:
+//! the default WAL path was derived from `producer_source`, and both binaries
+//! mint that source with a fresh uuid per boot. A restart therefore aimed a
+//! working replay at a NEW, empty file and orphaned the old one on disk with
+//! nothing left that could read it. Nothing in `deploy/` overrode the path.
+//!
+//! The fix separates the two identities that had been one string, because they
+//! have opposite requirements - see [`WalIdentity`], which is a newtype
+//! precisely so a producer source cannot be passed where a WAL key belongs.
+//! `zeroship-control` never had the defect: it passes a stable constant
 //! (`DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH`).
 //!
-//! Making the path stable is NOT sufficient on its own and must not be done
-//! alone: redb is single-writer, so co-located producers sharing one path would
-//! fail to open, and a failed open currently degrades to a drain-and-drop task
-//! rather than refusing to boot. Stable paths have to land together with that
-//! fail-closed change, or an intermittent partial loss becomes a permanent
-//! total one.
+//! A stable path could NOT land on its own, and this is the part that makes
+//! the two changes one change. redb is single-writer, so co-located producers
+//! sharing a path fail to open - and a failed open used to degrade to a
+//! drain-and-drop task rather than refusing to boot. Stabilising the path
+//! alone would therefore have converted an intermittent partial loss into a
+//! permanent total one. The worker and gateway now treat a build failure as
+//! fatal when brokers are configured, so the two properties hold together or
+//! not at all.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -110,11 +116,24 @@ impl UsageStreamSettings {
 
 /// Build a usage-event outbox (redpanda transport + redb WAL) from resolved
 /// [`UsageStreamSettings`], or `None` when no brokers are configured (producer
-/// disabled). Shared by the worker and gateway producers. The WAL path defaults
-/// per-`producer_source` so a worker and a gateway on the same host never
-/// contend for one single-writer redb file.
+/// disabled). Shared by the worker and gateway producers.
+///
+/// Takes the producer identity and the WAL identity SEPARATELY, and they must
+/// stay separate. `producer_source` names this live producer and carries a
+/// per-boot uuid so two running producers never collide on a client or group
+/// id. [`WalIdentity`] names the file this producer's unpublished events
+/// survive in, and must be identical across restarts of the same producer or
+/// the restarted process opens an empty WAL and orphans them.
+///
+/// An `Err` here means brokers WERE configured and the producer could not be
+/// built - most often because the WAL would not open, which on a stable path
+/// is what a co-located second producer looks like (redb is single-writer).
+/// Callers must treat that as fatal rather than degrading to a drain-and-drop
+/// task: dropping every event forever is strictly worse than the intermittent
+/// loss the drop was standing in for.
 pub fn build_usage_outbox(
     producer_source: &str,
+    wal: &WalIdentity,
     settings: &UsageStreamSettings,
 ) -> Result<Option<(UsageOutbox, OutboxConfig)>, String> {
     let Some(brokers) = settings
@@ -157,24 +176,70 @@ pub fn build_usage_outbox(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_wal_path(producer_source));
+        .unwrap_or_else(|| default_wal_path(wal));
     let outbox = UsageOutbox::new(stream, topic, wal_path).map_err(|e| e.to_string())?;
     Ok(Some((outbox, config)))
+}
+
+/// The stable key a producer's WAL file is named for.
+///
+/// A NEWTYPE rather than a `&str`, and that is the whole point of it. The
+/// original defect was not that anyone chose a bad path - it was that
+/// `build_usage_outbox` took one string and used it for BOTH the producer
+/// identity and the WAL name, and those two have opposite requirements:
+///
+///   * the producer/client id must be unique per LIVE producer, so the worker
+///     and gateway mint it with a fresh uuid per boot;
+///   * the WAL name must survive exactly the event that changes that uuid.
+///
+/// With one `&str` parameter the call sites satisfied the first and silently
+/// broke the second, and no test could bind them because the mistake was in
+/// what the caller passed, not in what the callee did. Making the WAL
+/// parameter a type that a producer source cannot coerce into means the call
+/// site is checked by the compiler on every future edit instead of by a test
+/// that has to remember to look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalIdentity(String);
+
+impl WalIdentity {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Build the stable WAL key for a producer.
+///
+/// `role` is what keeps co-located producers off one file, which matters
+/// because redb is single-writer: a gateway and a worker on one host must not
+/// name the same path. `host` is whatever the binary uses to distinguish
+/// itself from a peer on another machine (hostname, else bind address).
+///
+/// Both parts are sanitised the same way the path is, so a host carrying a `/`
+/// or a `..` cannot walk out of the WAL directory.
+#[must_use]
+pub fn wal_identity(role: &str, host: &str) -> WalIdentity {
+    WalIdentity(format!(
+        "{}-{}",
+        sanitise_path_component(role),
+        sanitise_path_component(host)
+    ))
+}
+
+fn sanitise_path_component(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 /// Where the WAL lives when the caller sets no explicit path.
 ///
 /// Extracted so the derivation is testable without building a transport or
-/// writing a redb file into the working directory. The choice of
-/// `producer_source` as the key is what decides whether a restarted process
-/// finds its predecessor's unpublished events - see the module docs and
-/// `restart_with_a_new_boot_source_gets_a_different_wal`.
-fn default_wal_path(producer_source: &str) -> PathBuf {
-    let safe: String = producer_source
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    PathBuf::from(format!(".zeroship/usage-outbox-{safe}.redb"))
+/// writing a redb file into the working directory. Takes a [`WalIdentity`]
+/// rather than a bare string so the key cannot silently become the per-boot
+/// producer source again - see `a_restart_reuses_the_previous_boots_wal`.
+fn default_wal_path(wal: &WalIdentity) -> PathBuf {
+    PathBuf::from(format!(".zeroship/usage-outbox-{}.redb", wal.as_str()))
 }
 
 #[derive(Debug, Clone)]
@@ -782,29 +847,144 @@ mod tests {
     /// So: a red here means the DERIVATION changed. It is not, on its own, a
     /// signal that the restart defect is fixed or unfixed.
     #[test]
-    fn restart_with_a_new_boot_source_gets_a_different_wal() {
-        // What crates/worker/src/main.rs builds: `{hostname}-{uuid-per-boot}`.
-        let boot_a = default_wal_path("worker-host-11111111111111111111111111111111");
-        let boot_b = default_wal_path("worker-host-22222222222222222222222222222222");
-        assert_ne!(
-            boot_a, boot_b,
-            "two boots on one host share a WAL path; if this now holds, the \
-             restart-loses-usage defect is fixed and this test should assert \
-             equality instead"
-        );
-
-        // The host part is not what separates them - only the per-boot suffix
-        // is, which is what makes this a restart problem rather than a
-        // multi-host one.
-        let gate = default_wal_path("gate-worker-host-11111111111111111111111111111111");
-        assert_ne!(gate, boot_a, "a gateway and a worker must not share a file");
-
-        // The same source is stable across calls, so the path is a pure
-        // function of the source and nothing else drifts.
+    fn a_restart_reuses_the_previous_boots_wal() {
+        // This used to assert INEQUALITY and carried a note saying that if it
+        // ever held, the restart-loses-usage defect was fixed and the test
+        // should assert equality instead. This is that rewrite.
+        //
+        // The WAL identity is deliberately NOT the producer source. The source
+        // still carries a per-boot uuid, because producer/client ids must not
+        // collide between two live producers; the WAL must survive exactly the
+        // event that changes that uuid.
+        let boot_a = default_wal_path(&wal_identity("worker", "host"));
+        let boot_b = default_wal_path(&wal_identity("worker", "host"));
         assert_eq!(
-            boot_a,
-            default_wal_path("worker-host-11111111111111111111111111111111"),
+            boot_a, boot_b,
+            "two boots of one worker must resolve to the same WAL file, or the \
+             restarted process opens an empty one and orphans whatever the \
+             previous boot had not yet published"
         );
+
+        // Distinctness still has to hold where it always did: redb is
+        // single-writer, so co-located producers must not name one file.
+        assert_ne!(
+            boot_a,
+            default_wal_path(&wal_identity("gate", "host")),
+            "a gateway and a worker on one host must not share a file"
+        );
+        assert_ne!(
+            boot_a,
+            default_wal_path(&wal_identity("worker", "other-host")),
+            "two hosts must not share a file"
+        );
+    }
+
+    #[test]
+    fn a_wal_identity_carries_no_per_boot_component() {
+        // The defect was not that the path was recreated - redb's
+        // `Database::create` opens an existing file. It was that the KEY
+        // changed every boot, so a working replay path pointed at a new empty
+        // file. This asserts the property that was actually missing, so the
+        // regression cannot come back by someone threading a fresh uuid into
+        // the identity again.
+        //
+        // Deliberately calls the seam twice rather than comparing one call to
+        // a literal: a hardcoded expected string would still pass if the
+        // function grew a random component AND the literal were updated to
+        // match one sample.
+        // POSITIVE CONTROL first. `contains_uuid_shape` returning false is the
+        // pass condition below, so a detector that never fires would make this
+        // test green against the exact code it exists to reject. Prove it
+        // fires on what the worker actually used to pass - `{host}-{uuid}` -
+        // in both the raw and path-sanitised spellings.
+        let boot_uuid = Uuid::new_v4().to_string();
+        assert!(
+            contains_uuid_shape(&format!("worker-host-{boot_uuid}")),
+            "detector missed a raw per-boot source; the negative results below \
+             would be meaningless"
+        );
+        assert!(
+            contains_uuid_shape(&sanitise_path_component(&format!(
+                "worker-host-{boot_uuid}"
+            ))),
+            "detector missed the sanitised spelling, which is the form that \
+             actually reached the WAL path"
+        );
+        // And that it is not simply always-true.
+        assert!(!contains_uuid_shape("worker-host"));
+
+        for role in ["worker", "gate"] {
+            let first = wal_identity(role, "host");
+            let second = wal_identity(role, "host");
+            assert_eq!(
+                first, second,
+                "wal_identity({role}, host) is not stable across calls"
+            );
+            // Not "does it contain THIS uuid" - a freshly minted uuid can never
+            // appear in a string derived from other inputs, so that assertion
+            // would pass against any implementation, including the broken one.
+            // Look for the SHAPE instead.
+            assert!(
+                !contains_uuid_shape(first.as_str()),
+                "identity {:?} embeds something uuid-shaped; the per-boot \
+                 component belongs in the producer source, not the WAL key",
+                first.as_str()
+            );
+        }
+    }
+
+    /// True when `s` contains 32 hex digits in uuid layout, with `-` or `_`
+    /// separators (the path sanitiser rewrites `-` to `_`, so a uuid that
+    /// reached the identity would show up in the underscored form).
+    fn contains_uuid_shape(s: &str) -> bool {
+        let bytes: Vec<char> = s.chars().collect();
+        let groups = [8usize, 4, 4, 4, 12];
+        (0..bytes.len()).any(|start| {
+            let mut i = start;
+            for (g, len) in groups.iter().enumerate() {
+                if g > 0 {
+                    match bytes.get(i) {
+                        Some('-' | '_') => i += 1,
+                        _ => return false,
+                    }
+                }
+                for _ in 0..*len {
+                    match bytes.get(i) {
+                        Some(c) if c.is_ascii_hexdigit() => i += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            true
+        })
+    }
+
+    #[test]
+    fn a_reopened_wal_still_holds_the_unpublished_events() {
+        // The half of the fix that the path change exists to enable. Without
+        // this, a stable path would be necessary but unproven: the claim is
+        // that a NEW `UsageWal` over the SAME file sees what the previous one
+        // wrote and never published.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("restart.redb");
+
+        let first = UsageWal::open(&path).expect("open wal");
+        first
+            .append(&[usage_event(Uuid::now_v7(), "requests", 7)])
+            .expect("append");
+        assert_eq!(first.load_pending().expect("pending").len(), 1);
+        drop(first);
+
+        let second = UsageWal::open(&path).expect("reopen wal");
+        let pending = second.load_pending().expect("pending after reopen");
+        assert_eq!(
+            pending.len(),
+            1,
+            "a reopened WAL lost the unpublished event, so a stable path would \
+             buy nothing"
+        );
+        assert_eq!(pending[0].event.meter, "requests");
+        assert_eq!(pending[0].event.value, 7);
     }
 
     #[test]
@@ -1049,6 +1229,21 @@ mod tests {
             assert!(published.contains(&drained[1]));
             assert!(published.contains(&drained[2]));
         });
+    }
+
+    fn usage_event(app_id: Uuid, meter: &str, value: u64) -> UsageEvent {
+        UsageEvent {
+            event_id: Uuid::now_v7().to_string(),
+            source: "test".to_string(),
+            subject: zeroship_core::usage_event::UsageSubject {
+                app: Some(app_id),
+                creator: Uuid::now_v7(),
+            },
+            meter: meter.to_string(),
+            value,
+            event_time: 0,
+            dims: Default::default(),
+        }
     }
 
     fn assert_event(events: &[UsageEvent], app_id: Uuid, meter: &str, value: u64) {
