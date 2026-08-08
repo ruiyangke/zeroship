@@ -17,7 +17,7 @@
 //! execution and a `applied` / `failed` terminal row after. The audited
 //! CIC recovery loop (extra rows for retry / invalid-index /
 //! data-violation paths) lives in
-//! [`crate::backend::Backend::create_index_with_recovery`].
+//! [`crate::backend::IndexBuilder::create_index_with_recovery`].
 
 use serde_json::Value;
 
