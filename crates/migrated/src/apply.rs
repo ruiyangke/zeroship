@@ -18,7 +18,7 @@ use zeroship_migrate_adapter::CompioPgSession;
 
 use crate::migration_store::{
     sealed_profile_audit_json, AuditAction, AuditInput, MigrationStore, MigrationStoreError,
-    StoreMigrationInput, StoredMigration,
+    StoreMigrationInput, StoredMigration, TerminalTransition,
 };
 use crate::policy::{
     confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
@@ -706,7 +706,22 @@ async fn apply_ir_documents_with_policy(
             provision_runtime_app_role(session.client(), &schema, &role)
                 .await
                 .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
-            migration_store.mark_applied(*app_id, migration_id).await?;
+            if migration_store.mark_applied(*app_id, migration_id).await?
+                == TerminalTransition::Lost
+            {
+                // The DDL is committed and cannot be taken back, but a concurrent
+                // path rejected this migration while the engine was applying it, so
+                // the row reads `rejected`. The record now contradicts the database
+                // it describes and only an operator can reconcile them. Erroring here
+                // would report a failure over changes that did land, so the request
+                // continues and the divergence is raised instead.
+                tracing::error!(
+                    app_id = %app_id,
+                    migration_id = %migration_id,
+                    "migrated: apply lost the terminal transition to a concurrent \
+                     reject - schema changes are committed but the row reads rejected"
+                );
+            }
             let applied = outcome.applied.clone();
             let skipped = outcome.skipped.clone();
             let pending_contract = outcome.pending_contract.clone();
@@ -1376,11 +1391,26 @@ async fn mark_migration_failed(
     migration_id: Uuid,
     message: &str,
 ) {
-    if let Err(store_err) = migration_store
+    match migration_store
         .mark_rejected(app_id, migration_id, message)
         .await
     {
-        tracing::error!(error = %store_err, "migrated: failed to mark migration rejected");
+        Ok(TerminalTransition::Recorded) => {}
+        Ok(TerminalTransition::Lost) => {
+            // The row is already `applied`, so this failure belongs to a migration
+            // that another path completed. The reject is correctly refused; what
+            // would be wrong is letting it pass for a recorded one.
+            tracing::warn!(
+                app_id = %app_id,
+                migration_id = %migration_id,
+                reason = message,
+                "migrated: reject lost the terminal transition to a completed apply - \
+                 the row stays applied and this failure is not recorded on it"
+            );
+        }
+        Err(store_err) => {
+            tracing::error!(error = %store_err, "migrated: failed to mark migration rejected");
+        }
     }
 }
 
