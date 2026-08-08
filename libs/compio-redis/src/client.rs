@@ -291,9 +291,9 @@ impl Client {
     }
 
     /// PTTL key — remaining TTL in milliseconds. Wire semantics:
-    ///   >= 0 → milliseconds remaining
-    ///   -1   → key exists but has no TTL
-    ///   -2   → key does not exist
+    /// - `>= 0` → milliseconds remaining
+    /// - `-1` → key exists but has no TTL
+    /// - `-2` → key does not exist
     pub async fn pttl(&mut self, key: &str) -> Result<i64> {
         let frame = self.send_recv(build_cmd(&[b"PTTL", key.as_bytes()])).await?;
         expect_integer(frame)
@@ -394,9 +394,11 @@ impl Client {
         let keys_arr = expect_array(keys_frame)?;
         let keys: Vec<String> = keys_arr
             .into_iter()
-            .filter_map(|f| match expect_bulk_or_null(f).ok().flatten() {
-                Some(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-                None => None,
+            .filter_map(|f| {
+                expect_bulk_or_null(f)
+                    .ok()
+                    .flatten()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             })
             .collect();
         Ok((cursor, keys))

@@ -318,7 +318,10 @@ pub struct PooledConn {
 }
 
 impl PooledConn {
-    pub fn as_mut(&mut self) -> &mut Client {
+    /// Not named `as_mut`: that reads as the `AsMut` trait method and would
+    /// resolve differently depending on which traits are in scope at the call
+    /// site, which is the kind of ambiguity a pool handle should not carry.
+    pub fn client_mut(&mut self) -> &mut Client {
         self.client.as_mut().expect("client taken")
     }
 }
