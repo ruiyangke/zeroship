@@ -877,17 +877,25 @@ mod tests {
     ///
     /// Re-emits the same `tracing::warn!` syntax the F1 sites use in
     /// `apply.rs` (lines 178–184 / 209–216) and `backend/postgres.rs`
-    /// (lines 496 / 548 / 597) so the operator-grep contract is
-    /// pinned by an executable example. Field names checked here MUST
-    /// match the production sites; a runbook that greps for
-    /// `audit_err=…` relies on every F1 site using that exact key.
+    /// (lines 496 / 548 / 597). Field names checked here MUST match the
+    /// production sites; a runbook that greps for `audit_err=…` relies
+    /// on every F1 site using that exact key.
     ///
-    /// **What this test catches**: a contributor who renames the field
-    /// in THIS test (or in the production sites) without updating the
-    /// other will see a mismatch when they sync. The test does NOT
-    /// drive production code — that would require a Backend mock the
-    /// brief explicitly scoped out. End-to-end coverage of the live
-    /// F1 path lives in `crates/plugin-db/tests/integration.rs`.
+    /// **What this test pins**: the shape written IN THIS FILE, against
+    /// itself. It re-emits the `warn!` rather than calling production
+    /// code, so the two copies are compared by a human, never by the
+    /// compiler or the test runner.
+    ///
+    /// **What it does NOT catch, and this is the important half**: a
+    /// rename at a PRODUCTION site alone. Nothing here reads
+    /// `apply.rs`'s real warn arms, so `cargo test` stays green while
+    /// the runbook's grep goes dead. It equally misses a rename made in
+    /// both places at once. Driving the real path would need a Backend
+    /// mock the brief scoped out; end-to-end coverage of the live F1
+    /// path lives in `crates/plugin-db/tests/integration.rs`.
+    ///
+    /// So: treat this as documentation that happens to compile, not as
+    /// a guard on the operator-grep contract.
     ///
     /// **What this test does NOT catch**: a contributor who renames
     /// `audit_err` → `error` in BOTH the production sites and this
@@ -962,11 +970,15 @@ mod tests {
     /// `validate.rs:101` + `apply.rs:84` running-row insert path).
     ///
     /// The original `f1_warn_shape_documentation_snapshot` above
-    /// pinned only the `audit_id` variant — operator grep on
-    /// `collection=audit_err=` against the insert-failure sites
-    /// wasn't backed by a test. This test closes that gap: any
-    /// rename of `collection` / `transition` / `audit_err` on the
-    /// insert-failure cluster fails here at unit-test time.
+    /// covers only the `audit_id` variant, so the `collection`-slot
+    /// shape had no written-down form at all. This test supplies one.
+    ///
+    /// It has the SAME limit as its sibling, and the limit is easy to
+    /// misread: like that test, this one re-emits the `warn!` rather
+    /// than calling `validate.rs` or `apply.rs`. A rename of
+    /// `collection` / `transition` / `audit_err` at either PRODUCTION
+    /// site does NOT fail here - nothing compares the two copies. What
+    /// fails here is a rename made in this file.
     #[test]
     fn f1_warn_shape_collection_slot_documentation_snapshot() {
         use crate::test_support::capture;
