@@ -101,6 +101,44 @@ impl ProducerContext for DeliveryContext {
     }
 }
 
+/// Connection settings for the redpanda transport.
+///
+/// # This transport is PLAINTEXT and UNAUTHENTICATED, by construction
+///
+/// There is no TLS and no SASL here, and that is enforced at two independent
+/// levels - so an operator who needs an encrypted or authenticated broker link
+/// cannot get one by configuration alone, and will not find out by trying.
+///
+/// 1. **The fields below are the whole surface**, and the struct is
+///    `deny_unknown_fields`. Passing `security.protocol`, `sasl.mechanism` or
+///    any other librdkafka security key is a deserialization ERROR, not an
+///    ignored key.
+/// 2. **librdkafka is not built with them.** The workspace pins
+///    `rdkafka = { default-features = false, features = ["cmake-build"] }`.
+///    In rdkafka 0.36.2 `ssl`, `sasl` and `gssapi` are separate opt-in
+///    features (verified against the registry source), so the linked C library
+///    has no TLS or SASL support at all. Even if a key reached it, the protocol
+///    would be unsupported at runtime.
+///
+/// The usage stream therefore carries per-app billing events in the clear, and
+/// any party who can reach the broker port can both read them and inject them.
+/// That is acceptable only on a trusted network. The compose deployment puts
+/// the broker on an internal address (`redpanda:9092`) and does not publish it,
+/// which is what makes the posture survivable today - not anything in this
+/// crate.
+///
+/// # If you are here to add TLS, do NOT start by restoring default features
+///
+/// That is the obvious move and it is wrong twice: `default = ["libz",
+/// "tokio"]` in rdkafka 0.36.2, so re-enabling defaults pulls TOKIO back into
+/// a workspace whose whole runtime posture is compio (see AGENTS.md), AND it
+/// still does not enable `ssl`, because ssl was never a default feature. The
+/// absence of TLS here is not a side effect of dropping tokio; it was simply
+/// never turned on.
+///
+/// The actual change is: add `ssl` (or `ssl-vendored`) and `sasl` to the
+/// rdkafka features, add the corresponding fields here, and thread them into
+/// the `ClientConfig` builders below for BOTH the producer and the consumer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedpandaConfig {
