@@ -121,6 +121,20 @@ pub fn heap_limit_callback_hits() -> u64 {
     HEAP_LIMIT_CALLBACK_HITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A snapshot of V8's own view of this isolate's heap: `(used, limit)` bytes.
+///
+/// `limit` is what V8 believes the cap to be, which is NOT necessarily the
+/// value passed to `heap_limit_mb`: V8 clamps a `max_old_generation_size`
+/// below its own floor, and the near-heap-limit callback raises the live limit
+/// on each hit. Comparing the two answers "did the configured cap take effect"
+/// separately from "was it enforced".
+#[must_use]
+pub fn heap_used_and_limit(runtime: &Runtime) -> (usize, usize) {
+    let mut inner = runtime.inner.borrow_mut();
+    let stats = inner.isolate.get_heap_statistics();
+    (stats.used_heap_size(), stats.heap_size_limit())
+}
+
 // ---------------------------------------------------------------------------
 // DispatchOutcome — result of dispatch_start
 // ---------------------------------------------------------------------------

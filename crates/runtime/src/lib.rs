@@ -236,7 +236,7 @@ pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{
-    heap_limit_callback_hits, AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease,
+    heap_limit_callback_hits, heap_used_and_limit, AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease,
     RuntimeLimits,
 };
 pub use fetch_outcome::{

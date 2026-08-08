@@ -5,28 +5,37 @@
 //! `MAX_HEAP_LIMIT_HITS` it calls `terminate_execution`. The app is supposed to
 //! see a non-2xx, never a success and never a hang.
 //!
-//! `runtime_heap_cap_enforces_oom` DOES NOT PASS. It is failing on purpose
-//! rather than ignored, because the arm it covers is the only one where the cap
-//! has to do anything: the other two tests allocate comfortably under their
-//! limits, so they would pass against a cap that never fires at all.
+//! ## An allocation that is never read is never allocated
 //!
-//! Two distinct failures were measured against `heap_limit_mb(32)`, and the
-//! callback counter separates them into different defects rather than one:
+//! `runtime_heap_cap_enforces_oom` spent a while failing while I recorded a
+//! defect that does not exist: "the cap does not cover large-object space,
+//! because 400 retained 1 MiB strings return 200 and the callback fires zero
+//! times". Both observations were real. The conclusion was wrong.
 //!
-//!   Large-object space is never checked. 400 retained 1 MiB strings return
-//!   HTTP 200 with `oom:false`, the process peaks at 229 MB RSS - about 7x the
-//!   cap - and the near-heap-limit callback fires ZERO times. V8 does not
-//!   consult it for this allocation shape, so nothing in the growth/terminate
-//!   logic ever runs. This is the case asserted below.
+//! Building `"x".repeat(1024 * 1024) + i` does not consume heap. V8 leaves the
+//! value unmaterialised until something reads it, so the loop retained 400
+//! nominal megabytes while `used_heap_size` sat at 1.5 MB and the near-heap-
+//! limit callback had nothing to fire about. Adding one `charCodeAt` per
+//! iteration takes the SAME loop to 58 MB used, five callback hits, and a 503.
 //!
-//!   Regular old space is checked, and the enforcement hangs. The callback
-//!   fires exactly `MAX_HEAP_LIMIT_HITS` (5) times, `terminate_execution` is
-//!   called as designed, and the dispatch then returns a `Pending` that never
-//!   settles - observed at a 30s and a 150s deadline. Termination works; what
-//!   is missing is anything that turns a terminated isolate into a response.
+//! So the cap does cover these allocations, and the test was asserting against
+//! a no-op. The lesson worth keeping is that a test which allocates must prove
+//! it allocated - `used_heap_size` is the check, not the size of the values the
+//! source appears to build.
 //!
-//! So the first is a hole in what the cap covers, and the second is a missing
-//! completion path after it fires. A single fix will not address both.
+//! What was real, and is fixed: heap-limit termination fired correctly and then
+//! left the request hanging, because nothing converted a terminated isolate
+//! into a response. The callback hit `MAX_HEAP_LIMIT_HITS` (5), called
+//! `terminate_execution` as designed, and the dispatch returned a `Pending`
+//! that never settled at a 30s or a 150s deadline.
+//!
+//! ## Still worth an operator decision, by design rather than by defect
+//!
+//! `heap_limit_mb(32)` does not cap the isolate at 32 MB. The callback grows
+//! the limit by a quarter of the original on each hit, up to 4x, so the
+//! observed ceiling is 128 MB and a dispatch was measured at 72 MB. That is
+//! deliberate - it avoids a hard V8 fatal-abort - but it means the configured
+//! number is a floor that buys headroom, not a bound.
 
 mod common;
 use common::*;
@@ -130,15 +139,15 @@ fn runtime_default_no_heap_cap() {
 // 2 — heap_limit_mb(32): allocate well past the cap, expect a non-2xx.
 // ---------------------------------------------------------------------------
 //
-// KNOWN FAILING. The cap does not bound this allocation: see the module header
-// for the two measured behaviours and what was not measured.
+// The cap DOES bound this allocation, once the allocation is real: see the
+// module header for why an earlier version of this test measured otherwise.
 //
 // V8 routes ArrayBuffer backing stores through its array-buffer allocator,
 // which is NOT counted against the heap limit configured by
-// `CreateParams::heap_limits`. Strings do live in the GC heap - but a 1 MiB
-// string exceeds V8's max regular object size, so it lands in large-object
-// space, and that is the allocation shape this test shows the cap failing to
-// bound.
+// `CreateParams::heap_limits`, so a test that allocates buffers would pass
+// against a cap that never fires. Strings live in the GC heap and do count,
+// which is why the allocation below is strings - provided each one is read,
+// per the module header.
 //
 // The allocation is deliberately a few hundred large strings rather than the
 // 100M small property stores this test used before. That version could not
@@ -154,11 +163,20 @@ fn runtime_heap_cap_enforces_oom() {
             fetch(request, env, ctx) {
                 const live = [];
                 try {
-                    // 1 MiB in-heap strings, retained. Reaches a 32 MiB cap in
-                    // a few dozen iterations instead of 100M property stores.
+                    // 1 MiB strings, retained. Building them is NOT enough:
+                    // until something reads one, V8 leaves the value
+                    // unmaterialised and the heap is never actually consumed -
+                    // measured at 1.5 MB used after 400 iterations, with the
+                    // near-heap-limit callback firing zero times. Touching a
+                    // byte forces materialisation and the same loop reaches
+                    // 58 MB used with the callback firing its full five times.
+                    let sink = 0;
                     for (let i = 0; i < 400; i++) {
-                        live.push("x".repeat(1024 * 1024) + i);
+                        const s = "x".repeat(1024 * 1024) + i;
+                        sink += s.charCodeAt(s.length - 2);
+                        live.push(s);
                     }
+                    if (sink < 0) { throw new Error("unreachable"); }
                 } catch (e) {
                     return new Response(JSON.stringify({
                         oom: true,
