@@ -32,8 +32,10 @@ use crate::model::policy::{DestructiveOps, SchemaScope};
 use crate::{GuardMode, SqlDialect};
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
-/// the two ported extensions. Minted via the `for_test` seam,
-/// which is `#[cfg(test)]`-only.
+/// the two ported extensions. Minted via the `for_test` seam, which
+/// `zero-migrate-ir` gates behind its `test-support` feature. This crate enables
+/// that feature as a dev-dependency only, so the seam never reaches a production
+/// build.
 fn platform_guard() -> SqlGuard {
     SqlGuard::new(platform_guard_config())
 }
@@ -772,10 +774,11 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 
 // ---- T11: capability minting uses named seams --------------------------
 
-/// The capability type is constructible from the in-crate test seam. The
-/// production mint is the named shadow seam
+/// The capability type is constructible from the test seam. The production mint
+/// is the named shadow seam
 /// (`model::capability::mint_shadow_operator_capability` for shadow dry-runs);
-/// `for_test` is `#[cfg(test)]`-gated.
+/// `for_test` is gated behind `zero-migrate-ir`'s `test-support` feature, which
+/// this crate enables only as a dev-dependency.
 #[test]
 fn t11_platform_capability_mints_only_via_runner_seam() {
     let cap = OperatorCapability::for_test();
@@ -806,8 +809,9 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
     );
     assert!(!ecfg.guard_config().skips_denylist_belt());
     // NOTE: `OperatorCapability::new` is crate-private. Production code uses
-    // named mint seams; tests use the `#[cfg(test)] for_test` seam. The
-    // external un-nameability is pinned by tests/trybuild_*.
+    // named mint seams; tests use the `for_test` seam, which `zero-migrate-ir`
+    // gates behind its `test-support` feature. The external un-nameability is
+    // pinned by tests/trybuild_*.
 }
 
 // ---- Platform widening is correct AND bounded ----------------------
