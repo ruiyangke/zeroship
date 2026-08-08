@@ -40,6 +40,7 @@ pub mod backend;
 pub mod callbacks;
 pub mod config;
 pub mod limits;
+pub(crate) mod live_streams;
 
 pub use backend::{Backend, LocalFs};
 #[cfg(feature = "s3")]

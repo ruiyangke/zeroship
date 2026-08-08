@@ -4,9 +4,6 @@
 //! promise, push an async op into the runtime pump's spawned-ops queue,
 //! return the promise. The pump resolves/rejects via OpResult.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -15,7 +12,7 @@ use zeroship_runtime::channel::{stream_buffer_with_cap, StreamReader};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime::streams::response_forwarder;
 
-use crate::backend::{BoxByteStream, ChunkResult, ChunkSource, ObjectMeta};
+use crate::backend::{ChunkResult, ChunkSource, ObjectMeta};
 use crate::{Backend, STORAGE_BACKEND, STORAGE_METER};
 
 /// Raw usage metrics a storage op emits in its success arm. `storage_ops`
@@ -354,39 +351,22 @@ pub fn list(
 //   upload and the StreamWriter backpressure cap, not the object size.
 //
 // Download (`getStream` + `readChunk` + `cancelStream`): `getStream` opens a
-//   `Backend::get_stream` and parks the `(meta, source)` in a per-isolate
-//   registry under a fresh id, resolving `{ streamId, contentType, size }`
+//   `Backend::get_stream` and parks the `(meta, source)` in the per-THREAD
+//   registry (`crate::live_streams`) under the OWNING APP's id — the thread
+//   hosts many apps' isolates, so ownership is part of the key, never
+//   implied by the id — resolving `{ streamId, contentType, size }`
 //   (or `null`). The `@zeroship/storage` SDK builds a `new ReadableStream`
 //   whose `pull` calls `readChunk(streamId)` — each call pulls the next
 //   `Backend::get_stream` chunk and resolves a `Uint8Array` (or `undefined`
 //   at EOF). `cancelStream` drops a half-read source.
 // ===========================================================================
 
-thread_local! {
-    /// Per-isolate registry of in-flight download streams, keyed by id.
-    /// `Rc<RefCell<Option<…>>>` so `readChunk` can take the source out for
-    /// the duration of an async pull and put it back, without holding a
-    /// `RefCell` borrow across the await.
-    static GET_STREAMS: RefCell<HashMap<u32, Rc<RefCell<Option<BoxByteStream>>>>> =
-        RefCell::new(HashMap::new());
-    /// Monotonic id source for download streams (per isolate).
-    static NEXT_GET_STREAM_ID: RefCell<u32> = const { RefCell::new(1) };
-}
-
-fn alloc_get_stream_id() -> u32 {
-    NEXT_GET_STREAM_ID.with(|c| {
-        let mut n = c.borrow_mut();
-        let id = *n;
-        *n = n.wrapping_add(1).max(1);
-        id
-    })
-}
-
-fn drop_get_stream(stream_id: u32) {
-    GET_STREAMS.with(|m| {
-        m.borrow_mut().remove(&stream_id);
-    });
-}
+// The registry of live download streams lives in [`crate::live_streams`].
+// It is per-THREAD (a worker thread multiplexes up to 200 app isolates), so
+// it is keyed by the owning `app_id` and every accessor takes that app_id as
+// its first parameter — see that module's docs for why an unkeyed registry
+// was a cross-tenant read/cancel channel, and for the SEC-1 precedent in
+// `crates/plugin-db/src/context.rs:127-140`.
 
 /// A [`ChunkSource`] over a runtime [`StreamReader`] — the consumer side of
 /// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,
@@ -623,20 +603,22 @@ pub fn get_stream(
                 OpResult::Completed { op_id, value: "null".into(), request_id }
             }
             Ok(Some((meta, source))) => {
-                // Success arm only: one op + the object's full byte count as
-                // egress. `meta.size` is the authoritative object size known
-                // at open; the per-chunk reads (readChunk) are the transport
-                // of those same bytes, so billing once here avoids
-                // double-counting.
+                // Park the source under THIS app's id. A refusal here means
+                // the app is over its live-stream cap; the source is dropped
+                // (releasing its fd / HTTP body) and the op fails.
+                let stream_id = match crate::live_streams::open(&app_id, source) {
+                    Ok(id) => id,
+                    Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+                };
+                // Success arm only, and only once the handle is actually
+                // live: one op + the object's full byte count as egress.
+                // `meta.size` is the authoritative object size known at open;
+                // the per-chunk reads (readChunk) are the transport of those
+                // same bytes, so billing once here avoids double-counting.
                 if let Some(m) = &meter {
                     m.record(STORAGE_OPS, 1);
                     m.record(STORAGE_EGRESS_BYTES, meta.size);
                 }
-                let stream_id = alloc_get_stream_id();
-                GET_STREAMS.with(|m| {
-                    m.borrow_mut()
-                        .insert(stream_id, Rc::new(RefCell::new(Some(source))));
-                });
                 OpResult::Completed {
                     op_id,
                     value: get_stream_handle_json(stream_id, &meta),
@@ -671,12 +653,17 @@ pub fn read_chunk(
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
 
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
+    // The server-injected APP_ID, not anything the app can choose. A stream
+    // owned by a co-resident app is simply not found.
+    let app_id = get_app_id(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let slot = GET_STREAMS.with(|m| m.borrow().get(&stream_id).cloned());
+    let slot = crate::live_streams::slot(&app_id, stream_id);
     let Some(slot) = slot else {
-        // Unknown / already-finished stream → resolve EOF (undefined) so the
-        // SDK's pull loop closes cleanly rather than rejecting.
+        // Unknown / already-finished / not-ours stream → resolve EOF
+        // (undefined) so the SDK's pull loop closes cleanly rather than
+        // rejecting. A stream belonging to another app is deliberately
+        // indistinguishable from one that never existed.
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
         }));
@@ -709,7 +696,7 @@ pub fn read_chunk(
                 }
             }
             Some(Err(e)) => {
-                drop_get_stream(stream_id);
+                crate::live_streams::close(&app_id, stream_id);
                 OpResult::JsValue {
                     resolver,
                     value: ResolveValue::RejectError(OpError::error(e)),
@@ -717,7 +704,7 @@ pub fn read_chunk(
                 }
             }
             None => {
-                drop_get_stream(stream_id);
+                crate::live_streams::close(&app_id, stream_id);
                 OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
             }
         }
@@ -737,8 +724,11 @@ pub fn cancel_stream(
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
+    // Scoped to the caller's own app: cancelling a co-resident app's stream
+    // is a no-op, not a reclaim.
+    let app_id = get_app_id(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    drop_get_stream(stream_id);
+    crate::live_streams::close(&app_id, stream_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
     }));

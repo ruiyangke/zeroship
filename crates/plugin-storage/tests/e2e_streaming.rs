@@ -13,7 +13,9 @@
 //!       → StreamWriter → StreamReader → Backend::put_stream
 //!
 //!     JS `env.storage.getStream(bucket, key)` + `readChunk(id)` loop
-//!       → Backend::get_stream → per-isolate registry → ResolveValue::Bytes
+//!       → Backend::get_stream → per-thread, app-keyed registry
+//!         (cross-tenant isolation is covered by cross_tenant_streams.rs)
+//!       → ResolveValue::Bytes
 //!       → JS reassembles the object
 //!
 //! The handler self-asserts a multi-chunk upload → download round-trip
