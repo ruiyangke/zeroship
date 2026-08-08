@@ -150,9 +150,39 @@ trap 'rm -f "$SUITE_LOG"' EXIT
 # PIPESTATUS is load-bearing. Piping into tee makes `$?` tee's status, which is
 # 0 whenever tee could write - so every group would look green regardless of
 # what cargo did.
+#
+# Also fails a group that ran NOTHING. The total-passed floor at the bottom of
+# this script cannot see a small group vanish: the metering group is ~12 tests
+# inside a ~713 total, so renaming its tests drops the total by under 2 percent
+# and the floor still passes. The per-group check catches it immediately,
+# because a filter matching nothing produces `running 0 tests` and exit 0.
+#
+# Summed ACROSS the group, not per target. One cargo invocation prints one
+# `running N tests` line per target, and a target with genuinely no tests
+# (doctests, an empty integration file) legitimately prints 0 - so a per-line
+# check would fail honest groups. The group total is the quantity that is only
+# zero when nothing ran.
 run_group() {
-  "$@" 2>&1 | tee -a "$SUITE_LOG"
-  return "${PIPESTATUS[0]}"
+  # Captured to its OWN file first. Counting `running N tests` out of the
+  # shared SUITE_LOG would sum every earlier group too, so the second group
+  # onwards would inherit a non-zero count and the check would pass for a
+  # group that ran nothing - the exact failure it exists to catch.
+  local group_log status ran
+  group_log="$(mktemp)"
+  "$@" 2>&1 | tee "$group_log"
+  status="${PIPESTATUS[0]}"
+  cat "$group_log" >> "$SUITE_LOG"
+
+  ran=$(grep -oP '^running \K[0-9]+' "$group_log" | awk '{s+=$1} END {print s+0}')
+  rm -f "$group_log"
+
+  if [ "$status" -eq 0 ] && [ "$ran" -eq 0 ]; then
+    echo "FAIL: group ran 0 tests and still exited 0 - a filter matched nothing." >&2
+    echo "      cargo exits 0 when a test-name filter selects no tests, so this" >&2
+    echo "      group covered nothing while reporting success." >&2
+    return 1
+  fi
+  return "$status"
 }
 
 fail=0
