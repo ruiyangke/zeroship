@@ -823,6 +823,18 @@ fn armed_fault_does_not_cross_thread_boundary() {
     // committed batch, and never runs a backfill itself.
     fault::arm(fault::points::BACKFILL_MID_BATCHES, 1);
 
+    // Assert the arming REACHED the registry before asserting a fault does not
+    // cross to thread B. Without this the test says only "nothing fired", which is
+    // equally true when `arm` does nothing at all - the assertions below about the
+    // completed apply are about the backfill, not about the fault. This line is what
+    // makes the test fail on a gutted `arm` rather than leaning on the positive
+    // control in the next test to supply its meaning.
+    assert_eq!(
+        fault::armed_thread_count(),
+        1,
+        "thread A holds an armed fault before thread B applies"
+    );
+
     // Thread B runs the whole apply. It trips the armed point 5 times (500 rows /
     // 100 per batch) and must never see thread A's fault.
     let out = std::thread::spawn(|| backfill_on_this_thread("bf_xthread_neg", false))
