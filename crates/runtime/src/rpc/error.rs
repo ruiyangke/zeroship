@@ -96,7 +96,7 @@ pub enum ZsErrorCode {
 
 impl ZsErrorCode {
     /// Variant → canonical UPPER_SNAKE wire string. Round-trips with
-    /// [`from_wire_str`].
+    /// [`Self::from_wire_str`].
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Unknown => "UNKNOWN",
@@ -187,7 +187,7 @@ pub struct RpcErrorInit<'s> {
 /// original JS value, preserving the source object's key insertion
 /// order across the getter round-trip (a `serde_json::Value` round-
 /// trip with the default backing would re-sort string keys via
-/// `BTreeMap`). [`details_as_value`] hydrates the stored text into a
+/// `BTreeMap`). [`RpcError::details_as_value`] hydrates the stored text into a
 /// `serde_json::Value` on demand for Rust callers that prefer the
 /// typed shape; the wire format is the JSON text either way.
 ///

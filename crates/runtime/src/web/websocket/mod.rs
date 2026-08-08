@@ -802,7 +802,7 @@ impl WebSocketImpl {
     }
 
     /// `socket.accept()` — workerd extension. Required by
-    /// `WebSocketPair `[1]`` to begin local message delivery; throws
+    /// `WebSocketPair[1]` to begin local message delivery; throws
     /// TypeError on a client-side socket. Transitions readyState
     /// CONNECTING → OPEN and queues an `open` event for dispatch on
     /// the next pump tick — matching the spec's "fire `open` event

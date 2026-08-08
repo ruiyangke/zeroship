@@ -326,7 +326,7 @@ impl URL {
         let _ = self.inner.set_password(Some(&s));
     }
 
-    /// `host` getter per §4.5 — returns hostname[:port].
+    /// `host` getter per §4.5 — returns `hostname[:port]`.
     #[v8_getter]
     fn host(&self) -> String {
         self.inner.host().to_string()
