@@ -34,6 +34,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor,
@@ -386,31 +389,23 @@ async fn fts_field_applies_cleanly_on_sqlite() {
         "the three FTS sync triggers must exist: {triggers:?}"
     );
 
-    // WHAT THIS TEST DOES NOT COVER, and why the gap is a defect rather than a
-    // layering choice. It diffs against an EMPTY base table, so the engine's own
-    // initial-population `INSERT ... SELECT` selects zero rows, FTS5's `xUpdate` is
-    // never entered, and the three triggers above are created and never fired. The
-    // structure is asserted; nothing here proves a row can be indexed or found.
+    // WHAT THIS TEST DOES NOT COVER, and where the coverage now lives. It diffs
+    // against an EMPTY base table, so the engine's own initial-population
+    // `INSERT ... SELECT` selects zero rows, FTS5's `xUpdate` is never entered, and
+    // the three triggers above are created and never fired. The structure is
+    // asserted; nothing here proves a row can be indexed or found, and that blind
+    // spot is what let the FTS index ship unable to index anything.
     //
-    // That is not academic: on a NON-empty table the population is refused. FTS5
-    // issues `PRAGMA data_version` internally on first access to the index, and the
-    // authorizer's pragma arm denies it, so the statement dies with
-    // `Exec("authorization denied")`. The same denial stops any later creator write
-    // to an FTS-indexed table, through the trigger. Filed, with the reproduction.
-    //
-    // An earlier version of this note said the authorizer deliberately withholds the
-    // "fts5 runtime tokenizer functions". No tokenizer function appears in the deny
-    // path - the measured blockers are `PRAGMA data_version` and the `MATCH`
-    // operator - and the population statement is not a data-plane concern at all,
-    // since the engine authors and ships it in its own `up`. The note was describing
-    // the bug as a design.
-    //
-    // The end-to-end shape that would catch it: seed a row BEFORE applying the
-    // index, then assert a `MATCH` returns a COUNT of 1. Assert the count, never
-    // `is_ok()` - a zero-row `MATCH` against an unpopulated index is the exact
-    // silent failure in play. Whether that `MATCH` runs on the engine connection or
-    // on a reopened raw one is the open question, since the engine never issues
-    // `MATCH` in production.
+    // The two behaviour tests below close it, and they are kept separate because
+    // population and trigger-sync run under DIFFERENT authorizer modes:
+    // `fts_index_over_a_populated_table_indexes_the_rows_already_there` (the engine's
+    // population batch, EngineJournal) and
+    // `a_creator_insert_reaches_the_fts_index_through_the_sync_trigger` (a creator
+    // write, CreatorUp). Both assert a MATCH COUNT on a REOPENED RAW connection,
+    // never `is_ok()` - a zero-row MATCH against an unpopulated index is the silent
+    // failure in play, and the engine never issues an FTS5 MATCH in production, so
+    // the query belongs on a raw connection rather than in the authorizer's
+    // allowlist.
 
     // A re-diff against the REAL introspected live snapshot → ZERO drift (the FTS5
     // vtable is recognised as the fts5 IndexSnapshot; its shadow tables are excluded;
@@ -432,5 +427,233 @@ async fn fts_field_applies_cleanly_on_sqlite() {
             .map(|m| m.name.clone())
             .collect::<Vec<_>>(),
         plan2.rebuilds.len()
+    );
+}
+
+// ===========================================================================
+// FTS BEHAVIOUR - a row reaches the index, on both routes into FTS5's xUpdate.
+//
+// The structural test above proves the vtable and its triggers EXIST. These two
+// prove the index actually holds rows, which is the property that was broken:
+// FTS5 fires `PRAGMA data_version` internally on first access to an index object
+// on a connection, and the authorizer's pragma arm refused it, so every write that
+// reached the index died with `Exec("authorization denied")`.
+//
+// The two routes run under DIFFERENT authorizer modes and are therefore separate
+// tests - collapsing them would let one mode's fix hide the other's breakage:
+//   - the engine's initial-population `INSERT ... SELECT`, under EngineJournal;
+//   - a creator `INSERT` mirrored by the `__fts_ai` trigger, under CreatorUp.
+//
+// Both read the index back on a REOPENED RAW `rusqlite::Connection` and assert a
+// COUNT. The engine never issues an FTS5 MATCH in production, so `MATCH` is
+// deliberately absent from the authorizer's surface; the raw reopen is the same
+// positive-control pattern `sqlite_confinement.rs` uses.
+// ===========================================================================
+
+/// The `posts` collection, with `body` either plain or `.fts()`-indexed. Diffing
+/// the plain form first and the FTS form second against the REAL live snapshot is
+/// how an FTS index arrives on a table that already holds rows - and it drives the
+/// engine's own emitter both times rather than hand-assembling a lookalike batch.
+fn posts_descriptor(fts: bool) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "body".into(),
+            ty: "string".into(),
+            fts,
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    }
+}
+
+/// An ordinary creator `up` (no engine-goodie flag), so the statement runs under
+/// the confined `CreatorUp` mode exactly as tenant-authored SQL does.
+fn creator_up(up: &str) -> Migration {
+    let flags = MigrationFlags::default();
+    let checksum = Checksum::of(&ChecksumInput {
+        up,
+        down: None,
+        flags: &flags,
+        owner_app: APP,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+    Migration {
+        version: MigrationId::generate(),
+        name: "creator_write".to_string(),
+        up: up.to_string(),
+        down: None,
+        checksum,
+        flags,
+        owner_app: APP.to_string(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        existence_guard: None,
+    }
+}
+
+/// Apply the base `posts` table (no FTS index yet) and return the ownership map the
+/// follow-up diff needs.
+async fn apply_base_posts_table(be: &SqliteBackend) -> HashMap<String, String> {
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        &[posts_descriptor(false)],
+        SqlDialect::Sqlite,
+        &effective_policy(),
+    )
+    .expect("desired without the fts index");
+    let plan = sqlite_author()
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
+        .expect("diff");
+    for m in &plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
+    }
+    ownership_of(&desired)
+}
+
+/// Diff the FTS-bearing descriptor against the REAL live snapshot and apply the one
+/// migration that comes out. Returns nothing but asserts, on the way, that what was
+/// applied really is the emitter's FTS batch (create + population + triggers) and
+/// not some other migration that happened to be planned.
+async fn apply_the_emitters_fts_batch(be: &SqliteBackend, ownership: &HashMap<String, String>) {
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect the live schema");
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        &[posts_descriptor(true)],
+        SqlDialect::Sqlite,
+        &effective_policy(),
+    )
+    .expect("desired with the fts index");
+    let plan = sqlite_author()
+        .diff(&desired, &live, ownership, &[], &effective_policy())
+        .expect("diff must succeed");
+    let migrations = plan.all_migrations();
+    assert_eq!(
+        migrations.len(),
+        1,
+        "adding `.fts()` to an existing collection must plan exactly the FTS batch: {:?}",
+        migrations
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+    );
+    let batch = &migrations[0];
+    assert!(
+        batch.flags.engine_goodie_ddl,
+        "the FTS batch is engine-authored DDL and must carry the engine-goodie flag, \
+         or it would run under CreatorUp and be denied its vtable create"
+    );
+    assert!(
+        batch.up.contains("USING fts5")
+            && batch.up.contains("INSERT INTO \"posts__fts\" (rowid,")
+            && batch
+                .up
+                .contains("CREATE TRIGGER IF NOT EXISTS \"posts__fts_ai\""),
+        "the batch under test must be the emitter's create + population + triggers, \
+         not a lookalike: {}",
+        batch.up
+    );
+    be.apply_one_additive(batch, "deployer")
+        .await
+        .expect("the engine's FTS batch must apply to a table that already holds rows");
+}
+
+/// Read the index back the way a data plane would: a REOPENED RAW connection on the
+/// app file, running the FTS5 MATCH the engine deliberately never issues.
+fn raw_match_count(app: &std::path::Path, term: &str) -> i64 {
+    let conn = rusqlite::Connection::open(app).expect("reopen the app file raw");
+    conn.query_row(
+        "SELECT count(*) FROM \"posts__fts\" WHERE \"posts__fts\" MATCH ?1",
+        [term],
+        |row| row.get(0),
+    )
+    .expect("the FTS5 index answers a MATCH")
+}
+
+/// The population route: rows that were ALREADY in the base table when the index
+/// was added are searchable. A non-empty base table is what makes the engine's
+/// initial-population `INSERT ... SELECT` do work and enter FTS5's `xUpdate`; the
+/// structural test above is green precisely because it skips this.
+#[compio::test]
+async fn fts_index_over_a_populated_table_indexes_the_rows_already_there() {
+    let p = paths("fts_populated");
+    let be = backend(&p);
+    let ownership = apply_base_posts_table(&be).await;
+
+    // The row goes in through the REAL backend, as an ordinary creator `up`, BEFORE
+    // the index exists - so it can only reach the index via the population batch.
+    be.apply_one_additive(
+        &creator_up(
+            "INSERT INTO posts (id, created_at, updated_at, version, body) \
+             VALUES ('p1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 'hello world');",
+        ),
+        "creator",
+    )
+    .await
+    .expect("an ordinary creator INSERT into the base table must apply");
+
+    apply_the_emitters_fts_batch(&be, &ownership).await;
+
+    assert_eq!(
+        raw_match_count(&p.app, "hello"),
+        1,
+        "the row that predated the index must be searchable: the population batch \
+         either ran or was refused, and a zero count is the silent failure"
+    );
+}
+
+/// The trigger route: a creator write AFTER the index exists reaches it through the
+/// `__fts_ai` sync trigger, which runs under `CreatorUp` rather than the engine's
+/// mode.
+///
+/// The index is built over an EMPTY base table here on purpose. The population
+/// statement then selects no rows and never enters `xUpdate`, so nothing in the
+/// setup can satisfy this test on the population route - the only write that
+/// reaches FTS5 is the creator INSERT below, under CreatorUp.
+///
+/// The INSERT runs on a FRESH backend. FTS5's internal pragma is a prepared
+/// statement cached per connection, so a connection that already touched the index
+/// would not issue it again and a mode-specific refusal would go unseen.
+#[compio::test]
+async fn a_creator_insert_reaches_the_fts_index_through_the_sync_trigger() {
+    let p = paths("fts_trigger");
+    {
+        let be = backend(&p);
+        let ownership = apply_base_posts_table(&be).await;
+        apply_the_emitters_fts_batch(&be, &ownership).await;
+    }
+
+    let fresh = backend(&p);
+    fresh
+        .apply_one_additive(
+            &creator_up(
+                "INSERT INTO posts (id, created_at, updated_at, version, body) \
+                 VALUES ('p2', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 1, 'goodbye moon');",
+            ),
+            "creator",
+        )
+        .await
+        .expect("an ordinary creator INSERT into an FTS-indexed table must apply");
+
+    assert_eq!(
+        raw_match_count(&p.app, "goodbye"),
+        1,
+        "the creator's row must have reached the index through the sync trigger"
     );
 }

@@ -25,6 +25,15 @@
 //!   table, including one that reads the `_mig` journal's catalog
 //! Both carry a positive control on a raw connection, which ships DEFENSIVE off
 //! and TRUSTED_SCHEMA on, so each of those two lines is the whole guard.
+//!
+//! One capability is CONCEDED rather than denied, and is pinned here on both
+//! sides: `PRAGMA data_version` on the APP database, which FTS5 issues internally
+//! on every route into an index. A creator can read that counter (stated as a test,
+//! not a comment); the same pragma on the `_mig` journal stays denied, which is
+//! what proves the grant is scoped by database rather than by pragma name. The
+//! `'delete-all'` command that grant puts within a creator's reach is recorded too:
+//! it wipes an FTS index past DEFENSIVE, and it is a cheaper spelling of the DROP a
+//! creator could always issue.
 
 use std::path::PathBuf;
 
@@ -1172,4 +1181,217 @@ async fn version_floor_satisfied() {
     // A successful hardened open is itself the runtime proof the floor check passed.
     let p = paths("floor");
     let _be = backend(&p);
+}
+
+// ---------------------------------------------------------------------------
+// PRAGMA data_version: the one pragma a creator can reach, and the exact edge it
+// stops at.
+//
+// FTS5's `xUpdate` issues `PRAGMA data_version` internally on the first access to
+// an index object on a connection, so the authorizer had to concede it or no write
+// could ever reach an FTS5 index (proven end to end in `sqlite_goodies.rs`). The
+// arm allows it ONLY when the action's database is the app file, in BOTH modes,
+// and is matched ahead of the general pragma arm.
+//
+// The scoping is the load-bearing half. `data_version` counters are PER SCHEMA, so
+// a name-only allow (the shape `is_engine_allowed_pragma` would have given) hands a
+// creator `PRAGMA "_mig".data_version` - a monotone counter of the ENGINE's commits
+// to the immutable journal - and this arm sits AHEAD of the CreatorUp `_mig`
+// backstop, so that arm would be the thing conceding it rather than a gap in the
+// backstop.
+//
+// The authorizer cannot tell FTS5's internal call from a creator typing the pragma:
+// both present identically, and a creator can forge the qualified spelling. So the
+// grant is real, and the second test states it as a capability rather than leaving
+// a comment claiming it is narrower than it is.
+// ---------------------------------------------------------------------------
+
+/// A creator `up` reading the JOURNAL's change counter is denied. This is the
+/// assertion that proves the scoping is real rather than incidental: the same
+/// pragma, one database over, applies cleanly on this very connection.
+#[compio::test]
+async fn confine_creator_pragma_data_version_on_the_journal_denied() {
+    let p = paths("data_version_mig");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+
+    let attack = "PRAGMA \"_mig\".data_version;";
+    assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
+    // The diagnostic must name the JOURNAL, since the database is the whole
+    // difference between this deny and the allow below.
+    let err = be
+        .apply_one_additive(&mig(attack), "attacker")
+        .await
+        .expect_err("the journal's counter must stay out of reach");
+    let text = err.to_string();
+    assert!(
+        text.contains("[denied: PRAGMA data_version on \"_mig\"")
+            && text.contains("mode=CreatorUp"),
+        "the refusal must name the pragma AND the journal schema: {text}"
+    );
+
+    // NEIGHBOUR EXCLUSION: the same pragma on the APP file applies on this exact
+    // connection, so the deny above is the DATABASE and not the pragma name.
+    be.apply_one_additive(&mig("PRAGMA main.data_version;"), "creator")
+        .await
+        .expect("the app file's counter is conceded (FTS5 needs it) and must apply");
+
+    // Positive control: on a raw connection with a `_mig` attached, the qualified
+    // pragma succeeds - so the hardened refusal is confinement, not a parse error or
+    // an unresolvable schema name.
+    assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
+}
+
+/// WHAT THE GRANT CONCEDES, as a test rather than a comment: a creator can read the
+/// app file's `data_version`, and what it reads is a live counter of OTHER
+/// connections' commits to that file - not a constant. That is a genuine
+/// observation channel onto the tenant's own database, which the creator already
+/// writes at will. The journal's counter, refused on the same connection in the
+/// same mode, is the boundary that matters.
+#[compio::test]
+async fn a_creator_can_observe_the_app_files_data_version_counter() {
+    let p = paths("data_version_main");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    be.apply_one_additive(&mig("CREATE TABLE t (id INTEGER PRIMARY KEY);"), "deployer")
+        .await
+        .expect("seed a table another connection can commit to");
+
+    async fn counter(be: &SqliteBackend) -> i64 {
+        be.actor()
+            .query("PRAGMA main.data_version")
+            .await
+            .expect("a creator may read the app file's change counter")[0][0]
+            .as_deref()
+            .expect("a value row")
+            .parse()
+            .expect("a numeric counter")
+    }
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("creator mode");
+    let before = counter(&be).await;
+
+    // Another connection commits to the app file. `data_version` reports EXTERNAL
+    // commits, so this is what makes the value move.
+    {
+        let conn = rusqlite::Connection::open(&p.app).expect("second connection on the app file");
+        conn.execute_batch("INSERT INTO t (id) VALUES (1);")
+            .expect("the second connection commits");
+    }
+    let after = counter(&be).await;
+    assert!(
+        after > before,
+        "the conceded read is a LIVE counter of other connections' commits to the \
+         app file, not a constant: {before} -> {after}"
+    );
+
+    // The boundary: the journal's counter is refused on this same connection, in
+    // this same mode. Both modes, because the grant spans both.
+    for mode in [Mode::CreatorUp, Mode::EngineJournal] {
+        be.actor().set_mode(mode).await.expect("select the mode");
+        let err = be
+            .actor()
+            .query("PRAGMA \"_mig\".data_version")
+            .await
+            .expect_err("the journal's counter is never conceded");
+        assert!(
+            err.is_authorizer_denied(),
+            "the journal counter must be an AUTHORIZER deny in {mode:?}: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WHAT THIS SUITE NO LONGER CATCHES, measured rather than left to be discovered.
+//
+// `confine_creator_write_to_an_fts5_shadow_table_denied_by_defensive` above proves
+// DEFENSIVE refuses a creator write to the FTS5 SHADOW TABLES. It does not, and
+// never did, cover the VTABLE: FTS5 reaches its own shadow tables through the
+// virtual table, so the `'delete-all'` command wipes the index and DEFENSIVE does
+// not see it. With `data_version` conceded, that command now reaches FTS5 at all,
+// which it previously did not.
+//
+// This is NOT a new capability class, and the test proves that rather than
+// asserting it: a creator `up` can already DROP the index outright, and the sync
+// triggers and the base table with it. A creator that wants the index gone has
+// always been able to remove it. The wipe is a cheaper spelling of a capability the
+// confinement model already grants, on objects the tenant owns.
+// ---------------------------------------------------------------------------
+
+/// The FTS5 `'delete-all'` command a creator can now issue, and the DROP that was
+/// always available. Both succeed; the point of the test is that this is stated in
+/// the suite instead of being found later.
+#[compio::test]
+async fn a_creator_can_wipe_an_fts_index_through_the_vtable() {
+    let p = paths("fts_delete_all");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    be.apply_one_additive(
+        &mig("CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);"),
+        "deployer",
+    )
+    .await
+    .expect("the tenant table applies");
+    be.apply_one_additive(
+        &mig("INSERT INTO docs (body) VALUES ('hello world');"),
+        "creator",
+    )
+    .await
+    .expect("a row to index");
+    // The engine's own create + population batch, from the shared builders.
+    let batch = format!(
+        "{};\n{};",
+        fts_sqlite::build_create_fts_table_sql(None, "docs", &["body".to_string()]),
+        fts_sqlite::build_initial_population_sql(None, "docs", &["body".to_string()])
+    );
+    be.apply_one_additive(&mig_engine_goodie(&batch), "deployer")
+        .await
+        .expect("the engine-goodie FTS5 create + population applies");
+
+    // The index holds the row. Read on a REOPENED RAW connection: the engine never
+    // issues an FTS5 MATCH, so `match` is deliberately absent from the authorizer's
+    // function allowlist.
+    let matches = |term: &str| -> i64 {
+        let conn = rusqlite::Connection::open(&p.app).expect("reopen the app file raw");
+        conn.query_row(
+            "SELECT count(*) FROM \"docs__fts\" WHERE \"docs__fts\" MATCH ?1",
+            [term],
+            |row| row.get(0),
+        )
+        .expect("the index answers a MATCH")
+    };
+    assert_eq!(matches("hello"), 1, "the index must start populated");
+
+    // The wipe, as an ordinary creator `up`. It SUCCEEDS.
+    let applied = be
+        .apply_one_additive(
+            &mig("INSERT INTO \"docs__fts\"(\"docs__fts\") VALUES('delete-all');"),
+            "creator",
+        )
+        .await
+        .expect("the FTS5 delete-all command is not refused by DEFENSIVE or the authorizer");
+    assert!(applied, "the wiping migration must be newly-applied");
+    assert_eq!(
+        matches("hello"),
+        0,
+        "the delete-all command empties the index - this is the capability the \
+         confinement suite does not catch"
+    );
+
+    // The capability class was already there: the creator can drop the whole index.
+    be.apply_one_additive(&mig("DROP TABLE \"docs__fts\";"), "creator")
+        .await
+        .expect("a creator up can drop the FTS index outright - a DROP TABLE on main");
+    let gone = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE name = 'docs__fts'")
+        .await
+        .expect("read main schema");
+    assert!(
+        gone.is_empty(),
+        "the index is gone, so the wipe above conceded nothing the creator lacked: {gone:?}"
+    );
 }

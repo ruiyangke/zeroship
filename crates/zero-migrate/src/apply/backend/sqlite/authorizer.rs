@@ -18,7 +18,9 @@
 //!
 //! - **`CreatorUp`** — the creator/AI `up` runs under this mode. The journal
 //! schema `_mig` is immutable: all writes/DDL to `_mig` are denied; ATTACH /
-//! DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied; functions
+//! DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied (the ONE
+//! pragma exception is `data_version` on the app database, which FTS5 issues
+//! internally on every route into an index - see the arm in `decide`); functions
 //! are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
 //! bodies that target `_mig` are denied at CREATE-prepare time (closing the
 //! defer-into-engine-mode hole item 6).
@@ -381,6 +383,11 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
 /// introspection the drift snapshot needs (they emit rows, mutate nothing).
 /// Fail-closed: anything not listed (incl. `writable_schema`, `journal_mode`) is
 /// denied even in engine mode.
+///
+/// `data_version` is deliberately ABSENT. It is allowed by its own arm in `decide`,
+/// which additionally requires the app database - this list is matched by NAME
+/// alone, so listing it here would grant `PRAGMA "_mig".data_version` too, and
+/// `data_version` counters are per schema.
 fn is_engine_allowed_pragma(name: &str) -> bool {
     const ENGINE_PRAGMAS: &[&str] = &[
         "foreign_keys",
@@ -388,7 +395,7 @@ fn is_engine_allowed_pragma(name: &str) -> bool {
         // works INSIDE a transaction (unlike `foreign_keys`, a no-op in a txn) and
         // reports orphaned rows; a non-empty result aborts the rebuild. It is
         // read-only (emits violation rows, mutates nothing). Engine-only — a creator
-        // never reaches it (PRAGMA is denied outright in CreatorUp).
+        // never reaches it (this list is only consulted in EngineJournal).
         "foreign_key_check",
         "table_info",
         "index_list",
@@ -493,6 +500,38 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // no new alias can be bound and none can be dropped — ever.
         AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
 
+        // PRAGMA `data_version` ON THE APP DATABASE: allowed in BOTH modes.
+        //
+        // FTS5's `xUpdate` issues this pragma internally on the FIRST access to an
+        // index object on a connection, so without it NOTHING can be written to an
+        // FTS5 index: the engine's own initial-population `INSERT ... SELECT` is
+        // refused under EngineJournal, and a creator write mirrored by the `__fts_ai`
+        // sync trigger is refused under CreatorUp. Both modes are required, not just
+        // the engine's -- the statement is cached per connection, so an
+        // EngineJournal-only allow would pass on the connection that populated the
+        // index and fail on the next fresh one.
+        //
+        // Scoped to the app database and matched AHEAD of the pragma arm below,
+        // rather than added to `is_engine_allowed_pragma`, which is name-only by
+        // construction. `data_version` counters are PER SCHEMA: a name-only allow
+        // would hand a creator `PRAGMA "_mig".data_version`, a monotone counter of
+        // other connections' commits to the immutable JOURNAL, and this arm runs
+        // ahead of the CreatorUp `_mig` backstop, so it would be the thing conceding
+        // it. On `_mig` (or any other alias) the pragma falls through to the arm
+        // below and is denied in both modes.
+        //
+        // WHAT THIS CONCEDES, stated rather than implied: the authorizer cannot
+        // distinguish FTS5's internal call from a creator typing the pragma -- both
+        // present identically, and a creator can forge the qualified spelling. So a
+        // creator CAN read the change counter of its OWN app file. That is the app
+        // file it already writes at will; the journal's counter is what stays out of
+        // reach. Pinned end to end in `tests/sqlite_confinement.rs`.
+        AuthAction::Pragma { pragma_name, .. }
+            if targets_main && pragma_name.eq_ignore_ascii_case("data_version") =>
+        {
+            Authorization::Allow
+        }
+
         // PRAGMA: denied in CreatorUp (closes the `writable_schema=ON` forge,
         // item 3). In EngineJournal, a SMALL allowlist is permitted:
         // - `foreign_keys` — the engine's toggle around the 12-step rebuild;
@@ -501,7 +540,8 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // These return rows and mutate nothing; they are the SQLite analog of
         // the PG drift path's `information_schema`/`pg_catalog` reads. They run
         // ONLY under engine mode (engine-private introspection); a creator can
-        // never reach them (PRAGMA stays denied outright in CreatorUp).
+        // never reach them (every pragma but the `data_version` arm above stays
+        // denied in CreatorUp).
         // Everything else (writable_schema, journal_mode, …) stays denied in BOTH
         // modes (fail-closed).
         AuthAction::Pragma { pragma_name, .. } => match current {
@@ -922,22 +962,23 @@ mod tests {
         let log = DenialLog::new();
         let mut installed = make_authorizer(m.clone(), log.clone());
 
-        // The FTS5 case that motivated the diagnostic: FTS5 issues this pragma
-        // internally, the authorizer denies it, and the message must say so.
+        // `data_version` is allowed on the APP database (FTS5 needs it) and denied on
+        // the journal, and the message must name the database that made the
+        // difference - the whole point of the scoping.
         assert_eq!(
             installed(ctx(
                 AuthAction::Pragma {
                     pragma_name: "data_version",
                     pragma_value: None
                 },
-                Some(MAIN_DB),
+                Some(MIG_ALIAS),
                 None
             )),
             Authorization::Deny
         );
         assert_eq!(
             log.last().expect("the deny was recorded").to_string(),
-            "PRAGMA data_version on \"main\", mode=CreatorUp"
+            "PRAGMA data_version on \"_mig\", mode=CreatorUp"
         );
 
         // A creator trigger body writing the journal names the trigger too.
@@ -1207,6 +1248,87 @@ mod tests {
             Authorization::Deny,
             "writable_schema stays denied in engine mode"
         );
+    }
+
+    // `data_version` is allowed on the APP database in BOTH modes (FTS5 issues it
+    // internally on every route into an index) and DENIED on the journal schema in
+    // both. The scoping is the whole grant: `data_version` counters are per schema,
+    // so a name-only allow would hand a creator a counter of the engine's own
+    // commits to the immutable journal. Proven end to end in
+    // `tests/sqlite_confinement.rs`; this pins the matrix directly.
+    #[test]
+    fn data_version_allowed_on_the_app_db_denied_on_the_journal() {
+        let m = AuthMode::new();
+        for mode in [Mode::CreatorUp, Mode::EngineJournal] {
+            m.store(mode);
+            // SQLite names the app file `Some("main")` on most actions and `None` on
+            // the main/temp namespace for a few; both denote the app database.
+            for db in [Some(MAIN_DB), None] {
+                assert_eq!(
+                    authorize(
+                        &m,
+                        &ctx(
+                            AuthAction::Pragma {
+                                pragma_name: "data_version",
+                                pragma_value: None
+                            },
+                            db,
+                            None
+                        )
+                    ),
+                    Authorization::Allow,
+                    "data_version on the app db (db={db:?}) must be allowed in {mode:?} \
+                     (FTS5 issues it internally on first access to an index)"
+                );
+            }
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Pragma {
+                            pragma_name: "data_version",
+                            pragma_value: None
+                        },
+                        Some(MIG_ALIAS),
+                        None
+                    )
+                ),
+                Authorization::Deny,
+                "data_version on the JOURNAL schema must stay denied in {mode:?} \
+                 (the counter is per schema, so the grant must not be name-only)"
+            );
+            // Case-insensitive, and the name is matched exactly: a different pragma
+            // on the app db is unaffected by this arm.
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Pragma {
+                            pragma_name: "DATA_VERSION",
+                            pragma_value: None
+                        },
+                        Some(MAIN_DB),
+                        None
+                    )
+                ),
+                Authorization::Allow
+            );
+            assert_eq!(
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Pragma {
+                            pragma_name: "data_version_x",
+                            pragma_value: None
+                        },
+                        Some(MAIN_DB),
+                        None
+                    )
+                ),
+                Authorization::Deny,
+                "the arm matches the pragma name exactly, not by prefix"
+            );
+        }
     }
 
     #[test]
