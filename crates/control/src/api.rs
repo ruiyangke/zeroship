@@ -772,8 +772,20 @@ pub async fn set_plan(
     // flip, under the per-creator advisory lock. The target plan must be a real,
     // non-archived plan; validate it via the catalog (segment pricing reads the
     // live catalog at reconcile time — the row freezes NO base fee).
+    //
+    // BOTH arms matter, and the archived one is easy to leave out because
+    // `PlanCatalog::get` selects `archived` without filtering on it. The
+    // proration UPDATE downstream is guarded on
+    // `EXISTS (... AND NOT archived)`, so an archived plan that reaches it
+    // matches zero rows and returns `AppNotFound` — a 404 "app not found" for
+    // an app that plainly exists, which sends the caller looking for a deleted
+    // app. Refuse it here, where the reason is still known.
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     match catalog.get(&body.plan_id).await {
+        Ok(Some(plan)) if plan.archived => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "plan archived"}))
+        }
         Ok(Some(_)) => {}
         Ok(None) => {
             return web::HttpResponse::BadRequest()
