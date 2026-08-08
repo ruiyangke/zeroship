@@ -75,12 +75,29 @@ fn cpu_limit_terminates_a_runaway_handler() {
             }
         };
     "#);
+    let heap_before = zeroship_runtime::heap_limit_callback_hits();
     let rt = Runtime::builder()
         .modules(modules)
         .cpu_limit(Duration::from_millis(200))
         .build();
 
     let (status, body) = dispatch_against(&rt);
+    // WITNESS that the CPU limit is what refused this, not the heap cap. Both
+    // routes now end in the same non-2xx through the same function, so status
+    // alone cannot tell them apart, and a heap kill here would mean the test
+    // is measuring the wrong limit. The loop allocates nothing, so any
+    // heap-callback activity at all is a signal that it does.
+    //
+    // Exact zero is safe ONLY because the counter is process-wide and this
+    // binary holds two tests, neither of which allocates. A future test here
+    // that does allocate would make this racy against the baseline; move to a
+    // per-runtime counter before adding one.
+    assert_eq!(
+        zeroship_runtime::heap_limit_callback_hits() - heap_before,
+        0,
+        "the heap callback fired during a pure-CPU handler, so status {status} \
+         may be a memory kill rather than the CPU limit this test names",
+    );
     assert!(
         !(200..300).contains(&status),
         "a runaway handler under cpu_limit(200ms) returned {status}; body: {body}",
