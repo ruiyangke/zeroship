@@ -28,7 +28,7 @@ edition = "2024"
 publish = false
 
 [features]
-# Phase F Stage 4a — the platform-schema migrate binary (`zeroship-platform-migrate`).
+# The platform-schema migrate binary (`zeroship-platform-migrate`).
 # Lights up the `platform` module + its V8 authoring front-end (zeroship-runtime).
 # OFF by default so the base library surface (Stage 1's adapter) stays V8-free.
 platform-cli = ["dep:zeroship-runtime", "dep:v8", "dep:serde_json", "dep:serde", "dep:zero-migrate-ir", "dep:zero-migrate-policy"]

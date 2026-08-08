@@ -141,9 +141,8 @@ hmac = { workspace = true }
 name = "bench_query_build"
 harness = false
 
-# Row-decoding microbench — landed as the [I35] forcing function
-# (performance r12). Synthesises `compio_postgres::Row` values via the
-# `test-utils` feature on `compio-postgres` (dev-dep above) and runs
+# Row-decoding microbench. Synthesises `compio_postgres::Row` values via
+# the `test-utils` feature on `compio-postgres` (dev-dep above) and runs
 # `row_to_json_for_bench` against narrow / medium / wide column shapes.
 [[bench]]
 name = "bench_row_to_json"

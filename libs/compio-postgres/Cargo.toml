@@ -31,8 +31,8 @@ tls = ["dep:compio-tls"]
 # synthesise `Row` / `Statement` / `Column` values without a live
 # Postgres. The feature is dev-only (consumers add it under
 # `[dev-dependencies]`); production builds never see the constructors.
-# Added for plugin-db `bench_row_to_json` ([I35] forcing function —
-# performance r12). See `libs/compio-postgres/src/test_utils.rs`.
+# Added for plugin-db's `bench_row_to_json`. See
+# `libs/compio-postgres/src/test_utils.rs`.
 test-utils = []
 
 [dependencies]
