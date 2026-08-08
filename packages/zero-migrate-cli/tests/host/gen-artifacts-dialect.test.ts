@@ -26,7 +26,7 @@ import { dialect, table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { apply, currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
-import { pgUrl } from "./live-db.js";
+import { connectLivePg, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -173,10 +173,12 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
   }
 });
 
-test("genArtifacts folds the Postgres target's own dialectal leg (matches the live Postgres catalog)", async () => {
-  const { Client } = await import("pg");
-  const admin = new Client({ connectionString: PG_URL });
-  await admin.connect();
+test("genArtifacts folds the Postgres target's own dialectal leg (matches the live Postgres catalog)", async (ctx) => {
+  // `connectLivePg` owns the connect, so it can tell "this machine has no database"
+  // (skip) from "a database was configured and did not work" (throw); the client it
+  // hands back is closed here, and on a skip there is no client to close.
+  const admin = await connectLivePg(ctx);
+  if (!admin) return;
   const schema = uniqueName("gad_pg");
 
   try {
