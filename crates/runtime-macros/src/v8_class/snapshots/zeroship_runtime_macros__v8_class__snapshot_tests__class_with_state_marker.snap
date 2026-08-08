@@ -19,7 +19,7 @@ impl State {
 /// per isolate — required for `#[v8_inherit]` to chain
 /// derived classes onto the SAME template the global was
 /// bound to (otherwise `instanceof` walks a different
-/// [[FunctionPrototype]] and returns false).
+/// `[[FunctionPrototype]]` and returns false).
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
 pub struct __InstallSlot_Marker(::v8::Global<::v8::FunctionTemplate>);
