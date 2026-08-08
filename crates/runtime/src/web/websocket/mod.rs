@@ -216,7 +216,7 @@ pub struct WebSocketImpl {
     pub peer_id: Cell<Option<u32>>,
 
     /// `accepted` flag (workerd extension) — true after `accept()`.
-    /// Required for WebSocketPair[1] before message delivery starts.
+    /// Required for WebSocketPair `[1]` before message delivery starts.
     /// Pre-set to true for client-side `new WebSocket(url)` because
     /// the user never calls accept() on a client socket (and
     /// `accept()` throws TypeError on a client socket).
@@ -802,7 +802,7 @@ impl WebSocketImpl {
     }
 
     /// `socket.accept()` — workerd extension. Required by
-    /// `WebSocketPair[1]` to begin local message delivery; throws
+    /// `WebSocketPair `[1]`` to begin local message delivery; throws
     /// TypeError on a client-side socket. Transitions readyState
     /// CONNECTING → OPEN and queues an `open` event for dispatch on
     /// the next pump tick — matching the spec's "fire `open` event

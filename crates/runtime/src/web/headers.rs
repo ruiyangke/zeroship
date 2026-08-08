@@ -33,7 +33,7 @@
 //!   list. After `delete`, casing resets — there's nothing in the
 //!   list anymore. Iteration always emits lowercase.
 //!
-//! ## Forward-compat (Request/Response, [SameObject])
+//! ## Forward-compat (Request/Response, `[SameObject]`)
 //!
 //! Native Request/Response are coming. Spec marks `Request.headers` /
 //! `Response.headers` as `[SameObject]`. v1 storage is owned by Headers

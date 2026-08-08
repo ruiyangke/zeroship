@@ -13,7 +13,7 @@
 //! ```text
 //! pub struct URL {
 //!     inner: ada_url::Url,
-//!     // [SameObject] cache: lazily allocated on first .searchParams
+//!     // `[SameObject]` cache: lazily allocated on first .searchParams
 //!     // access; same Global on all subsequent reads. Cleared on
 //!     // .href setter (which fully reparses).
 //!     search_params: Option<v8::Global<v8::Object>>,
@@ -248,7 +248,7 @@ impl URL {
     ///   2. If parsedURL is failure, throw a TypeError.
     ///   3. Set this's URL to parsedURL.
     ///   4. Empty this's query object's list. (We invalidate the
-    ///      [SameObject] cache; the next `.searchParams` access reuses
+    ///      `[SameObject]` cache; the next `.searchParams` access reuses
     ///      the same JS object but its entries re-sync from the parsed
     ///      URL.)
     #[v8_setter]
@@ -462,7 +462,7 @@ pub fn install_global<'s>(
 ) -> v8::Local<'s, v8::Function> {
     let tmpl = URL::install(scope);
 
-    // searchParams is a getter that returns a [SameObject]
+    // searchParams is a getter that returns a `[SameObject]`
     // URLSearchParams bound to this URL. Wire as an accessor on the
     // FunctionTemplate's prototype_template so the descriptor lives
     // on every instance's prototype chain naturally.
@@ -609,14 +609,14 @@ fn search_params_getter_callback(
     let sp_inst: &mut URLSearchParams = unsafe { &mut *old_raw };
     // C1: SP holds a Weak<Object> to its parent URL — not a strong
     // Global. The URL keeps a strong Global to the SP wrapper (forward
-    // direction, below) for [SameObject], but the back reference is
+    // direction, below) for `[SameObject]`, but the back reference is
     // weak so the cycle is breakable. When the URL is GC'd the Weak
     // fails to upgrade and the SP transparently falls back to
     // standalone semantics.
     let parent_weak = v8::Weak::new(scope, this_obj);
     *sp_inst = URLSearchParams::bound_to(parent_weak);
 
-    // Cache the SP wrapper Global on the URL so [SameObject] holds.
+    // Cache the SP wrapper Global on the URL so `[SameObject]` holds.
     let cached = v8::Global::new(scope, sp_obj);
     url.search_params = Some(cached);
 

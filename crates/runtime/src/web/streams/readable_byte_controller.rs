@@ -678,7 +678,7 @@ pub fn readable_byte_stream_controller_enqueue_chunk_to_queue(
 }
 
 /// `ReadableByteStreamControllerEnqueueClonedChunkToQueue(controller,
-/// buffer, byteOffset, byteLength)` — used by byte-tee branch[1] cloning.
+/// buffer, byteOffset, byteLength)` — used by byte-tee branch `[1]` cloning.
 /// Per spec we copy the bytes into a freshly-allocated ArrayBuffer.
 pub fn readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
     scope: &mut v8::PinScope,

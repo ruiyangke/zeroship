@@ -176,7 +176,7 @@ pub fn mint_pair(scope: &mut v8::PinScope, state: &SharedState) -> (u32, u32) {
 use super::WebSocketImpl;
 
 /// JS-callable constructor: `new WebSocketPair()` returns an object
-/// with index keys [0] and [1] holding two paired native WebSocket
+/// with index keys `[0]` and `[1]` holding two paired native WebSocket
 /// instances. Each side starts in CONNECTING; `accept()` transitions
 /// to OPEN and unblocks message delivery (workerd contract).
 pub fn websocket_pair_callback(
