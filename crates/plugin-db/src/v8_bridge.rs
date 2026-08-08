@@ -114,6 +114,19 @@ pub(crate) fn refuse_if_query_capability<'s>(
 /// duplicate rather than re-export because plugin-db must not pull in
 /// the entire `rpc` subtree (cyclic dep risk).
 ///
+/// The mirror is NOT faithful on non-finite numbers, and the divergence is
+/// undecided rather than intended. `superjson`'s `encode_number` tags NaN and
+/// +/-Infinity and sends them as sentinel strings, so RPC round-trips them
+/// losslessly - that is a documented contract in its module table and is covered
+/// by `runtime/tests/rpc_superjson.rs::special_floats_round_trip`. This walker
+/// drops them to `Value::Null` instead (see `non_finite_numbers_decode_to_null`).
+///
+/// So the same runtime answers the same question two ways at two boundaries:
+/// RPC preserves, `env.db` discards. Whether `env.db` should reject or preserve
+/// is an open call, not a settled one - the point of recording it here is that a
+/// reader hitting the null should know the platform already chose differently
+/// next door, rather than assuming discarding is the house style.
+///
 /// Mapping:
 /// - `undefined` / `null` → `Value::Null`
 /// - boolean → `Value::Bool`
