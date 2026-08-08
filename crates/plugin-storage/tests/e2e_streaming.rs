@@ -536,6 +536,16 @@ fn e2e_storage_upload_with_a_throwing_producer_is_not_committed() {
         body.contains(r#""ok":true"#),
         "putStream did not reject on producer failure; body: {body}"
     );
+    // WITNESS that the scenario actually occurred. Without this the test passes
+    // on ANY rejection - a bad bucket name, a validation refusal, a backend
+    // that never started - none of which exercise the producer-failure path.
+    // The rejection must carry the producer's own message, which only the
+    // abort-note path can put there.
+    assert!(
+        body.contains("producer exploded mid-upload"),
+        "putStream rejected, but not for the producer's failure, so this test \
+         did not exercise the path it names; body: {body}"
+    );
 }
 
 #[test]
