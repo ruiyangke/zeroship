@@ -31,7 +31,7 @@ use zero_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, Sea
 use zero_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zero_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
-    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
+    KEY_SCHEMA_CREATE_SCHEMA, KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
 };
 use zero_migrate_policy::{
     admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
@@ -452,6 +452,27 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
                         .to_string(),
                 );
             }
+            // Any OTHER schema-scoped grant is refused rather than passed through.
+            // This arm used to be `_ => {}`, which let a grant this function does not
+            // know how to bind reach the composed charter still carrying its authored
+            // `scope = "all"` - authority over every schema, from a function whose whole
+            // job is confining authority to one. The registry already defines three such
+            // keys beyond the three handled above (`schema.create_schema` PerSchema,
+            // `schema.alter_injected` PerTable, `schema.partition` Global), so this is
+            // not a guard against a hypothetical future key.
+            //
+            // Refusing means adding one to the charter is a compile-free but LOUD
+            // failure: whoever adds it must come here and say how it binds. That is the
+            // decision we want made deliberately, including for `schema.partition`,
+            // whose Global object model may well make `scope = "all"` correct.
+            other if other.starts_with("schema.") => {
+                return Err(format!(
+                    "confined charter grant {index} carries schema-scoped key {other}, which \
+                     app binding does not know how to confine; bind it explicitly or remove it"
+                ));
+            }
+            // Non-schema keys (`safety.*`, `runtime.*`, `code.*`) are not schema-scoped,
+            // so `scope = "all"` is their intended shape and they pass through unchanged.
             _ => {}
         }
     }
@@ -622,6 +643,44 @@ mod tests {
             Some(zero_migrate::SchemaScope::Single(app_schema)),
             "the effective policy must retain the exact app-schema boundary"
         );
+    }
+
+    /// App binding must refuse a schema-scoped grant it cannot confine.
+    ///
+    /// `bind_confined_charter_to_schema` rewrites `schema.create_table` and
+    /// `schema.rename` from `scope = "all"` to this app's schema, and appends a bound
+    /// `schema.cross_schema`. Every other key fell to `_ => {}` and passed through
+    /// untouched. For a non-schema key (`safety.*`, `runtime.*`) that is right. For a
+    /// schema-scoped one it is the exact opposite of the function's purpose: the grant
+    /// reaches the composed charter still saying `scope = "all"`.
+    ///
+    /// The registry defines three such keys today that this function does not handle,
+    /// so the case below uses a real one (`schema.create_schema`, PerSchema) rather
+    /// than an invented key - a made-up key would prove the arm fires without proving
+    /// it fires on anything that can actually appear.
+    #[test]
+    fn app_binding_refuses_a_schema_key_it_cannot_confine() {
+        let app_schema = Uuid::new_v4().to_string();
+        let charter = format!(
+            "{CONFINED_GUARD_CHARTER_TOML}\n\
+             [[grant]]\n\
+             key = \"{KEY_SCHEMA_CREATE_SCHEMA}\"\n\
+             value = true\n\
+             scope = \"all\"\n"
+        );
+
+        let err = bind_confined_charter_to_schema(&charter, &app_schema)
+            .expect_err("an unbindable schema-scoped grant must fail closed");
+        assert!(
+            err.contains(KEY_SCHEMA_CREATE_SCHEMA),
+            "the error must name the offending key, got: {err}"
+        );
+
+        // POSITIVE CONTROL. The assertion above is satisfied by a function that
+        // rejects every charter, including the real one. The unmodified guard charter
+        // must still bind.
+        bind_confined_charter_to_schema(CONFINED_GUARD_CHARTER_TOML, &app_schema)
+            .expect("the shipped guard charter must still bind");
     }
 
     #[test]
