@@ -11,9 +11,14 @@
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
 //! [`crate::diff`] (the schema metadata types). plugin-db re-exports both
-//! the codec and the types from their original module paths so existing
-//! `crate::crud::mask_backfill::{build,parse}_mask_sentinel` references
-//! keep resolving unchanged.
+//! the codec and the types from their original module paths, so
+//! `zeroship_plugin_db::crud::mask_backfill::parse_mask_sentinel` still
+//! resolves there.
+//!
+//! Written `crate::...` until 2026-08-08, which was wrong in two ways once
+//! this module was extracted: `crate` is zeroship-schema, a leaf crate that
+//! does not depend on plugin-db, and `build_mask_sentinel` is not in
+//! plugin-db at all - it is defined below, in this file.
 
 use crate::descriptors::EncryptionMode;
 use crate::diff::{Classification, EncryptionMeta, MaskKind, WrappedType};

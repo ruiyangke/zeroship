@@ -8,7 +8,7 @@
 //!
 //! The engine intentionally does not run any DDL on its own — it returns
 //! a `Vec<DiffOp>` that the orchestrator in
-//! `crate::register_model::exec_register_model_with_pool`
+//! `zeroship_plugin_db::register_model::exec_register_model_with_pool`
 //! then sequences with the advisory lock, audit writes, and validation
 //! pass.
 //!
@@ -113,7 +113,7 @@ pub enum ChangeKind {
     /// `ALTER TABLE … ADD COLUMN <col>_masked TEXT NULL` op is emitted
     /// as a separate `AddColumn` immediately before this one; the
     /// backfill itself is driven by
-    /// [`crate::crud::mask_backfill::run_mask_backfill`]. After the
+    /// `zeroship_plugin_db::crud::mask_backfill::run_mask_backfill`. After the
     /// backfill is fully drained (two consecutive clean polls), the
     /// final step is `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT
     /// NULL`. Carries the kind + classification so the audit row
@@ -129,7 +129,7 @@ pub enum ChangeKind {
     /// changes. Touches every row (no IS NULL filter); the sibling
     /// column already exists + is NOT NULL so no schema mutation is
     /// needed. Driven by
-    /// [`crate::crud::mask_backfill::run_mask_rewrite`].
+    /// `zeroship_plugin_db::crud::mask_backfill::run_mask_rewrite`.
     MaskRewrite {
         collection: String,
         column: String,
@@ -322,7 +322,7 @@ impl Default for ColumnInfo {
 ///
 /// Populated by schema introspection:
 /// - **PG**: from `__zeroship_meta.encrypted_columns` rows the
-///   `register_model` DDL emitter writes alongside the table create.
+///   `zeroship_plugin_db::register_model` DDL emitter writes alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
@@ -1175,7 +1175,7 @@ pub fn compute_diff(
     // `MaskBackfill` op so the column exists when the backfill writes
     // to it. The sibling ADD is nullable on purpose -- backfill flips
     // it to NOT NULL after the last batch (see
-    // `crate::crud::mask_backfill::run_mask_backfill`).
+    // `zeroship_plugin_db::crud::mask_backfill::run_mask_backfill`).
     //
     // Brand-new columns with a mask declaration are NOT routed here —
     // `build_create_table_with_fks` (CreateTable op) and
