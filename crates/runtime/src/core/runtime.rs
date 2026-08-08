@@ -102,6 +102,25 @@ use crate::channel::{
     self, CancelFlag, ResultSender,
 };
 
+/// Count of near-heap-limit callback invocations across every isolate in this
+/// process, since start. Monotonic; never reset.
+///
+/// Exposed because the per-isolate hit counter lives behind a raw pointer that
+/// is deliberately leaked for the isolate's lifetime, so nothing outside the
+/// callback can read it. Without a process-wide count, a heap cap that fails to
+/// bound an isolate is indistinguishable from one V8 never consults - and those
+/// two have different fixes.
+static HEAP_LIMIT_CALLBACK_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Read the process-wide near-heap-limit callback count. See
+/// [`HEAP_LIMIT_CALLBACK_HITS`]. Because it is process-wide and monotonic, a
+/// caller comparing before/after must take a baseline rather than expect zero.
+#[must_use]
+pub fn heap_limit_callback_hits() -> u64 {
+    HEAP_LIMIT_CALLBACK_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // DispatchOutcome — result of dispatch_start
 // ---------------------------------------------------------------------------
@@ -1040,6 +1059,12 @@ impl RuntimeInner {
             // so we have exclusive access here.
             let d = unsafe { &mut *(data as *mut HeapLimitData) };
             d.hits += 1;
+            // Process-wide, monotonic. `d.hits` is per-isolate and behind a
+            // raw pointer no observer can reach, so without this there is no
+            // way to tell "V8 never consulted the cap" from "it fired and the
+            // growth outran the termination" - the two have completely
+            // different fixes.
+            HEAP_LIMIT_CALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if d.hits >= MAX_HEAP_LIMIT_HITS {
                 tracing::error!(
                     heap_limit_mb = current_heap_limit / 1024 / 1024,

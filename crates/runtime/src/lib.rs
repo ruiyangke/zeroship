@@ -235,7 +235,10 @@ pub use init::{init_v8, init_v8_single_threaded, v8_platform_flavor, RequestResu
 pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
-pub use runtime::{AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease, RuntimeLimits};
+pub use runtime::{
+    heap_limit_callback_hits, AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease,
+    RuntimeLimits,
+};
 pub use fetch_outcome::{
     EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch, SettledWorkflow, WorkflowOutcome,
 };
