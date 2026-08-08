@@ -9,7 +9,7 @@ use std::io::Write;
 ///
 /// It is deliberately not a word. `tests/run_auth_suite.sh` used to search the
 /// run log for "skipping", which missed the 13 lines reading
-/// "[anchors] skip <name> (no GATEWAY_ANCHORS_DB_URL)" and reported "0 skipped"
+/// `[anchors] skip <name> (no GATEWAY_ANCHORS_DB_URL)` and reported "0 skipped"
 /// with them sitting in its own log. Widening that search to "skip" does not
 /// work either, and the reason is measured: of the 98 lines containing "skip"
 /// in one full run, 13 were real announcements, 5 were the harness's own

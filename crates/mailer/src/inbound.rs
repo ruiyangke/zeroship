@@ -113,7 +113,7 @@ impl InboundMessage {
     /// `true` when this inbound should be dropped as a relay loop (sub-spec §7
     /// hop cap): it carries an `X-ZS-Relay` hop count at/above `max_hops`. A
     /// fresh inbound (no marker) is never a loop. The outbound forward of a
-    /// below-cap inbound is stamped with `hop + 1` (see [`next_hop`]).
+    /// below-cap inbound is stamped with `hop + 1` (see [`Self::next_hop`]).
     #[must_use]
     pub fn is_relay_loop(&self, max_hops: u32) -> bool {
         self.loop_hop().is_some_and(|hop| hop >= max_hops)
@@ -121,7 +121,7 @@ impl InboundMessage {
 
     /// The hop count to stamp on the outbound forward of THIS inbound
     /// (sub-spec §7): the inbound hop + 1, or 1 for a fresh (un-stamped)
-    /// inbound. Callers MUST have already rejected loops via [`is_relay_loop`].
+    /// inbound. Callers MUST have already rejected loops via [`Self::is_relay_loop`].
     #[must_use]
     pub fn next_hop(&self) -> u32 {
         self.loop_hop().map_or(1, |hop| hop.saturating_add(1))
