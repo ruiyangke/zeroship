@@ -1123,6 +1123,29 @@ pub fn fold_ops_onto(
                     },
                 );
             }
+            // HOLE: the fold models attachment, not PostgreSQL's ATTACH preconditions.
+            // The server additionally refuses a child that carries an identity column
+            // ("The new partition may not contain an identity column"), whose column
+            // names/types/order differ from the parent's, that lacks a NOT NULL the
+            // parent has, that is missing a parent CHECK, that is itself partitioned,
+            // or that is already a partition elsewhere. None of those is checked here.
+            //
+            // This is a hole with a floor rather than an omission: one ATTACH
+            // precondition is row-level ("partition constraint is violated by some
+            // row") and can never be decided offline, so the server stays the
+            // enforcing layer regardless of how much the fold learns to model.
+            //
+            // Rejecting here was considered and declined. A fold-side identity check
+            // would refuse a history PostgreSQL accepts, because `Op::PgRaw` folds to
+            // nothing and `ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY` is the only
+            // way to clear identity from a column that is not part of a primary-key
+            // change - `drop_identity_from` rides on `AlterPrimaryKeyAction` alone. The
+            // fold error would fail the deploy, whereas letting the server refuse costs
+            // only a late diagnosis: the apply rolls back and writes no journal row.
+            //
+            // The resulting asymmetry is deliberate. Detach STRIPS identity below,
+            // because the server drops it on DETACH, so the fold asserts on the way out
+            // an invariant it does not enforce on the way in.
             Op::AttachPartition {
                 parent,
                 name,
