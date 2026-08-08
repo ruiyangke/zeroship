@@ -1772,16 +1772,16 @@ pub struct FieldDescriptor {
     /// For a `literal` field, the single accepted value (`literalValue` on the
     /// wire `FieldDef`). Drives both the column's primitive type
     /// (text/numeric/boolean — see `literal_pg_data_type`) and a
-    /// `CHECK (<col> = <value>)` constraint (mirrors plugin-db's
-    /// `query.rs:2091/2185`).
+    /// `CHECK (<col> = <value>)` constraint, mirroring plugin-db, which maps the
+    /// type in `def_to_pg_type` and pins the value in `def_to_constraints`.
     #[serde(rename = "literalValue", default)]
     pub literal_value: Option<serde_json::Value>,
     /// Column `DEFAULT` value (`default` on the wire `FieldDef`). Emitted in the
-    /// column declaration per plugin-db's `def_to_constraints` (`query.rs:2125`).
+    /// column declaration per plugin-db's `def_to_constraints`.
     #[serde(default)]
     pub default: Option<serde_json::Value>,
     /// Minimum (numeric `min`) — emits a `CHECK (<col> >= <min>)` (or combined
-    /// with `max`). Mirrors plugin-db `query.rs:2167`.
+    /// with `max`). Mirrors plugin-db's `def_to_constraints`.
     #[serde(default)]
     pub min: Option<f64>,
     /// Maximum (numeric `max`) — emits a `CHECK (<col> <= <max>)`.
@@ -1789,7 +1789,7 @@ pub struct FieldDescriptor {
     pub max: Option<f64>,
     /// Enum membership (`enum` on the wire `FieldDef`) — emits a
     /// `CHECK (<col> IN (…))`. String or numeric values, mirroring plugin-db
-    /// `query.rs:2200`.
+    /// in `def_to_constraints`.
     #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
     /// For a `{ type: "id", idPrefix }` field, the declared typed-id prefix
@@ -2462,7 +2462,7 @@ fn json_scalar_sql(v: &serde_json::Value, dialect: SqlDialect) -> Option<String>
 /// each as a [`ConstraintSnapshot`] whose `definition` is the emitted DDL CHECK
 /// clause (used by `render_create_table` to inline it).
 ///
-/// Mirrors plugin-db's `def_to_constraints_for_dialect` (`query.rs:2167-2218`):
+/// Mirrors plugin-db's `def_to_constraints_for_dialect`:
 /// - a numeric field with `min`/`max` → `CHECK (<col> >= min [AND <col> <= max])`
 ///   (or `CHECK (<col> <= max)` for max-only);
 /// - a `literal` field → `CHECK (<col> = <value>)`;
@@ -2545,8 +2545,8 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 /// The `DEFAULT` clause expression a field emits at CREATE / ADD COLUMN,
 /// or `None` for no default.
 ///
-/// Mirrors plugin-db's `def_to_constraints_for_dialect` default arm
-/// (`query.rs:2125-2165`): an explicit `default` renders per the field's
+/// Mirrors plugin-db's `def_to_constraints_for_dialect` default
+/// arm: an explicit `default` renders per the field's
 /// primitive type (string single-quoted, number/boolean bare, json/object →
 /// the dialect's empty-object expression, array → its empty-array expression).
 /// PostgreSQL retains the `::jsonb` casts, SQLite emits plain text literals,
@@ -7135,7 +7135,7 @@ impl DeclarativeAuthor {
     /// `'{}'::jsonb`, `'[]'::jsonb` — never `NOW()` / `gen_random_uuid()`), so
     /// `ADD COLUMN … DEFAULT <literal>` takes Postgres' metadata-only fast path
     /// (no table rewrite) and stays a safe ADDITIVE op — matching plugin-db's
-    /// `diff.rs:15-26` reasoning (it never emits a volatile default either). The
+    /// volatile-default trap note (it never emits a volatile default either). The
     /// classifier therefore correctly classifies it additive, not destructive.
     fn render_add_column(&self, table: &str, c: &ColumnSnapshot) -> Migration {
         self.render_add_column_with_statements(table, c).0

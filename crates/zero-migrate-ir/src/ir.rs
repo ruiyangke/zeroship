@@ -1003,7 +1003,7 @@ impl VectorMetric {
 }
 
 /// The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the
-/// SDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff
+/// db SDK's `MaskKind` union (not vendored here) and the runtime/diff
 /// `zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum — like every other IR
 /// token-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
 /// IR envelope cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`

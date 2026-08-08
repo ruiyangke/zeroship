@@ -68,8 +68,8 @@ thread_local! {
 /// THREAD ONLY; a [`trip`] of the same point on any other thread is unaffected.
 ///
 /// The shipping Node consumer runs every apply on a freshly spawned worker
-/// thread: `run_engine_blocking` in `zero-migrate-node/src/runtime.rs:41` spawns
-/// the thread that drives the engine future, and that worker never calls `arm`.
+/// thread: `run_engine_blocking` in the `zero-migrate-node` runtime spawns the
+/// thread that drives the engine future, and that worker never calls `arm`.
 /// An external caller that arms a fault on its own thread therefore cannot reach
 /// a production apply through that consumer.
 ///

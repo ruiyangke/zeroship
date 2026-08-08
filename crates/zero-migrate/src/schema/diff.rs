@@ -12,9 +12,16 @@
 //! That orchestrator is NOT in this workspace, and the `crate::`-rooted path
 //! this comment used to carry (`crate::register_model::exec_register_model_with_pool`)
 //! never resolved here. This kernel was extracted from appbase's `zeroship-schema`,
-//! where the sentence is true: the function is a live `pub async fn` at
-//! `crates/plugin-db/src/register_model/mod.rs:341`, confirmed by that project on
-//! 2026-08-08. Nothing in this repository consumes the diff that way.
+//! where the sentence is true: `exec_register_model_with_pool` is a live `pub async
+//! fn` in that project's register-model module, confirmed by them on 2026-08-08.
+//! Nothing in this repository consumes the diff that way.
+//!
+//! The line number that used to sit on that citation is gone deliberately. It read
+//! `:341`, and over the day it was written the function moved to `:372` and then to
+//! `:388` in their tree - a coordinate into a repository this one does not build
+//! cannot be kept true, and the reader who follows a stale one lands on unrelated
+//! code believing they arrived. The date is what makes the claim checkable; the
+//! function name is what makes it findable.
 //!
 //! ## Volatile-default trap
 //!
@@ -429,7 +436,8 @@ pub struct MaskMeta {
 
 /// Built-in mask transform applied at write time.
 ///
-/// Mirrors the SDK's `MaskKind` union (`sdks/db/src/types.ts`).
+/// Mirrors the `MaskKind` union in the db SDK, which ships with the consuming
+/// product and is not vendored here.
 /// `None` is the explicit opt-out variant for encrypted columns
 /// where the creator genuinely wants plaintext-on-read; the write/read
 /// passes branch on `kind == None` to skip sibling emission and use the
@@ -464,8 +472,8 @@ pub enum MaskKind {
 
 impl MaskKind {
     /// Canonical SDK-wire string for this kind. Mirrors
-    /// the discriminator the SDK emits in `def.mask.kind` (see
-    /// `sdks/db/src/types.ts`). Used by the diff layer to round-trip
+    /// the discriminator the SDK emits in `def.mask.kind`, spelled by the db
+    /// SDK's `MaskKind` union. Used by the diff layer to round-trip
     /// the live-introspection sentinel through `pg_description` (PG) /
     /// `sqlite_master.sql` (SQLite) and back into a `MaskKind`.
     #[must_use]
