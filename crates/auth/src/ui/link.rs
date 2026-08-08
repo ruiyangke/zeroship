@@ -562,6 +562,19 @@ fn validated_native_return_to(return_to: &str) -> Option<&str> {
     return_to::valid_path(return_to)
 }
 
+fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
+    let page = ErrorPage {
+        message,
+        error_code: message.error_code(),
+    };
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("text/html; charset=utf-8");
+    resp.body(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::validated_native_return_to;
@@ -584,17 +597,4 @@ mod tests {
             "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         assert_eq!(validated_native_return_to(return_to), Some(return_to));
     }
-}
-
-fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
-    let page = ErrorPage {
-        message,
-        error_code: message.error_code(),
-    };
-    let body = page
-        .render()
-        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
-    let mut resp = HttpResponse::Ok();
-    resp.content_type("text/html; charset=utf-8");
-    resp.body(body)
 }

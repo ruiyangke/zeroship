@@ -693,7 +693,7 @@ chfOO390zPo2KvlyenOqynqSZA==
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut future = pin!(future);
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(output) => output,

@@ -406,9 +406,8 @@ async fn one_login(fx: &Fixture, email: &str, password: &str, xff_ip: &str) -> S
         "POST /login expected 303 success, got {}",
         resp.status()
     );
-    let sid = read_set_cookie(&resp, "zsidp_session")
-        .expect("zsidp_session cookie set on POST /login success");
-    sid
+    read_set_cookie(&resp, "zsidp_session")
+        .expect("zsidp_session cookie set on POST /login success")
 }
 
 /// §13 "Session fixation": `zsidp_session` rotates on successful

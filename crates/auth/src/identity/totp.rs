@@ -380,7 +380,11 @@ mod tests {
         assert!(!verify_code(&secret, ""));
         assert!(!verify_code(&secret, "   "));
         assert!(!verify_code(&secret, "abcdef"));
-        assert!(!verify_code(&secret, "000000") || true); // 000000 may rarely be valid; don't over-assert
+        // 000000 may rarely be valid for this secret; exercise the call without
+        // asserting on its result (nothing was actually being checked before -
+        // the old `... || true` was unconditionally true regardless of the
+        // verify_code() result, so this is behavior-preserving).
+        let _ = verify_code(&secret, "000000");
     }
 
     #[test]

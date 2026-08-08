@@ -693,7 +693,11 @@ async fn numeric_types() {
     let small: i16 = -123;
     let medium: i32 = 42_000;
     let large: i64 = 9_000_000_000i64;
+    // These are arbitrary round-trip test inputs, not attempts to write PI/E -
+    // clippy::approx_constant would have us "fix" the value under test.
+    #[allow(clippy::approx_constant)]
     let float_s: f32 = 3.14;
+    #[allow(clippy::approx_constant)]
     let float_d: f64 = 2.718281828459045;
     let flag: bool = true;
 
@@ -2159,8 +2163,7 @@ async fn sslmode_require_fails_closed_without_a_tls_connector() {
 
     let err = Pool::connect(&require, 2)
         .await
-        .err()
-        .expect("the pool must not satisfy sslmode=require in the clear");
+        .expect_err("the pool must not satisfy sslmode=require in the clear");
     // `Error`'s own Display is a category; the cause carries the detail.
     let cause = std::error::Error::source(&err)
         .map(ToString::to_string)

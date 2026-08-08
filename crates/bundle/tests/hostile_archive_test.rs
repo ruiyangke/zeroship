@@ -120,9 +120,9 @@ fn raw_tar_entry(name: &str, body: &[u8]) -> Vec<u8> {
     out.extend_from_slice(body);
     // Entries are padded to a 512-byte boundary.
     let pad = (512 - (body.len() % 512)) % 512;
-    out.extend(std::iter::repeat(0u8).take(pad));
+    out.extend(std::iter::repeat_n(0u8, pad));
     // Two zero blocks terminate the archive.
-    out.extend(std::iter::repeat(0u8).take(1024));
+    out.extend(std::iter::repeat_n(0u8, 1024));
     out
 }
 
@@ -250,7 +250,7 @@ fn pack_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     for (name, body) in entries {
         tar_buf.extend_from_slice(&raw_tar_entry_no_end(name, body));
     }
-    tar_buf.extend(std::iter::repeat(0u8).take(1024));
+    tar_buf.extend(std::iter::repeat_n(0u8, 1024));
     zstd::encode_all(tar_buf.as_slice(), 0).unwrap()
 }
 

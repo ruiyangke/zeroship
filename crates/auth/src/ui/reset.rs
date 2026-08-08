@@ -258,7 +258,7 @@ async fn complete_password_reset_tx(
             outcome: "success",
             user_id: Some(&completed.user_id),
             auth_method: Some("password_reset"),
-            ..AuditEvent::from_request(&req)
+            ..AuditEvent::from_request(req)
         },
     )
     .await?;
@@ -318,7 +318,7 @@ async fn complete_password_reset_tx(
                 "magic_tokens": counts.magic_tokens,
                 "magic_completions": counts.magic_completions,
             }),
-            ..AuditEvent::from_request(&req)
+            ..AuditEvent::from_request(req)
         },
     )
     .await?;

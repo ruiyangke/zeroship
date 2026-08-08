@@ -31,7 +31,7 @@
 //!     a natural person.
 //!
 //! **This default is a policy choice, isolated in `user_has_financial_history`
-//! + `erase_one` so an operator / counsel can change it (e.g. add a longer
+//! and `erase_one` so an operator / counsel can change it (e.g. add a longer
 //! retention horizon, narrow what counts as "financial history", or hash the
 //! email under a pepper instead of a random tombstone) without touching the
 //! lifecycle plumbing.** Flagged for explicit operator confirmation.

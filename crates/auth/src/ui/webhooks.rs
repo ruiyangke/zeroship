@@ -329,7 +329,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
                         "count": bounce.bounced_recipients.len(),
                         "kind": "permanent",
                     }),
-                    ..AuditEvent::from_request(&req)
+                    ..AuditEvent::from_request(req)
                 },
             )
             .await;
@@ -360,7 +360,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
                     detail: serde_json::json!({
                         "count": complaint.complained_recipients.len(),
                     }),
-                    ..AuditEvent::from_request(&req)
+                    ..AuditEvent::from_request(req)
                 },
             )
             .await;

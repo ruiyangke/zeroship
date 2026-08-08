@@ -484,6 +484,13 @@ impl Issuer {
         )
     }
 
+    // Private helper shared by `issue_id_token` / `issue_principal_id_token`,
+    // both of which already destructure a `*Mint` struct before calling this.
+    // The two callers disagree on which mint field maps to `subject`, so
+    // collapsing this back into one mint-struct parameter is a real
+    // refactor, not a mechanical lint fix - not doing that as part of a lint
+    // sweep.
+    #[allow(clippy::too_many_arguments)]
     fn issue_id_token_with_subject(
         &self,
         subject: &str,

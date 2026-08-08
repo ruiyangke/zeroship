@@ -122,6 +122,10 @@ fn reset_post(csrf: &str, token: &str, password: &str, ip: &str) -> test::TestRe
 
 /// The defect: a token with no live row must be refused before the password
 /// is hashed. Pre-fix the handler hashes first and the counter moves.
+// `hash_counter_guard` must be held across the request under test - that's
+// exactly the point (see the doc comment on it above): the counter delta is
+// only meaningful if no other test's hashing overlaps this one's request.
+#[allow(clippy::await_holding_lock)]
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_refuses_a_dead_token_without_hashing() {
@@ -169,6 +173,8 @@ async fn reset_post_refuses_a_dead_token_without_hashing() {
 
 /// The refusal must not be bought by breaking the real path: a live token
 /// still completes, and that path does pay for the hash.
+// See the allow on `reset_post_refuses_a_dead_token_without_hashing` above.
+#[allow(clippy::await_holding_lock)]
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_with_a_live_token_still_completes() {
@@ -260,6 +266,8 @@ async fn reset_post_with_a_live_token_still_completes() {
 /// The pre-check bounds the cost of one refused request; the limiter bounds
 /// how many an IP gets. `/reset` was the only password-hashing handler in the
 /// crate without one.
+// See the allow on `reset_post_refuses_a_dead_token_without_hashing` above.
+#[allow(clippy::await_holding_lock)]
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_is_rate_limited_per_ip() {

@@ -71,7 +71,7 @@ async fn federation_start_rejects_open_redirect_return_to_without_stash_cookie()
                 .append_pair("return_to", bad_return_to)
                 .finish();
             let resp = http
-                .request(http::Method::GET, &format!("{auth_base}{path}?{query}"))
+                .request(http::Method::GET, format!("{auth_base}{path}?{query}"))
                 .expect("build federation start request")
                 .send()
                 .await

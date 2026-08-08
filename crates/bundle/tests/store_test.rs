@@ -40,9 +40,9 @@ fn exists() {
     let dir = temp_dir("exists");
     let store = LocalFs::new(&dir).unwrap();
 
-    assert_eq!(store.exists("app1").unwrap(), false);
+    assert!(!store.exists("app1").unwrap());
     store.put("app1", b"data").unwrap();
-    assert_eq!(store.exists("app1").unwrap(), true);
+    assert!(store.exists("app1").unwrap());
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -53,10 +53,10 @@ fn delete() {
     let store = LocalFs::new(&dir).unwrap();
 
     store.put("app1", b"data").unwrap();
-    assert_eq!(store.exists("app1").unwrap(), true);
+    assert!(store.exists("app1").unwrap());
 
     store.delete("app1").unwrap();
-    assert_eq!(store.exists("app1").unwrap(), false);
+    assert!(!store.exists("app1").unwrap());
 
     // Second delete should return NotFound.
     let result = store.delete("app1");
@@ -93,8 +93,8 @@ fn multiple_apps_isolated() {
     // Delete app-a; app-b must still be intact.
     store.delete("app-a").unwrap();
 
-    assert_eq!(store.exists("app-a").unwrap(), false);
-    assert_eq!(store.exists("app-b").unwrap(), true);
+    assert!(!store.exists("app-a").unwrap());
+    assert!(store.exists("app-b").unwrap());
     assert_eq!(store.get("app-b").unwrap(), b"bundle-b");
 
     std::fs::remove_dir_all(&dir).ok();

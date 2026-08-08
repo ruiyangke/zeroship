@@ -390,8 +390,9 @@ pub struct AuditInput<'a> {
     pub detail: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuditAction {
+    #[default]
     Submit,
     RejectPending,
     Approve,
@@ -512,11 +513,6 @@ pub enum MigrationStoreError {
     InvalidTransition,
 }
 
-impl Default for AuditAction {
-    fn default() -> Self {
-        Self::Submit
-    }
-}
 
 /// Audit view of a sealed managed policy. Records the seal's public BINDING fields
 /// (dialect, matcher version, ceiling version, registry digest) — the tamper-evidence

@@ -24,6 +24,11 @@ async fn pg() -> Option<(compio_postgres::Client, String)> {
     Some((client, dsn))
 }
 
+// TOKEN_SWEEP_TEST_LOCK serializes tests against the shared token-sweep
+// table state; it must stay held for the whole request/tick under test, not
+// just the synchronous setup, so the counts it protects can't be raced by
+// another test's sweep.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     let Some((client, db_url)) = pg().await else {
@@ -221,6 +226,8 @@ async fn cleanup(
 /// relay dedup sentinels that share the table) so a forged-IP flood cannot
 /// leave permanent rows. A bucket idle past the 24h grace window is deleted; a
 /// freshly-touched one survives. Live PG — skip when `AUTH_DB_URL` unset.
+// See the allow on `token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows` above.
+#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
     let Some((client, db_url)) = pg().await else {

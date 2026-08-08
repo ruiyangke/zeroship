@@ -200,6 +200,12 @@ fn pool_key(worker_url: &str) -> String {
 /// kernel exposes — both `_rpc/*` URLs and normal HTTP requests travel the
 /// same wire; any routing within the app happens in user-space JS via the
 /// bootstrap router.
+// `forward_dispatch` -> `forward_to_worker_path` -> `build_request` thread
+// the same per-request identifiers (app/plan/request id, worker key, user
+// header) down the dispatch hot path. Bundling them into a params struct is
+// a real refactor across all three functions, not a mechanical lint fix -
+// not doing that as part of a lint sweep.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_dispatch(
     ring: &HashRing,
     app_id: &Uuid,
@@ -292,6 +298,8 @@ async fn forward_to_worker_dispatch(
     .await
 }
 
+// See the allow on `forward_dispatch` above - same call-chain rationale.
+#[allow(clippy::too_many_arguments)]
 async fn forward_to_worker_path(
     worker_url: &str,
     path: &str,
@@ -323,7 +331,7 @@ async fn forward_to_worker_path(
         }
     };
 
-    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+    let request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
 
     if stream.write_all(request).await.is_err() {
         let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
@@ -332,7 +340,7 @@ async fn forward_to_worker_path(
             .map_err(|e| format!("reconnect: {e}"))?;
         stream = new_stream;
         from_pool = false;
-        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+        let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
@@ -345,7 +353,7 @@ async fn forward_to_worker_path(
                 .map_err(|e| format!("reconnect: {e}"))?;
             stream = new_stream;
             from_pool = false;
-            let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+            let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
             stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
             compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
                 .await
@@ -375,21 +383,16 @@ async fn forward_to_worker_path(
             let mut leftover = parsed.trailing;
 
             loop {
-                loop {
-                    match decode_next_chunk(&leftover) {
-                        ChunkDecode::Complete(data, consumed) => {
-                            if data.is_empty() {
-                                return;
-                            }
-                            let item: Result<ntex::util::Bytes, std::io::Error> =
-                                Ok(ntex::util::Bytes::from(data));
-                            if tx.send(item).is_err() {
-                                return;
-                            }
-                            leftover = leftover[consumed..].to_vec();
-                        }
-                        ChunkDecode::Incomplete => break,
+                while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
+                    if data.is_empty() {
+                        return;
                     }
+                    let item: Result<ntex::util::Bytes, std::io::Error> =
+                        Ok(ntex::util::Bytes::from(data));
+                    if tx.send(item).is_err() {
+                        return;
+                    }
+                    leftover = leftover[consumed..].to_vec();
                 }
 
                 let read_buf = vec![0u8; 4096];
@@ -513,6 +516,8 @@ fn strip_cookie_domain(set_cookie: &str) -> String {
     kept.join("; ")
 }
 
+// See the allow on `forward_dispatch` above - same call-chain rationale.
+#[allow(clippy::too_many_arguments)]
 fn build_request(
     path: &str,
     host: &str,
