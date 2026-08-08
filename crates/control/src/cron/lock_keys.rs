@@ -12,10 +12,12 @@
 //! and four modules had grown their own hand-written collision test comparing
 //! against transcribed literals:
 //!
-//!     dunning.rs           1 comparison
-//!     stripe_reconcile.rs  1
-//!     billing_notify.rs    2
-//!     spend_recompute.rs   6
+//! ```text
+//! dunning.rs           1 comparison
+//! stripe_reconcile.rs  1
+//! billing_notify.rs    2
+//! spend_recompute.rs   6
+//! ```
 //!
 //! Ten of the twenty-one pairs, spread over four tests that each read like
 //! coverage. The two keys defined in the SAME file - `BILLING_SWEEP` and
