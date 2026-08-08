@@ -1,0 +1,5 @@
+error: #[v8_async_method] does not support &mut self — use &self with Cell/RefCell on state that needs to mutate (borrow across .await is unsound under V8 re-entry)
+  --> tests/compile_fail_async_method/v8_async_method_mut_self.rs:29:14
+   |
+29 |     async fn bump(&mut self) -> Result<u32, OpError> {
+   |              ^^^^

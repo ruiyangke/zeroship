@@ -1,0 +1,5 @@
+error: #[v8_method(fastcall)] / #[v8_getter(fastcall)] does not support &mut self — use &self with Cell/RefCell on state that needs to mutate (V8 fast-path callbacks have no scope, so the slow path's per-method re-entrancy guard cannot be emitted)
+  --> tests/compile_fail_fastcall/v8_fastcall_mut_self.rs:25:8
+   |
+25 |     fn bump(&mut self) -> u32 {
+   |        ^^^^

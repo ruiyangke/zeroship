@@ -1,0 +1,5 @@
+error: #[v8_async_method] requires the method to be declared `async`
+  --> tests/compile_fail_async_method/v8_async_method_not_async.rs:25:8
+   |
+25 |     fn must_be_async(&self) -> Result<u32, OpError> {
+   |        ^^^^^^^^^^^^^
