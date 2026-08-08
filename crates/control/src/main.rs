@@ -1457,6 +1457,29 @@ fn main() -> std::io::Result<()> {
                         );
                         std::process::exit(1);
                     }
+                    // The in-memory transport is registered in the same
+                    // `register_builtin` registry as redpanda and is selectable
+                    // here by one string, so nothing downstream tells them
+                    // apart. It reports durable success for a push into a
+                    // process-static Vec, and the usage outbox reads that `Ok`
+                    // as broker-acked and TRIMS its redb WAL - so choosing it
+                    // silently converts the billing path from durable to
+                    // best-effort, and a restart loses every event not yet
+                    // forwarded.
+                    //
+                    // Only the control plane can reach this: the worker and
+                    // gateway producers build their outbox through
+                    // `zeroship_metering::build_usage_outbox`, which hardcodes
+                    // "redpanda".
+                    if streams.transport_id() == "memory" {
+                        tracing::warn!(
+                            stream = streams.transport_id(),
+                            "control: in-memory billing stream selected - usage events are NOT \
+                             durable and are not shared between processes; the outbox WAL is \
+                             trimmed on a publish that only reached this process's memory. \
+                             Intended for tests and local development."
+                        );
+                    }
                     tracing::info!(
                         stream = streams.transport_id(),
                         forwarder_group_id = streams.forwarder_group_id(),
