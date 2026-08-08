@@ -8,8 +8,11 @@
 // dialect — the TS mirror of
 // third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs.
 // Faithfulness to the engine's live Support::decision() is proven Rust-side by
-// tests/dialect_table_faithfulness.rs; the TS drift test pins this file (and the
-// Rust one) against the sidecar. Nothing reads it yet.
+// third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs
+// - spelled from the repo root because the engine is a vendored submodule with
+// its own cargo workspace, so a bare tests/ path resolves nowhere from here.
+// The TS drift test pins this file (and the Rust one) against the sidecar.
+// Nothing reads it yet.
 
 export type Disposition = "portable" | "transparentDegradable" | "vendor" | "unsupported";
 export type Dialect = "postgres" | "sqlite" | "mysql";
