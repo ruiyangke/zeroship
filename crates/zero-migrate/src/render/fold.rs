@@ -1654,6 +1654,56 @@ pub fn fold_ops_onto(
                         cascade_columns.sort();
                     }
                 }
+                // NOT rewritten, and measured stale on PG 18.4:
+                // `ConstraintSnapshot::definition`, which drift DOES compare for
+                // UNIQUE and FOREIGN KEY. PG deparses `UNIQUE (a)` as `UNIQUE (b)`
+                // and `FOREIGN KEY (a) REFERENCES ...` as `FOREIGN KEY (b) ...` the
+                // moment the rename commits, while the fold keeps the old rendering.
+                // (A CHECK definition goes stale identically but is EXCLUDED from
+                // drift comparison, so it reports nothing.) Rewriting a name inside
+                // rendered SQL is text surgery, not the structural swap below.
+                //
+                // An index names columns too, and a rename has to follow it for the
+                // same reason. `pg_index` references the attribute by `attnum`, never
+                // by name, so PG renames the attribute in place and every index over
+                // it keeps working under the NEW name: `pg_get_indexdef` spells the new
+                // name the instant the rename commits, and a later `DROP COLUMN` of the
+                // new name cascades the index away. Without this rewrite the fold drifts
+                // twice: the surviving index disagrees with live on its key columns, and
+                // `createIndex on a; rename a -> b; drop b` leaves a PHANTOM INDEX (the
+                // DropColumn cascade above matches on `IndexSnapshot::columns`, which
+                // would still say `a`).
+                //
+                // The index NAME is deliberately NOT rewritten: PG does NOT rename an
+                // index when a column is renamed (measured on PG 18.4 - an index created
+                // as `t_a_idx` over `a` is still `t_a_idx` after `a` becomes `b`), so
+                // rewriting it here would invent an index live does not have. Key and
+                // INCLUDE lists are POSITIONAL, so they are rewritten in place and never
+                // re-sorted - unlike `cascade_columns`, whose order carries no meaning.
+                //
+                // NOT rewritten, and known to go stale: a partial-index `predicate` and
+                // an `IndexElementSnapshot::Expr` key are RENDERED SQL text rather than
+                // structured names, and PG rewrites both on rename. Swapping a name
+                // inside that text needs real expression rewriting, not a string compare.
+                for index in &mut snap.indexes {
+                    for column in &mut index.columns {
+                        if column == from {
+                            column.clone_from(to);
+                        }
+                    }
+                    for element in &mut index.elements {
+                        if let IndexElementSnapshot::Column { name, .. } = element {
+                            if name == from {
+                                name.clone_from(to);
+                            }
+                        }
+                    }
+                    for column in &mut index.include {
+                        if column == from {
+                            column.clone_from(to);
+                        }
+                    }
+                }
             }
             Op::SetColumnType {
                 table,
