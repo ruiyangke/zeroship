@@ -686,6 +686,14 @@ pub struct ConstraintSnapshot {
     ///
     /// Empty for `EXCLUDE`: PG canonicalizes exclusion definitions differently from
     /// the closed IR renderer, and drift tracks those constraints by name + kind.
+    ///
+    /// Populated but NOT compared for `CHECK`. PostgreSQL deparses a CHECK body from
+    /// the parsed tree rather than echoing what was written - it re-quotes only the
+    /// identifiers that need it, injects inferred casts, and expands `IN` - so the
+    /// offline renderer cannot reproduce the spelling and a byte compare reports
+    /// drift on every CHECK that exists. The text is still recorded because the
+    /// existence guard's fail-closed refusal prints it, which is the difference
+    /// between naming the installed predicate and saying `<present>`.
     pub definition: String,
     /// User-authored catalog comment on this constraint.
     pub comment: Option<String>,

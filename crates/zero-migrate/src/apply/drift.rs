@@ -1328,7 +1328,7 @@ pub async fn snapshot_schema<D: SqlSession>(
                     r.try_get("condeferred")?,
                     convalidated,
                 )?
-            } else if constraint_definition_is_comparable(kind) {
+            } else if constraint_definition_is_retained(kind) {
                 catalog_definition
             } else {
                 String::new()
@@ -2528,7 +2528,47 @@ fn diff_attrs(
     }
 }
 
+/// Whether a constraint's `definition` text is meaningful to compare across an
+/// offline-rendered snapshot and a live catalog read.
+///
+/// `EXCLUDE` and `CHECK` are excluded because PostgreSQL does not store either
+/// body as written: `pg_get_constraintdef` deparses from the parsed tree, so it
+/// re-quotes only the identifiers that need it, injects the casts that parse
+/// analysis inferred, expands `IN` to `= ANY (ARRAY[...])`, and lowercases
+/// keywords. Verified on PostgreSQL 18.4: `CHECK (quantity > 0)` reads back as
+/// `CHECK ((quantity > 0))`, `CHECK (code = 'x')` as `CHECK ((code = 'x'::text))`,
+/// and `CHECK (TRUE)` as `CHECK (true)`. An offline renderer quotes every column
+/// unconditionally and knows no column types, so it cannot reproduce any of that
+/// without PostgreSQL's own parse analysis. Comparing the text therefore reports
+/// drift on every CHECK constraint that exists, on every comparison.
+///
+/// This makes the differ agree with the intent already recorded at
+/// `render::declarative::field_check_constraints`, which states that CHECK bodies
+/// are not re-diffed and that presence plus enforcement are what round-trip.
+///
+/// What this gives up: a CHECK whose body is altered out of band while keeping
+/// its name and kind is not reported. That is a real loss, not a technicality -
+/// swapping `CHECK (quantity > 0)` for `CHECK (quantity > -2147483648)` leaves the
+/// invariant vacuous and this differ silent. Recovering it needs the treatment
+/// foreign keys already get: parse the catalog text back to the closed AST and
+/// compare structurally, rather than comparing spellings.
+///
+/// Kept separate from [`constraint_definition_is_retained`] on purpose. Not
+/// comparing a body is not a reason to stop recording it: the guard's fail-closed
+/// refusal reports the live definition so an operator can see what is actually
+/// installed, and collapsing that to `<present>` would remove the only text in the
+/// message that says anything specific.
 fn constraint_definition_is_comparable(kind: &str) -> bool {
+    !matches!(kind, "EXCLUDE" | "CHECK")
+}
+
+/// Whether to store a live constraint's catalog text on the introspected snapshot.
+///
+/// Wider than [`constraint_definition_is_comparable`]: a `CHECK` body is retained
+/// even though it is never compared, because it is read for diagnostics rather than
+/// for equality. `EXCLUDE` stays empty, matching what the offline renderer emits for
+/// it, so the two sides agree on the field being absent rather than unread.
+fn constraint_definition_is_retained(kind: &str) -> bool {
     kind != "EXCLUDE"
 }
 
@@ -2609,5 +2649,127 @@ impl DriftReport {
             && self.unexpected_objects.is_empty()
             && self.altered_objects.is_empty()
             && self.orphan_journal.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod constraint_definition_tests {
+    use super::{diff_snapshots, ConstraintSnapshot};
+    use crate::model::snapshot::{SchemaSnapshot, TableSnapshot};
+    use crate::TableRuntimeOptions;
+
+    /// These cover the differ directly rather than through a live database. The
+    /// PostgreSQL round-trip oracle that found the CHECK mismatch is behind
+    /// `skip_if_no_pg!`, so on a checkout with no database configured it reports a
+    /// pass without running, and nothing else would notice this contract changing.
+    fn snapshot_with(constraints: Vec<ConstraintSnapshot>) -> SchemaSnapshot {
+        let mut snapshot = SchemaSnapshot::default();
+        snapshot.tables.insert(
+            "orders".to_string(),
+            TableSnapshot {
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                constraints,
+                runtime_options: TableRuntimeOptions::default(),
+                partition_by: None,
+                comment: None,
+                stored_create_sql: None,
+            },
+        );
+        snapshot
+    }
+
+    fn constraint(name: &str, kind: &str, definition: &str) -> ConstraintSnapshot {
+        ConstraintSnapshot {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            definition: definition.to_string(),
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn check_bodies_that_differ_only_in_spelling_are_not_drift() {
+        // The exact pair that PostgreSQL 18.4 produces: the offline renderer quotes
+        // every column, `pg_get_constraintdef` deparses without the quotes.
+        let expected = snapshot_with(vec![constraint(
+            "orders_quantity_check",
+            "CHECK",
+            "CHECK ((\"quantity\" > 0))",
+        )]);
+        let actual = snapshot_with(vec![constraint(
+            "orders_quantity_check",
+            "CHECK",
+            "CHECK ((quantity > 0))",
+        )]);
+
+        assert!(
+            diff_snapshots(&expected, &actual).is_clean(),
+            "a CHECK body that differs only in deparse spelling must not report drift"
+        );
+    }
+
+    #[test]
+    fn a_renamed_check_constraint_is_still_drift() {
+        // Skipping the body comparison must not make CHECK constraints invisible:
+        // without this, the test above is satisfied by a differ that ignores them.
+        let expected = snapshot_with(vec![constraint(
+            "orders_quantity_check",
+            "CHECK",
+            "CHECK ((quantity > 0))",
+        )]);
+        let actual = snapshot_with(vec![constraint(
+            "orders_quantity_chk",
+            "CHECK",
+            "CHECK ((quantity > 0))",
+        )]);
+
+        let drift = diff_snapshots(&expected, &actual);
+        assert!(
+            !drift.is_clean(),
+            "a CHECK constraint present under a different name must report drift: {drift:#?}"
+        );
+    }
+
+    #[test]
+    fn a_check_constraint_that_changed_kind_is_still_drift() {
+        let expected = snapshot_with(vec![constraint(
+            "orders_quantity_check",
+            "CHECK",
+            "CHECK ((quantity > 0))",
+        )]);
+        let actual = snapshot_with(vec![constraint(
+            "orders_quantity_check",
+            "UNIQUE",
+            "UNIQUE (quantity)",
+        )]);
+
+        let drift = diff_snapshots(&expected, &actual);
+        assert!(
+            !drift.is_clean(),
+            "a constraint whose kind changed must report drift: {drift:#?}"
+        );
+    }
+
+    #[test]
+    fn a_unique_body_change_is_still_drift() {
+        // The exclusion is scoped to CHECK and EXCLUDE. Every other kind still
+        // compares its body, so widening the exclusion by accident shows up here.
+        let expected = snapshot_with(vec![constraint(
+            "orders_code_key",
+            "UNIQUE",
+            "UNIQUE (code)",
+        )]);
+        let actual = snapshot_with(vec![constraint(
+            "orders_code_key",
+            "UNIQUE",
+            "UNIQUE (code, tenant)",
+        )]);
+
+        let drift = diff_snapshots(&expected, &actual);
+        assert!(
+            !drift.is_clean(),
+            "a UNIQUE body change must still report drift: {drift:#?}"
+        );
     }
 }
