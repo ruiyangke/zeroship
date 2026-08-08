@@ -105,14 +105,21 @@ impl ProducerContext for DeliveryContext {
 ///
 /// # This transport is PLAINTEXT and UNAUTHENTICATED, by construction
 ///
-/// There is no TLS and no SASL here, and that is enforced at two independent
-/// levels - so an operator who needs an encrypted or authenticated broker link
-/// cannot get one by configuration alone, and will not find out by trying.
+/// There is no TLS and no SASL here, and two separate things stop it - so an
+/// operator who needs an encrypted or authenticated broker link cannot get one
+/// by configuration alone, and will not find out by trying.
+///
+/// They are not two barriers on one path; they cover DIFFERENT vectors, which
+/// is the part worth keeping straight. (1) stops a config file introducing a
+/// security key. (2) stops CODE doing it - `RedpandaConfig` appears nowhere
+/// outside this file and both `ClientConfig::new()` call sites are below, so a
+/// future `producer_config.set("security.protocol", ..)` would sail past serde
+/// and hit (2) instead. Neither one covers the other's vector.
 ///
 /// 1. **The fields below are the whole surface**, and the struct is
 ///    `deny_unknown_fields`. Passing `security.protocol`, `sasl.mechanism` or
 ///    any other librdkafka security key is a deserialization ERROR, not an
-///    ignored key.
+///    ignored key. This is the CONFIG vector only.
 /// 2. **librdkafka is not built with them.** The workspace pins
 ///    `rdkafka = { default-features = false, features = ["cmake-build"] }`.
 ///    In rdkafka 0.36.2 `ssl`, `sasl` and `gssapi` are separate opt-in
