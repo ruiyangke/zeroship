@@ -155,6 +155,18 @@ impl std::fmt::Debug for BillingStreamConfig {
 }
 
 impl BillingStreamConfig {
+    /// Build the billing stream config for THIS replica.
+    ///
+    /// Resolves the replica identity from `HOSTNAME` and delegates to
+    /// [`Self::new_for_replica`]. See there for why the recompute group is
+    /// per-replica and the forwarder group is not.
+    ///
+    /// The fallback when `HOSTNAME` is unset is a single fixed string, which is
+    /// correct for the case that produces it (one control process on a box) and
+    /// WRONG if someone runs two replicas on one host with no hostname set.
+    /// That is a narrow gap and it is named here rather than papered over: the
+    /// symptom would be the same partial-snapshot defect this split exists to
+    /// close.
     pub fn new(
         registry: Arc<StreamRegistry>,
         transport_id: impl Into<String>,
@@ -162,8 +174,67 @@ impl BillingStreamConfig {
         forwarder_group_id: impl Into<String>,
         recompute_group_id: impl Into<String>,
     ) -> Result<Self, StreamError> {
+        let replica = std::env::var("HOSTNAME")
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "solo".to_string());
+        Self::new_for_replica(
+            registry,
+            transport_id,
+            base_config,
+            forwarder_group_id,
+            recompute_group_id,
+            &replica,
+        )
+    }
+
+    /// Build the config with an explicit replica identity.
+    ///
+    /// The two consumer groups here have OPPOSITE requirements, which is the
+    /// whole reason this constructor exists:
+    ///
+    ///   * the FORWARDER is a work queue. Every usage event must be forwarded
+    ///     exactly once, so all replicas share one group and Kafka splits the
+    ///     partitions between them. A per-replica group would forward each
+    ///     event once per replica.
+    ///   * the RECOMPUTE is a witness. It rewinds, reads the COMPLETE retained
+    ///     stream, and calls `replace_period_snapshot`, which DELETEs the
+    ///     period and rewrites it. Two replicas in one group each receive a
+    ///     subset of partitions, each computes a partial total, and each
+    ///     overwrites the other. The month total silently lands below the
+    ///     truth and spend enforcement reads that number.
+    ///
+    /// So the recompute group is suffixed per replica, making each replica the
+    /// sole member of its own group and therefore the owner of every partition.
+    ///
+    /// Per REPLICA, not per BOOT: the recompute never commits an offset (it
+    /// rewinds every cycle), so a fresh group each restart would buy nothing
+    /// and leave abandoned group metadata behind for every process that ever
+    /// ran.
+    pub fn new_for_replica(
+        registry: Arc<StreamRegistry>,
+        transport_id: impl Into<String>,
+        base_config: StreamConfig,
+        forwarder_group_id: impl Into<String>,
+        recompute_group_id: impl Into<String>,
+        replica_id: &str,
+    ) -> Result<Self, StreamError> {
         let forwarder_group_id = forwarder_group_id.into().trim().to_string();
-        let recompute_group_id = recompute_group_id.into().trim().to_string();
+        let replica_suffix: String = replica_id
+            .trim()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let recompute_group_id = format!(
+            "{}-{}",
+            recompute_group_id.into().trim(),
+            if replica_suffix.is_empty() {
+                "solo"
+            } else {
+                replica_suffix.as_str()
+            }
+        );
         let topic = stream_topic(&base_config)?;
         let control_usage_outbox_wal_path = std::env::var("CONTROL_USAGE_OUTBOX_WAL_PATH")
             .ok()
@@ -586,5 +657,78 @@ impl AppState {
         client_id: &str,
     ) -> bool {
         zeroship_core::auth::trusted_clients::is_trusted_client_id(trusted_oauth_clients, client_id)
+    }
+}
+
+#[cfg(test)]
+mod billing_stream_group_tests {
+    use super::*;
+
+    fn config_for(replica: &str) -> BillingStreamConfig {
+        let base = StreamConfig::new(serde_json::json!({
+            "topic": "zeroship.usage.events",
+            "brokers": "127.0.0.1:9092",
+            "group.id": "placeholder",
+        }));
+        BillingStreamConfig::new_for_replica(
+            Arc::new(StreamRegistry::default()),
+            "memory",
+            base,
+            DEFAULT_BILLING_FORWARDER_GROUP_ID,
+            DEFAULT_SPEND_RECOMPUTE_GROUP_ID,
+            replica,
+        )
+        .expect("config")
+    }
+
+    #[test]
+    fn two_replicas_get_separate_recompute_groups_but_share_the_forwarder_group() {
+        let a = config_for("control-a");
+        let b = config_for("control-b");
+
+        // THE DEFECT. The recompute REBUILDS the whole period snapshot and
+        // calls `replace_period_snapshot`, so it must read every partition.
+        // Two replicas in ONE consumer group split partitions between them,
+        // each computes a partial total, and each overwrites the other - the
+        // month total lands somewhere below the truth with nothing logged.
+        assert_ne!(
+            a.recompute_group_id(),
+            b.recompute_group_id(),
+            "two control replicas share a recompute group, so each sees only its \
+             assigned partitions and writes a partial snapshot over the other's"
+        );
+
+        // The OPPOSITE requirement, in the same struct, which is why this is
+        // not "make all the groups unique". The forwarder is a WORK QUEUE:
+        // every event must be forwarded exactly once, so splitting partitions
+        // across replicas is the correct behaviour and a per-replica group
+        // would forward each event N times.
+        assert_eq!(
+            a.forwarder_group_id(),
+            b.forwarder_group_id(),
+            "the forwarder group must stay shared or every event is forwarded once per replica"
+        );
+    }
+
+    #[test]
+    fn a_replicas_recompute_group_is_stable_across_restarts() {
+        // Unique per REPLICA, not per BOOT. A fresh group each restart would
+        // leave abandoned group metadata on the broker for every process that
+        // ever ran, and buys nothing: the recompute rewinds every cycle and
+        // never commits an offset.
+        assert_eq!(
+            config_for("control-a").recompute_group_id(),
+            config_for("control-a").recompute_group_id(),
+        );
+    }
+
+    #[test]
+    fn the_three_groups_still_differ_after_the_suffix() {
+        // `validate()` rejects overlap between forwarder / recompute / producer.
+        // Suffixing must not accidentally collide any pair.
+        let a = config_for("control-a");
+        assert_ne!(a.forwarder_group_id(), a.recompute_group_id());
+        assert_ne!(a.recompute_group_id(), DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID);
+        assert_ne!(a.forwarder_group_id(), DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID);
     }
 }
