@@ -126,7 +126,8 @@ pub struct JwksCache {
     /// Bounded budget for a single JWKS HTTP fetch (see
     /// [`DEFAULT_JWKS_FETCH_TIMEOUT`]). Internal — not part of the public
     /// constructor surface; defaults to 5s and is only overridable from
-    /// in-crate tests via [`JwksCache::with_fetch_timeout_for_test`].
+    /// in-crate tests via `JwksCache::with_fetch_timeout_for_test` - a code span,
+    /// not a link: the method is `#[cfg(test)]`, so rustdoc cannot resolve it.
     fetch_timeout: Duration,
 }
 
