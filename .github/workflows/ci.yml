@@ -352,8 +352,12 @@ jobs:
       # All three are the committed generated artifacts having drifted from the
       # vendored engine. Fixing that removes all three exclusions at once; it
       # waits on the decision about which engine commit is authoritative.
-      - run: >
-          pnpm -r --no-bail test
-          --filter='!zero-migrate'
-          --filter='!@zeroship/migrate'
-          --filter='!@zeroship/vite-plugin'
+      #
+      # Runs through a script rather than inline so the result can be COUNTED.
+      # `pnpm -r` skips a package whose `test` script is renamed or removed, in
+      # silence - measured, and invisible here because the filter selects 41
+      # projects of which only 16 run a suite at all. The script carries the
+      # filters and the floors; see its header for what it does and does not
+      # catch.
+      - name: JavaScript suites
+        run: tests/run_js_suite.sh
