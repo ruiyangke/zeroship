@@ -131,6 +131,26 @@ jobs:
         run: tests/lib_measurement_integrity_selftest.sh
       - name: Doc links resolve
         run: tests/run_doc_gate.sh
+      # The source-path half of the citation checks above. That step resolves
+      # comments naming a `docs/**.md` file; this one resolves comments naming a
+      # source file, which rot identically and are read the same way - as "the
+      # justification is over there" - so a citation pointing at a file that
+      # moved stops the reader looking and nothing notices. One sweep found 82.
+      #
+      # The script carries its own resolution rules and the reasons each exists;
+      # they were measured against this tree rather than assumed, and getting any
+      # of them wrong produces a confident wrong answer rather than an obvious
+      # one. It also prints the corpus size on success, not only inside a failure
+      # message, because a count nobody sees until the gate has already failed
+      # cannot warn anyone.
+      #
+      # Note when this fires: every citation it has ever caught named a REAL file
+      # at a wrong address - stale, crate-relative, or reaching into the vendored
+      # engine - not an invented one. The first question is "where did this move
+      # to", not "does this exist". Deleting the citation is almost always the
+      # wrong repair.
+      - name: Source citations resolve
+        run: tests/source_citation_scan.sh
       - name: Test-target enumeration floor
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
