@@ -1,28 +1,50 @@
-//! Heap-cap tests for `RuntimeBuilder::heap_limit_mb` (TODO.md lever 1).
+//! Heap-cap tests for `RuntimeBuilder::heap_limit_mb`.
 //!
-//! V8's near-heap-limit callback fires before the allocator hard-fails;
-//! after the runtime's hit-counter exceeds its threshold, the isolate
-//! is terminated. The user-visible signal at the dispatch boundary is
-//! a 500 Response whose body carries a V8-flavoured error message
-//! (typically a `RangeError` — "Array buffer allocation failed",
-//! "Invalid string length", etc.).
+//! The intended contract: V8's near-heap-limit callback fires before the
+//! allocator hard-fails, the runtime grows the cap a few times, and after
+//! `MAX_HEAP_LIMIT_HITS` it calls `terminate_execution`. The app is supposed to
+//! see a non-2xx, never a success and never a hang.
 //!
-//! These tests don't try to assert the exact message string — V8 picks
-//! it based on which allocation site lost first. Instead they assert
-//! the high-level user contract:
-//!   1. unset → V8 default → 100 MB array stringifies fine.
-//!   2. set & exceeded → 500 with an error indicator.
-//!   3. set & not exceeded → handler runs to completion.
+//! `runtime_heap_cap_enforces_oom` DOES NOT PASS. It is failing on purpose
+//! rather than ignored, because the arm it covers is the only one where the cap
+//! has to do anything: the other two tests allocate comfortably under their
+//! limits, so they would pass against a cap that never fires at all.
+//!
+//! Two distinct failures were measured against `heap_limit_mb(32)`:
+//!
+//!   Large-object space evades the cap. 400 retained 1 MiB strings return
+//!   HTTP 200 with `oom:false`, and the process peaked at 229 MB RSS - about
+//!   7x the configured cap. This is the case asserted below.
+//!
+//!   Regular old-space allocation hangs instead. 20k objects of 100 unique
+//!   keys each produce a `Pending` that never settles; observed at both a 30s
+//!   and a 150s deadline, so it is a hang and not slow JS.
+//!
+//! Both were measured here; NOT measured is whether the near-heap-limit
+//! callback fires in either case, which would separate "the cap is never
+//! consulted" from "it fires and the growth outpaces the termination". That
+//! needs a tracing subscriber this test target does not currently install.
 
 mod common;
 use common::*;
 
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime};
+use std::time::Duration;
+
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 use zeroship_runtime::channel::CancelFlag;
 
-/// Run a single fetch handler against a freshly-built runtime and
-/// return the (status, body) pair. Sync path only — heap allocation
-/// inside `default.fetch` is synchronous, no pump needed.
+/// Run a single fetch handler against a freshly-built runtime and return the
+/// (status, body) pair.
+///
+/// This drives `Pending` to settlement instead of rejecting it. A handler that
+/// exhausts the heap does NOT come back synchronously: V8 terminates the
+/// isolate mid-allocation, the dispatch cannot produce a Response on the spot,
+/// and the outcome arrives as `Pending` carrying a `DispatchError`. A sync-only
+/// helper reports that as a harness panic, which reads as "the cap is broken"
+/// when the cap is in fact the thing that fired.
+///
+/// A `DispatchError` is mapped to status 500 rather than panicking: for these
+/// tests it IS the result under test, not a harness failure.
 fn dispatch_against(runtime: &Runtime) -> (u16, String) {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -38,10 +60,37 @@ fn dispatch_against(runtime: &Runtime) -> (u16, String) {
         FetchOutcome::Response { status, body, .. } => {
             (status, String::from_utf8_lossy(&body).into_owned())
         }
-        other => panic!(
-            "expected sync Response, got {}",
-            std::any::type_name_of_val(&other),
-        ),
+        // Name the VARIANT. `type_name_of_val` on the binding prints the enum's
+        // own path for every arm, so a mismatch here used to report only
+        // "got FetchOutcome" - true of all four and a description of none.
+        FetchOutcome::Stream { status, .. } => {
+            panic!("expected sync Response, got Stream (status {status})")
+        }
+        FetchOutcome::Pending { rx, cancel: _ } => compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                runtime.start_pump();
+                let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("pending heap-limit dispatch never settled");
+                match settled {
+                    Ok(SettledFetch::Response { status, body, .. }) => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
+                    Ok(SettledFetch::Stream { status, .. }) => {
+                        (status, "<stream>".to_string())
+                    }
+                    Ok(SettledFetch::WebSocketUpgrade { .. }) => {
+                        panic!("unexpected WebSocketUpgrade from a heap-limit dispatch")
+                    }
+                    // The OOM surface. Not a harness failure - the contract
+                    // under test is that the app does not get a 2xx.
+                    Err(e) => (500, format!("DispatchError: {e:?}")),
+                }
+            }),
+        FetchOutcome::WebSocketUpgrade { ws_id, .. } => {
+            panic!("expected sync Response, got WebSocketUpgrade (ws_id {ws_id})")
+        }
     }
 }
 
@@ -78,13 +127,21 @@ fn runtime_default_no_heap_cap() {
 // 2 — heap_limit_mb(32): allocate well past the cap, expect a non-2xx.
 // ---------------------------------------------------------------------------
 //
+// KNOWN FAILING. The cap does not bound this allocation: see the module header
+// for the two measured behaviours and what was not measured.
+//
 // V8 routes ArrayBuffer backing stores through its array-buffer allocator,
 // which is NOT counted against the heap limit configured by
-// `CreateParams::heap_limits`. Only allocations that live in the GC heap
-// (plain JS objects, strings, closures, retained property tables) trip
-// the near-heap-limit callback. The test grows a retained array of
-// long strings — each `repeat(...)` produces a fresh in-heap string,
-// and the outer Array keeps them alive so GC can't reclaim.
+// `CreateParams::heap_limits`. Strings do live in the GC heap - but a 1 MiB
+// string exceeds V8's max regular object size, so it lands in large-object
+// space, and that is the allocation shape this test shows the cap failing to
+// bound.
+//
+// The allocation is deliberately a few hundred large strings rather than the
+// 100M small property stores this test used before. That version could not
+// finish inside any reasonable deadline, so the test reported a timeout whose
+// message named neither the cap nor the allocation - it looked like a hang in
+// the harness rather than a result about the runtime.
 
 #[test]
 fn runtime_heap_cap_enforces_oom() {
@@ -94,21 +151,10 @@ fn runtime_heap_cap_enforces_oom() {
             fetch(request, env, ctx) {
                 const live = [];
                 try {
-                    // Push retained objects with many unique-keyed
-                    // properties. Plain JS objects (and their hidden-
-                    // class transitions / property tables) are old-gen
-                    // heap-resident. Each iteration adds ~120 KB of
-                    // retained heap; 100k iterations → ~12 GB target,
-                    // well past any reasonable cap. The bound caps
-                    // the loop so a misconfigured test fails loudly
-                    // rather than hangs.
-                    for (let i = 0; i < 100_000; i++) {
-                        const o = {};
-                        for (let k = 0; k < 1000; k++) {
-                            // Unique key per (i, k) → V8 can't intern.
-                            o["k_" + i + "_" + k] = "v_" + i + "_" + k;
-                        }
-                        live.push(o);
+                    // 1 MiB in-heap strings, retained. Reaches a 32 MiB cap in
+                    // a few dozen iterations instead of 100M property stores.
+                    for (let i = 0; i < 400; i++) {
+                        live.push("x".repeat(1024 * 1024) + i);
                     }
                 } catch (e) {
                     return new Response(JSON.stringify({
