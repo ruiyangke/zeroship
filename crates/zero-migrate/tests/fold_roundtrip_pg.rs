@@ -1,11 +1,12 @@
-//! Live PostgreSQL round-trip checks for three `fold_ops` primary-key name cases.
+//! Live PostgreSQL round-trip checks for `fold_ops` primary-key and lifecycle cases.
 //!
-//! Each test applies a validated IR plan through `MigrationEngine::apply_plan`,
+//! The primary-key tests apply a validated IR plan through
+//! `MigrationEngine::apply_plan`,
 //! verifies the resulting primary-key catalog state, folds the same resolved ops
 //! offline, and checks the folded snapshot against live introspection with
-//! `diff_snapshots(...).is_clean()`. The first two checks intentionally stay red
-//! until the fold models PostgreSQL's implicit-name uniquification. The third is
-//! the positive control for adopting a standalone candidate index.
+//! `diff_snapshots(...).is_clean()`. The first two checks cover PostgreSQL's
+//! implicit-name uniquification. The third covers adopting a standalone candidate
+//! index. The lifecycle tests apply and compare at every listed stable point.
 //!
 //! A clean drift result is strictly narrower than saying that the snapshots agree.
 //! `IndexSnapshot` equality excludes `opclass` and `nulls_not_distinct`. It does
@@ -309,5 +310,318 @@ async fn using_candidate_index_keeps_fold_and_live_primary_key_names_aligned() {
             ))
         }
     })
+    .await;
+}
+
+async fn assert_lifecycle_roundtrip(label: &str, source: &str, checkpoints: &[(&str, usize)]) {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token();
+    let cfg = cfg_for(&schema);
+    let quoted_schema = quote_ident(&cfg.project_schema);
+    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    session
+        .batch(&format!("CREATE SCHEMA {quoted_schema}"))
+        .await
+        .expect("create isolated fold lifecycle schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure migration journal: {error}"))?;
+
+        let policy = support::no_inject(&cfg.project_schema);
+        let authored: MigrationIr =
+            serde_json::from_str(source).map_err(|error| format!("parse test IR: {error}"))?;
+        let resolved = resolve_create_table_policy(&authored, &policy, &cfg.project_schema)
+            .map_err(|error| format!("resolve create-table policy: {error}"))?;
+        let resolved_source = serde_json::to_string(&resolved)
+            .map_err(|error| format!("serialize resolved test IR: {error}"))?;
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let artifact = author
+            .load_and_lower_guarded(
+                &resolved_source,
+                OWNER,
+                &BTreeMap::new(),
+                &LiveSchema::default(),
+                &guard,
+            )
+            .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
+
+        if artifact.op_spans.len() != resolved.ops.len() {
+            return Err(format!(
+                "lowered {} operation spans for {} resolved ops",
+                artifact.op_spans.len(),
+                resolved.ops.len()
+            ));
+        }
+
+        let engine = MigrationEngine::new();
+        let mut applied_ops = Vec::new();
+        let mut next_checkpoint = 0;
+        for (op_index, span) in artifact.op_spans.iter().enumerate() {
+            if span.op != resolved.ops[op_index] {
+                return Err(format!(
+                    "lowered operation span {op_index} does not match the resolved operation"
+                ));
+            }
+
+            let mut ranges = vec![span.step_range.clone()];
+            ranges.extend(span.additional_step_ranges.iter().cloned());
+            ranges.sort_by_key(|range| range.start);
+            for range in ranges {
+                engine
+                    .apply_plan(
+                        &artifact.plan.steps[range],
+                        Approval::Approved,
+                        &backend,
+                        &cfg,
+                        "fold-roundtrip-pg",
+                        LockMode::Acquire,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("apply IR plan operation {}: {error}", op_index + 1)
+                    })?;
+            }
+            applied_ops.push(resolved.ops[op_index].clone());
+
+            if checkpoints
+                .get(next_checkpoint)
+                .is_some_and(|(_, op_count)| *op_count == applied_ops.len())
+            {
+                let (checkpoint, _) = checkpoints[next_checkpoint];
+                let expected = fold_ops(
+                    &applied_ops,
+                    SqlDialect::Postgres,
+                    &cfg.project_schema,
+                    &support::no_inject(&cfg.project_schema),
+                )
+                .map_err(|error| {
+                    format!("{checkpoint}: fold the applied PostgreSQL ops: {error}")
+                })?;
+                let actual = snapshot_schema(&session, &cfg.project_schema)
+                    .await
+                    .map_err(|error| {
+                        format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
+                    })?;
+                let drift = diff_snapshots(&expected, &actual);
+                if !drift.is_clean() {
+                    return Err(format!(
+                        "{checkpoint}: folded and live PostgreSQL schemas must have clean drift: \
+                         {drift:#?}"
+                    ));
+                }
+
+                // A CHECK body is deliberately not compared, so a clean drift result
+                // says nothing about whether the live text was read at all. The guard's
+                // fail-closed refusal prints this field, so an empty one degrades that
+                // message to `<present>`. Assert it survives introspection here,
+                // because nothing in the comparison would notice if it stopped.
+                for (table, snapshot) in &actual.tables {
+                    for constraint in &snapshot.constraints {
+                        if constraint.kind == "CHECK" && constraint.definition.is_empty() {
+                            return Err(format!(
+                                "{checkpoint}: live CHECK constraint {table}.{} lost its \
+                                 catalog definition text",
+                                constraint.name
+                            ));
+                        }
+                    }
+                }
+                next_checkpoint += 1;
+            }
+        }
+
+        if next_checkpoint != checkpoints.len() {
+            return Err(format!(
+                "reached {next_checkpoint} of {} lifecycle checkpoints",
+                checkpoints.len()
+            ));
+        }
+        Ok(())
+    }
+    .await;
+
+    let cleanup = session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {quoted_schema} CASCADE; \
+             DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
+        ))
+        .await;
+    match (work, cleanup) {
+        (Ok(()), Ok(())) => {}
+        (Err(work), Ok(())) => panic!("{label}: {work}"),
+        (Ok(()), Err(cleanup)) => panic!("{label}: drop PostgreSQL test schemas: {cleanup}"),
+        (Err(work), Err(cleanup)) => {
+            panic!("{label}: {work}; cleanup failed: {cleanup}")
+        }
+    }
+}
+
+#[compio::test]
+async fn add_and_alter_columns() {
+    // Exercise plain column alteration stages. This does not cover setColumnType.using.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "add_and_alter_columns",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"column_lifecycle","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"amount","type":"int","nullable":true}
+        ]},
+        {"op":"addColumn","table":"column_lifecycle","column":"note",
+         "type":"text","nullable":true},
+        {"op":"setColumnNotNull","table":"column_lifecycle","column":"note"},
+        {"op":"dropColumnNotNull","table":"column_lifecycle","column":"note"},
+        {"op":"setColumnDefault","table":"column_lifecycle","column":"note",
+         "value":{"literal":{"value":"memo"}}},
+        {"op":"dropColumnDefault","table":"column_lifecycle","column":"note"},
+        {"op":"setColumnType","table":"column_lifecycle","column":"amount",
+         "toType":"bigInt"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "add and alter columns",
+        source,
+        &[
+            ("create table", 1),
+            ("add column", 2),
+            ("set column not null", 3),
+            ("drop column not null", 4),
+            ("set column default", 5),
+            ("drop column default", 6),
+            ("set column type", 7),
+        ],
+    )
+    .await;
+}
+
+#[compio::test]
+async fn standalone_constraint_lifecycle() {
+    // Exercise standalone constraint stages. This does not cover NOT VALID state.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "standalone_constraint_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"constraint_parent","columns":[
+          {"name":"id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"createTable","name":"constraint_child","columns":[
+          {"name":"code","type":"text","nullable":false},
+          {"name":"quantity","type":"int","nullable":false},
+          {"name":"parent_id","type":"int","nullable":false}
+        ]},
+        {"op":"addConstraint","table":"constraint_child","constraint":{
+          "name":"constraint_child_code_key",
+          "kind":{"kind":"unique","columns":["code"]}
+        }},
+        {"op":"addConstraint","table":"constraint_child","constraint":{
+          "name":"constraint_child_quantity_check",
+          "kind":{"kind":"check","expr":{
+            "node":"binOp","op":"gt",
+            "lhs":{"node":"colRef","name":"quantity"},
+            "rhs":{"node":"literal","value":0}
+          }}
+        }},
+        {"op":"addConstraint","table":"constraint_child","constraint":{
+          "name":"constraint_child_parent_fkey",
+          "kind":{"kind":"fk","columns":["parent_id"],
+            "referencesTable":"constraint_parent","referencesColumns":["id"]}
+        }},
+        {"op":"dropConstraint","table":"constraint_child",
+         "name":"constraint_child_code_key"},
+        {"op":"dropConstraint","table":"constraint_child",
+         "name":"constraint_child_quantity_check"},
+        {"op":"dropConstraint","table":"constraint_child",
+         "name":"constraint_child_parent_fkey"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "standalone constraint lifecycle",
+        source,
+        &[
+            ("create constraint tables", 2),
+            ("add unique constraint", 3),
+            ("add check constraint", 4),
+            ("add foreign-key constraint", 5),
+            ("drop unique constraint", 6),
+            ("drop check constraint", 7),
+            ("drop foreign-key constraint", 8),
+        ],
+    )
+    .await;
+}
+
+#[compio::test]
+async fn named_type_lifecycle() {
+    // Exercise named types and their column uses. This does not cover type attributes.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "named_type_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createEnum","name":"account_state",
+         "values":["active","disabled"]},
+        {"op":"createDomain","name":"positive_number","as":"int"},
+        {"op":"createTable","name":"typed_rows","columns":[
+          {"name":"state","type":{"enum":{"name":"account_state"}},
+           "nullable":false},
+          {"name":"amount","type":{"domain":{"name":"positive_number"}},
+           "nullable":true}
+        ]},
+        {"op":"dropTable","table":"typed_rows"},
+        {"op":"dropDomain","name":"positive_number"},
+        {"op":"dropEnum","name":"account_state"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "named type lifecycle",
+        source,
+        &[
+            ("create enum and domain", 2),
+            ("create table using named types", 3),
+            ("drop table using named types", 4),
+            ("drop domain", 5),
+            ("drop enum", 6),
+        ],
+    )
+    .await;
+}
+
+#[compio::test]
+async fn sequence_lifecycle() {
+    // Exercise catalog-visible sequence attributes. This does not cover restart state.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "sequence_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createSequence","name":"roundtrip_seq","as":"int",
+         "increment":5,"start":100,"minValue":10,"maxValue":1000,
+         "cache":7,"cycle":true},
+        {"op":"alterSequence","name":"roundtrip_seq","increment":9,
+         "minValue":20,"maxValue":2000,"cache":11,"cycle":false},
+        {"op":"dropSequence","name":"roundtrip_seq"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "sequence lifecycle",
+        source,
+        &[
+            ("create sequence", 1),
+            ("alter sequence", 2),
+            ("drop sequence", 3),
+        ],
+    )
     .await;
 }
