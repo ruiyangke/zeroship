@@ -230,9 +230,10 @@ impl S3 {
                         }
                         None => producer_done = true,
                     },
-                    done = inflight.next() => match done {
-                        Some(res) => parts.push(res?),
-                        None => {} // set drained to empty; next iter re-reads
+                    // `None` means the set drained; nothing to do, the next
+                    // iteration re-reads it.
+                    done = inflight.next() => if let Some(res) = done {
+                        parts.push(res?);
                     },
                 }
             }
