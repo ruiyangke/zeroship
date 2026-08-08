@@ -697,17 +697,32 @@ pub fn validate_field_name_for_declaration(
 /// Legacy base62-UUIDv7 ID prefixes reserved for the platform. An internal
 /// descriptor using `usr` would mint IDs that collide with platform user IDs,
 /// so the prefix is rejected.
-/// Only `usr` is reserved for now (matches the SDK-side fence in
-/// `sdks/db/src/types.ts`).
+/// Only `usr` is reserved for now. The db SDK fences the same name at build
+/// time, but that SDK ships with the consuming product and is not vendored
+/// here, so this list is the copy this crate enforces and the two are kept in
+/// step by hand.
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 /// Validate a legacy internal platform-ID prefix.
 ///
-/// Defense-in-depth mirror of the SDK-side check in
-/// the db SDK types: the SDK throws at `pnpm dev` build time, but
-/// a hand-built wire payload (a raw `default = { fetch }` deploy calling
-/// the `db.registerModel` op directly) skips the SDK entirely, so the
-/// runtime re-validates at register-model.
+/// The single source of truth in this crate for both rules below: the
+/// declarative author ([`crate::render::declarative`]), the IR facet validator
+/// ([`crate::model::validate`]) and the descriptor DDL builder further down
+/// this file all route here rather than keeping their own copy.
+///
+/// Defense in depth, and deliberately unconditional. Two fences sit upstream of
+/// this one in the consuming product: the db SDK rejects a reserved prefix at
+/// build time, and the platform-internal `registerModel` op that the descriptor
+/// route ends in over there is itself fenced off from creator JS. Neither fence
+/// is in this repository, and this crate is a library - it validates the
+/// descriptor it is handed and cannot see which producer built it.
+///
+/// Whether some wire route delivers a descriptor to these emitters without
+/// crossing the SDK fence is UNTRACED: nobody has followed that path end to end
+/// in either repository, so treat it as neither established nor ruled out. The
+/// check earns its place on the usual defense-in-depth terms - a charset scan
+/// over a string already in hand, guarding against IDs that would collide with
+/// platform user IDs - and not on a demonstrated bypass.
 ///
 /// Rules:
 /// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
@@ -1017,11 +1032,12 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // policy an authored `id` is an ordinary author-owned column.
             // so we neither duplicate the `id` column nor trip the
             // reserved-name fence in `validate_field_name_for_declaration`.
-            // We still validate the declared `idPrefix` here (defense in
-            // depth — mirrors the SDK fence so a hand-built wire payload
-            // can't smuggle a reserved/malformed prefix past register-
-            // model). A field named `id` with any OTHER type falls
-            // through to `field_to_column_for_dialect`, which rejects it.
+            // We still validate the declared `idPrefix` here, BEFORE the fold
+            // skips the field: once it is skipped nothing further down this
+            // emitter ever looks at the prefix again. `validate_id_prefix`
+            // carries why the check is unconditional. A field named `id` with
+            // any OTHER type falls through to `field_to_column_for_dialect`,
+            // which rejects it.
             if let Some(prefix) = def.get("idPrefix").and_then(|p| p.as_str()) {
                 validate_id_prefix(prefix)?;
             }

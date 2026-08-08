@@ -730,9 +730,12 @@ SELECT c.relname AS table_name,
         //     pass (stamps `MaskMeta` on the PARENT);
         //   - `zero-migrate:enc:…` on the encrypted column itself → parsed inline here into
         //     `EncryptionMeta`. On PG the inline `/* zero-migrate:enc */` DDL comment is
-        //     parse-discarded, so the engine/registerModel also write a
-        //     `COMMENT ON COLUMN` carrying the `zero-migrate:enc:` body; this is where the
-        //     data plane (and the diff) recover it.
+        //     parse-discarded, so whoever writes the column must ALSO write a
+        //     `COMMENT ON COLUMN` carrying the `zero-migrate:enc:` body; this engine does
+        //     it from `render::declarative`'s `comment_stmt`. This read side is
+        //     producer-agnostic - it recovers the body from `pg_description` without
+        //     caring which writer put it there - and is where the data plane (and the
+        //     diff) get it back.
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
             if comment.starts_with("zero-migrate:mask:") && column.ends_with("_masked") {
@@ -2135,8 +2138,11 @@ mod tests {
     // SCOPE NOTE: CHECK-constraint evolution (extending the
     // discriminator's IN-list, adding per-variant integrity CHECKs)
     // is NOT yet diffed — it is additive-by-construction, so skipping it
-    // is safe. Re-running registerModel today does
-    // not amend existing CHECK constraints. This is a known follow-up.
+    // is safe: this diff engine does not model constraints at all, so it
+    // never emits an op that amends an existing CHECK and a re-deploy
+    // leaves the live ones as first created.
+    // (Whether a consumer's own register path amends them is not traced
+    // here.) This is a known follow-up.
     // -----------------------------------------------------------------
 
     #[test]

@@ -1795,8 +1795,8 @@ pub struct FieldDescriptor {
     /// For a `{ type: "id", idPrefix }` field, the declared typed-id prefix
     /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK
     /// — it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
-    /// and the prefix is validated (mirrors plugin-db `query.rs:648-653` +
-    /// `validate_id_prefix`).
+    /// and the prefix is validated through
+    /// [`crate::schema::query::validate_id_prefix`].
     #[serde(rename = "idPrefix", default)]
     pub id_prefix: Option<String>,
 
@@ -3297,7 +3297,8 @@ fn build_table_snapshot_impl(
         // DECLARATION for the
         // policy-managed `id` PK column already present in `resolved_shape`,
         // NOT a second column. FOLD it: validate the declared prefix (defense
-        // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
+        // in depth, through the shared kernel's `validate_id_prefix`, which is
+        // the single source of truth for the rule and the reserved set)
         // and SKIP it, so we neither duplicate the `id` column nor emit a
         // bogus second PK. A field NAMED `id` with any OTHER type is rejected
         // by the field-name fence below (an `id` column may only be the
