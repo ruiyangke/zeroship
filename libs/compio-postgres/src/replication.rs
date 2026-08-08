@@ -1317,9 +1317,13 @@ pub mod pgoutput {
     //
     // pgoutput messages are server → client only; nobody sends them
     // from the client side. The codec tests need to construct frames
-    // to assert the decoder reads what we expect. Encoders live behind
-    // `#[cfg(any(test, feature = "test-encoders"))]` so they don't
-    // bloat the release binary.
+    // to assert the decoder reads what we expect. Encoders are
+    // `#[cfg(test)]` so they don't bloat the release binary.
+    //
+    // Plain `cfg(test)`, NOT `cfg(any(test, feature = "..."))`: there is
+    // no encoder feature on this crate, and nothing outside it needs to
+    // build frames. If a downstream crate ever does, that is the moment
+    // to add the feature - not to describe one that does not exist.
 
     #[cfg(test)]
     pub(crate) mod encode {

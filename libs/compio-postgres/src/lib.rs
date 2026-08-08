@@ -126,8 +126,7 @@ pub mod types;
 
 // Test-only constructors for `Row` / `Statement` / `Column`. Gated
 // behind the `test-utils` Cargo feature so production builds never see
-// the surface. Added for plugin-db `bench_row_to_json` ([I35] forcing
-// function — performance r12).
+// the surface. Added for plugin-db's `bench_row_to_json`.
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 

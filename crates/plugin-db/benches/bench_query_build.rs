@@ -26,11 +26,18 @@
 //! 2. cover the realistic query-build cost the SDK pays on every CRUD
 //!    call (filter parsing, identifier quoting, parameter binding).
 //!
-//! When `row_to_json` becomes externally benchable (either by exposing
-//! a `Row` constructor behind `#[cfg(feature = "test-helpers")]` in
-//! `compio-postgres`, or by adding a `#[doc(hidden)] pub` wrapper in
-//! `plugin-db` that takes a synthetic input), add it as a new bench
-//! file alongside this one.
+//! That is no longer the state of things: `row_to_json` IS externally
+//! benchable now, and `bench_row_to_json.rs` sits next to this file. The
+//! route taken was the first of the two this paragraph used to offer -
+//! `compio-postgres` exposes `Row` / `Statement` / `Column` constructors
+//! from `test_utils`, behind its `test-utils` feature, which `plugin-db`
+//! turns on as a dev-dependency (see this crate's `Cargo.toml`).
+//!
+//! The feature is `test-utils` and it belongs to `compio-postgres`. This
+//! paragraph previously named `test-helpers`, which is THIS crate's
+//! feature and does not exist in `compio-postgres` at all - so a reader
+//! following it would look for a feature that is not there and conclude
+//! the work was still undone.
 //!
 //! ## Running
 //!
