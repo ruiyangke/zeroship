@@ -631,7 +631,16 @@ pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 ///    listed backend forces the connection closed. "Killed" means
 ///    `pg_terminate_backend`, NOT OS SIGKILL (§17.7) — only the one
 ///    replication connection dies, never the worker process.
-/// 2. **`pg_drop_replication_slot(slot)`** — now guaranteed inactive.
+/// 2. **`pg_drop_replication_slot(slot)`** — now EXPECTED inactive, not
+///    guaranteed. Two gaps keep the still-attached case reachable: the
+///    terminate is skipped when `active_pid` is NULL even though
+///    `active` is true (a race, see the arm below), and
+///    `pg_terminate_backend` returning true means the signal was SENT,
+///    not that the backend detached. So this step can still raise
+///    `55006 object_in_use`, which the handler below surfaces as
+///    `LockContention` ("slot still active (retry)") for the caller to
+///    retry from step 3. Best-effort terminate plus retry-on-contention
+///    is the actual mechanism.
 /// 3. **`DROP PUBLICATION <pub>`** — after the slot, so nothing is
 ///    decoding the publication when it disappears.
 ///
