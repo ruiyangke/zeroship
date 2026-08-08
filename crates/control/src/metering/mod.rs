@@ -79,7 +79,15 @@ pub struct PeriodTotalDecrease {
 }
 
 /// Outcome of a period rewrite: rows written, plus any total that SHRANK.
+///
+/// `#[must_use]` because `decreased` is the whole point and it is easy to drop: the
+/// workspace denies `unused_must_use`, so ignoring this becomes a compile error rather
+/// than a silently unreported billing fail-open. Both bugs this pattern produced
+/// elsewhere in the tree were plain returns nobody marked - a `usize` row count and a
+/// `DateTime` deadline - so no lint could catch either. The enforcement point is the
+/// DEFINITION, not the call site, because `let _ =` is the documented opt-out.
 #[derive(Debug, Clone, Default)]
+#[must_use]
 pub struct PeriodSnapshotWrite {
     pub written: usize,
     /// Empty on a healthy rewrite. Non-empty means spend enforcement is now reading a
