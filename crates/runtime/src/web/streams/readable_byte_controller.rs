@@ -735,29 +735,20 @@ pub fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
 // Fill helpers
 // ---------------------------------------------------------------------------
 
-/// `ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller,
-/// size, descriptor)` — spec §3.11.x. Update bytes_filled in place.
-///
-/// Spec asserts that exactly one of (a) the head reader_type is None, or
-/// (b) the stream has a default reader, or (c) the stream has a BYOB
-/// reader. We only debug_assert that pendingPullIntos is non-empty here
-/// — the caller invariants are enforced by the spec algorithms.
-pub fn readable_byte_stream_controller_fill_head_pull_into_descriptor(
-    scope: &mut v8::PinScope,
-    controller: v8::Local<v8::Object>,
-    size: u64,
-) {
-    debug_assert!(
-        !with_controller_state(scope, controller, |s| s.pending_pull_intos.borrow().is_empty())
-            .unwrap_or(true)
-    );
-    readable_byte_stream_controller_invalidate_byob_request(scope, controller);
-    with_controller_state(scope, controller, |s| {
-        if let Some(d) = s.pending_pull_intos.borrow_mut().front_mut() {
-            d.bytes_filled += size;
-        }
-    });
-}
+// `ReadableByteStreamControllerFillHeadPullIntoDescriptor` has no function
+// here on purpose. Its two effects - bump `bytes_filled` and invalidate the
+// byob_request - are performed INLINE in the copy loop of
+// `..._fill_pull_into_descriptor_from_queue` below, which is the only place
+// the spec calls it from on our paths. See the note beside that loop for why
+// the invalidate sits where it does.
+//
+// It previously existed as a standalone `pub fn` with zero callers anywhere in
+// the tree - the only one of 33 in this file - carrying a doc claim that
+// "caller invariants are enforced by the spec algorithms", which described
+// callers that did not exist. Deleted rather than wired up: the inline form
+// operates on the `&mut PullIntoDescriptor` the caller already holds, whereas
+// the helper reached for the front of `pending_pull_intos`, and those are not
+// the same descriptor mid-fill.
 
 /// `ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(
 /// controller, descriptor)` — spec §3.11.x. Returns true if descriptor's
@@ -765,8 +756,10 @@ pub fn readable_byte_stream_controller_fill_head_pull_into_descriptor(
 ///
 /// The function copies bytes from the controller's queue into the
 /// descriptor's buffer, popping queue entries as fully consumed.
-/// Per spec, each copy iteration calls FillHeadPullIntoDescriptor
-/// (which invalidates the byob_request and bumps bytes_filled).
+/// Per spec each copy iteration applies FillHeadPullIntoDescriptor; this
+/// INLINES its two effects (bump `bytes_filled`, invalidate the
+/// byob_request) rather than calling it, because the descriptor being
+/// filled is the caller's `&mut`, not the front of `pending_pull_intos`.
 pub fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
