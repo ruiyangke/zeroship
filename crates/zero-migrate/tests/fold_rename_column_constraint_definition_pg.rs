@@ -20,6 +20,15 @@
 //! measured) is structurally unreachable here. The FK tail (`REFERENCES ...`, MATCH,
 //! `ON UPDATE`/`ON DELETE`, DEFERRABLE, ` NOT VALID`) is spliced through untouched.
 //!
+//! The FK tail carries a SECOND column list, the REFERENCED one, and it lives in a
+//! DIFFERENT table than the renamed column. `pg_constraint.confkey` is attribute
+//! numbers too, so live deparses the new name there as well while the rename arm -
+//! which never leaves its own table's snapshot - left it stale. That list is the same
+//! CLOSED IDENTIFIER LIST grammar, so the same argument licenses the same rewrite;
+//! `rewrite_incoming_fk_column_targets` matches the referenced TABLE first, because a
+//! rewrite keyed on the column name alone would corrupt an unrelated FK that
+//! references a same-named column in another parent.
+//!
 //! Quoting is CONDITIONAL, which is why the group is RE-RENDERED through
 //! `render::declarative::constraintdef_cols` rather than substring-swapped:
 //! `rename a -> order` must produce `UNIQUE ("order")`, and a naive swap gives
@@ -422,6 +431,277 @@ async fn rename_column_rewrites_a_primary_key_definition() {
         drift.is_clean(),
         "a PRIMARY KEY definition follows the rename in PostgreSQL and the differ \
          compares it (only EXCLUDE and CHECK are exempt); the fold must re-render it: \
+         {drift:#?}"
+    );
+}
+
+/// The renamed column is the FK TARGET of a DIFFERENT table. `pg_constraint.confkey`
+/// holds attribute NUMBERS too, so the referencing table's `REFERENCES ...(id)` tail
+/// deparses the NEW name the instant the rename commits, in a table the rename arm
+/// never visits.
+#[compio::test]
+async fn rename_column_rewrites_an_incoming_foreign_key_reference() {
+    let applied = r#"{
+      "ir_version": 1,
+      "name": "xfk_create",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_parent","columns":[
+          {"name":"id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"createTable","name":"xfk_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"parent_id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_child","constraint":{
+          "name":"xfk_child_parent_fkey",
+          "kind":{"kind":"fk","columns":["parent_id"],
+            "referencesTable":"xfk_parent","referencesColumns":["id"]}
+        }}
+      ]
+    }"#;
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "xfk",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_parent","columns":[
+          {"name":"id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"createTable","name":"xfk_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"parent_id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_child","constraint":{
+          "name":"xfk_child_parent_fkey",
+          "kind":{"kind":"fk","columns":["parent_id"],
+            "referencesTable":"xfk_parent","referencesColumns":["id"]}
+        }},
+        {"op":"renameColumn","table":"xfk_parent","from":"id","to":"uid","type":"int"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        applied,
+        &["ALTER TABLE {schema}.\"xfk_parent\" RENAME COLUMN \"id\" TO \"uid\""],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "a FK in ANOTHER table names the referenced column in its REFERENCES tail, and \
+         PostgreSQL deparses the NEW name there the instant the rename commits; the \
+         fold must rewrite the referencing table too: {drift:#?}"
+    );
+}
+
+/// Two parents carry a column of the SAME name and one child references each. The
+/// rename hits ONE parent, so ONLY the FK that targets that parent may move - a
+/// rewrite that matched on the column name alone would corrupt the other FK into
+/// naming a column its parent does not have.
+#[compio::test]
+async fn rename_column_leaves_an_incoming_fk_on_another_parent_alone() {
+    let applied = r#"{
+      "ir_version": 1,
+      "name": "xfk_twin_create",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_p1","columns":[
+          {"name":"k","type":"int","nullable":false}
+        ],"primaryKey":["k"]},
+        {"op":"createTable","name":"xfk_p2","columns":[
+          {"name":"k","type":"int","nullable":false}
+        ],"primaryKey":["k"]},
+        {"op":"createTable","name":"xfk_twin_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"p1_k","type":"int","nullable":false},
+          {"name":"p2_k","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_twin_child","constraint":{
+          "name":"xfk_twin_child_p1_fkey",
+          "kind":{"kind":"fk","columns":["p1_k"],
+            "referencesTable":"xfk_p1","referencesColumns":["k"]}
+        }},
+        {"op":"addConstraint","table":"xfk_twin_child","constraint":{
+          "name":"xfk_twin_child_p2_fkey",
+          "kind":{"kind":"fk","columns":["p2_k"],
+            "referencesTable":"xfk_p2","referencesColumns":["k"]}
+        }}
+      ]
+    }"#;
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "xfk_twin",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_p1","columns":[
+          {"name":"k","type":"int","nullable":false}
+        ],"primaryKey":["k"]},
+        {"op":"createTable","name":"xfk_p2","columns":[
+          {"name":"k","type":"int","nullable":false}
+        ],"primaryKey":["k"]},
+        {"op":"createTable","name":"xfk_twin_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"p1_k","type":"int","nullable":false},
+          {"name":"p2_k","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_twin_child","constraint":{
+          "name":"xfk_twin_child_p1_fkey",
+          "kind":{"kind":"fk","columns":["p1_k"],
+            "referencesTable":"xfk_p1","referencesColumns":["k"]}
+        }},
+        {"op":"addConstraint","table":"xfk_twin_child","constraint":{
+          "name":"xfk_twin_child_p2_fkey",
+          "kind":{"kind":"fk","columns":["p2_k"],
+            "referencesTable":"xfk_p2","referencesColumns":["k"]}
+        }},
+        {"op":"renameColumn","table":"xfk_p1","from":"k","to":"uid","type":"int"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        applied,
+        &["ALTER TABLE {schema}.\"xfk_p1\" RENAME COLUMN \"k\" TO \"uid\""],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "only the FK whose REFERENCES tail names the RENAMED table may follow the \
+         rename; a same-named column in a different parent must keep its own FK \
+         byte-identical: {drift:#?}"
+    );
+}
+
+/// A SELF-REFERENCING FK: the renamed column is both the table's own PK and the
+/// target of its own FK. The referencing constraint lives in the renamed table's
+/// snapshot, so the walk must include that table rather than skipping it.
+#[compio::test]
+async fn rename_column_rewrites_a_self_referencing_foreign_key() {
+    let applied = r#"{
+      "ir_version": 1,
+      "name": "xfk_self_create",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_self","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"parent_id","type":"int","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_self","constraint":{
+          "name":"xfk_self_parent_fkey",
+          "kind":{"kind":"fk","columns":["parent_id"],
+            "referencesTable":"xfk_self","referencesColumns":["id"]}
+        }}
+      ]
+    }"#;
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "xfk_self",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_self","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"parent_id","type":"int","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_self","constraint":{
+          "name":"xfk_self_parent_fkey",
+          "kind":{"kind":"fk","columns":["parent_id"],
+            "referencesTable":"xfk_self","referencesColumns":["id"]}
+        }},
+        {"op":"renameColumn","table":"xfk_self","from":"id","to":"uid","type":"int"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        applied,
+        &["ALTER TABLE {schema}.\"xfk_self\" RENAME COLUMN \"id\" TO \"uid\""],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "a self-referencing FK targets the renamed column from inside the renamed \
+         table's own snapshot; the fold must rewrite its REFERENCES tail too: {drift:#?}"
+    );
+}
+
+/// A COMPOSITE FK where only ONE referenced column is renamed. The referenced list
+/// is POSITIONAL and pairs with the local list, so the rewrite must move exactly
+/// that position and never re-sort.
+#[compio::test]
+async fn rename_column_rewrites_one_position_of_a_composite_fk_reference() {
+    let applied = r#"{
+      "ir_version": 1,
+      "name": "xfk_pair_create",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_pair_parent","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":false},
+          {"name":"b","type":"int","nullable":false}
+        ],"primaryKey":["id"],"constraints":[
+          {"name":"xfk_pair_parent_ab_key","kind":{"kind":"unique","columns":["a","b"]}}
+        ]},
+        {"op":"createTable","name":"xfk_pair_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"x","type":"int","nullable":false},
+          {"name":"y","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_pair_child","constraint":{
+          "name":"xfk_pair_child_ab_fkey",
+          "kind":{"kind":"fk","columns":["x","y"],
+            "referencesTable":"xfk_pair_parent","referencesColumns":["a","b"]}
+        }}
+      ]
+    }"#;
+    let folded = r#"{
+      "ir_version": 1,
+      "name": "xfk_pair",
+      "owner_app": "app_fold_rename_constraint_pg",
+      "ops": [
+        {"op":"createTable","name":"xfk_pair_parent","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":false},
+          {"name":"b","type":"int","nullable":false}
+        ],"primaryKey":["id"],"constraints":[
+          {"name":"xfk_pair_parent_ab_key","kind":{"kind":"unique","columns":["a","b"]}}
+        ]},
+        {"op":"createTable","name":"xfk_pair_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"x","type":"int","nullable":false},
+          {"name":"y","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"xfk_pair_child","constraint":{
+          "name":"xfk_pair_child_ab_fkey",
+          "kind":{"kind":"fk","columns":["x","y"],
+            "referencesTable":"xfk_pair_parent","referencesColumns":["a","b"]}
+        }},
+        {"op":"renameColumn","table":"xfk_pair_parent","from":"a","to":"c","type":"int"}
+      ]
+    }"#;
+
+    let Some(drift) = drift_between_fold_and_live(
+        applied,
+        &["ALTER TABLE {schema}.\"xfk_pair_parent\" RENAME COLUMN \"a\" TO \"c\""],
+        folded,
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        drift.is_clean(),
+        "a composite FK's referenced list is positional and pairs with the local \
+         list; renaming one referenced column must move exactly that position: \
          {drift:#?}"
     );
 }

@@ -454,6 +454,59 @@ fn rewrite_incoming_fk_targets(
     }
 }
 
+/// Rewrite the REFERENCED column list of every INCOMING FK `definition` that targets
+/// `renamed_table` so it follows a COLUMN rename - the offline mirror of what live PG
+/// does on `ALTER TABLE ... RENAME COLUMN`.
+///
+/// **Why this is required.** The column-rename arm never leaves the renamed table's
+/// own snapshot, but a FK `definition` in ANOTHER table embeds the referenced column
+/// by name in its `REFERENCES <schema>.<target>(id)` tail. Live PG holds
+/// `pg_constraint.confkey` as attribute NUMBERS, so `pg_get_constraintdef` deparses
+/// the NEW name there the instant the rename commits (measured on PG 18.4). Leaving
+/// the referencing table stale is a permanent phantom drift: the differ compares
+/// `definition` for every kind but EXCLUDE and CHECK.
+///
+/// The referenced TABLE is matched FIRST, on the same uniquely spelled
+/// `REFERENCES <schema_q>.<target_q>(` token [`rewrite_incoming_fk_targets`] uses -
+/// schema and target both `quote_ident_if_needed`-quoted, immediately followed by the
+/// referenced list. Without that match, renaming `id` in one table would rewrite an
+/// unrelated FK that happens to reference a same-named `id` in a DIFFERENT table,
+/// turning a stale definition into a corrupt one. The token also cannot collide with
+/// the LOCAL column list, which precedes `REFERENCES`.
+///
+/// The walk covers EVERY table, including the renamed table's own entry, which may
+/// carry a SELF-FK whose tail live PG re-targets the same way.
+fn rewrite_incoming_fk_column_targets(
+    tables: &mut BTreeMap<String, TableSnapshot>,
+    project_schema: &str,
+    renamed_table: &str,
+    from: &str,
+    to: &str,
+) {
+    let schema_q = quote_ident_if_needed(project_schema);
+    let target_ref = format!(
+        "REFERENCES {schema_q}.{}(",
+        quote_ident_if_needed(renamed_table)
+    );
+    for table in tables.values_mut() {
+        for constraint in &mut table.constraints {
+            if constraint.kind != "FOREIGN KEY" {
+                continue;
+            }
+            let Some(at) = constraint.definition.find(&target_ref) else {
+                continue;
+            };
+            // `target_ref` ends WITH the `(`, so its last byte is the group's opener.
+            let open = at + target_ref.len() - 1;
+            if let Some(definition) =
+                rename_definition_column_group(&constraint.definition, open, from, to)
+            {
+                constraint.definition = definition;
+            }
+        }
+    }
+}
+
 fn selected_dialectal_leg<'a>(
     dialect: SqlDialect,
     default: &'a Option<Vec<Op>>,
@@ -1724,13 +1777,6 @@ pub fn fold_ops_onto(
                         }
                     }
                 }
-                // STILL NOT rewritten: a FK in ANOTHER table whose REFERENCES tail
-                // names this renamed column. PG follows that too (`confkey` is
-                // attribute numbers), but this arm never leaves `snap`, so the other
-                // table's definition stays stale - measured on PG 18.4. The table-rename
-                // analogue `rewrite_incoming_fk_targets` exists and the column-rename
-                // one does not; it is a separate change with its own live oracle.
-                //
                 // An index names columns too, and a rename has to follow it for the
                 // same reason. `pg_index` references the attribute by `attnum`, never
                 // by name, so PG renames the attribute in place and every index over
@@ -1796,6 +1842,12 @@ pub fn fold_ops_onto(
                         expr_cascade_columns.sort();
                     }
                 }
+                // A FK in ANOTHER table names this column in its REFERENCES tail, and
+                // PG follows the rename there too (`confkey` is attribute numbers).
+                // That constraint lives outside `snap`, so it needs its own walk - the
+                // column-rename analogue of what `rewrite_incoming_fk_targets` does for
+                // a table rename.
+                rewrite_incoming_fk_column_targets(&mut tables, project_schema, table, from, to);
             }
             Op::SetColumnType {
                 table,
@@ -3312,15 +3364,44 @@ fn constraint_local_columns_contain(definition: &str, column: &str) -> bool {
 /// ROUND-TRIP GUARD: the UNCHANGED parse is re-rendered first and must equal the
 /// original group BYTE FOR BYTE. A definition the parser mishandles therefore stays
 /// stale rather than becoming corrupt - `UNIQUE ("a""b")` parses to `a""b` (the
-/// `trim_matches('"')` in [`constraint_ordered_columns`] cannot see an embedded
-/// escaped quote), re-renders to `"a""""b"`, fails the compare, and is left alone.
-/// The same guard catches a name carrying a `,` or a `)`, both of which the
-/// split-on-comma / first-`)` parse gets wrong.
+/// `trim_matches('"')` cannot see an embedded escaped quote), re-renders to
+/// `"a""""b"`, fails the compare, and is left alone. The same guard catches a name
+/// carrying a `,` or a `)`, both of which the split-on-comma / first-`)` parse gets
+/// wrong. It lives in the shared [`rename_definition_column_group`] speller.
 fn rename_constraint_definition_column(definition: &str, from: &str, to: &str) -> Option<String> {
-    let open = definition.find('(')?;
+    rename_definition_column_group(definition, definition.find('(')?, from, to)
+}
+
+/// Re-render the parenthesized column list that OPENS at byte `open` with `from`
+/// renamed to `to`, or `None` to leave `definition` untouched.
+///
+/// The single speller behind both column-list groups a constraint `definition` can
+/// carry: the LEADING local list ([`rename_constraint_definition_column`]) and the
+/// FOREIGN KEY tail's REFERENCED list ([`rewrite_incoming_fk_column_targets`]).
+/// Both are CLOSED IDENTIFIER LISTS in the grammar, so neither can hold a string
+/// literal - the trap that rules out text rewriting for a CHECK body is structurally
+/// unreachable in either. Everything outside the group is spliced through
+/// byte-identically.
+///
+/// ROUND-TRIP GUARD: the UNCHANGED parse is re-rendered through [`constraintdef_cols`]
+/// first and must equal the original group BYTE FOR BYTE. A group the split-on-comma
+/// / first-`)` parse mishandles - an embedded escaped quote, a `,` or a `)` inside a
+/// name - therefore stays STALE rather than becoming CORRUPT.
+fn rename_definition_column_group(
+    definition: &str,
+    open: usize,
+    from: &str,
+    to: &str,
+) -> Option<String> {
     let close = definition[open + 1..].find(')')? + open + 1;
     let group = &definition[open + 1..close];
-    let columns = constraint_ordered_columns(definition)?;
+    let columns = group
+        .split(',')
+        .map(|column| column.trim().trim_matches('"').to_string())
+        .collect::<Vec<_>>();
+    if columns.is_empty() || columns.iter().any(String::is_empty) {
+        return None;
+    }
     if constraintdef_cols(&columns) != group {
         return None;
     }
@@ -8487,6 +8568,90 @@ columns = [
             None,
             "the guard fires on the SHAPE, so even a parse that happens to name the \
              renamed column cannot get through it"
+        );
+    }
+
+    fn incoming_fk_table(constraints: &[(&str, &str, &str)]) -> TableSnapshot {
+        TableSnapshot {
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            constraints: constraints
+                .iter()
+                .map(|(name, kind, definition)| ConstraintSnapshot {
+                    name: (*name).to_string(),
+                    kind: (*kind).to_string(),
+                    definition: (*definition).to_string(),
+                    comment: None,
+                    cascade_columns: None,
+                })
+                .collect(),
+            runtime_options: TableRuntimeOptions::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: None,
+        }
+    }
+
+    /// The referenced TABLE is matched before anything is rewritten. A same-named
+    /// column in a DIFFERENT parent keeps its FK byte-identical - matching on the
+    /// column name alone would turn a stale definition into a corrupt one, naming a
+    /// column its parent does not have.
+    #[test]
+    fn incoming_fk_column_rewrite_matches_the_referenced_table_first() {
+        let mut tables = BTreeMap::new();
+        tables.insert(
+            "child".to_string(),
+            incoming_fk_table(&[
+                (
+                    "child_p1_fkey",
+                    "FOREIGN KEY",
+                    "FOREIGN KEY (p1_k) REFERENCES proj.p1(k)",
+                ),
+                (
+                    "child_p2_fkey",
+                    "FOREIGN KEY",
+                    "FOREIGN KEY (p2_k) REFERENCES proj.p2(k)",
+                ),
+                ("child_k_key", "UNIQUE", "UNIQUE (k)"),
+            ]),
+        );
+        rewrite_incoming_fk_column_targets(&mut tables, "proj", "p1", "k", "uid");
+        let definitions = tables["child"]
+            .constraints
+            .iter()
+            .map(|constraint| constraint.definition.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            definitions,
+            vec![
+                "FOREIGN KEY (p1_k) REFERENCES proj.p1(uid)",
+                "FOREIGN KEY (p2_k) REFERENCES proj.p2(k)",
+                "UNIQUE (k)",
+            ],
+            "only the FK targeting the RENAMED table moves; the same-named column in \
+             another parent and the local UNIQUE list are untouched"
+        );
+    }
+
+    /// The referenced list is POSITIONAL, the LOCAL list is never touched by this
+    /// walk (the rename arm owns it), and the tail after the group survives.
+    #[test]
+    fn incoming_fk_column_rewrite_moves_one_position_and_keeps_the_tail() {
+        let mut tables = BTreeMap::new();
+        tables.insert(
+            "child".to_string(),
+            incoming_fk_table(&[(
+                "child_ab_fkey",
+                "FOREIGN KEY",
+                "FOREIGN KEY (a, b) REFERENCES proj.parent(a, b) ON DELETE CASCADE",
+            )]),
+        );
+        rewrite_incoming_fk_column_targets(&mut tables, "proj", "parent", "a", "order");
+        assert_eq!(
+            tables["child"].constraints[0].definition,
+            "FOREIGN KEY (a, b) REFERENCES proj.parent(\"order\", b) ON DELETE CASCADE",
+            "the local `(a, b)` stays put, the referenced `a` moves in place, quoting is \
+             re-derived, and the referential-action tail survives"
         );
     }
 }
