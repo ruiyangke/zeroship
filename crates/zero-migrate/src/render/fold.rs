@@ -158,6 +158,14 @@ pub enum FoldError {
     MissingIndex(String),
     /// A `createIndex` / table-level `createTable` index name collided.
     DuplicateIndex(String),
+    /// A `dropColumn` reached a folded CHECK constraint with no recorded
+    /// `cascade_columns`, so whether PostgreSQL cascaded it away is unknowable.
+    CheckCascadeColumnsMissing {
+        /// The table.
+        table: String,
+        /// The CHECK constraint with no recorded columns.
+        name: String,
+    },
     /// A `renameColumn` `to` name already exists on the table.
     RenameCollision {
         /// The table.
@@ -237,6 +245,12 @@ impl std::fmt::Display for FoldError {
             }
             FoldError::MissingIndex(n) => write!(f, "fold: index `{n}` does not exist"),
             FoldError::DuplicateIndex(n) => write!(f, "fold: index `{n}` already exists"),
+            FoldError::CheckCascadeColumnsMissing { table, name } => write!(
+                f,
+                "fold: CHECK constraint `{name}` on `{table}` records no cascade columns, \
+                 so a column drop cannot tell whether PostgreSQL cascaded it away; the \
+                 producer of this constraint must record them structurally"
+            ),
             FoldError::RenameCollision { table, to } => {
                 write!(f, "fold: rename target `{table}.{to}` already exists")
             }
@@ -1530,13 +1544,22 @@ pub fn fold_ops_onto(
                 snap.indexes
                     .retain(|i| !i.columns.iter().any(|c| c == column));
                 // (2) Drop every constraint whose LOCAL column list contains the
-                //     column. UNIQUE (`UNIQUE (cols)`) and FOREIGN KEY
+                //     column. A producer that recorded `cascade_columns` is believed
+                //     verbatim - that list is structural provenance, collected from
+                //     the closed AST rather than read back out of rendered SQL, and
+                //     an empty list means the constraint reads no column at all and
+                //     never cascades. Everything else falls back to parsing the
+                //     leading parenthesized group of the definition: UNIQUE
+                //     (`UNIQUE (cols)`) and FOREIGN KEY
                 //     (`FOREIGN KEY (cols) REFERENCES …`) both carry their local
-                //     columns as the leading parenthesized group; the system
-                //     `<table>_pkey` is `PRIMARY KEY (id)` and CHECK is never folded,
-                //     so neither false-matches a non-`id` user column. Collect the
-                //     dropped constraint names first to cascade their implicit unique
-                //     indexes (mirror the DropConstraint index-cascade below).
+                //     columns there, and the system `<table>_pkey` is
+                //     `PRIMARY KEY (id)`, so none false-matches a non-`id` user
+                //     column. A CHECK cannot use that fallback - its leading group is
+                //     the EXPRESSION, so the parse never matches and the constraint
+                //     survives a drop PostgreSQL cascaded - hence the refusal below
+                //     rather than a silent guess. Collect the dropped constraint names
+                //     first to cascade their implicit unique indexes (mirror the
+                //     DropConstraint index-cascade below).
                 //
                 //     Capture (name, kind) so the implicit-index cascade can
                 //     discriminate by kind: only UNIQUE / PRIMARY KEY back a same-named
@@ -1545,12 +1568,22 @@ pub fn fold_ops_onto(
                 //     index that merely shares the FK's name (PG allows a FK and an
                 //     index to share a name — see the DropConstraint arm), so the
                 //     implicit-index retain below is kind-gated for safety.
-                let dropped_constraints: Vec<(String, String)> = snap
-                    .constraints
-                    .iter()
-                    .filter(|c| constraint_local_columns_contain(&c.definition, column))
-                    .map(|c| (c.name.clone(), c.kind.clone()))
-                    .collect();
+                let mut dropped_constraints: Vec<(String, String)> = Vec::new();
+                for c in &snap.constraints {
+                    let cascades = match &c.cascade_columns {
+                        Some(cols) => cols.iter().any(|local| local == column),
+                        None if c.kind == "CHECK" => {
+                            return Err(FoldError::CheckCascadeColumnsMissing {
+                                table: table.clone(),
+                                name: c.name.clone(),
+                            })
+                        }
+                        None => constraint_local_columns_contain(&c.definition, column),
+                    };
+                    if cascades {
+                        dropped_constraints.push((c.name.clone(), c.kind.clone()));
+                    }
+                }
                 snap.constraints
                     .retain(|c| !dropped_constraints.iter().any(|(n, _)| n == &c.name));
                 // A UNIQUE/PK constraint backs an implicit unique index of the SAME
@@ -1604,6 +1637,23 @@ pub fn fold_ops_onto(
                     })?;
                 col.name = to.clone();
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
+                // `cascade_columns` names columns, so a rename has to follow it.
+                // PostgreSQL renames the attribute in place and leaves every
+                // constraint's `conkey` pointing at it, so a later drop of the NEW
+                // name still cascades. Without this rewrite the provenance would
+                // still name `from`, the drop of `to` would find no match, and
+                // `rename qty -> amount; drop amount` would leave a phantom CHECK
+                // behind - the exact drift this provenance exists to prevent.
+                for constraint in &mut snap.constraints {
+                    if let Some(cascade_columns) = &mut constraint.cascade_columns {
+                        for local in cascade_columns.iter_mut() {
+                            if local == from {
+                                local.clone_from(to);
+                            }
+                        }
+                        cascade_columns.sort();
+                    }
+                }
             }
             Op::SetColumnType {
                 table,
@@ -2867,6 +2917,11 @@ fn fold_create_table_specs(
                 );
                 let rendered = crate::render::dml::render_expr_inline(expr, dialect)
                     .map_err(|e| FoldError::Render(e.to_string()))?;
+                // Record the columns the CHECK reads structurally, from the same
+                // AST the render above walked, so the `DropColumn` cascade never
+                // has to guess them back out of the rendered text.
+                let cascade_columns = crate::render::dml::expr_column_refs(expr, dialect)
+                    .map_err(|e| FoldError::Render(e.to_string()))?;
                 push_folded_constraint(
                     table,
                     snap,
@@ -2876,6 +2931,7 @@ fn fold_create_table_specs(
                             kind: "CHECK".to_string(),
                             definition: format!("CHECK ({rendered})"),
                             comment: None,
+                            cascade_columns: Some(cascade_columns),
                         }),
                         index: None,
                     },
@@ -2962,6 +3018,7 @@ fn fold_create_table_specs(
                             // kind only, matching `snapshot_schema`.
                             definition: String::new(),
                             comment: None,
+                            cascade_columns: None,
                         }),
                         index: None,
                     },
@@ -3060,15 +3117,22 @@ fn push_folded_constraint(
 
 /// True iff the LOCAL column list of a constraint `definition` contains `column`.
 ///
-/// Used by the `DropColumn` cascade: PG auto-drops a UNIQUE/FK constraint when one
-/// of its local columns is dropped, so the fold must too. Both the foldable
-/// column-list constraints carry their LOCAL columns as the LEADING parenthesized
-/// group — `UNIQUE (cols)` and `FOREIGN KEY (cols) REFERENCES <schema>.<tgt>(id)…`
-/// — so we parse that first `(...)`. The FK's REFERENCED column list (`(id)`) comes
-/// AFTER `REFERENCES`, never in the leading group, so a column named `id` on the
-/// REFERENCING side is matched while the referenced `(id)` is correctly ignored.
-/// The system `<table>_pkey` (`PRIMARY KEY (id)`) is the only PK and CHECK bodies
-/// are never folded, so neither false-matches a non-`id` user column.
+/// The `DropColumn` cascade's FALLBACK, used only for a constraint whose producer
+/// recorded no `cascade_columns`: PG auto-drops a UNIQUE/FK constraint when one of
+/// its local columns is dropped, so the fold must too. Both column-list constraints
+/// carry their LOCAL columns as the LEADING parenthesized group - `UNIQUE (cols)`
+/// and `FOREIGN KEY (cols) REFERENCES <schema>.<tgt>(id)...` - so we parse that first
+/// `(...)`. The FK's REFERENCED column list (`(id)`) comes AFTER `REFERENCES`, never
+/// in the leading group, so a column named `id` on the REFERENCING side is matched
+/// while the referenced `(id)` is correctly ignored. The system `<table>_pkey`
+/// (`PRIMARY KEY (id)`) is the only PK, so it cannot false-match a non-`id` user
+/// column.
+///
+/// NOT usable for a CHECK, whose leading group is the EXPRESSION rather than a
+/// column list: `CHECK ((qty >= 0))` yields the token `qty >= 0`, which matches no
+/// column, so the constraint would survive a drop PostgreSQL cascaded. Every CHECK
+/// producer records `cascade_columns` instead, and the cascade REFUSES a CHECK that
+/// reaches it without them rather than falling back here.
 ///
 /// Columns are spelled by [`constraintdef_cols`] (conditional quoting), so each
 /// comma-separated token is trimmed of whitespace and surrounding double-quotes
@@ -3100,6 +3164,7 @@ fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> Fol
             kind: "UNIQUE".to_string(),
             definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
             comment: None,
+            cascade_columns: None,
         }),
         index: Some(IndexSnapshot::btree(
             name.to_string(),
@@ -3174,12 +3239,16 @@ fn add_constraint_snapshot(
             );
             let rendered = crate::render::dml::render_expr_inline(expr, dialect)
                 .map_err(|e| FoldError::Render(e.to_string()))?;
+            // Same structural provenance as the table-level CHECK above.
+            let cascade_columns = crate::render::dml::expr_column_refs(expr, dialect)
+                .map_err(|e| FoldError::Render(e.to_string()))?;
             Ok(FoldedConstraint {
                 constraint: Some(ConstraintSnapshot {
                     name: cname,
                     kind: "CHECK".to_string(),
                     definition: format!("CHECK ({rendered})"),
                     comment: None,
+                    cascade_columns: Some(cascade_columns),
                 }),
                 index: None,
             })
@@ -3205,6 +3274,7 @@ fn add_constraint_snapshot(
                     // matching `snapshot_schema`.
                     definition: String::new(),
                     comment: None,
+                    cascade_columns: None,
                 }),
                 index: None,
             })

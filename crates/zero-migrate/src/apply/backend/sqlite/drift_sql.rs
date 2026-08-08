@@ -490,6 +490,7 @@ async fn introspect_columns(
             kind: "PRIMARY KEY".to_string(),
             definition: format!("PRIMARY KEY ({})", cols.join(", ")),
             comment: None,
+            cascade_columns: None,
         });
     }
     Ok(())
@@ -603,6 +604,7 @@ async fn introspect_indexes_and_unique(
                 // this canonical spelling is the closest faithful round-trip form.)
                 definition: format!("UNIQUE ({})", index.columns.join(", ")),
                 comment: None,
+                cascade_columns: None,
             });
             // Do NOT also push it into the index bucket if it is a SQLite auto-index;
             // an explicit `CREATE UNIQUE INDEX` (origin 'c') is handled below.
@@ -946,6 +948,7 @@ async fn introspect_foreign_keys(
                 &pragma_fk, &from_cols, &to_cols, parsed_fk,
             ),
             comment: None,
+            cascade_columns: None,
         });
     }
     Ok(())

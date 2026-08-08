@@ -1043,6 +1043,105 @@ fn select_dialect_leg<'a>(
     })
 }
 
+/// Collect every column an expression reads AS RENDERED FOR `dialect`, in sorted
+/// order.
+///
+/// The offline half of the `DropColumn` CHECK cascade: PostgreSQL drops a CHECK
+/// whenever any column its expression references is dropped, so the fold has to
+/// know that column set exactly. Reading it back out of the rendered SQL text is
+/// not an option - `CHECK ((status <> 'qty'::text))` must NOT cascade on a `qty`
+/// column, and `CHECK (((a)::text <> ''::text))` carries a bare `text` token that
+/// is a cast type rather than a column. Walking the closed AST answers both
+/// exactly.
+///
+/// [`Expr::Dialectal`] descends ONLY into the leg [`select_dialect_leg`] picks,
+/// matching what [`render_expr_inline`] actually emits. Unioning all legs would
+/// attribute a PostgreSQL CHECK to a column that appears only in the SQLite or
+/// MySQL leg and cascade away a constraint PostgreSQL kept.
+///
+/// Deliberately NOT shared with the `collect_col_refs` inside
+/// [`crate::render::lower::derived_check_constraint_name`], which unions every leg
+/// because a derived constraint NAME has to stay stable across dialects. Same walk,
+/// opposite requirement.
+///
+/// The match has no catch-all arm so a new [`Expr`] variant is a compile error here
+/// rather than a silently missed column reference.
+pub(crate) fn expr_column_refs(expr: &Expr, dialect: SqlDialect) -> Result<Vec<String>, DmlError> {
+    fn walk(
+        expr: &Expr,
+        dialect: SqlDialect,
+        out: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), DmlError> {
+        match expr {
+            Expr::ColRef { name, .. } => {
+                out.insert(name.clone());
+            }
+            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => {}
+            Expr::BinOp { lhs, rhs, .. } => {
+                walk(lhs, dialect, out)?;
+                walk(rhs, dialect, out)?;
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Cast { operand, .. }
+            | Expr::PgColumnSize { expr: operand }
+            | Expr::Extract { from: operand, .. }
+            | Expr::PgExtract { from: operand, .. }
+            | Expr::PgRegexMatch { expr: operand, .. }
+            | Expr::InList { expr: operand, .. } => walk(operand, dialect, out)?,
+            Expr::Case { branches, r#else } => {
+                for branch in branches {
+                    walk(&branch.when, dialect, out)?;
+                    walk(&branch.then, dialect, out)?;
+                }
+                if let Some(r#else) = r#else {
+                    walk(r#else, dialect, out)?;
+                }
+            }
+            Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+                for arg in args {
+                    walk(arg, dialect, out)?;
+                }
+            }
+            Expr::Between { operand, low, high } => {
+                walk(operand, dialect, out)?;
+                walk(low, dialect, out)?;
+                walk(high, dialect, out)?;
+            }
+            Expr::Like { operand, pattern } => {
+                walk(operand, dialect, out)?;
+                walk(pattern, dialect, out)?;
+            }
+            Expr::DistinctFrom { left, right } => {
+                walk(left, dialect, out)?;
+                walk(right, dialect, out)?;
+            }
+            Expr::Agg { arg, delimiter, .. } => {
+                if let Some(arg) = arg {
+                    walk(arg, dialect, out)?;
+                }
+                if let Some(delimiter) = delimiter {
+                    walk(delimiter, dialect, out)?;
+                }
+            }
+            Expr::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => walk(
+                select_dialect_leg(dialect, default, pg, sqlite, mysql)?,
+                dialect,
+                out,
+            )?,
+        }
+        Ok(())
+    }
+
+    let mut out = std::collections::BTreeSet::new();
+    walk(expr, dialect, &mut out)?;
+    Ok(out.into_iter().collect())
+}
+
 /// Return whether the MySQL-selected leg of an expression reads `column`.
 /// This mirrors the renderer's recursive closed-AST walk so an unsafe dependency
 /// cannot hide inside CASE, a helper, or a dialect branch.

@@ -409,12 +409,14 @@ TableSnapshot {
             kind: "FOREIGN KEY",
             definition: "FOREIGN KEY (author) REFERENCES app.authors(id)",
             comment: None,
+            cascade_columns: None,
         },
         ConstraintSnapshot {
             name: "articles_pkey",
             kind: "PRIMARY KEY",
             definition: "PRIMARY KEY (id)",
             comment: None,
+            cascade_columns: None,
         },
     ],
     runtime_options: TableRuntimeOptions {

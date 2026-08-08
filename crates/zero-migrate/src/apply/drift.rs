@@ -1338,6 +1338,12 @@ pub async fn snapshot_schema<D: SqlSession>(
                 kind: kind.to_string(),
                 definition,
                 comment: r.try_get("comment").ok().flatten(),
+                // `conkey` IS PostgreSQL's own cascade predicate: `DROP COLUMN`
+                // removes every constraint whose `conkey` contains the dropped
+                // attribute. A whole-row CHECK has a NULL `conkey`, which the ARRAY
+                // subselect above already resolves to an empty list - exactly the
+                // "references no column, never cascades" case.
+                cascade_columns: Some(local_columns),
             });
         }
     }
@@ -2685,6 +2691,7 @@ mod constraint_definition_tests {
             kind: kind.to_string(),
             definition: definition.to_string(),
             comment: None,
+            cascade_columns: None,
         }
     }
 

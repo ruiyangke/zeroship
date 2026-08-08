@@ -3761,6 +3761,7 @@ impl IrAuthor {
                                 crate::render::declarative::constraintdef_cols(columns)
                             ),
                             comment: None,
+                            cascade_columns: None,
                         });
                     }
                     Op::DropConstraint {
@@ -6460,6 +6461,7 @@ impl IrAuthor {
                         kind: "CHECK".to_string(),
                         definition: format!("CHECK ({rendered})"),
                         comment: None,
+                        cascade_columns: None,
                     });
                 }
                 IrConstraintKind::Fk {
@@ -6529,6 +6531,7 @@ impl IrAuthor {
                             crate::render::declarative::constraintdef_cols(columns)
                         ),
                         comment: None,
+                        cascade_columns: None,
                     });
                 }
                 IrConstraintKind::Exclusion { elements, .. } => {
@@ -6548,6 +6551,7 @@ impl IrAuthor {
                         kind: "EXCLUDE".to_string(),
                         definition,
                         comment: None,
+                        cascade_columns: None,
                     });
                 }
             }
@@ -9708,6 +9712,7 @@ mod tests {
                 kind: "PRIMARY KEY".into(),
                 definition: "PRIMARY KEY (id)".into(),
                 comment: None,
+                cascade_columns: None,
             }],
             vec![],
         );
@@ -9771,6 +9776,7 @@ mod tests {
                 kind: "PRIMARY KEY".into(),
                 definition: "PRIMARY KEY (id)".into(),
                 comment: None,
+                cascade_columns: None,
             }],
             vec![],
         );
@@ -11796,6 +11802,7 @@ mod tests {
                     kind: "PRIMARY KEY".into(),
                     definition: "PRIMARY KEY (id)".into(),
                     comment: None,
+                    cascade_columns: None,
                 }],
                 vec![],
             ),
@@ -14156,6 +14163,7 @@ columns = [
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             Vec::new(),
             "CREATE TABLE events (id TEXT PRIMARY KEY, rowid INTEGER NOT NULL, code INTEGER NOT NULL)",
@@ -14183,6 +14191,7 @@ columns = [
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (tenant, id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             Vec::new(),
             "CREATE TABLE events (tenant TEXT NOT NULL, id TEXT NOT NULL, code INTEGER NOT NULL, PRIMARY KEY (tenant, id)) WITHOUT ROWID",

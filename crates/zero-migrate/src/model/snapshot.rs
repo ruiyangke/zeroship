@@ -674,7 +674,7 @@ impl IndexSnapshot {
 /// One constraint of a table, as introspected from
 /// `information_schema.table_constraints` (kind) + byte-comparable
 /// `pg_get_constraintdef` bodies.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConstraintSnapshot {
     /// Constraint name.
     pub name: String,
@@ -697,7 +697,37 @@ pub struct ConstraintSnapshot {
     pub definition: String,
     /// User-authored catalog comment on this constraint.
     pub comment: Option<String>,
+    /// **Provenance-only** local columns whose drop cascades this constraint away,
+    /// recorded structurally by the producer rather than parsed back out of
+    /// `definition`.
+    ///
+    /// On the live side this is PostgreSQL's `conkey` expanded to names, which is
+    /// exactly the catalog's own cascade predicate: `ALTER TABLE ... DROP COLUMN`
+    /// removes every constraint whose `conkey` contains the dropped attribute.
+    /// On the offline side it is collected from the closed-AST expression the
+    /// renderer emitted, descending only into the leg the target dialect selects.
+    ///
+    /// `None` means the producer did not record it and the consumer must fall back
+    /// to parsing the leading parenthesized group of `definition`. `Some(vec![])`
+    /// means the constraint references no column at all (`CHECK (true)`, a
+    /// whole-row predicate) and therefore never cascades.
+    ///
+    /// EXCLUDED from equality: this is provenance, not identity. The fold-derived
+    /// and `conkey`-derived lists legitimately differ (the fold records it only
+    /// where it drives a cascade decision), and comparing them would report drift
+    /// on constraints that are structurally identical.
+    pub cascade_columns: Option<Vec<String>>,
 }
+
+impl PartialEq for ConstraintSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.kind == other.kind
+            && self.definition == other.definition
+            && self.comment == other.comment
+    }
+}
+impl Eq for ConstraintSnapshot {}
 
 /// A live table's structure (deterministic ordering throughout).
 #[derive(Debug, Clone)]

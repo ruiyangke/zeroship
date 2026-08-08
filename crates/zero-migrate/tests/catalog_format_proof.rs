@@ -111,6 +111,7 @@ fn live(dialect: SqlDialect, evidence: Evidence) -> LiveSchema {
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             runtime_options: Default::default(),
             partition_by: None,

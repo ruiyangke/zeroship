@@ -683,6 +683,7 @@ fn unmanaged_live_with_case_sensitive(data_type: &str, case_sensitive: Option<bo
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             runtime_options: Default::default(),
             partition_by: None,
@@ -764,6 +765,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
                     kind: "PRIMARY KEY".to_string(),
                     definition: "PRIMARY KEY (id)".to_string(),
                     comment: None,
+                    cascade_columns: None,
                 }],
                 runtime_options: Default::default(),
                 partition_by: None,
@@ -1015,6 +1017,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             indexes: Vec::new(),
             runtime_options: Default::default(),
@@ -1211,6 +1214,7 @@ fn sqlite_declared_bigint_reference_matches_managed_integer_storage() {
                 kind: "PRIMARY KEY".to_string(),
                 definition: "PRIMARY KEY (id)".to_string(),
                 comment: None,
+                cascade_columns: None,
             }],
             indexes: Vec::new(),
             runtime_options: Default::default(),
@@ -1370,6 +1374,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
             kind: "PRIMARY KEY".to_string(),
             definition: "PRIMARY KEY (id)".to_string(),
             comment: None,
+            cascade_columns: None,
         }],
     );
     let author = IrAuthor::new(
@@ -1462,6 +1467,7 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
             kind: "PRIMARY KEY".to_string(),
             definition: "PRIMARY KEY (row_id)".to_string(),
             comment: None,
+            cascade_columns: None,
         }],
     );
 

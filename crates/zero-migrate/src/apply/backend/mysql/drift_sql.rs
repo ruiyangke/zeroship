@@ -421,6 +421,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
                         crate::render::declarative::constraintdef_cols(&parts.columns)
                     ),
                     comment: None,
+                    cascade_columns: None,
                 });
             }
             table.indexes.push(IndexSnapshot {

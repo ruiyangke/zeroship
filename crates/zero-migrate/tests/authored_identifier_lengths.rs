@@ -519,6 +519,7 @@ fn constraint_snapshot(name: &str) -> ConstraintSnapshot {
         kind: "UNIQUE".to_string(),
         definition: "UNIQUE (c)".to_string(),
         comment: None,
+        cascade_columns: None,
     }
 }
 

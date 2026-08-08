@@ -1542,6 +1542,7 @@ scope = "all"
                         kind: "PRIMARY KEY".to_string(),
                         definition: format!("PRIMARY KEY ({})", columns.join(", ")),
                         comment: None,
+                        cascade_columns: None,
                     }],
                     runtime_options: Default::default(),
                     partition_by: None,

@@ -1446,6 +1446,7 @@ mod tests {
             kind: kind.to_string(),
             definition: definition.to_string(),
             comment: None,
+            cascade_columns: None,
         }
     }
 

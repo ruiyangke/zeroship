@@ -2474,6 +2474,12 @@ fn json_scalar_sql(v: &serde_json::Value, dialect: SqlDialect) -> Option<String>
 /// byte round-trip of the body is not attempted; the constraint's PRESENCE and
 /// enforcement are what round-trip cleanly, matching plugin-db, which never
 /// re-diffs a CHECK).
+///
+/// Every shape here constrains exactly ONE column, so each records that column as
+/// its `cascade_columns`. `build_table_snapshot_impl` feeds these into the offline
+/// fold, whose `dropColumn` cascade needs the column set structurally: the CHECK
+/// body is the leading parenthesized group of `definition`, so parsing it back out
+/// would never match and PostgreSQL's cascade of the constraint would go unmirrored.
 fn field_check_constraints(
     table: &str,
     f: &FieldDescriptor,
@@ -2496,6 +2502,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: def,
                 comment: None,
+                cascade_columns: Some(vec![f.name.clone()]),
             });
         }
     }
@@ -2512,6 +2519,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} = {rendered})"),
                 comment: None,
+                cascade_columns: Some(vec![f.name.clone()]),
             });
         }
     }
@@ -2528,6 +2536,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} IN ({}))", rendered.join(", ")),
                 comment: None,
+                cascade_columns: Some(vec![f.name.clone()]),
             });
         }
     }
@@ -2850,6 +2859,7 @@ pub(crate) fn push_primary_key_snapshot(snap: &mut TableSnapshot, columns: &[Str
         kind: "PRIMARY KEY".into(),
         definition: format!("PRIMARY KEY ({})", constraintdef_cols(columns)),
         comment: None,
+        cascade_columns: None,
     });
     snap.indexes
         .push(IndexSnapshot::btree(name, true, columns.to_vec()));
@@ -3285,6 +3295,7 @@ fn build_table_snapshot_impl(
             kind: "PRIMARY KEY".into(),
             definition: format!("PRIMARY KEY ({})", constraintdef_cols(primary_key)),
             comment: None,
+            cascade_columns: None,
         });
         indexes.push(IndexSnapshot::btree(name, true, primary_key.clone()));
     }
@@ -3477,6 +3488,7 @@ fn build_table_snapshot_impl(
                     dialect,
                 ),
                 comment: None,
+                cascade_columns: None,
             });
         }
     }
@@ -3919,6 +3931,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         kind: "FOREIGN KEY".to_string(),
         definition,
         comment: None,
+        cascade_columns: None,
     }
 }
 
