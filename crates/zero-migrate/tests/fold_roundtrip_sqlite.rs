@@ -10,7 +10,11 @@
 //! Same shape as the PG oracle: APPLY the corpus to a real temp-file `SQLite` backend,
 //! INTROSPECT via `snapshot_schema_sqlite`, FOLD the SAME ops offline with the
 //! `SqlDialect::Sqlite` dialect, assert structural equality. No DB env gate is
-//! needed — `SQLite` is an embedded temp file, always available.
+//! needed - `SQLite` is an embedded temp file, always available.
+//!
+//! The comparison runs after EVERY stage, not once at the end of the corpus. A
+//! create and a drop of the same object cancel in the folded snapshot, so a single
+//! trailing comparison would observe neither half of the `notes_tag_idx` pair.
 //!
 //! Run with `--test-threads=1` for parity with the rest of the suite.
 
@@ -152,6 +156,33 @@ fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     snap
 }
 
+/// Fold the ops applied so far and compare them against live introspection.
+///
+/// Called after every stage rather than once at the end of the corpus. A create
+/// and a drop of the same object cancel in the folded snapshot, so a single
+/// trailing comparison observes neither: `notes_tag_idx` is created in stage 4
+/// and dropped in stage 5, and folding both at once yields the same snapshot a
+/// fold that ignored `createIndex` and `dropIndex` entirely would yield.
+async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .unwrap_or_else(|error| panic!("{stage}: introspect live SQLite schema: {error}"));
+    let folded = fold_ops(
+        ops,
+        SqlDialect::Sqlite,
+        PROJECT,
+        &support::confined_charter(),
+    )
+    .unwrap_or_else(|error| panic!("{stage}: fold the corpus offline: {error}"));
+
+    assert_eq!(
+        canonicalize(folded),
+        canonicalize(live),
+        "{stage}: fold_ops(corpus) must equal the live introspected SQLite snapshot"
+    );
+}
+
 #[compio::test]
 async fn fold_equals_introspect_sqlite() {
     let p = paths("fold_rt");
@@ -175,6 +206,7 @@ async fn fold_equals_introspect_sqlite() {
     ]}"#;
     all_ops.extend(apply_doc(&be, notes, &registry(&[]), &live_tables, Approval::None).await);
     live_tables.insert("notes".to_string());
+    assert_matches_live(&be, &all_ops, "create table").await;
 
     let full = registry(&[("notes", APP)]);
 
@@ -183,42 +215,26 @@ async fn fold_equals_introspect_sqlite() {
         {"op":"addColumn","table":"notes","column":"tag","type":"text","nullable":true}
     ]}"#;
     all_ops.extend(apply_doc(&be, add_col, &full, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "add column").await;
 
     // (3) dropColumn.
     let drop_col = r#"{"ir_version":1,"name":"drop_col","ops":[
         {"op":"dropColumn","table":"notes","column":"score"}
     ]}"#;
     all_ops.extend(apply_doc(&be, drop_col, &full, &live_tables, Approval::Approved).await);
+    assert_matches_live(&be, &all_ops, "drop column").await;
 
-    // (4) createIndex, then dropIndex it.
+    // (4) createIndex, then dropIndex it. Each is compared before the next runs,
+    // so neither can be cancelled by its counterpart before anything observes it.
     let mk_idx = r#"{"ir_version":1,"name":"mk_idx","ops":[
         {"op":"createIndex","table":"notes","columns":[{"kind":"column","name":"tag"}],"name":"notes_tag_idx"}
     ]}"#;
     all_ops.extend(apply_doc(&be, mk_idx, &full, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create index").await;
 
     let drop_idx = r#"{"ir_version":1,"name":"drop_idx","ops":[
         {"op":"dropIndex","name":"notes_tag_idx","table":"notes"}
     ]}"#;
     all_ops.extend(apply_doc(&be, drop_idx, &full, &live_tables, Approval::None).await);
-
-    // INTROSPECT the live SQLite schema.
-    let live = be
-        .snapshot_schema_sqlite()
-        .await
-        .expect("introspect live SQLite schema");
-
-    // FOLD the SAME ops offline (no DB), SQLite dialect.
-    let folded = fold_ops(
-        &all_ops,
-        SqlDialect::Sqlite,
-        PROJECT,
-        &support::confined_charter(),
-    )
-    .expect("fold the corpus offline");
-
-    assert_eq!(
-        canonicalize(folded),
-        canonicalize(live),
-        "fold_ops(corpus) must equal the live introspected SQLite snapshot"
-    );
+    assert_matches_live(&be, &all_ops, "drop index").await;
 }
