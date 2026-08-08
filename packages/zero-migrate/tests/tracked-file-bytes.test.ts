@@ -56,8 +56,21 @@
 // gate because it is the byte that makes grep and the tooling around it report
 // backwards, and the rest were never measured.
 //
-// Does NOT check file ENCODING (a valid UTF-8 file with unusual codepoints passes;
-// that is `tsc`/`cargo fmt`'s business, not this gate's).
+// Does NOT reject VALID UTF-8 carrying unusual codepoints - a confusable, a
+// zero-width joiner, a bidi override. Those render oddly and search fine, which is
+// `tsc`'s and a reviewer's business rather than this gate's. Nothing here covers
+// them; that is a hole, and a deliberate one.
+//
+// It DOES reject invalid UTF-8, and that arm exists because the earlier version of
+// this comment named the exclusion above as if it were the whole encoding story. It
+// was not: an ill-formed byte sequence blinds a search exactly as a NUL does and
+// carries no NUL to find. The gate would have passed such a file while claiming to
+// protect searches from precisely that.
+//
+// The general lesson, and the reason the arm is here rather than in a ticket: a
+// planted control proves the gate catches THE THING YOU PLANTED. It is silent about
+// what else produces the same symptom, because you chose the input from the same
+// belief that built the gate. Ask the second question separately.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -67,6 +80,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** `fatal: true` is the whole point: the lenient decoder replaces every bad byte
+ *  with U+FFFD and reports success, which is the same false green this gate exists
+ *  to prevent. */
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
 const repoRoot = resolve(here, "../../..");
 
 /** The lower bound exists so a broken invocation cannot pass as a clean tree.
@@ -122,9 +140,27 @@ test("no tracked file contains a NUL byte", (t) => {
     }
     if (size === 0) continue;
 
-    const index = readFileSync(absolute).indexOf(0);
+    const bytes = readFileSync(absolute);
     scanned += 1;
-    if (index !== -1) offenders.push(`${relative} (first NUL at byte ${index})`);
+    const index = bytes.indexOf(0);
+    if (index !== -1) {
+      offenders.push(`${relative} (first NUL at byte ${index})`);
+      continue;
+    }
+    // Invalid UTF-8 blinds a search the same way a NUL does and carries no NUL to
+    // find, so a gate that looked only for the byte would pass the file and leave
+    // the search silently empty. MEASURED: a file containing 0xFF with no NUL gives
+    // `indexOf(0) === -1`, and `grep -c <pattern>` over it exits 1 printing nothing
+    // while the identical clean file exits 0 printing 1.
+    //
+    // This is the question a planted control could not have answered. Planting a NUL
+    // proves the gate catches a NUL; it says nothing about what ELSE produces the
+    // same symptom, and that second question is the one that found this.
+    try {
+      STRICT_UTF8.decode(bytes);
+    } catch {
+      offenders.push(`${relative} (not valid UTF-8)`);
+    }
   }
 
   // The count above proves git ENUMERATED files; this proves we READ them. Without
