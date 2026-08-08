@@ -774,11 +774,12 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 
 // ---- T11: capability minting uses named seams --------------------------
 
-/// The capability type is constructible from the test seam. The production mint
-/// is the named shadow seam
-/// (`model::capability::mint_shadow_operator_capability` for shadow dry-runs);
-/// `for_test` is gated behind `zero-migrate-ir`'s `test-support` feature, which
-/// this crate enables only as a dev-dependency.
+/// What this pins is the CONFIG the policy produces, not exclusive minting - the
+/// name is historical. `OperatorCapability` is freely mintable by any dependent
+/// crate (`new`, `Default`, and `for_test` under an additive feature), and it
+/// authorises nothing; `ExecutorConfig::platform` ignores the token and returns what
+/// the public `ExecutorConfig::new` returns. The assertions below are about the
+/// composed `EffectivePolicy`, which is the part that cannot be forged.
 #[test]
 fn t11_platform_capability_mints_only_via_runner_seam() {
     let cap = OperatorCapability::for_test();
@@ -808,10 +809,11 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
     assert!(!ecfg.guard_config().skips_denylist_belt());
-    // NOTE: `OperatorCapability::new` is crate-private. Production code uses
-    // named mint seams; tests use the `for_test` seam, which `zero-migrate-ir`
-    // gates behind its `test-support` feature. The external un-nameability is
-    // pinned by tests/trybuild_*.
+    // NOTE: `OperatorCapability::new` is PUBLIC, as are `Default` and (under an
+    // additive feature) `for_test`, so any dependent crate can mint one. Nothing
+    // reads it. The boundary that is actually pinned is the unforgeable
+    // `EffectivePolicy`, held by the T8 `compile_fail` doctests in
+    // `zero_migrate_guard::guard` - there is no `tests/trybuild_*` and never was.
 }
 
 // ---- Platform widening is correct AND bounded ----------------------

@@ -2535,9 +2535,13 @@ pub fn plan_rollback<'a>(
 // ===========================================================================
 // The Trusted profile applies arbitrary SQL on a REAL Postgres.
 //
-// These MUST be in-crate: `ExecutorConfig::trusted` + `OperatorCapability::for_test`
-// are `pub(crate)` (the external boundary is pinned by `tests/trybuild_*`, T8), so
-// an integration test (a separate crate) could not even construct a Trusted config.
+// These MUST be in-crate because `ExecutorConfig::trusted` is `pub(crate)` AND
+// `#[cfg(test)]`, so an integration test - a separate crate - cannot construct a
+// Trusted config. `OperatorCapability::for_test` is NOT what stops it: that is `pub`
+// under an additive feature a downstream can turn on, and the token authorises
+// nothing anyway. The external boundary that is genuinely pinned is the unforgeable
+// `EffectivePolicy`, held by the T8 `compile_fail` doctests in
+// `zero_migrate_guard::guard`.
 //
 // They run the FULL `executor::apply` path under a Trusted `ExecutorConfig` and
 // prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op

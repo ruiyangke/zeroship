@@ -279,9 +279,13 @@ impl ExecutorConfig {
     /// The token stays the in-crate enforcement primitive.
     // `#[allow(dead_code)]`: the sole in-crate consumer (the live-Postgres
     // Trusted-apply tests) is gated behind a running DB and currently absent, but
-    // this `pub(crate)` ctor stays as the pinned in-crate Trusted-config primitive
-    // (a separate integration crate cannot construct one — see the T8 trybuild
-    // boundary), so it must not be deleted.
+    // this `pub(crate)` ctor stays as the pinned in-crate Trusted-config primitive,
+    // so it must not be deleted. What keeps a separate integration crate out is the
+    // `#[cfg(test)]` below plus `pub(crate)`, not the capability token it takes -
+    // that token is freely mintable and authorises nothing. The unforgeable input is
+    // the composed `EffectivePolicy`, pinned by the T8 `compile_fail` doctests in
+    // `zero_migrate_guard::guard` (NOT by any `tests/trybuild_*`, which has never
+    // existed here).
     #[must_use]
     #[cfg(test)]
     #[allow(dead_code)]

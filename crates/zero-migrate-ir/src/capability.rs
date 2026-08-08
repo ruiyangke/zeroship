@@ -29,11 +29,16 @@ use crate::policy::{SchemaScope, TrustProfile};
 ///
 /// The token type lives with the capability model (in the `zero-migrate-ir` leaf)
 /// so operator-side engine seams can name it without depending on the runner. The
-/// token has a PRIVATE `()` field, so an external crate can name the type but cannot
-/// construct one. Production code mints it through the named engine runner seam
-/// ([`OperatorCapability::new`]); engine tests mint it through the `for_test` method,
-/// gated by the `test-support` feature. Guard policies are always supplied explicitly
-/// as composed `EffectivePolicy` values and do not use this token to select a preset.
+/// PRIVATE `()` field blocks only the struct-literal form. The token is freely
+/// mintable by any dependent crate through the public [`OperatorCapability::new`],
+/// through `Default`, and through `for_test` when a downstream turns on the additive
+/// `test-support` feature.
+///
+/// It authorises nothing. The two functions that take one bind it and never read it,
+/// and the config they build is what the public `ExecutorConfig::new` returns anyway.
+/// Privilege comes from the composed `EffectivePolicy` argument and from nowhere else
+/// - that is the unforgeable type, and its own docs record that it replaced this
+/// token. Do NOT hang a real check on holding one of these.
 #[derive(Debug, Clone)]
 pub struct OperatorCapability(());
 
