@@ -214,3 +214,96 @@ async fn a_zstd_stream_that_is_not_a_tar_is_refused() {
         .expect_err("a non-tar payload must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Reaching the entry-name allowlist at all
+// ---------------------------------------------------------------------------
+//
+// The three name tests above pack a SINGLE hostile entry, so ingest refuses
+// them at "manifest must be first tar entry" and never evaluates the name.
+// Measured: all three return
+//   BadRequest { error: "manifest must be first tar entry", detail: "got <name>" }
+// They assert only `matches!(err, BadRequest)`, which that satisfies. Delete
+// the `blobs/<hash>` allowlist entirely and they still pass - they are tests of
+// entry ORDER wearing the names of tests of entry SAFETY.
+//
+// A hostile name only reaches the allowlist as a LATER entry, behind a
+// well-formed manifest. These build that archive.
+
+/// A manifest that PARSES and VALIDATES, so ingest proceeds to the entries
+/// behind it. `{}` does not: it is refused as "invalid manifest" before the
+/// second entry is read, which is the same not-reaching-the-allowlist defect
+/// one level down - and my first version of the control below passed against
+/// it, because "invalid manifest" is also not an ordering error.
+const VALID_MANIFEST: &[u8] = br#"{"version":1,"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"metadata":{"built_at":"2026-06-25T00:00:00Z"}}"#;
+
+/// Same 512-byte header as `raw_tar_entry`, without the end-of-archive blocks,
+/// so entries can be concatenated.
+fn raw_tar_entry_no_end(name: &str, body: &[u8]) -> Vec<u8> {
+    let mut out = raw_tar_entry(name, body);
+    out.truncate(out.len() - 1024);
+    out
+}
+
+fn pack_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut tar_buf = Vec::new();
+    for (name, body) in entries {
+        tar_buf.extend_from_slice(&raw_tar_entry_no_end(name, body));
+    }
+    tar_buf.extend(std::iter::repeat(0u8).take(1024));
+    zstd::encode_all(tar_buf.as_slice(), 0).unwrap()
+}
+
+/// CONTROL: a manifest followed by a well-formed `blobs/<sha256>` entry gets
+/// PAST the ordering check, so a refusal in the tests below is about the name.
+///
+/// It still fails - the manifest is not a valid Manifest - but it must fail
+/// with a MANIFEST error, not an ordering one. If this ever reports "manifest
+/// must be first tar entry", the two tests below have silently stopped
+/// reaching the allowlist and are back to testing order.
+#[compio::test]
+async fn a_second_entry_is_reached_after_a_first_manifest_entry() {
+    let hash = "a".repeat(64);
+    let blob_name = format!("blobs/{hash}");
+    let archive = pack_entries(&[("manifest.json", VALID_MANIFEST), (blob_name.as_str(), b"x")]);
+    let err = ingest(&store(), &Uuid::now_v7(), &archive).await.unwrap_err();
+    let IngestError::BadRequest { error, .. } = &err else {
+        panic!("expected BadRequest, got {err:?}")
+    };
+    assert!(
+        !error.contains("manifest must be first"),
+        "the ordering check still fired, so the entry-name tests below are not \
+         reaching the allowlist; got {err:?}"
+    );
+    // POSITIVE witness: the failure must be about the SECOND entry, proving it
+    // was read and hashed. "not the ordering error" alone is satisfied by any
+    // earlier refusal - my first version asserted exactly that and passed while
+    // the manifest was still being rejected before the entry was reached.
+    assert!(
+        error.contains("blob hash mismatch"),
+        "expected the second entry to be read and hashed; got {err:?}"
+    );
+}
+
+/// A traversing name in a LATER entry is refused BY THE ALLOWLIST.
+///
+/// The allowlist is positive - `blobs/<64 lowercase hex>` - so `..` is refused
+/// for not matching the shape, not by a path-traversal rule. Asserting the
+/// message keeps the distinction: a future denylist-style check that happened
+/// to let `blobs/../../x` through would fail here rather than pass quietly.
+#[compio::test]
+async fn a_traversing_name_in_a_later_entry_is_refused_by_the_allowlist() {
+    let archive = pack_entries(&[("manifest.json", VALID_MANIFEST), ("blobs/../../etc/passwd", b"x")]);
+    let err = ingest(&store(), &Uuid::now_v7(), &archive).await.unwrap_err();
+    let IngestError::BadRequest { error, detail } = &err else {
+        panic!("expected BadRequest, got {err:?}")
+    };
+    assert!(
+        !error.contains("manifest must be first"),
+        "refused by the ordering check, not the allowlist; got {err:?}"
+    );
+    assert!(
+        error.contains("sha256") || detail.contains("sha256") || error.contains("expected manifest.json or blobs/"),
+        "refused, but not for the entry name; got {err:?}"
+    );
+}
