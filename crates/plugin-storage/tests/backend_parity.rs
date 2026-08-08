@@ -82,6 +82,30 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
         .unwrap_or_else(|| panic!("[{label}] buffered get returned None"));
     assert_eq!(got, body, "[{label}] buffered get bytes");
     assert_eq!(meta.size, body.len() as u64, "[{label}] buffered get meta size");
+    // The content type the creator set on `put` must survive the round trip
+    // IDENTICALLY on every backend. This is the assertion the parity suite was
+    // missing: `LocalFs` used to drop the type on the floor and hand back
+    // `None` while `S3` returned `Some("text/plain")`, so an object served off
+    // the shared LocalFs volume in a multi-node deployment lost its type.
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("text/plain"),
+        "[{label}] buffered get must round-trip the put content type"
+    );
+
+    // Same object, metadata read via the STREAMING path — `getStream` reports
+    // `contentType` from this `ObjectMeta`, so it needs its own assertion.
+    let (smeta, sstream) = backend
+        .get_stream(APP, BUCKET, key)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] get_stream for content type: {e}"))
+        .unwrap_or_else(|| panic!("[{label}] get_stream for content type returned None"));
+    assert_eq!(
+        smeta.content_type.as_deref(),
+        Some("text/plain"),
+        "[{label}] get_stream must round-trip the put content type"
+    );
+    drop(drain(sstream).await);
 
     // get of a missing key => None
     assert!(
@@ -109,12 +133,17 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
         .unwrap_or_else(|e| panic!("[{label}] streaming put: {e}"));
     assert_eq!(written, expect.len() as u64, "[{label}] streaming put size");
 
-    let (sbuf, _m) = backend
+    let (sbuf, m) = backend
         .get(APP, BUCKET, skey, GET_CAP)
         .await
         .unwrap()
         .unwrap_or_else(|| panic!("[{label}] streaming object get None"));
     assert_eq!(sbuf, expect, "[{label}] streaming put round-trip bytes");
+    assert_eq!(
+        m.content_type.as_deref(),
+        Some("application/octet-stream"),
+        "[{label}] streaming put must round-trip its content type"
+    );
 
     // ---- streaming get path ----
     let (_meta, stream) = backend
@@ -160,6 +189,119 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
 
     // cleanup the stream object too
     backend.delete(APP, BUCKET, skey).await.unwrap();
+}
+
+/// Content-type parity beyond the plain round-trip: the *absent* type, and
+/// what an overwrite does to the type the previous writer set.
+///
+/// These three cases are where a naive "write a sidecar next to the object"
+/// implementation diverges from S3 even after the basic round trip passes:
+///
+/// - `put(.., None)` must land the same advertised type on both backends. S3
+///   has always sent `application/octet-stream` when the caller gives nothing,
+///   so that is the contract `LocalFs` has to match — not `None`.
+/// - Overwriting with a NEW type must replace the old one, never keep it.
+/// - Overwriting with NO type must fall back to the default, never leave the
+///   previous writer's type attached to the new writer's bytes. That last one
+///   is the dangerous direction: bytes and type disagreeing is worse than a
+///   missing type.
+async fn run_content_type_parity(backend: &dyn Backend, label: &str) {
+    // ---- absent content type → the octet-stream default, not None ----
+    let key = "ct-default.bin";
+    backend
+        .put(APP, BUCKET, key, b"no type given", None)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] ct default put: {e}"));
+    let (_b, meta) = backend
+        .get(APP, BUCKET, key, GET_CAP)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{label}] ct default get None"));
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/octet-stream"),
+        "[{label}] a put with no content type must advertise the octet-stream default"
+    );
+
+    // ---- overwrite with a different type → the NEW type wins ----
+    let key = "ct-overwrite.bin";
+    backend
+        .put(APP, BUCKET, key, b"first", Some("text/plain"))
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] ct overwrite put 1: {e}"));
+    backend
+        .put(APP, BUCKET, key, b"second", Some("application/json"))
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] ct overwrite put 2: {e}"));
+    let (body, meta) = backend
+        .get(APP, BUCKET, key, GET_CAP)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{label}] ct overwrite get None"));
+    assert_eq!(body, b"second", "[{label}] ct overwrite bytes");
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/json"),
+        "[{label}] overwrite must replace the previous content type"
+    );
+
+    // ---- overwrite with NO type → the default, NOT the stale prior type ----
+    // A sidecar that is written-but-never-cleared passes every assertion above
+    // and fails this one, handing the new bytes the old writer's type.
+    backend
+        .put(APP, BUCKET, key, b"third", None)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] ct overwrite put 3: {e}"));
+    let (body, meta) = backend
+        .get(APP, BUCKET, key, GET_CAP)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{label}] ct clear get None"));
+    assert_eq!(body, b"third", "[{label}] ct clear bytes");
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/octet-stream"),
+        "[{label}] an untyped overwrite must NOT inherit the previous type"
+    );
+
+    // ---- delete → re-put with no type → still the default ----
+    // Any per-object metadata a backend keeps on the side must not outlive the
+    // object it describes and reattach itself to a later one.
+    assert!(
+        backend.delete(APP, BUCKET, key).await.unwrap(),
+        "[{label}] ct delete present"
+    );
+    backend
+        .put(APP, BUCKET, key, b"fourth", None)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] ct re-put after delete: {e}"));
+    let (_b, meta) = backend
+        .get(APP, BUCKET, key, GET_CAP)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{label}] ct re-put get None"));
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/octet-stream"),
+        "[{label}] metadata must not survive the delete of the object it described"
+    );
+
+    // ---- listing must not surface any sidecar/companion file as an object ----
+    // A metadata file stored beside the object would otherwise show up as a
+    // phantom key that a creator never wrote and cannot get/delete.
+    let entries = backend.list(APP, BUCKET, "ct-").await.unwrap();
+    let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+    let mut expected = vec!["ct-default.bin", "ct-overwrite.bin"];
+    expected.sort_unstable();
+    let mut actual = keys.clone();
+    actual.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "[{label}] list surfaced unexpected keys (sidecar leaking as an object?)"
+    );
+
+    backend.delete(APP, BUCKET, "ct-default.bin").await.unwrap();
+    backend.delete(APP, BUCKET, "ct-overwrite.bin").await.unwrap();
 }
 
 /// Large streaming round-trip: put a > part-size object as many chunks, get
@@ -331,6 +473,7 @@ fn localfs_parity_and_large_stream() {
         .expect("compio runtime")
         .block_on(async {
             run_parity(&backend, "localfs").await;
+            run_content_type_parity(&backend, "localfs").await;
             run_large_stream(&backend, "localfs").await;
         });
 
@@ -448,6 +591,7 @@ fn s3_parity_and_large_stream() {
             .expect("compio runtime")
             .block_on(async {
                 run_parity(&backend, "s3").await;
+                run_content_type_parity(&backend, "s3").await;
                 run_large_stream(&backend, "s3").await;
                 // Parallel multipart: a many-part object with concurrency > 1
                 // round-trips byte-exact (parts sorted by number before

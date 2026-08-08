@@ -40,7 +40,7 @@ use compio_s3::{PartETag, PutOptions, S3Client, S3Config, S3Credentials, S3Error
 
 use super::{
     validate_list_coords, validate_object_coords, Backend, BoxByteStream, BoxChunkSource,
-    ChunkResult, ChunkSource, ListEntry, ObjectMeta,
+    ChunkResult, ChunkSource, ListEntry, ObjectMeta, DEFAULT_CONTENT_TYPE,
 };
 
 /// Multipart part size. S3 requires every part except the last to be
@@ -455,7 +455,7 @@ impl Backend for S3 {
     ) -> Result<u64, String> {
         validate_object_coords(app_id, bucket, key)?;
         let s3_key = Self::object_key(app_id, bucket, key);
-        let content_type = content_type.unwrap_or("application/octet-stream");
+        let content_type = content_type.unwrap_or(DEFAULT_CONTENT_TYPE);
 
         // Best-effort drain of any orphan recorded by a PRIOR drop-cancelled
         // upload on this thread. Cheap when the queue is empty (no network).

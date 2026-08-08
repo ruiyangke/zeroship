@@ -41,6 +41,13 @@ pub use s3::S3;
 /// feature. Keep in sync with `s3::PART_SIZE`.
 pub const UPLOAD_STREAM_BUFFER_CAP: usize = 16 * 1024 * 1024;
 
+/// The content type an object is advertised with when the writer supplied
+/// none. Every backend applies it at its own `put_stream` boundary, so a
+/// `put(.., None)` reads back identically whichever backend is configured —
+/// this is the S3/HTTP convention, and `LocalFs` matches it rather than
+/// inventing a `None` that only one backend can produce.
+pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+
 // ---------------------------------------------------------------------------
 // Types shared by all backends
 // ---------------------------------------------------------------------------
@@ -48,6 +55,10 @@ pub const UPLOAD_STREAM_BUFFER_CAP: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct ObjectMeta {
     pub size: u64,
+    /// The object's content type. Backends resolve an absent writer-supplied
+    /// type to [`DEFAULT_CONTENT_TYPE`] on the way in, so a *stored* object
+    /// always reports `Some(_)`. `None` is reserved for callers that
+    /// synthesise an `ObjectMeta` without going through a backend.
     pub content_type: Option<String>,
     pub modified_at: SystemTime,
 }
