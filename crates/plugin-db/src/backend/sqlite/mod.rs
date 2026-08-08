@@ -644,7 +644,7 @@ impl NamespaceManager for SqliteBackend {
     /// path is built from `db_dir` (operator-controlled, typically a
     /// UTF-8 absolute path) joined with `zs-<app_id>.sqlite`. The
     /// `app_id` is constrained to ASCII alphanumeric + `_` + `-` by
-    /// [`crate::audit::validate_app_id`] before any consumer reaches
+    /// `audit::validate_app_id` before any consumer reaches
     /// `ensure_app_schema`, so the suffix is always UTF-8 safe. If
     /// `db_dir` itself contains non-UTF-8 bytes (rare on the Linux
     /// targets we ship to), `to_string_lossy` substitutes U+FFFD —

@@ -9,7 +9,7 @@
 //!    cached schema. A column with no mask declaration cannot be
 //!    unmasked — surface `unmask_column_not_masked`.
 //! 2. Authorise via [`check_unmask_authorization`]: consult the app's
-//!    per-app [`MaskPolicy`] (configured via `defineMaskPolicy()`) when
+//!    per-app [`crate::crud::mask_policy::MaskPolicy`] (configured via `defineMaskPolicy()`) when
 //!    one is cached; otherwise fall back to a strict default-deny rule
 //!    where only the `auto` actor kind (system / migrations /
 //!    background jobs) can unmask any classification. Denied attempts
@@ -1802,7 +1802,7 @@ mod tests {
     // Per-app policy lookup
     // ---------------------------------------------------------------
 
-    /// Helper: install a [`MaskPolicy`] for `app_id` on the current
+    /// Helper: install a [`crate::crud::mask_policy::MaskPolicy`] for `app_id` on the current
     /// isolate's context cache, then immediately remove it on drop.
     /// Keeps the thread-local cache hygiene clean across tests.
     struct PolicyGuard(String);

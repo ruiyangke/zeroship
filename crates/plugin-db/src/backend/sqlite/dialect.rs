@@ -11,7 +11,7 @@
 //! the matching `PgDialect` impl so `query.rs`'s free-function string
 //! builders can be retargeted onto a dialect-typed entry point in a
 //! later change without re-shaping their call sites. The
-//! [`crate::backend::sqlite::SqliteBackend::ensure_app_schema`] impl
+//! [`crate::backend::NamespaceManager::ensure_app_schema`] impl
 //! uses `quote_ident` to escape the ATTACH alias; the other
 //! hooks have no consumer yet.
 

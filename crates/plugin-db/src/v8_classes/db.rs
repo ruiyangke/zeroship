@@ -107,7 +107,7 @@ impl Db {
         Err(OpError::type_error("Illegal constructor"))
     }
 
-    /// `db.collection(name)` — returns a [`Collection`] v8_class
+    /// `db.collection(name)` — returns a [`crate::v8_classes::collection::Collection`] v8_class
     /// instance bound to this Db and the given collection name.
     ///
     /// Cached by `name`: subsequent calls with the same `name` return
@@ -319,7 +319,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value.
 ///
-/// Before returning, this also mints a [`DbPlatform`]
+/// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the
 /// `Db` object under the `ZS_PLATFORM` private symbol. The handle
 /// holds the platform-internal callables (`registerModel`,

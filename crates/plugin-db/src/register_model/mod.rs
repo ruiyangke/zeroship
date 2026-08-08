@@ -330,7 +330,7 @@ pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
 
 /// Pool-driven entry retained for integration tests that hand in a
 /// `Rc<Pool>` directly (predates the Backend trait). Builds an ad-hoc
-/// [`PostgresBackend`] around the pool and delegates to
+/// [`crate::backend::PostgresBackend`] around the pool and delegates to
 /// [`run_pipeline`].
 ///
 /// Production code reaches the orchestrator through

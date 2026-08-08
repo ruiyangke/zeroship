@@ -83,7 +83,7 @@ use crate::error::DbError;
 ///
 /// This is the overload that captures plaintexts for the
 /// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
-/// for the version that populates a [`MaskPlaintextSidechannel`]
+/// for the version that populates a [`crate::crud::mask_pass::MaskPlaintextSidechannel`]
 /// (`HashMap<String, Zeroizing<String>>`) BEFORE replacing the plaintext with
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
