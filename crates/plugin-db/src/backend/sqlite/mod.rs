@@ -2391,8 +2391,14 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //   * `pitr_replay(app_id, target)`:
 //       SQLite has no WAL-archive PITR. Returns
 //       `Configuration { code: "pitr_pg_only" }` unconditionally.
+//
+// The gate below is `test-helpers` ALONE, and must stay that way. The
+// `Backup` trait itself carries `#[cfg(feature = "test-helpers")]`
+// (`backend/mod.rs`), so under a plain `cargo test --lib` the trait does
+// not exist and there is nothing here to implement. Widening this to
+// `any(test, feature = "test-helpers")` does not make the impl available
+// to in-crate unit tests - it fails the build with E0405/E0432, measured.
 
-#[cfg(any(test, feature = "test-helpers"))]
 #[cfg(feature = "test-helpers")]
 impl crate::backend::Backup for SqliteBackend {
     async fn snapshot(
@@ -2440,7 +2446,9 @@ impl crate::backend::Backup for SqliteBackend {
 ///
 /// `pub(super)` so the trait methods above can call in; the helpers
 /// stay private to this file.
-#[cfg(any(test, feature = "test-helpers"))]
+///
+/// Gated to match the `impl Backup` block above - see the note there for
+/// why `test-helpers` alone is the only gate that builds.
 #[cfg(feature = "test-helpers")]
 mod backup_sqlite {
     use std::io::Read;

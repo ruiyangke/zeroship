@@ -1402,12 +1402,28 @@ pub use zeroship_schema::descriptors::EncryptionMode;
 /// Snapshot + restore + PITR for the per-app data store.
 ///
 /// **Admin surface** — like [`ChangeStream`] / [`VectorIndex`], this
-/// trait is routed through the `BackendHandle::as_backup_*`
-/// accessors rather than joining the `Backend` super-trait. App
-/// code never reaches this; only the platform's backup orchestrator
-/// does. PG ships `pg_dump`/`pg_restore` shell-out + PITR
-/// placeholder; SQLite ships `VACUUM INTO`
-/// + atomic-rename restore + `pitr_pg_only` refusal.
+/// trait sits beside the `Backend` super-trait rather than joining it.
+/// App code never reaches it.
+///
+/// # This capability is NOT in a release build
+///
+/// The `#[cfg]` below is the whole story: the trait, both impls
+/// (`PostgresBackend` in `backend/postgres.rs`, `SqliteBackend` in
+/// `backend/sqlite/mod.rs`), both `BackendHandle::as_backup_*`
+/// accessors, and the three compile-time assertions in `mod tests` are
+/// each gated on `feature = "test-helpers"`. Nothing in the workspace
+/// enables that feature outside this crate's own integration targets,
+/// so there is no backup orchestrator calling in and no shipped path
+/// that can take a snapshot. Read the bodies as a design placeholder
+/// exercised by tests, not as operable backup.
+///
+/// The two `as_backup_*` accessors have no caller at all - the
+/// integration tests reach the impls through the trait directly.
+///
+/// Bodies, for what they will do: PG shells out to
+/// `pg_dump`/`pg_restore` and writes a PITR placeholder row; SQLite
+/// does `VACUUM INTO` + atomic-rename restore and refuses PITR with
+/// `pitr_pg_only`.
 #[cfg(feature = "test-helpers")]
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
