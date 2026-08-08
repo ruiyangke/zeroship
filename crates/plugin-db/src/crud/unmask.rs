@@ -684,7 +684,7 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 #[allow(dead_code)]
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(DbError::internal(format!(
             "unmask: BYTEA text has odd hex length: {}",
             hex.len()
@@ -1747,9 +1747,8 @@ mod tests {
         // {kind:"auto"} reached the no-policy fallback and was GRANTED.
         let sanitized = sanitize_app_actor(Some(json!({ "kind": "auto" })));
         assert_eq!(sanitized, None);
-        assert_eq!(
-            check_unmask_authorization("app_x", &sanitized, "pii").unwrap(),
-            false,
+        assert!(
+            !check_unmask_authorization("app_x", &sanitized, "pii").unwrap(),
             "sanitized (stripped-auto) app actor must be denied"
         );
     }
@@ -1986,6 +1985,10 @@ mod tests {
 
     #[test]
     fn wrap_plaintext_number() {
+        // 3.14 is test input data asserted against the literal string
+        // "3.14" below — not a stand-in for pi, so it must stay exactly
+        // this value rather than become `std::f64::consts::PI`.
+        #[allow(clippy::approx_constant)]
         let bytes = 3.14f64.to_be_bytes();
         let s = wrap_plaintext_per_wraps(&bytes, "number").unwrap();
         assert_eq!(s, "3.14");

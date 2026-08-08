@@ -798,6 +798,7 @@ enum SettleOutcome {
 /// Top-level (`savepoint == None`):
 ///   - success → `COMMIT`, drop the connection, drain pending emits.
 ///   - failure → `ROLLBACK`, drop the connection, clear pending emits.
+///
 /// Nested (`savepoint == Some(name)`):
 ///   - success → `RELEASE SAVEPOINT name` (keeps the connection open).
 ///   - failure → `ROLLBACK TO SAVEPOINT name` (keeps the connection

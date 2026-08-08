@@ -139,7 +139,7 @@ fn unit_fixtures(prefix: &str) -> Vec<ColFixture> {
 }
 
 /// Narrow row: 3 columns (INT4 + TEXT + INT8). Mirrors a primary-key
-/// + name lookup. Sized so the linear-scan / index-scan cost is roughly
+/// and name lookup. Sized so the linear-scan / index-scan cost is roughly
 /// equal — useful as a baseline.
 fn narrow_row() -> Row {
     build_row(vec![

@@ -29,16 +29,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// `(key1, key2) -> Rc<Cell<bool>>` slot map — keyed on the
+/// [`crate::backend::LockScope::to_keys`] derivation; the bool
+/// records "currently held". `Rc<Cell<…>>` so a future
+/// `SqliteLockGuard` can clone the slot at acquire time and release
+/// on drop without re-walking the map.
+type LockSlots = HashMap<(String, String), Rc<Cell<bool>>>;
+
 /// Per-process advisory-lock registry. One instance per
 /// [`super::SqliteBackend`].
 #[derive(Default)]
 pub(crate) struct InProcessLockRegistry {
-    /// `(key1, key2) -> Rc<Cell<bool>>` — keyed on the
-    /// [`crate::backend::LockScope::to_keys`] derivation; the bool
-    /// records "currently held". `Rc<Cell<…>>` so a future
-    /// `SqliteLockGuard` can clone the slot at acquire time and release
-    /// on drop without re-walking the map.
-    slots: RefCell<HashMap<(String, String), Rc<Cell<bool>>>>,
+    slots: RefCell<LockSlots>,
 }
 
 impl InProcessLockRegistry {

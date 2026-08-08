@@ -339,7 +339,7 @@ pub async fn mint_and_init_via_pool(
         .get()
         .await
         .map_err(|e| coded_sql("pool get", e))?;
-    mint_and_init(&*client, init, ttl_secs).await
+    mint_and_init(&client, init, ttl_secs).await
 }
 
 // ---------------------------------------------------------------------------

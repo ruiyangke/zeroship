@@ -3035,8 +3035,8 @@ mod tests {
         assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
         assert_eq!(m.key_id, "default");
         assert!(matches!(m.wraps, crate::diff::WrappedType::String));
-        assert!(got.get("name").is_none(), "non-encrypted col must be absent");
-        assert!(got.get("id").is_none());
+        assert!(!got.contains_key("name"), "non-encrypted col must be absent");
+        assert!(!got.contains_key("id"));
     }
 
     /// Deterministic mode + non-string wraps + custom key id.

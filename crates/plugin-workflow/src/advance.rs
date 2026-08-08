@@ -96,7 +96,7 @@ impl WorkflowAdvanceResponse {
         let next_wake_at = registrations
             .iter()
             .find(|registration| registration.run_id == run_id)
-            .and_then(|registration| registration.next_wake_at.clone());
+            .and_then(|registration| registration.next_wake_at);
         Self {
             ack: true,
             nack: false,

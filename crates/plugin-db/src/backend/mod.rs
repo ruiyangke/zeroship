@@ -904,7 +904,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// **Open Q5 resolution**: the alternative was a GAT on
 /// [`LockManager`] of the form
 /// `type PooledLockClient<'p>: 'p where Self: 'p`. async-fn-in-trait
-/// + GAT is workable but fights the trait solver in subtle ways
+/// and GAT is workable but fights the trait solver in subtle ways
 /// (HRTB-style bounds at consumer sites). Since the PG impl is the
 /// only one that needs a borrow-lifetimed lock client today — and
 /// future backends (sqlite, planetscale) would have their own
@@ -1170,6 +1170,7 @@ pub trait VectorIndex: 'static {
     /// Each returned `Value` is an object including a synthetic
     /// `"_distance"` field (`f64`).
     #[allow(async_fn_in_trait)]
+    #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat vector-search call shape; a params struct would just move the fields
     async fn vector_search(
         &self,
         app_id: &str,
@@ -1277,6 +1278,7 @@ pub trait SpatialIndex: 'static {
     /// Return rows within `radius_m` of `point` ordered by distance
     /// ASC. `limit` of `None` defers to the impl's default.
     #[allow(async_fn_in_trait)]
+    #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat spatial-near call shape; a params struct would just move the fields
     async fn spatial_near(
         &self,
         app_id: &str,
@@ -1669,6 +1671,7 @@ impl<T> RegisterBackend for T where
 ///   on the per-isolate context (e.g.
 ///   `IsolateDbContext::tx_conns`) for the duration
 ///   of a transaction.
+///
 /// NOTE FOR DOC LINKS, AND AN OPEN DECISION.
 ///
 /// This trait is `cfg(any(test, feature = "test-helpers"))`, so it does not
@@ -2330,7 +2333,7 @@ mod tests {
             name: "register_model".into(),
         };
         let _ = backend.try_acquire(client, &global).await?;
-        let _ = backend.acquire(client, &global).await?;
+        backend.acquire(client, &global).await?;
         backend.release(client, &global).await?;
 
         // LocalApp arm — same dispatch surface (variant classifies

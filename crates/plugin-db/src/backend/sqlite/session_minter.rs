@@ -155,7 +155,7 @@ impl SqliteSessionMinterConfig {
 /// SQLite arm runs one backend per worker thread.
 ///
 /// Insertion is `O(1)` amortised; eviction is `O(1)` (`pop_front`
-/// + `HashSet::remove`). Memory bound: `capacity × (~32 bytes
+/// and `HashSet::remove`). Memory bound: `capacity × (~32 bytes
 /// nonce + 8 bytes expiry + HashSet overhead)` ≈ 800 KB at the
 /// default 10K capacity.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -265,7 +265,7 @@ pub(crate) fn compute_signature(secret: &[u8], payload: &[u8]) -> Vec<u8> {
 /// ```
 ///
 /// Empty `actor_id` / `pid` mirror PG's `COALESCE(p_actor_id, '')`
-/// + `p_pid::TEXT` (the PG impl casts a `NULL`-able integer to
+/// and `p_pid::TEXT` (the PG impl casts a `NULL`-able integer to
 /// text via `COALESCE`).
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn canonical_payload(

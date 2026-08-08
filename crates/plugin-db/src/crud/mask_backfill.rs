@@ -16,7 +16,7 @@
 //!
 //! - [`run_mask_rewrite`] — existing masked column's `.mask(...)`
 //!   `kind` (or `classification`) changed. The sibling already exists
-//!   + is NOT NULL, so the rewrite touches every row (no IS NULL
+//!   and is NOT NULL, so the rewrite touches every row (no IS NULL
 //!   filter) and DOES NOT mutate the schema afterwards.
 //!
 //! - [`run_mask_remove`] — `.mask(...)` declaration removed (or
@@ -122,6 +122,7 @@ pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), DbErro
 /// encrypted column resolves its key + recovers plaintext before the
 /// mask transform; plaintext columns (`enc_meta == None`) take the
 /// direct branch.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_mask_to_one_row<B>(
     backend: &B,
     app_id: &str,
@@ -255,6 +256,7 @@ pub struct BackfillReport {
 /// finds the existing `Running` (or `Failed`) audit row and reuses it
 /// — the row's `cursor` carries the last processed PK so subsequent
 /// SELECTs pick up where the previous attempt stopped.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_mask_backfill<B>(
     backend: &B,
     app_id: &str,
@@ -340,6 +342,7 @@ where
 /// observable difference. Resume from `audit_row.cursor` skips
 /// already-rewritten rows for the common case where the operator
 /// just wants to bypass the redundant work.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_mask_rewrite<B>(
     backend: &B,
     app_id: &str,
@@ -588,7 +591,7 @@ async fn read_processed_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Opt
 /// Resume semantics: if a `Running` row already exists for this
 /// `(collection, name)` pair (from a prior worker that crashed
 /// mid-backfill), we reuse it. This means a backfill that fails halfway
-/// + a deploy that re-emits the same `MaskBackfill` op finds the same
+/// and a deploy that re-emits the same `MaskBackfill` op finds the same
 /// audit row and resumes from the cursor it already wrote.
 async fn open_backfill_audit_row(
     pool: &Pool,
@@ -781,7 +784,7 @@ fn wrapped_bytes_to_string(bytes: &[u8], wraps: crate::diff::WrappedType) -> Str
 /// flip its visibility for one consumer.
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(DbError::internal(format!(
             "mask_backfill: BYTEA text has odd hex length {}",
             hex.len()
@@ -865,10 +868,8 @@ pub fn compute_masked_pairs_for_row(
                 None
             } else if let Some(s) = v.as_str() {
                 Some(Zeroizing::new(s.to_string()))
-            } else if let Some(n) = v.as_i64() {
-                Some(Zeroizing::new(n.to_string()))
             } else {
-                None
+                v.as_i64().map(|n| Zeroizing::new(n.to_string()))
             }
         } else {
             None

@@ -266,7 +266,7 @@ async fn persist_pg(
     let pool = pg.pool_handle();
     let policy_text = policy.to_json().to_string();
     let sql = "SELECT __zeroship_admin.set_mask_policy($1, $2::jsonb)";
-    pool.query_text_params(sql, &[&app_id, &policy_text])
+    pool.query_text_params(sql, &[app_id, &policy_text])
         .await
         .map_err(|e| crate::error::DbError::from_pg(&e))?;
     Ok(())
@@ -284,7 +284,7 @@ pub async fn load_pg(
     let rows = pool
         .query_text_params(
             "SELECT __zeroship_admin.get_mask_policy($1)::text",
-            &[&app_id],
+            &[app_id],
         )
         .await
         .map_err(|e| crate::error::DbError::from_pg(&e))?;
