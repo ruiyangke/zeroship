@@ -1,43 +1,33 @@
-//! Compile-fail doctests for the `#[v8_async_method]` rejection rules.
+//! Accepted-shape doctests for the `#[v8_async_method]` and
+//! `#[v8_method(fastcall)]` attributes.
+//!
 //! These live at the runtime crate level (not on the proc macro itself)
-//! because proc-macro crates can't depend on themselves, so doctests
-//! that exercise the macro must run from a downstream crate.
+//! because proc-macro crates can't depend on themselves, so anything
+//! exercising the macro must run from a downstream crate.
 //!
-//! `&mut self` is rejected — borrow across `.await` is unsound under
-//! V8 re-entry:
+//! # The REJECTION rules are pinned in `tests/`, not here
 //!
-//! ```compile_fail
-//! use zeroship_runtime::state::OpError;
-//! use zeroship_runtime_macros::{v8_class, v8_async_method, v8_constructor};
-//! struct Mutator { n: u32 }
-//! #[v8_class]
-//! impl Mutator {
-//!     #[v8_constructor]
-//!     fn new() -> Self { Mutator { n: 0 } }
-//!     #[v8_async_method]
-//!     async fn bump(&mut self) -> Result<u32, OpError> {
-//!         self.n += 1;
-//!         Ok(self.n)
-//!     }
-//! }
-//! ```
+//! Six rules used to be pinned by `compile_fail` doctests in this
+//! header. They are now trybuild fixtures with `.stderr` snapshots:
 //!
-//! Non-`async` methods marked with the attribute are rejected:
+//!   tests/v8_async_method_compile_fail.rs  + tests/compile_fail_async_method/
+//!   tests/v8_fastcall_compile_fail.rs      + tests/compile_fail_fastcall/
 //!
-//! ```compile_fail
-//! use zeroship_runtime::state::OpError;
-//! use zeroship_runtime_macros::{v8_class, v8_async_method, v8_constructor};
-//! struct NotAsync;
-//! #[v8_class]
-//! impl NotAsync {
-//!     #[v8_constructor]
-//!     fn new() -> Self { NotAsync }
-//!     #[v8_async_method]
-//!     fn must_be_async(&self) -> Result<u32, OpError> { Ok(0) }
-//! }
-//! ```
+//! A raw `compile_fail` passes on ANY compilation error, so it cannot
+//! distinguish the rejection it means to pin from a typo, a renamed
+//! macro, or a stale import - the pin keeps passing while the property
+//! goes untested, and reads as coverage the whole time. The four
+//! fastcall cases made that concrete: they differ only in return type,
+//! so one error in the shared scaffolding would have satisfied all four
+//! at once. trybuild asserts the diagnostic MATCHES the snapshot, so
+//! failing for the wrong reason is a test failure.
 //!
-//! The positive `&self` shape compiles fine:
+//! What remains below is the other half, and doctests are the right
+//! tool for it: the shapes that MUST compile. Keep both - a rejection
+//! rule with no accepted counterpart can be satisfied by rejecting
+//! everything.
+//!
+//! The accepted `&self` async shape:
 //!
 //! ```
 //! use std::cell::Cell;
@@ -56,70 +46,17 @@
 //! }
 //! ```
 //!
-//! ## `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` rejection rules
+//! ## `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` accepted shapes
 //!
 //! Fastcall codegen restricts the user's signature to fit V8's fast API
-//! constraints. The macro emits compile-fail errors at the right span so
-//! mistakes surface as clear messages rather than runtime UB.
+//! constraints, and the macro rejects the rest at the right span so
+//! mistakes surface as clear messages rather than runtime UB. The four
+//! rejections - `&mut self`, and `String` / `Vec<u8>` / `Option<T>`
+//! returns - are pinned by the fixtures under
+//! `tests/compile_fail_fastcall/`, each with its own `.stderr` naming
+//! the offending type.
 //!
-//! `&mut self` is rejected — fast-path callbacks have no scope and so
-//! the slow path's per-method re-entrancy guard cannot be emitted:
-//!
-//! ```compile_fail
-//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
-//! struct M { n: u32 }
-//! #[v8_class]
-//! impl M {
-//!     #[v8_constructor]
-//!     fn new() -> Self { M { n: 0 } }
-//!     #[v8_method(fastcall)]
-//!     fn bump(&mut self) -> u32 { self.n += 1; self.n }
-//! }
-//! ```
-//!
-//! `String` return is rejected — fast path forbids allocation:
-//!
-//! ```compile_fail
-//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
-//! struct M;
-//! #[v8_class]
-//! impl M {
-//!     #[v8_constructor]
-//!     fn new() -> Self { M }
-//!     #[v8_method(fastcall)]
-//!     fn name(&self) -> String { "x".to_string() }
-//! }
-//! ```
-//!
-//! `Vec<u8>` return is rejected — same allocation reason:
-//!
-//! ```compile_fail
-//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
-//! struct M;
-//! #[v8_class]
-//! impl M {
-//!     #[v8_constructor]
-//!     fn new() -> Self { M }
-//!     #[v8_method(fastcall)]
-//!     fn bytes(&self) -> Vec<u8> { vec![] }
-//! }
-//! ```
-//!
-//! `Option<T>` return is rejected — fast path can't represent `null`:
-//!
-//! ```compile_fail
-//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
-//! struct M;
-//! #[v8_class]
-//! impl M {
-//!     #[v8_constructor]
-//!     fn new() -> Self { M }
-//!     #[v8_method(fastcall)]
-//!     fn opt(&self) -> Option<u32> { None }
-//! }
-//! ```
-//!
-//! Positive shapes compile fine:
+//! The shapes that must keep compiling:
 //!
 //! ```
 //! use zeroship_runtime::state::OpError;
