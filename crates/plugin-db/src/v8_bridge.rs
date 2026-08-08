@@ -303,6 +303,60 @@ mod tests {
         assert!(levels >= MAX_DECODE_DEPTH, "should descend to the cap, got {levels}");
         assert!(matches!(cur, Value::Null), "structure past the cap is Null");
     }
+
+    /// Non-finite JS numbers decode to `Value::Null`, SILENTLY.
+    ///
+    /// This pins current behaviour rather than endorsing it. `Infinity`,
+    /// `-Infinity` and `NaN` all reach the number arm as real V8 numbers, skip the
+    /// lossless-integer branch (their `fract()` is NaN, so `fract() == 0.0` is
+    /// false), and then fail `serde_json::Number::from_f64`, which returns `None`
+    /// for anything non-finite. The arm falls through to `Value::Null`.
+    ///
+    /// So a creator value of `Infinity` is not rejected here and does not error -
+    /// it becomes NULL, and on a nullable column the row stores NULL for a number
+    /// the app supplied. What prevents that on the ordinary path is the SDK guard
+    /// in `sdks/db/src/validate.ts` (`Number.isFinite`), which runs before the op.
+    /// A raw native op call does not go through it and still nulls silently.
+    ///
+    /// The coercion is worth pinning because it is invisible: no error, no log,
+    /// and the same `Value::Null` an explicit `null` produces, so nothing
+    /// downstream can tell the two apart.
+    #[test]
+    fn non_finite_numbers_decode_to_null() {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        macro_rules! decode {
+            ($src:expr) => {{
+                let code = v8::String::new(scope, $src).unwrap();
+                let script = v8::Script::compile(scope, code, None).unwrap();
+                let val = script.run(scope).unwrap();
+                v8_value_to_serde_json(scope, val)
+            }};
+        }
+
+        for src in ["Infinity", "-Infinity", "NaN", "1/0", "-1/0", "0/0"] {
+            assert!(matches!(decode!(src), Value::Null), "{src} must decode to Null");
+        }
+
+        // POSITIVE CONTROL. The loop above is satisfied by a decoder that returns
+        // Null for every number, which would be a far worse bug and would leave
+        // this test green. Finite values must survive, including the f64 extreme
+        // adjacent to the ones that do not.
+        assert_eq!(
+            decode!("1.5"),
+            Value::Number(serde_json::Number::from_f64(1.5).unwrap())
+        );
+        assert_eq!(decode!("0"), Value::Number(serde_json::Number::from(0i64)));
+        assert_eq!(decode!("-42"), Value::Number(serde_json::Number::from(-42i64)));
+        assert!(
+            matches!(decode!("Number.MAX_VALUE"), Value::Number(_)),
+            "the largest finite double must decode as a number, not Null"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

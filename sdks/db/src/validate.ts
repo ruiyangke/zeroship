@@ -165,11 +165,19 @@ function checkField(
     }
   } else if (type === "number") {
     // `Number.isFinite` rather than `!isNaN`: the old guard caught NaN and let both
-    // infinities through, and the two fail identically downstream - `JSON.stringify`
-    // encodes NaN, Infinity and -Infinity all as `null`. So a column that accepts
-    // NULL silently stores NULL for a value validation just approved, and one that
-    // does not gets a database error instead of a field-level message. Catching NaN
-    // alone covered one third of the same defect.
+    // infinities through, and all three are lost identically downstream.
+    //
+    // The loss happens in the native V8->serde decoder, NOT at a JSON.stringify
+    // boundary - `env.db` ops receive the document as V8 values. In
+    // `crates/plugin-db/src/v8_bridge.rs` the number arm skips its lossless-integer
+    // branch (non-finite `fract()` is NaN) and then calls
+    // `serde_json::Number::from_f64`, which returns `None` for anything non-finite,
+    // so the arm falls through to `Value::Null`. Measured, and pinned there by
+    // `non_finite_numbers_decode_to_null`.
+    //
+    // The result is that a column accepting NULL silently stores NULL for a value
+    // validation just approved, and one that does not gets a database error instead
+    // of a field-level message. Catching NaN alone covered one third of that.
     if (typeof value !== "number" || !Number.isFinite(value)) {
       errors[key] = { path: key, message: `${key} must be a finite number` };
       return;
