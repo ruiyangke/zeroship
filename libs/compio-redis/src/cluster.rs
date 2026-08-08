@@ -611,6 +611,19 @@ impl ClusterClient {
         // First attempt uses our cached topology.
         let mut addr_override: Option<String> = None;
         let mut ask_once = false;
+        // An UNCOMMITTED slot-map update from a `-MOVED`. A MOVED is only a
+        // *claim* that some other node now owns the slot; it isn't verified
+        // until that node actually answers us. `pool_for` may refuse the
+        // address outright (SSRF allowlist), or the connect/command may
+        // fail. Writing the slot map before that point is what turned a
+        // single bad redirect into a permanent brick: every later command
+        // for the slot resolved to the refused address with no redirect in
+        // play, and plugin-kv's thread-local ClusterClient cache never
+        // evicts, so the poisoning outlived the request. We therefore hold
+        // the update here and commit it only once the claimed owner has
+        // replied on this attempt; otherwise it is dropped with the loop
+        // and the next command falls back to the previous owner.
+        let mut pending_moved: Option<(u16, String)> = None;
 
         loop {
             let addr = match addr_override.take() {
@@ -638,6 +651,13 @@ impl ClusterClient {
             // as `OwnedFrame::Error("MOVED …")`. Intercept those before
             // surfacing the frame to the caller.
             let frame = conn.send_recv(cmd.clone()).await?;
+            // The claimed owner answered, so the pending MOVED is now
+            // corroborated and safe to cache. Everything above this line
+            // (`pool_for`'s allowlist check, connect, acquire, send_recv)
+            // exits via `?` and leaves the slot map untouched.
+            if let Some((moved_slot, moved_addr)) = pending_moved.take() {
+                self.set_slot(moved_slot, &moved_addr);
+            }
             if let OwnedFrame::Error(msg) = &frame
                 && let Some(redirect) = parse_redirect(msg)
             {
@@ -649,7 +669,12 @@ impl ClusterClient {
                 redirects += 1;
                 match redirect {
                     Error::Moved { slot: s, addr: new_addr } => {
-                        self.set_slot(s, &new_addr);
+                        // Stage the slot-map update; it is committed at the
+                        // top of the next iteration, once `new_addr` has
+                        // actually answered. (The ASK arm below still writes
+                        // nothing at all: an ASK is a one-shot migration
+                        // hint, not a new owner.)
+                        pending_moved = Some((s, new_addr.clone()));
                         addr_override = Some(new_addr);
                         continue;
                     }
@@ -1273,6 +1298,116 @@ mod ssrf_allowlist_tests {
         assert!(
             matches!(err, Error::Pool(_)),
             "known addr must reach the connect path (Pool error), got: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod moved_poisoning_tests {
+    use super::*;
+    use compio::io::{AsyncRead, AsyncWriteExt};
+    use compio::net::TcpListener;
+    use std::cell::Cell;
+
+    /// Mock node that answers the FIRST command it ever receives with
+    /// `-MOVED <slot> <redirect_to>` and every command after that with
+    /// `$5\r\nhello\r\n`. The "only once" part is what makes the poisoning
+    /// visible: the second command has NO redirect in play, so if it still
+    /// fails, the failure can only come from the cached slot map.
+    async fn spawn_moved_once_node(slot: u16, redirect_to: String) -> NodeAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock node");
+        let addr = listener.local_addr().expect("local_addr");
+        let moved: Vec<u8> = format!("-MOVED {slot} {redirect_to}\r\n").into_bytes();
+        let served = Rc::new(Cell::new(0u32));
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                let moved = moved.clone();
+                let served = served.clone();
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(n, _b) = stream.read(buf).await;
+                        match n {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let seen = served.get();
+                                served.set(seen + 1);
+                                let reply: Vec<u8> = if seen == 0 {
+                                    moved.clone()
+                                } else {
+                                    b"$5\r\nhello\r\n".to_vec()
+                                };
+                                let compio::BufResult(w, _r) = stream.write_all(reply).await;
+                                if w.is_err() { break; }
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Regression: a MOVED whose target `pool_for` REFUSES must not be
+    /// committed to the cached slot map.
+    ///
+    /// Pre-fix `send_to_slot` called `set_slot(s, &new_addr)` before
+    /// anything validated `new_addr`, so the refused address became the
+    /// cached owner of the slot for the life of the client (and, via
+    /// plugin-kv's thread-local `ClusterClient` cache, for the life of the
+    /// worker thread). The first command fails either way, and that alone
+    /// proves nothing. The load-bearing assertion is the SECOND command:
+    /// the mock redirects only once, so no redirect is in play, and the
+    /// command can only fail if the slot map itself was poisoned.
+    ///
+    /// What this does NOT catch: it exercises exactly one rejection reason
+    /// (the SSRF allowlist). A MOVED target that is allowlisted but whose
+    /// connect or first command fails takes a different early-return out of
+    /// the same loop and is not covered here.
+    #[compio::test]
+    async fn refused_moved_target_does_not_poison_the_slot_map() {
+        const KEY: &str = "{app}:k";
+        let slot = redis_keyslot(KEY.as_bytes());
+        // Not in the allowlist -> `pool_for` refuses it with Error::Config.
+        let untrusted = "169.254.169.254:80";
+        let node = spawn_moved_once_node(slot, untrusted.to_string()).await;
+
+        let mut topo = ClusterTopology::empty();
+        topo.slots[slot as usize] = Some(node.clone());
+        let known: HashSet<NodeAddr> = std::iter::once(node.clone()).collect();
+        let cc = ClusterClient::for_test_with_known(topo, known);
+
+        // Command 1: the node answers MOVED -> untrusted, and the allowlist
+        // refuses to follow it. This command fails both pre- and post-fix.
+        let err1 = match cc.get(KEY).await {
+            Ok(v) => panic!("first command should be refused by the allowlist, got {v:?}"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(&err1, Error::Config(_)) && err1.to_string().contains(untrusted),
+            "expected the allowlist rejection naming the refused addr, got: {err1:?}"
+        );
+
+        // Command 2, SAME slot, no redirect in play: must reach the
+        // original owner. Pre-fix this fails with the allowlist rejection
+        // because the cached owner is now the refused address.
+        match cc.get(KEY).await {
+            Ok(v) => assert_eq!(v.as_deref(), Some(b"hello".as_ref())),
+            Err(e) => panic!(
+                "second command for slot {slot} must still reach the original owner \
+                 {node} (the mock issues no second redirect), but failed with: {e:?}"
+            ),
+        }
+
+        // And the cached owner is unchanged: the refused claim was never
+        // committed.
+        assert_eq!(
+            cc.slot_owner(slot).as_deref(),
+            Some(node.as_str()),
+            "a MOVED whose target was refused must leave the cached slot owner intact"
         );
     }
 }
