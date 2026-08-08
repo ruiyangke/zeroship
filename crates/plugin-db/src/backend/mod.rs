@@ -1680,6 +1680,19 @@ impl<T> RegisterBackend for T where
 /// this crate documents a lot of prose about items its readers cannot see.
 /// zeroship has no doc gate today, so nothing currently encodes either answer.
 ///
+/// The counts above are for `--document-private-items`. On a PUBLIC doc build
+/// the same question has much smaller but much sharper stakes, measured
+/// 2026-08-07 over all 26 workspace members from a clean `cargo clean --doc`:
+///
+///     cargo doc --no-deps --workspace                 -> 1 unresolved
+///     cargo doc --no-deps --workspace --all-features  -> 0
+///
+/// That single link is `cross_app_fk.rs`'s citation of
+/// `register_model::bootstrap::build_ctx`, whose module is
+/// `#[cfg(any(test, feature = "test-helpers"))]`. So it is now the ONLY thing
+/// between this workspace and zero unresolved public doc links, and which way
+/// it goes is decided entirely by the answer above, not by editing that line.
+///
 /// It is a conformance marker, not the production abstraction: nothing takes
 /// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
 /// that enum, and this trait exists so tests can assert the concrete backends

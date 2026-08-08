@@ -4,8 +4,7 @@
 //!
 //! Gated behind the `test-utils` Cargo feature so production builds
 //! never see this surface. Added to unblock plugin-db's
-//! `bench_row_to_json` ([I35] forcing function — performance r12); see
-//! `crates/plugin-db/benches/bench_row_to_json.rs`.
+//! `bench_row_to_json`; see `crates/plugin-db/benches/bench_row_to_json.rs`.
 //!
 //! ## Why a builder, not just `Row::new`
 //!
