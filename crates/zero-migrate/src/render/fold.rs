@@ -49,9 +49,9 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    AlterPrimaryKeyAction, ColType, ColumnReference, CommentTarget, IndexElement, IrColumn,
-    IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction, SafeI64, SafeU64,
-    SequenceOwnedBy, TableRuntimeOptions,
+    AlterPrimaryKeyAction, ColType, ColumnOrExpr, ColumnReference, CommentTarget, ExclusionElement,
+    IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
+    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
@@ -3213,7 +3213,11 @@ fn fold_create_table_specs(
                             // kind only, matching `snapshot_schema`.
                             definition: String::new(),
                             comment: None,
-                            cascade_columns: None,
+                            // The empty `definition` above leaves the DropColumn
+                            // cascade's parsing fallback nothing to match, so the
+                            // cascade set is recorded structurally - PG's own `conkey`
+                            // predicate, plain column elements only.
+                            cascade_columns: Some(exclusion_cascade_columns(elements)),
                         }),
                         index: None,
                     },
@@ -3308,6 +3312,66 @@ fn push_folded_constraint(
         snap.indexes.push(idx);
     }
     Ok(())
+}
+
+/// The columns whose drop cascades an EXCLUDE away, collected structurally from the
+/// constraint's elements.
+///
+/// PostgreSQL records an exclusion's PLAIN COLUMN elements in `pg_constraint.conkey`,
+/// and `conkey` IS the catalog's cascade predicate: `ALTER TABLE ... DROP COLUMN`
+/// removes every constraint whose `conkey` names the dropped attribute. So this is
+/// the same list `snapshot_schema` recovers on the live side, built from the closed
+/// IR instead of the catalog.
+///
+/// An EXCLUDE `definition` is deliberately EMPTY in the snapshot (PostgreSQL
+/// canonicalizes exclusion bodies differently from the authored render, so
+/// `apply::drift::constraint_definition_is_comparable` tracks EXCLUDE by presence and
+/// name), which leaves the cascade's `definition`-parsing fallback nothing to match.
+/// Without this provenance an EXCLUDE never cascaded and survived as a PHANTOM the
+/// live catalog does not have.
+///
+/// EXPRESSION elements and the `WHERE` predicate are DELIBERATELY EXCLUDED, and this
+/// is where an EXCLUDE parts ways with [`IndexSnapshot::expr_cascade_columns`]. Both
+/// reach a column through a parse tree, but PostgreSQL treats the two dependencies
+/// differently: an expression/partial INDEX is cascaded away silently, while an
+/// EXCLUDE that names the column only through `indexprs` / `indpred` carries a NORMAL
+/// dependency and PostgreSQL REFUSES the drop outright - measured on PostgreSQL 18.4:
+///
+/// ```text
+/// ALTER TABLE t ADD CONSTRAINT x EXCLUDE USING btree (((a + 1)) WITH =);
+/// ALTER TABLE t DROP COLUMN a;
+/// -- ERROR:  cannot drop column a of table t because other objects depend on it
+/// -- DETAIL:  constraint x on table t depends on column a of table t
+/// ```
+///
+/// The engine only ever emits a plain `ALTER TABLE ... DROP COLUMN` (never
+/// `CASCADE` - see `DdlEmitter::drop_column_up`), so that refusal is the real
+/// behaviour: the statement aborts and the constraint is still there. Folding those
+/// columns in would drop a constraint PostgreSQL did NOT drop, which is worse drift
+/// than the phantom. The live side agrees by construction - `conkey` holds attnum `0`
+/// for an expression element, which resolves to no name, and the predicate is not in
+/// `conkey` at all.
+///
+/// A column reached through BOTH a plain element and an expression/predicate still
+/// cascades, because the plain element's auto dependency is enough - measured on
+/// PostgreSQL 18.4, `EXCLUDE USING gist (a WITH =, ((b + 1)) WITH =)` loses the whole
+/// constraint to `DROP COLUMN a`. Matching on the plain elements alone gets that
+/// right.
+///
+/// Sorted and deduplicated so the list is deterministic, matching what
+/// `render::dml::expr_column_refs` gives the CHECK producers and the post-condition
+/// the `RenameColumn` arm re-establishes.
+fn exclusion_cascade_columns(elements: &[ExclusionElement]) -> Vec<String> {
+    let mut columns = elements
+        .iter()
+        .filter_map(|element| match &element.target {
+            ColumnOrExpr::Column { name } => Some(name.clone()),
+            ColumnOrExpr::Expr { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    columns.sort();
+    columns.dedup();
+    columns
 }
 
 /// True iff the LOCAL column list of a constraint `definition` contains `column`.
@@ -3550,7 +3614,11 @@ fn add_constraint_snapshot(
                     // matching `snapshot_schema`.
                     definition: String::new(),
                     comment: None,
-                    cascade_columns: None,
+                    // Same structural provenance as the createTable EXCLUDE above:
+                    // the empty `definition` leaves the DropColumn cascade's parsing
+                    // fallback nothing to match, so the plain column elements - PG's
+                    // own `conkey` predicate - are recorded directly.
+                    cascade_columns: Some(exclusion_cascade_columns(elements)),
                 }),
                 index: None,
             })
