@@ -82,7 +82,9 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// proc-macro2 entry — same logic as [`expand`] but operates on
 /// `TokenStream2` so unit tests in this crate can call it without going
 /// through the proc-macro driver. Insta snapshots in
-/// `tests/v8_class_codegen_snapshot.rs` consume this entry.
+/// [`snapshot_tests`] consume this entry. They live in `src/`, not a `tests/`
+/// binary - this crate has no tests directory - which is why they can call an
+/// entry that is not part of the proc-macro surface.
 pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     let input: ItemImpl = match syn::parse2(item) {
         Ok(parsed) => parsed,
