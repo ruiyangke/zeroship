@@ -7,7 +7,7 @@
 //!
 //! pull{1,2}Algorithm:
 //!   1. If `reading` is set → mark readAgainForBranchN, return.
-//!   2. Get branchN.[[controller]].byobRequest.
+//!   2. Get branchN.`[[controller]]`.byobRequest.
 //!   3. If null → pullWithDefaultReader().
 //!      Else → pullWithBYOBReader(byobRequest.view, forBranch2=N==2).
 //!

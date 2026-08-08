@@ -65,8 +65,8 @@ pub struct TSControllerState {
     pub cancel_algorithm: AlgorithmFn,
     /// `[[finishPromise]]` — shared across the three terminal paths
     /// (sink.close, sink.abort, source.cancel). Spec §5.4.6.{8,9,10}:
-    /// each algorithm's first step is "if [[finishPromise]] is not
-    /// undefined → return [[finishPromise]]". Only the Promise is
+    /// each algorithm's first step is "if `[[finishPromise]]` is not
+    /// undefined → return `[[finishPromise]]`". Only the Promise is
     /// cached; the Resolver is owned by whichever path FIRST allocated
     /// it (and only that path settles it).
     pub finish_promise: RefCell<Option<v8::Global<v8::Promise>>>,
@@ -327,7 +327,7 @@ pub fn transform_stream_default_controller_get_desired_size(
 /// Spec:
 ///  1. If !ReadableStreamDefaultControllerCanCloseOrEnqueue(rs.controller) → throw TypeError.
 ///  2. ReadableStreamDefaultControllerEnqueue(rs.controller, chunk).
-///  3. If !rs.controller.[[hasBackpressure]]: TransformStreamSetBackpressure(stream, true).
+///  3. If !rs.controller.`[[hasBackpressure]]`: TransformStreamSetBackpressure(stream, true).
 pub fn transform_stream_default_controller_enqueue<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     controller: v8::Local<v8::Object>,
@@ -434,7 +434,7 @@ pub fn transform_stream_default_controller_terminate(
 /// `TransformStreamDefaultControllerPerformTransform(controller, chunk)` — §5.4.6.4.
 ///
 /// Spec:
-///  1. transformPromise = controller.[[transformAlgorithm]](chunk).
+///  1. transformPromise = controller.`[[transformAlgorithm]]`(chunk).
 ///  2. Return transformPromise.then(undefined, e => { TransformStreamError(stream, e); throw e; }).
 pub fn transform_stream_default_controller_perform_transform<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -498,13 +498,13 @@ pub fn transform_stream_default_controller_clear_algorithms(
 /// `TransformStreamDefaultSinkWriteAlgorithm(stream, chunk)` — §5.4.6.7.
 ///
 /// Spec:
-///  1. Assert: stream.[[writable]].[[state]] === "writable".
-///  2. controller = stream.[[controller]].
-///  3. If stream.[[backpressure]] is true:
-///     a. backpressureChangePromise = stream.[[backpressureChangePromise]].
+///  1. Assert: stream.`[[writable]]`.`[[state]]` === "writable".
+///  2. controller = stream.`[[controller]]`.
+///  3. If stream.`[[backpressure]]` is true:
+///     a. backpressureChangePromise = stream.`[[backpressureChangePromise]]`.
 ///     b. Return backpressureChangePromise.then(_ => {
-///         writableState = stream.[[writable]].[[state]].
-///         If writableState is "erroring", throw stream.[[writable]].[[storedError]].
+///         writableState = stream.`[[writable]]`.`[[state]]`.
+///         If writableState is "erroring", throw stream.`[[writable]]`.`[[storedError]]`.
 ///         Assert: writableState is "writable".
 ///         Return TransformStreamDefaultControllerPerformTransform(controller, chunk).
 ///     }).
@@ -580,11 +580,11 @@ pub fn transform_stream_default_sink_write<'s>(
 /// `TransformStreamDefaultSinkAbortAlgorithm(stream, reason)` — §5.4.6.8.
 ///
 /// Spec:
-///  1. controller = stream.[[controller]].
-///  2. If controller.[[finishPromise]] is not undefined → return finishPromise.
-///  3. ws = stream.[[writable]]. // assertion
-///  4. controller.[[finishPromise]] = a new pending promise (resolver stored).
-///  5. cancelPromise = controller.[[cancelAlgorithm]](reason).
+///  1. controller = stream.`[[controller]]`.
+///  2. If controller.`[[finishPromise]]` is not undefined → return finishPromise.
+///  3. ws = stream.`[[writable]]`. // assertion
+///  4. controller.`[[finishPromise]]` = a new pending promise (resolver stored).
+///  5. cancelPromise = controller.`[[cancelAlgorithm]]`(reason).
 ///  6. ClearAlgorithms.
 ///  7. cancelPromise.then(...) → settle finishPromise.
 ///  8. Return finishPromise.
@@ -682,8 +682,8 @@ pub fn transform_stream_default_sink_abort<'s>(
 /// `TransformStreamDefaultSinkCloseAlgorithm(stream)` — §5.4.6.9.
 ///
 /// Spec (simplified for v1):
-///  1. controller = stream.[[controller]].
-///  2. flushPromise = controller.[[flushAlgorithm]]().
+///  1. controller = stream.`[[controller]]`.
+///  2. flushPromise = controller.`[[flushAlgorithm]]`().
 ///  3. ClearAlgorithms.
 ///  4. flushPromise.then(
 ///       _ => {
@@ -781,8 +781,8 @@ pub fn transform_stream_default_sink_close<'s>(
 /// `TransformStreamDefaultSourceCancelAlgorithm(stream, reason)` — §5.4.6.10.
 ///
 /// Same shape as abort but the readable side initiated. Spec:
-///  1. controller = stream.[[controller]].
-///  2. cancelPromise = controller.[[cancelAlgorithm]](reason).
+///  1. controller = stream.`[[controller]]`.
+///  2. cancelPromise = controller.`[[cancelAlgorithm]]`(reason).
 ///  3. ClearAlgorithms.
 ///  4. cancelPromise.then(
 ///       _ => {
@@ -1109,11 +1109,11 @@ fn build_controller<'s>(
 ///  flushAlgorithm, cancelAlgorithm)` — §5.4.1.
 ///
 /// Wires:
-///   stream.[[controller]] = controller
-///   controller.[[stream]] = stream
-///   controller.[[transformAlgorithm]] = transformAlgorithm
-///   controller.[[flushAlgorithm]] = flushAlgorithm
-///   controller.[[cancelAlgorithm]] = cancelAlgorithm
+///   stream.`[[controller]]` = controller
+///   controller.`[[stream]]` = stream
+///   controller.`[[transformAlgorithm]]` = transformAlgorithm
+///   controller.`[[flushAlgorithm]]` = flushAlgorithm
+///   controller.`[[cancelAlgorithm]]` = cancelAlgorithm
 ///
 /// The actual halves (readable/writable) are built by InitializeTransformStream
 /// in algorithms.rs.

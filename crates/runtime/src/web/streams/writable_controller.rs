@@ -80,7 +80,7 @@ struct WSQueueEntry {
 
 #[allow(missing_debug_implementations)]
 pub struct WSControllerState {
-    /// SLOT: [[queue]] + [[queueTotalSize]] — using a private wrapper that
+    /// SLOT: `[[queue]]` + `[[queueTotalSize]]` — using a private wrapper that
     /// supports the close-sentinel marker.
     queue: RefCell<std::collections::VecDeque<WSQueueEntry>>,
     queue_total_size: Cell<f64>,
@@ -89,7 +89,7 @@ pub struct WSControllerState {
     pub write_algorithm: AlgorithmFn,
     pub close_algorithm: AlgorithmFn,
     pub abort_algorithm: AlgorithmFn,
-    /// SLOT: [[started]]
+    /// SLOT: `[[started]]`
     pub started: Cell<bool>,
 }
 

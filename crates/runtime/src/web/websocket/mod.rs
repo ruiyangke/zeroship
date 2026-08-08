@@ -45,7 +45,7 @@ use crate::state::OpError;
 // Public types — ReadyState, BinaryType, WsFrame, WsMessage
 // ---------------------------------------------------------------------------
 
-/// Spec [[readyState]] — WHATWG §3.1.
+/// Spec `[[readyState]]` — WHATWG §3.1.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u16)]
 pub enum ReadyState {
@@ -922,7 +922,7 @@ impl WebSocketImpl {
 /// Estimate how many bytes `data` will add to bufferedAmount. The
 /// estimate is conservative — actual UTF-8 encoding may differ for
 /// strings with multibyte chars, but the difference doesn't impact
-/// the [[full]] guard which is a soft cap.
+/// the `[[full]]` guard which is a soft cap.
 fn estimate_send_bytes(scope: &mut v8::PinScope, data: v8::Local<v8::Value>) -> u64 {
     if data.is_string() {
         if let Some(s) = data.to_string(scope) {
