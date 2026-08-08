@@ -31,7 +31,8 @@
 //! `zero-migrate` and `plugin-db` are different trust domains and the migrate
 //! crate must not depend on the runtime plugin. The shared vocabulary should be
 //! lifted into a small shared crate later; until then the
-//! [`desired_snapshot`]-round-trips-to-live test (`tests/declarative_pg.rs`) is
+//! [`desired_snapshot`]-round-trips-to-live test
+//! (`tests/pg_declarative.rs`, `declarative_deploy_creates_table_and_round_trips_with_zero_drift`) is
 //! the guard against the two copies drifting apart.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
