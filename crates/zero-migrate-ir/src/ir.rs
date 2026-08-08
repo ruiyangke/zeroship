@@ -1647,7 +1647,7 @@ pub enum IrConstraintKind {
 /// A named table constraint.
 ///
 /// `kind` is a NESTED object (`{"name":…,"kind":{"kind":"fk",…}}`), NOT a
-/// flattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde
+/// flattened sibling — un-flattening makes `deny_unknown_fields` sound (serde
 /// forbids `flatten` + `deny_unknown_fields` together) and removes the
 /// flatten-merge ambiguity that made the generated JSON Schema lossy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

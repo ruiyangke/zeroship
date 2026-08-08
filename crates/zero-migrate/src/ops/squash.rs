@@ -16,7 +16,7 @@
 //!   [`apply`](crate::apply::executor::apply) of a set containing `S` runs `S.up` once and
 //!   SKIPS `v1..vN` (the executor's pending computation treats a version superseded
 //!   by an applied/being-applied squash as satisfied — see
-//!   [`crate::apply::executor::compute_superseded`]). `v1..vN` are never double-applied,
+//!   `crate::apply::executor::compute_superseded`). `v1..vN` are never double-applied,
 //!   and a later migration that `depends_on` a superseded version is satisfied by
 //!   `S`.
 //!

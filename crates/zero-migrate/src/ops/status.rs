@@ -8,7 +8,7 @@
 //!
 //! This module emits NO DDL and mutates nothing — it surfaces journal state. It
 //! reuses the journal's NET-state reader ([`journal::applied`]) and the
-//! executor's pending-ordering ([`crate::apply::executor::order_pending`]) so status's
+//! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
 //! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -412,7 +412,7 @@ pub struct MigrationStatus {
     /// [`journal::applied`]'s entries (version, checksum, phase).
     pub applied: Vec<AppliedEntry>,
     /// Versions in the supplied set that are NOT net-applied, in the SAME
-    /// topological order apply will run them ([`crate::apply::executor::order_pending`]).
+    /// topological order apply will run them (`crate::apply::executor::order_pending`).
     /// A rolled-back version that is still in the set reappears here.
     pub pending: Vec<MigrationId>,
     /// Versions whose latest event is a rollback (net rolled-back), with the
@@ -1075,7 +1075,7 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///
 /// **Read-only.** Bootstraps the journal idempotently (so a fresh project reports
 /// cleanly), then derives every field from NET journal state. `applied` reuses
-/// [`journal::applied`]; `pending` reuses the executor's [`order_pending`] (same
+/// [`journal::applied`]; `pending` reuses the executor's `order_pending` (same
 /// topo order as apply); `current_version` is the highest net-applied version;
 /// `rolled_back` is from [`journal::net_rolled_back`].
 ///
@@ -1233,7 +1233,7 @@ mod legacy_snapshot_transaction_tests {
 /// structurally, so a single net-state read is already a consistent view).
 ///
 /// `applied` / `pending` / `current_version` are derived with the SAME rules and
-/// the SAME [`order_pending`] the executor uses, so status never disagrees with
+/// the SAME `order_pending` the executor uses, so status never disagrees with
 /// what apply would do. `rolled_back` is left empty here because the neutral
 /// trait exposes only rollback version ids, not the full [`RolledBackEntry`]
 /// detail required by [`MigrationStatus`]. A rolled-back version is already

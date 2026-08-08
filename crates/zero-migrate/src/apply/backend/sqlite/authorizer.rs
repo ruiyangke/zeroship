@@ -11,8 +11,8 @@
 //! `Connection::authorizer(Some(F))` requires `F: FnMut(AuthContext) ->
 //! Authorization + Send + 'static`. The mode is therefore an [`Arc<AtomicU8>`]
 //! (which is `Send + 'static`) captured **by-move into the single closure
-//! installed once at connection open** ([`make_authorizer`]); flipping the mode is
-//! a plain [`AuthMode::store`] on the shared atomic — it never re-installs the
+//! installed once at connection open** (`make_authorizer`); flipping the mode is
+//! a plain `AuthMode::store` on the shared atomic — it never re-installs the
 //! closure (impossible mid-`execute_batch`, which borrows the connection). An
 //! `Rc<Cell<_>>` would NOT compile: `Rc`/`Cell` are not `Send`.
 //!

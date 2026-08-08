@@ -9,7 +9,7 @@
 //! `IrAuthor` does **NOT** hand-construct snapshots, and does NOT re-spell the
 //! default / policy-injection / encryption-/comment-sentinel logic. It routes every
 //! op's fields through the SHARED, dialect-parameterized snapshot-builder
-//! [`crate::render::declarative::build_table_snapshot`] — the SAME builder the differ's
+//! `crate::render::declarative::build_table_snapshot` — the SAME builder the differ's
 //! `desired_snapshot_for_dialect` calls — and then renders the resulting
 //! [`TableSnapshot`] / [`ColumnSnapshot`] / [`IndexSnapshot`] through the SAME
 //! render methods the differ uses (`DeclarativeAuthor::lower_*`, which delegate to
@@ -1383,9 +1383,9 @@ pub enum IrLowerError {
          arrange. Refusing to silently render into `main` (a wrong-target drop)."
     )]
     SqliteSchemaUnsupported(String),
-    /// the connection [`default_schema`](IrAuthor::default_schema)
+    /// the connection [`default_schema`](IrAuthor::with_default_schema)
     /// resolved an op's EFFECTIVE schema to a schema the author's
-    /// confinement [`scope`](IrAuthor::scope) does NOT permit. The friendly op-level
+    /// confinement `scope` does NOT permit. The friendly op-level
     /// cross-schema VALIDATE gate inspects ONLY the op's own qualifier, never this
     /// connection default; so a foreign `default_schema` would otherwise render every
     /// guard-less op (one that omits its own qualifier) into the foreign schema while
@@ -1404,7 +1404,7 @@ pub enum IrLowerError {
     DefaultSchemaOutOfScope(String),
     /// an op carrying an
     /// EXPLICIT `schema()` qualifier that the author's confinement
-    /// [`scope`](IrAuthor::scope) does NOT permit. The friendly op-level cross-schema
+    /// [`scope`](IrAuthor::with_schema_scope) does NOT permit. The friendly op-level cross-schema
     /// VALIDATE gate ([`crate::model::validate::validate_ir_scoped`]) already refuses this
     /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
     /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
@@ -2634,8 +2634,8 @@ impl IrAuthor {
     /// Confined platform path leaves it `None` (lowering pins `project_schema`).
     ///
     /// **Confinement.** A `default_schema` is NOT trusted blindly: it
-    /// is validated against this author's [`scope`](Self::scope) at lower time
-    /// ([`lower_one_op`](Self::lower_one_op)). The default scope is the Confined
+    /// is validated against this author's `scope` at lower time
+    /// (`lower_one_op`). The default scope is the Confined
     /// `Single(project_schema)`, so a foreign `default_schema` is REFUSED fail-closed
     /// unless a Platform/Trusted CLI first widened the scope via
     /// [`with_schema_scope`](Self::with_schema_scope). This is what stops a foreign
@@ -2648,8 +2648,8 @@ impl IrAuthor {
         self
     }
 
-    /// widen the schema-confinement [`scope`](Self::scope)
-    /// the connection [`default_schema`](Self::default_schema) is validated against.
+    /// widen the schema-confinement `scope`
+    /// the connection [`default_schema`](Self::with_default_schema) is validated against.
     /// The default scope is the Confined `Single(project_schema)`; a
     /// Platform/Trusted CLI that sets a multi-schema or foreign-search-path default
     /// calls this with the matching [`crate::model::policy::SchemaScope`] (typically
@@ -2850,14 +2850,12 @@ impl IrAuthor {
     /// owner resolved from `live.table_snapshots` (the same introspection the
     /// unique-gate uses) so the index's table enters the touched-set.
     ///
-    /// FAIL CLOSED on an unresolvable owner: fold in [`TOUCHES_UNKNOWN`] so the
+    /// FAIL CLOSED on an unresolvable owner: fold in `crate::engine::TOUCHES_UNKNOWN` so the
     /// engine refuses the deploy if ANY obligation is outstanding (the obligation
     /// set lives in the engine, so the "refuse-if-any-outstanding" decision is made
     /// there). On the production path a bare-name `dropIndex` is already rejected at
     /// validate, so the sentinel arm is defense-in-depth for any caller that
     /// lowers a bare-name drop without the validator.
-    ///
-    /// [`TOUCHES_UNKNOWN`]: crate::engine::TOUCHES_UNKNOWN
     #[must_use]
     pub fn resolved_touched_tables(ir: &MigrationIr, live: &LiveSchema) -> Vec<String> {
         let mut touched_tables = ir.touched_tables();
@@ -2962,7 +2960,7 @@ impl IrAuthor {
     /// flat `Vec<Migration>` the byte-identity goldens compare). The plan's
     /// `checksum` is the dialect-neutral [`crate::model::migration::Checksum::of_ir`] anchor and each `Ddl`
     /// step's journaled checksum is stamped with it (see
-    /// [`assemble_plan`](Self::assemble_plan)). A `renameColumn` op lowers to a
+    /// `assemble_plan`). A `renameColumn` op lowers to a
     /// [`PlanStep::OnlineRename`] step, carried verbatim into the plan.
     ///
     /// # Errors

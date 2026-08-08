@@ -6,7 +6,7 @@
 //! the `SqlSession` impl, exactly as the `pg` shell does for
 //! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
-//! placeholders) differs, and all of it lives here + in [`session`] / [`journal_sql`]
+//! placeholders) differs, and all of it lives here + in `session` / `journal_sql`
 //! — never in the shared executor (the structural fix that lets MySQL ride the
 //! same seam).
 //!

@@ -43,7 +43,7 @@
 //! - **Index `ifNotExists` under a name another TABLE owns** - `FailDrift` naming
 //!   `table`. The probe resolves an index by NAME, and an index name is schema-wide
 //!   on PostgreSQL and SQLite but PER TABLE on MySQL
-//!   ([`Capability::SchemaWideIndexNames`]). Where the name is schema-wide, a
+//!   (`Capability::SchemaWideIndexNames`). Where the name is schema-wide, a
 //!   same-name index on another table means the CREATE cannot succeed AND the
 //!   declared index is absent, so a `SatisfiedNoop` would journal the migration
 //!   complete over an index that was never created. Where it is per table

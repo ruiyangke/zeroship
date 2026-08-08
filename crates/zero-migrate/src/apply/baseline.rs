@@ -2,7 +2,7 @@
 //! 31) — the **adoption path**.
 //!
 //! A project DB may already physically carry its schema (created outside the
-//! engine, or a legacy DB being adopted). [`baseline`] records a baseline
+//! engine, or a legacy DB being adopted). `baseline` records a baseline
 //! migration as a `completed` event in the journal **WITHOUT running its `up`**:
 //! the schema already exists, so re-running `CREATE TABLE …` would error. The
 //! baseline's `up` *documents* the current schema (a FRESH rebuild could run it),
@@ -36,7 +36,7 @@ use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::model::migration::Migration;
 
-/// What [`baseline`] did.
+/// What `baseline` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineOutcome {
     /// The version recorded as the baseline (`mig_…`).
@@ -46,7 +46,7 @@ pub struct BaselineOutcome {
     pub already_present: bool,
 }
 
-/// Error from [`baseline`].
+/// Error from `baseline`.
 #[derive(Debug, thiserror::Error)]
 pub enum BaselineError {
     /// A database error outside a guarded/journaled step.

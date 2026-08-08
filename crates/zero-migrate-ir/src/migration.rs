@@ -409,7 +409,7 @@ impl Checksum {
 
     /// Compute the checksum over a migration authored in the `op.*` IR — the
     /// canonical op-list region in PLACE OF the `up`/`down`
-    /// region, then the SAME [`fold_common`] tail as [`Checksum::of`].
+    /// region, then the SAME `fold_common` tail as [`Checksum::of`].
     ///
     /// The op-list region is [`crate::ir::CanonicalOpList::canonical_bytes`]: an op count,
     /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a

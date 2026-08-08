@@ -148,13 +148,13 @@ fn column_def(c: &Column) -> Result<String, AuthorError> {
 /// deterministically *ourselves* and keep the result ≤ this many bytes.
 pub(crate) const PG_MAX_IDENT_BYTES: usize = 63;
 
-/// Cap an arbitrary generated identifier to ≤ [`PG_MAX_IDENT_BYTES`],
+/// Cap an arbitrary generated identifier to ≤ `PG_MAX_IDENT_BYTES` (63 bytes),
 /// deterministically: when `natural` fits, return it verbatim; when it would
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
 ///
 /// This is the single source of truth for the cap discipline both the
-/// deterministic author ([`index_name`]) and the declarative author
+/// deterministic author (`index_name`) and the declarative author
 /// (`declarative::unique_index_name`) use, so an over-long generated index name
 /// can never desync `up`/`down`/on-disk (which would cause CREATE/DROP churn —
 /// the emitted full name ≠ the server-truncated live name on a re-diff). Mirrors

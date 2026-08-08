@@ -6673,7 +6673,7 @@ pub fn validate_ir_resolved(
 /// peer of [`validate_ir_resolved`]: re-run the expression-AST walk for ONE op with
 /// a RESOLVING [`TargetScope`] when its target table's live column set is known.
 ///
-/// This is the seam the DML LOWER calls ([`crate::render::lower::IrAuthor::lower_dml_op`]):
+/// This is the seam the DML LOWER calls (`IrAuthor::lower_dml_op`):
 /// at lower/apply the live schema HAS been introspected, so each DML op
 /// (`update`/`delete`/`backfill`) / `setColumnType` resolves its embedded
 /// `ColRef`s against the live target-table columns BEFORE the SQL template is

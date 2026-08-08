@@ -560,7 +560,7 @@ pub async fn apply_with_lock<D: SqlSession>(
 /// renders MySQL dialect SQL (`GET_LOCK` project lock, MySQL journal DDL, `?`
 /// placeholders, auto-committing two-phase apply). This is the dialect-selection
 /// entry: a caller that knows the target is MySQL constructs the MySQL backend
-/// here and reuses the identical generic [`apply_with_lock_backend`] orchestration
+/// here and reuses the identical generic `apply_with_lock_backend` orchestration
 /// shell — so the executor holds no dialect SQL and MySQL rides the same seam.
 ///
 /// # Errors

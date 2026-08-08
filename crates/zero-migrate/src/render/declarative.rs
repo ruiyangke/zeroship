@@ -19,7 +19,7 @@
 //!
 //! Descriptor field/table names and types are **untrusted** (a prompt-injectable
 //! AI authored them). They are validated at the author boundary
-//! ([`validate_ident`] / [`validate_type`], mirroring
+//! (`validate_ident` / `validate_type`, mirroring
 //! [`crate::render::expand_contract`]) AND re-checked by the guard as the second line.
 //!
 //! # Type-mapping provenance (shared-truth-to-extract-later)
@@ -1989,7 +1989,7 @@ struct ResolvedRename {
 /// This is the token-only convenience entry (kept as the engine's public surface,
 /// and used by `desired_snapshot` for token-only fields). Fields carrying the
 /// parameterised goodies (`vector(dims)`, `encrypted{…}`, `mask{…}`) need their
-/// whole descriptor, so `desired_snapshot` calls [`field_data_type`] directly;
+/// whole descriptor, so `desired_snapshot` calls `field_data_type` directly;
 /// this wrapper builds a minimal descriptor from the token. `actor`/`id` are
 /// engine-only text spellings the shared SDK map does not name, folded to
 /// `string` here.
@@ -2396,7 +2396,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 }
 
 /// Canonicalise a column `data_type` to the SQLite type-affinity token used to
-/// compare a DESIRED snapshot (PG-spelled, from [`ddl_to_information_schema`])
+/// compare a DESIRED snapshot (PG-spelled, from `ddl_to_information_schema`)
 /// against a LIVE snapshot REAL-introspected from SQLite
 /// (`sqlite::drift_sql::snapshot_schema`, which returns the
 /// lowercased SQLite declared type).

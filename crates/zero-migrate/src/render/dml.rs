@@ -18,7 +18,7 @@
 //!    [`PlanStep::Dml`](crate::render::step::PlanStep::Dml) `binds` vector, NEVER
 //!    string-interpolated. So a value containing a quote / semicolon / comment
 //!    cannot change the *shape* of the statement on either backend (the
-//!    bind-safety property). The expression renderer ([`render_expr_bound`]) walks
+//!    bind-safety property). The expression renderer (`render_expr_bound`) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
 //! 2. **Batched backfill** (`assemble_backfill`). The existing
@@ -27,7 +27,7 @@
 //!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
 //!    statement). A backfill expression references the row's own columns and is
 //!    paged, so it cannot carry positional binds the way a one-shot statement can.
-//!    Here the renderer ([`render_expr_inline`]) emits a SQL string in which a
+//!    Here the renderer (`render_expr_inline`) emits a SQL string in which a
 //!    `Literal` is an INLINE SQL literal (numeric verbatim; a string single-quoted
 //!    with `''` doubling — the canonical escape the guard's real-parser deny-list
 //!    then re-validates). The assembled `UPDATE` is guard-checked by the executor
@@ -38,7 +38,7 @@
 //!
 //! Every identifier (table, column) is validated as a bare
 //! `[A-Za-z_][A-Za-z0-9_]*` identifier and double-quoted with `"` doubling
-//! ([`quote_ident`]). A schema-qualified or otherwise malformed identifier is
+//! (`quote_ident`). A schema-qualified or otherwise malformed identifier is
 //! rejected at assemble time — an injection attempt through an identifier slot
 //! cannot reach the database. On **Postgres** the table is qualified to the project
 //! schema (`"schema"."table"`) so the resolved relation is always the project's
@@ -260,7 +260,7 @@ pub(crate) fn quote_bare_ident_for_dialect(
 
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
 /// migrator role, meta schema, …) — the single fail-closed gate every engine
-/// quoting seam routes through ([`quote_ident_checked`]). Distinct from
+/// quoting seam routes through (`quote_ident_checked`). Distinct from
 /// [`DmlError::InvalidIdentifier`], which gates *author-supplied* bare
 /// identifiers with the strict `[A-Za-z_][A-Za-z0-9_]*` rule; this gate is for
 /// names the engine itself produces (a UUIDv7 schema carries `-`, so the strict
@@ -1919,8 +1919,8 @@ fn render_on_conflict_mysql(
 }
 
 /// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
-/// `set` RHS values render through [`render_value_bound`] and the optional `where`
-/// renders through [`render_expr_bound`], so scalar set values and expression
+/// `set` RHS values render through `render_value_bound` and the optional `where`
+/// renders through `render_expr_bound`, so scalar set values and expression
 /// literals are native binds. Portable on both backends.
 ///
 /// # Errors

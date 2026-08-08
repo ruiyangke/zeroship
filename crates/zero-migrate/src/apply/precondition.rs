@@ -11,7 +11,7 @@
 //! [`Precondition::ColumnExists`], [`Precondition::RowCount`], …) are
 //! ENGINE-BUILT, fully parameterized catalog queries
 //! (`information_schema` / `pg_catalog`). The project schema is bound as `$1`;
-//! the table/column identifiers are validated with [`validate_ident`] (bare
+//! the table/column identifiers are validated with `validate_ident` (bare
 //! `[A-Za-z_][A-Za-z0-9_]*` only — no schema qualifier, no quotes, no
 //! punctuation) and then bound as parameters too. There is **no string
 //! interpolation of user input into SQL**, so these are injection-safe by
@@ -22,7 +22,7 @@
 //! 1. it MUST pass the [`SqlGuard`](crate::guard::SqlGuard) (read-only SELECT;
 //! a cross-schema / file / network / dangerous precondition is denied — the
 //! same line-1 defense the `up` gets);
-//! 2. it MUST pass the **shape gate** ([`validate_single_select`]): a SINGLE
+//! 2. it MUST pass the **shape gate** (`validate_single_select`): a SINGLE
 //! `SELECT` (no second statement, no non-SELECT) with NO data-modifying
 //! statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) anywhere in its tree
 //! (catches a data-modifying CTE at any nesting), NO locking clause (`FOR
@@ -49,14 +49,14 @@
 //! `SELECT`); a precondition can never write.
 //!
 //! **This module is the POSTGRES precondition impl.** Both the SQL VALIDATION
-//! ([`validate_single_select`], `pg_query::parse` — "is this a safe single
+//! (`validate_single_select`, `pg_query::parse` — "is this a safe single
 //! SELECT?") and the EVALUATION ([`evaluate`], `information_schema` catalog reads +
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
 //! BEHIND the [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam: the
 //! generic apply path calls
 //! [`backend.evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions),
 //! and only [`PostgresBackend`](crate::apply::backend::PostgresBackend) routes into this
-//! module (via [`evaluate_all`], which folds the per-check verdict loop). The
+//! module (via `evaluate_all`, which folds the per-check verdict loop). The
 //! SQLite backend validates/evaluates in its own dialect (descriptor migrations
 //! carry no preconditions, so it fails closed on a declared one). No `pg_query` /
 //! `information_schema` / `&Client` appears in the generic executor body — it is
@@ -164,7 +164,7 @@ fn quote_ident(ident: &str) -> String {
 ///
 /// All evaluation is **read-only**: structured checks are parameterized catalog
 /// reads; [`Precondition::SqlBoolean`] is gated to a no-mutation, no-lock single
-/// `SELECT` by [`validate_single_select`] (the real pre-execution line) and then
+/// `SELECT` by `validate_single_select` (the real pre-execution line) and then
 /// run under the migrator role inside a `READ ONLY` transaction
 /// (defense-in-depth). A precondition can never mutate state or acquire a leaking
 /// lock — it is rejected before it touches the DB.

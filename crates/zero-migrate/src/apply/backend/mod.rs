@@ -602,7 +602,7 @@ pub trait MigrationBackend {
     /// destructive DML under any approval other than [`crate::approval::Approval::Approved`] is
     /// refused with [`ApplyError::ApprovalRequired`] BEFORE the template executes,
     /// mirroring the per-`Migration` gate in
-    /// [`apply_with_lock_backend`](crate::apply::executor::apply_with_lock_backend). The
+    /// `apply_with_lock_backend`. The
     /// engine's [`apply_plan`](crate::engine::MigrationEngine::apply_plan) gate runs
     /// first; this is the independent executor-layer check so a direct seam caller
     /// cannot bypass it.

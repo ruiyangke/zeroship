@@ -121,9 +121,9 @@ impl ManifestHash {
 ///
 /// The manifest is over the order the executor will actually RUN, NOT the cosmetic
 /// slice order in which the migrations were supplied. Before folding, the set is
-/// sorted into the same order [`order_pending`](crate::apply::executor::order_pending)
+/// sorted into the same order `order_pending`
 /// produces — a `depends_on` topological sort, UUIDv7-version-tiebroken — via the
-/// SHARED [`canonical_set_order`](crate::apply::executor::canonical_set_order), so the
+/// SHARED `canonical_set_order`, so the
 /// order the manifest blesses can never diverge from the order the executor runs.
 ///
 /// Two consequences:

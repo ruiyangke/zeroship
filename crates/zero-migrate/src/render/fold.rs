@@ -12,10 +12,8 @@
 //!
 //! The fold does NOT re-implement column / type / default / sentinel shaping. It
 //! REUSES the SHARED snapshot-builder the differ + the IR lower both use
-//! ([`build_table_snapshot`](crate::render::declarative::build_table_snapshot),
-//! [`ir_fk_constraint_snapshot_for_columns`](crate::render::declarative::ir_fk_constraint_snapshot_for_columns),
-//! [`ir_column_to_field`](crate::render::lower::ir_column_to_field),
-//! [`create_index_snapshot`](crate::render::lower::create_index_snapshot), …). Because
+//! (`build_table_snapshot`, `ir_fk_constraint_snapshot_for_columns`,
+//! `ir_column_to_field`, `create_index_snapshot`, …). Because
 //! the engine APPLIES the same ops the fold replays through that builder, and the
 //! differ's `desired_snapshot` is already round-trip-proven equal to
 //! `snapshot_schema(live)` (the `declarative_pg` round-trip tests), the folded
@@ -3882,7 +3880,7 @@ fn recover_fk_policy(
 /// applied shape:
 ///
 /// - **type / vector dims / encrypted(default) / ref / id_prefix / vector_metric**
-///   from the op `IrColumn` via [`ir_column_to_field`] (reusing the shared
+///   from the op `IrColumn` via `ir_column_to_field` (reusing the shared
 ///   descriptor machinery — the carried fields + structural ones);
 /// - **enum / min / max** LIFTED from canonical CHECKs ([`recover_check_facet`]),
 ///   bounded to recognized shapes;
@@ -4522,7 +4520,7 @@ fn facet_check_constraints(
 /// - **required / unique** — onto `nullable` / `unique`;
 /// - **default** — onto `default` (a typed literal);
 /// - **enum / min / max** — as CHECK constraints in the closed-AST shapes
-///   [`recover_check_facet`] lifts back ([`facet_check_constraints`]).
+///   [`recover_check_facet`] lifts back (`facet_check_constraints`).
 ///
 /// One resolved `Op::CreateTable` per descriptor, in descriptor order. The columns,
 /// top-level `primary_key`, and indexes include exactly the active policy's resolved

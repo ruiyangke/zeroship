@@ -35,7 +35,7 @@
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
 //!   the engine never emits. The MySQL backend evaluates NO probe, so a MySQL
-//!   preview says so instead ([`guard_label`]): the bare DDL runs unconditionally,
+//!   preview says so instead (`guard_label`): the bare DDL runs unconditionally,
 //!   except for `dropView`, whose lowered MySQL DDL carries a native
 //!   `DROP VIEW IF EXISTS`. This is a preview-text distinction only: it changes no
 //!   lowered statement and no apply behaviour on any dialect.

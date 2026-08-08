@@ -1038,11 +1038,10 @@ impl MigrationEngine {
     ///
     /// Runs an ordered [`PlanStep`] list — the convergence point of the declarative
     /// path (re-pointed here via the shape-adapter in
-    /// [`apply_declarative_locked`](Self::apply_declarative_locked)) and the future
+    /// `apply_declarative_locked`) and the future
     /// IR `op.*` path. It is plan-shape-neutral: it dispatches by step kind,
     /// reusing the existing downstream primitives unchanged as execution
-    /// destinations —
-    /// [`apply_with_lock_backend`](crate::apply::executor::apply_with_lock_backend) for
+    /// destinations — `apply_with_lock_backend` for
     /// DDL, [`run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
     /// for a PG online rename (with the `pending_contract` partition),
     /// [`rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one) for a SQLite

@@ -593,7 +593,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// that whole class.
 ///
 /// Also refuses any field name matching the
-/// [`RESERVED_NAMES`] table (platform suffixes / prefixes / exact
+/// `RESERVED_NAMES` table (platform suffixes / prefixes / exact
 /// names). The `_masked` suffix is reserved for Path B sibling
 /// columns; the six default-classification names (`public`, `pii`,
 /// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
@@ -904,7 +904,7 @@ pub enum SqliteEmitScope {
 ///   SQLite-side wire).
 ///
 /// Foreign-key column types continue to come from the author schema — see
-/// [`def_to_pg_type`].
+/// `def_to_pg_type`.
 pub fn build_create_table_with_fks_for_dialect(
     app_id: &str,
     collection: &str,
@@ -2364,7 +2364,7 @@ pub fn build_mask_sentinel_comment_for_field(
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
 /// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape — both
-/// [`field_to_column_for_dialect`] (the column-DDL emitter that bakes it after
+/// `field_to_column_for_dialect` (the column-DDL emitter that bakes it after
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
 /// engine `generate`s is byte-identical to the one `registerModel` writes. The

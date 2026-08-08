@@ -4746,7 +4746,7 @@
       ]
     },
     "IrConstraint": {
-      "description": "A named table constraint.\n\n`kind` is a NESTED object (`{\"name\":…,\"kind\":{\"kind\":\"fk\",…}}`), NOT a\nflattened sibling — un-flattening makes [`deny_unknown_fields`] sound (serde\nforbids `flatten` + `deny_unknown_fields` together) and removes the\nflatten-merge ambiguity that made the generated JSON Schema lossy.",
+      "description": "A named table constraint.\n\n`kind` is a NESTED object (`{\"name\":…,\"kind\":{\"kind\":\"fk\",…}}`), NOT a\nflattened sibling — un-flattening makes `deny_unknown_fields` sound (serde\nforbids `flatten` + `deny_unknown_fields` together) and removes the\nflatten-merge ambiguity that made the generated JSON Schema lossy.",
       "type": "object",
       "properties": {
         "name": {
