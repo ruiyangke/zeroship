@@ -3330,8 +3330,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     ///
     /// Service dependency: a single-node Redis reachable at `REDIS_TEST_URL`
     /// (e.g. `redis://127.0.0.1:6379`). When unset the KV leg can't run
-    /// faithfully, so the test SKIPS (matching `plugin-kv`'s
-    /// `tests/redis_backend.rs`); set `KV_REQUIRE_REDIS=1` to turn the skip
+    /// faithfully, so the test SKIPS (matching
+    /// `crates/plugin-kv/tests/redis_backend.rs`); set `KV_REQUIRE_REDIS=1` to turn the skip
     /// into a hard failure in CI. Storage + db + auth need no external
     /// service.
     #[test]
