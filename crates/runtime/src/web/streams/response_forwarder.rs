@@ -617,18 +617,26 @@ fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32)
     }
 }
 
-fn error_forwarder(
-    fwd: &ResponseForwarder,
-    state: &SharedState,
-    stream_id: u32,
-    _msg: &str,
-) {
-    // For the wire path an error is functionally equivalent to a
-    // close (the TCP layer just sees EOF — the upstream peer won't
-    // receive a structured error, only a truncated body). Future work:
-    // surface error info via the StreamWriter so the kernel can emit
-    // a response trailer or a tcp RST.
-    close_forwarder(fwd, state, stream_id);
+fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32, msg: &str) {
+    // Abort rather than close, so a consumer can tell a producer failure from
+    // a clean EOF. `abort` still ends the stream, so the wire path is
+    // unchanged: the upstream peer sees a truncated body, since HTTP has no
+    // way to retract a response whose head is already on the socket. What it
+    // buys is the storage path, where committing the bytes received so far
+    // would durably store a prefix of the object as if it were whole.
+    //
+    // The kernel could additionally emit a response trailer or a TCP RST on
+    // the wire path; nothing reads the reason there yet.
+    let mut inner = fwd.borrow_mut();
+    inner.closed = true;
+    if let Some(writer) = inner.direct_writer.as_ref() {
+        writer.abort(msg);
+    }
+    let remove_now = inner.direct_writer.is_some();
+    drop(inner);
+    if remove_now {
+        remove(state, stream_id);
+    }
 }
 
 // ---------------------------------------------------------------------------

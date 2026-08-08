@@ -137,6 +137,14 @@ struct StreamInner {
     /// True once the writer hit the cap. The reader sees this as "stream
     /// errored" and terminates forwarding.
     overflow: bool,
+    /// Set by `abort` when the producer failed partway through. Distinct from
+    /// `done`, which a reader cannot tell apart from a clean EOF: a consumer
+    /// that commits what it received (storage's multipart upload) must not
+    /// treat a failed producer as a complete object.
+    ///
+    /// `abort` sets `done` as well, so a consumer that only checks `is_done`
+    /// keeps its existing end-of-stream behaviour.
+    error: Option<String>,
     done: bool,
     waker: Option<Waker>,
 }
@@ -267,6 +275,24 @@ impl StreamWriter {
             waker.wake();
         }
     }
+
+    /// Signal that the producer FAILED and the bytes written so far are a
+    /// partial write, not a complete stream. Ends the stream like `close`,
+    /// and additionally records `msg` for consumers that must distinguish the
+    /// two - see `StreamReader::error`.
+    ///
+    /// The first abort reason wins: a later abort cannot overwrite the
+    /// original cause with a downstream symptom.
+    pub fn abort(&self, msg: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.error.is_none() {
+            inner.error = Some(msg.to_string());
+        }
+        inner.done = true;
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+    }
 }
 
 /// Reader half of a shared stream buffer.
@@ -308,6 +334,16 @@ impl StreamReader {
     /// use this to emit a final error frame instead of a normal completion.
     pub fn is_overflow(&self) -> bool {
         self.inner.borrow().overflow
+    }
+
+    /// The producer's failure reason, if it aborted rather than closing
+    /// cleanly. `None` means the stream ended normally (or has not ended).
+    ///
+    /// A consumer that DURABLY COMMITS what it read must check this before
+    /// treating end-of-stream as a complete object; `is_done` alone cannot
+    /// tell a finished upload from a failed one.
+    pub fn error(&self) -> Option<String> {
+        self.inner.borrow().error.clone()
     }
 
     /// Register a waker to be notified when data arrives or the stream closes.
@@ -375,6 +411,7 @@ pub fn stream_buffer_with_cap(max_bytes: usize) -> (StreamWriter, StreamReader) 
         buffered_bytes: 0,
         max_bytes,
         overflow: false,
+        error: None,
         done: false,
         waker: None,
     }));

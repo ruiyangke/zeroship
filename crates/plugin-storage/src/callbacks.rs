@@ -433,6 +433,11 @@ impl ChunkSource for StreamReaderSource {
                     "storage: upload stream exceeded the buffer backpressure cap".to_string(),
                 ));
             }
+            // Checked BEFORE `is_done`, which an abort also sets: a producer
+            // that failed partway must not be committed as a complete object.
+            if let Some(err) = self.reader.error() {
+                return Some(Err(format!("storage: upload stream failed: {err}")));
+            }
             if self.reader.is_done() {
                 return None;
             }
