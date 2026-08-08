@@ -80,12 +80,21 @@ pub struct PeriodTotalDecrease {
 
 /// Outcome of a period rewrite: rows written, plus any total that SHRANK.
 ///
-/// `#[must_use]` because `decreased` is the whole point and it is easy to drop: the
-/// workspace denies `unused_must_use`, so ignoring this becomes a compile error rather
-/// than a silently unreported billing fail-open. Both bugs this pattern produced
-/// elsewhere in the tree were plain returns nobody marked - a `usize` row count and a
-/// `DateTime` deadline - so no lint could catch either. The enforcement point is the
-/// DEFINITION, not the call site, because `let _ =` is the documented opt-out.
+/// `#[must_use]` because `decreased` is the whole point and it is easy to drop. The
+/// workspace denies `unused_must_use`, so ignoring this is a compile error rather than a
+/// silently unreported billing fail-open - it caught a real discard in the spend tests
+/// the moment it was added.
+///
+/// It does NOT cover every way to drop this, and the difference is worth knowing before
+/// relying on it. Measured on this toolchain:
+///
+///   `write_period(..).await;`          bare      -> DENIED by `unused_must_use`
+///   `let _ = write_period(..).await;`  explicit  -> SILENT; `let _` is the opt-out
+///
+/// Only `clippy::let_underscore_must_use` catches the second, and it is a RESTRICTION
+/// lint that this workspace does not enable (`all`/`pedantic`/`nursery` only). So
+/// `#[must_use]` stops the accident and not the deliberate discard - which is the right
+/// split, but means a reviewer still has to look at any `let _ =` on this type.
 #[derive(Debug, Clone, Default)]
 #[must_use]
 pub struct PeriodSnapshotWrite {
