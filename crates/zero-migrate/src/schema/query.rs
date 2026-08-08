@@ -812,16 +812,18 @@ pub fn build_create_schema(app_id: &str) -> String {
     format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id))
 }
 
-// `build_create_table` (the non-`_with_fks` wrapper that hardcoded
-// `FkEmission::Inline`) was removed during the v2-only consolidation.
-// Production paths (`exec_register_model_with_pool`) always pass the
-// orchestrator's live table set to `build_create_table_with_fks` so
-// FKs to not-yet-created targets get deferred to a separate
-// `ALTER TABLE … ADD CONSTRAINT`. Tests that need the legacy "always
-// inline" behaviour call `build_create_table_with_fks(..., &Inline)`
-// directly.
+// The production CREATE path passes the orchestrator's live table set through
+// `FkEmission::Deferred` so an FK to a not-yet-created target becomes a separate
+// `ALTER TABLE ... ADD CONSTRAINT` rather than an inline clause the statement
+// order cannot satisfy. `render/declarative.rs:5936` is that caller, reaching
+// `build_create_table_with_fks_for_dialect_scoped_statements` directly.
+//
+// An earlier version of this comment named `exec_register_model_with_pool` as
+// the production path. That function does not exist in this workspace and never
+// has - it belongs to appbase's plugin-db, from which this kernel was seeded.
+// `schema/diff.rs:10` still carries the same inherited name.
 
-/// Controls FK emission strategy for `build_create_table_with_fks`.
+/// Controls FK emission strategy for `build_create_table_with_fks_for_dialect`.
 ///
 /// - `Inline` — every `t.ref(target)` becomes an inline `FOREIGN KEY`
 ///   clause inside CREATE TABLE. The caller takes responsibility for
@@ -868,27 +870,6 @@ pub enum SqliteEmitScope {
     /// `SqliteBackend` model). The schema qualifier is dropped on the table
     /// name and the index name.
     MainUnqualified,
-}
-
-// pub (not pub): external consumer tests/integration.rs calls this via glob import.
-//
-// PG-flavoured shim around [`build_create_table_with_fks_for_dialect`]. The active
-// policy is mandatory here too; no shim supplies an ambient injected shape.
-pub fn build_create_table_with_fks(
-    app_id: &str,
-    collection: &str,
-    schema: &serde_json::Value,
-    fk_emit: &FkEmission<'_>,
-    effective: &EffectivePolicy,
-) -> Result<String, QueryError> {
-    build_create_table_with_fks_for_dialect(
-        app_id,
-        collection,
-        schema,
-        fk_emit,
-        SqlDialect::Postgres,
-        effective,
-    )
 }
 
 /// Dialect-aware CREATE TABLE emitter.
@@ -2231,7 +2212,7 @@ fn short_hash_base32(input: &str) -> String {
 ///
 /// The platform reserves the `_masked` suffix at the field-name level
 /// (`validate_field_name`'s `ReservedName::Suffix`) so a creator cannot
-/// shadow a sibling. Called by both `build_create_table_with_fks`
+/// shadow a sibling. Called by both `build_create_table_with_fks_for_dialect`
 /// (DDL emission) and `build_insert` / `build_set_clauses` (atomic
 /// dual-write).
 pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
@@ -2284,7 +2265,8 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
 ///
 /// Only the PG arm executes these statements — SQLite doesn't support
 /// `COMMENT ON COLUMN`. The SQLite arm relies on the inline
-/// `/* zero-migrate:mask:... */` comment emitted by `build_create_table_with_fks`,
+/// `/* zero-migrate:mask:... */` comment emitted by
+/// `build_create_table_with_fks_for_dialect`,
 /// preserved verbatim in `sqlite_master.sql`.
 ///
 /// Returns the empty vector when the schema declares no masked
@@ -3113,7 +3095,16 @@ columns = [
         schema: &serde_json::Value,
         fk_emit: &FkEmission<'_>,
     ) -> Result<String, QueryError> {
-        super::build_create_table_with_fks(app_id, collection, schema, fk_emit, &confined_policy())
+        // `super::` is load-bearing: the wrapper below shadows the production
+        // name inside this module.
+        super::build_create_table_with_fks_for_dialect(
+            app_id,
+            collection,
+            schema,
+            fk_emit,
+            SqlDialect::Postgres,
+            &confined_policy(),
+        )
     }
 
     fn build_create_table_with_fks_for_dialect(
@@ -3577,11 +3568,12 @@ columns = [
     #[test]
     fn no_inject_policy_still_rejects_reserved_id_prefix() {
         let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
-        let err = super::build_create_table_with_fks(
+        let err = super::build_create_table_with_fks_for_dialect(
             "app1",
             "posts",
             &schema,
             &FkEmission::Inline,
+            SqlDialect::Postgres,
             &no_inject_policy(),
         )
         .expect_err("ID-prefix reservations are independent of table injection");
@@ -4747,8 +4739,8 @@ columns = [
     // CREATE TABLE prepends the active policy's injected shape
     //
     // Tests the dialect-aware emitter
-    // (`build_create_table_with_fks_for_dialect`) and the PG-flavoured
-    // shim (`build_create_table_with_fks`). The system-field prefix and
+    // (`build_create_table_with_fks_for_dialect`), reached both directly and
+    // through this module's PG-defaulting test wrapper. The system-field prefix and
     // auto-index emission are dialect-symmetric except for timestamp
     // type / default expression and the SQLite `<schema>.<index_name>`
     // form vs PG's `ON <schema>.<table>`.

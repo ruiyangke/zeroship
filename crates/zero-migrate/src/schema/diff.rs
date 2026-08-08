@@ -1071,7 +1071,7 @@ pub fn compute_diff(
     // in the live snapshot.
     //
     // First-time CREATE TABLE inlines the FK in the same statement (see
-    // build_create_table_with_fks's Deferred mode), so when the table is
+    // build_create_table_with_fks_for_dialect's Deferred mode), so when the table is
     // brand new (`live_cols.is_none()`) we only emit AddForeignKey ops
     // for refs whose target *doesn't* exist yet — but currently
     // build_create_table emits FKs inline always. To stay safe and
@@ -1241,7 +1241,7 @@ pub fn compute_diff(
     // `crate::crud::mask_backfill::run_mask_backfill`).
     //
     // Brand-new columns with a mask declaration are NOT routed here —
-    // `build_create_table_with_fks` (CreateTable op) and
+    // `build_create_table_with_fks_for_dialect` (CreateTable op) and
     // `build_add_column` (AddColumn op) already emit the sibling at
     // CREATE / ALTER ADD time. Only EXISTING columns whose mask state
     // changed reach this loop.
