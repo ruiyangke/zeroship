@@ -53,7 +53,7 @@ const WRITER_BRAND: &str = "[[ws.writer.brand]]";
 /// This parallels the readers. Self::new validates the
 /// stream argument and stashes it in `pending_stream` for the post_init
 /// hook (`after_install`) to consume. The hook does box-install-dependent
-/// setup: WRITER_BRAND priv-sym, [[stream]] / stream.[[writer]] wires,
+/// setup: WRITER_BRAND priv-sym, `[[stream]]` / stream.`[[writer]]` wires,
 /// and the four-way state-driven closedPromise / readyPromise init.
 #[allow(missing_debug_implementations)]
 pub struct WritableStreamDefaultWriter {

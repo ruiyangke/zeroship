@@ -502,10 +502,10 @@ fn fill_from_iterable(
 /// Record-of-ByteString-to-ByteString fill (Fetch §2.2.1
 /// `dom-Headers` step 3, WebIDL `record<…>`):
 ///
-///   1. Let keys be ? O.[[OwnPropertyKeys]] — ALL own keys including Symbols.
+///   1. Let keys be ? O.`[[OwnPropertyKeys]]` — ALL own keys including Symbols.
 ///   2. For each key in keys (in insertion order):
-///      a. Let desc be ? O.[[GetOwnProperty]](key).
-///      b. If desc is not undefined and desc.[[Enumerable]] is true:
+///      a. Let desc be ? O.`[[GetOwnProperty]]`(key).
+///      b. If desc is not undefined and desc.`[[Enumerable]]` is true:
 ///         i. Let typedKey be key converted to ByteString. Symbol → throws.
 ///         ii. Let value = ? Get(O, key); convert to ByteString.
 ///         iii. Append (typedKey, typedValue) to result.

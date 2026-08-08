@@ -567,7 +567,7 @@ pub fn readable_stream_default_controller_has_backpressure(
 ///
 /// Returns true iff:
 /// 1. `CanCloseOrEnqueue` is true, AND
-/// 2. controller.[[started]] is true, AND
+/// 2. controller.`[[started]]` is true, AND
 /// 3. (the stream is locked AND there are pending read requests) OR
 ///    desiredSize > 0.
 pub fn readable_stream_default_controller_should_call_pull(

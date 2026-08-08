@@ -316,14 +316,14 @@ fn set_up_default_reader_internal(
 
 /// `ReadableStreamReaderGenericInitialize(reader, stream)` — §3.9.2 + §3.3.x.
 ///
-/// 1. Set reader.[[stream]] = stream.
-/// 2. Set stream.[[reader]] = reader.
-/// 3. If stream.[[state]] is "readable":
-///    a. Set reader.[[closedPromise]] to a new pending Promise.
-/// 4. Else if stream.[[state]] is "closed":
-///    a. Set reader.[[closedPromise]] to a Promise resolved with undefined.
+/// 1. Set reader.`[[stream]]` = stream.
+/// 2. Set stream.`[[reader]]` = reader.
+/// 3. If stream.`[[state]]` is "readable":
+///    a. Set reader.`[[closedPromise]]` to a new pending Promise.
+/// 4. Else if stream.`[[state]]` is "closed":
+///    a. Set reader.`[[closedPromise]]` to a Promise resolved with undefined.
 /// 5. Else (errored):
-///    a. Set reader.[[closedPromise]] to a Promise rejected with stream.[[storedError]].
+///    a. Set reader.`[[closedPromise]]` to a Promise rejected with stream.`[[storedError]]`.
 ///       (and PromiseIsHandled = true).
 fn readable_stream_reader_generic_initialize<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -458,7 +458,7 @@ fn read_method_callback(
 
 /// `ReadableStreamDefaultReaderRead(reader, readRequest)` — §3.9.2.
 ///
-/// 1. Set [[disturbed]] on stream to true.
+/// 1. Set `[[disturbed]]` on stream to true.
 /// 2. If stream state == "closed": readRequest.closeSteps().
 /// 3. Else if state == "errored": readRequest.errorSteps(storedError).
 /// 4. Else: pull_steps(stream, readRequest).
@@ -613,7 +613,7 @@ fn release_lock_method_callback(
 
 /// `ReadableStreamDefaultReaderRelease(reader)` — §3.9.2.
 ///
-/// 1. If reader.[[stream]] is undefined, return.
+/// 1. If reader.`[[stream]]` is undefined, return.
 /// 2. Run ReadableStreamReaderGenericRelease(reader).
 /// 3. Run ReadableStreamDefaultReaderErrorReadRequests(reader, ...) where
 ///    the error is a TypeError("Reader released — read requests rejected").
@@ -634,14 +634,14 @@ pub fn readable_stream_default_reader_release(
 
 /// `ReadableStreamReaderGenericRelease(reader)` — §3.9.2.
 ///
-/// 1. Assert reader.[[stream]] is not undefined.
-/// 2. Run controller's [[ReleaseSteps]]() — for byte controllers this
+/// 1. Assert reader.`[[stream]]` is not undefined.
+/// 2. Run controller's `[[ReleaseSteps]]`() — for byte controllers this
 ///    marks the front pendingPullInto's readerType="none".
 /// 3. If state == "readable": reject closedPromise with TypeError.
 ///    Else: replace closedPromise with a rejected one.
 ///    (Both: PromiseIsHandled = true).
-/// 4. Set stream.[[reader]] = undefined.
-/// 5. Set reader.[[stream]] = undefined.
+/// 4. Set stream.`[[reader]]` = undefined.
+/// 5. Set reader.`[[stream]]` = undefined.
 pub fn readable_stream_reader_generic_release(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
@@ -732,7 +732,7 @@ fn cancel_method_callback<'s>(
 }
 
 /// `ReadableStreamReaderGenericCancel(reader, reason)` — §3.9.2.
-/// Returns ReadableStreamCancel(reader.[[stream]], reason).
+/// Returns ReadableStreamCancel(reader.`[[stream]]`, reason).
 pub fn readable_stream_reader_generic_cancel<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _reader: v8::Local<v8::Object>,

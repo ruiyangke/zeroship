@@ -364,7 +364,7 @@ pub fn read_sequence<T: WebIdlConvertible>(
 /// 3. For each key, call `[[Get]](value, key)` and convert to `V`.
 ///    Convert the key to `K` (must be `USVString` or `ByteString`).
 ///    Skip non-enumerable own properties (per spec step "for each key
-///    in keys → if descriptor's [[Enumerable]] is true").
+///    in keys → if descriptor's `[[Enumerable]]` is true").
 ///
 /// Returns the pairs in spec order. Two same-keyed entries are not
 /// possible (own properties have unique keys).

@@ -486,8 +486,8 @@ fn run_op<'s>(
 /// `next()` per spec §3.4.6 + WebIDL §3.7.10.4 "next iteration result":
 ///
 ///   1. Let promise = a new Promise.
-///   2. Let reader be this.[[reader]].
-///   3. If reader.[[stream]] is undefined → resolve promise with
+///   2. Let reader be this.`[[reader]]`.
+///   3. If reader.`[[stream]]` is undefined → resolve promise with
 ///      `{value: undefined, done: true}`. Return promise.
 ///   4. Else: issue a Native ReadRequest:
 ///      - chunkSteps(chunk): resolve promise with `{value: chunk, done: false}`.
@@ -601,10 +601,10 @@ fn return_method_callback<'s>(
 /// `return(value)` per spec §3.4.6 step 5 / ref impl
 /// `ReadableStreamAsyncIterator-impl.js`:
 ///
-///   1. Let reader be this.[[reader]].
-///   2. If reader.[[stream]] is undefined → return promiseResolvedWith
+///   1. Let reader be this.`[[reader]]`.
+///   2. If reader.`[[stream]]` is undefined → return promiseResolvedWith
 ///      `{value, done: true}`.
-///   3. Let preventCancel be this.[[preventCancel]].
+///   3. Let preventCancel be this.`[[preventCancel]]`.
 ///   4. If preventCancel is true:
 ///        a. ReadableStreamReaderGenericRelease(reader).
 ///        b. Return promiseResolvedWith `{value, done: true}`.

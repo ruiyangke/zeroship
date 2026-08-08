@@ -479,7 +479,7 @@ pub fn readable_byte_stream_controller_close(
 ///
 /// Spec steps:
 ///   1. If queue is empty AND closeRequested is true → return.
-///   2. View args: buffer = chunk.[[ArrayBuffer]], byteOffset, byteLength.
+///   2. View args: buffer = chunk.`[[ArrayBuffer]]`, byteOffset, byteLength.
 ///   3. If IsDetachedBuffer(buffer) → throw TypeError.
 ///   4. transferredBuffer = TransferArrayBuffer(buffer).
 ///   5. If pendingPullIntos non-empty:
@@ -1346,7 +1346,7 @@ pub fn readable_byte_stream_controller_respond_internal(
 ///   1. assert descriptor.bytesFilled mod descriptor.elementSize == 0
 ///   2. If descriptor.readerType is "none":
 ///        ShiftPendingPullInto(controller)
-///   3. stream = controller.[[stream]]
+///   3. stream = controller.`[[stream]]`
 ///   4. If ReadableStreamHasBYOBReader(stream):
 ///        While ReadableStreamGetNumReadIntoRequests(stream) > 0:
 ///          d = ShiftPendingPullInto(controller)

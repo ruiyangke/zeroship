@@ -30,7 +30,7 @@ pub(super) fn gen_install_slot_types(cfg: &ClassConfig) -> TokenStream2 {
         /// per isolate — required for `#[v8_inherit]` to chain
         /// derived classes onto the SAME template the global was
         /// bound to (otherwise `instanceof` walks a different
-        /// [[FunctionPrototype]] and returns false).
+        /// `[[FunctionPrototype]]` and returns false).
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);

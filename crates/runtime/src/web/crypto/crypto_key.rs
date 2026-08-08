@@ -30,8 +30,8 @@ pub struct CryptoKey {
     /// the brand check from a non-CryptoKey allocation is bounded
     /// safely (single-byte read) — see SAFETY notes on `is_crypto_key`.
     pub tag: u8,
-    /// The spec's [[type]] / [[extractable]] / [[algorithm]] /
-    /// [[usages]] / [[handle]] slots, all bundled.
+    /// The spec's `[[type]]` / `[[extractable]]` / `[[algorithm]]` /
+    /// `[[usages]]` / `[[handle]]` slots, all bundled.
     pub state: CryptoKeyState,
 }
 

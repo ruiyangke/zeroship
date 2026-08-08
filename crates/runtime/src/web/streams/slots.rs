@@ -49,7 +49,7 @@ pub fn write_slot(
 /// Delete a slot. After this call, `read_slot` returns `undefined`.
 ///
 /// Used by `InvalidateBYOBRequest` (§3.7) and `releaseLock` (§3.4) which
-/// the spec describes as "set X.[[Y]] to undefined" / "set X.[[Y]] to null".
+/// the spec describes as "set X.`[[Y]]` to undefined" / "set X.`[[Y]]` to null".
 pub fn delete_slot(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,

@@ -70,9 +70,9 @@ struct PendingTransformSetup {
 /// slots live in V8 private symbols.
 #[allow(missing_debug_implementations)]
 pub struct TSStreamState {
-    /// SLOT: [[backpressure]] — current backpressure flag.
+    /// SLOT: `[[backpressure]]` — current backpressure flag.
     pub backpressure: Cell<bool>,
-    /// SLOT: [[backpressureChangePromise]] — paired storage. The Promise
+    /// SLOT: `[[backpressureChangePromise]]` — paired storage. The Promise
     /// is the JS-visible side; the Resolver lets Rust resolve it when
     /// backpressure flips. We keep it in one place, in Rust state,
     /// because the spec only needs the Promise

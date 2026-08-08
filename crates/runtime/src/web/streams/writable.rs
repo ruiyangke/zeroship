@@ -61,22 +61,22 @@ pub enum WSState {
 /// V8 private symbols.
 #[allow(missing_debug_implementations)]
 pub struct WSStreamState {
-    /// SLOT: [[state]]
+    /// SLOT: `[[state]]`
     pub state: Cell<WSState>,
-    /// SLOT: [[backpressure]]
+    /// SLOT: `[[backpressure]]`
     pub backpressure: Cell<bool>,
-    /// SLOT: [[closeRequest]] — Promise+Resolver pair (None when no close pending).
+    /// SLOT: `[[closeRequest]]` — Promise+Resolver pair (None when no close pending).
     pub close_request: RefCell<Option<PromisePair>>,
-    /// SLOT: [[inFlightWriteRequest]] — the resolver of the currently-writing
+    /// SLOT: `[[inFlightWriteRequest]]` — the resolver of the currently-writing
     /// chunk's promise. The corresponding promise was already returned to JS
     /// by writer.write() and is held in `write_requests` until the spec moves
     /// it to in-flight via WritableStreamMarkFirstWriteRequestInFlight.
     pub in_flight_write_request: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
-    /// SLOT: [[inFlightCloseRequest]] — the resolver of the in-flight close.
+    /// SLOT: `[[inFlightCloseRequest]]` — the resolver of the in-flight close.
     pub in_flight_close_request: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
-    /// SLOT: [[pendingAbortRequest]]
+    /// SLOT: `[[pendingAbortRequest]]`
     pub pending_abort_request: RefCell<Option<PendingAbortRequest>>,
-    /// SLOT: [[writeRequests]] — list of Promises (returned to JS).
+    /// SLOT: `[[writeRequests]]` — list of Promises (returned to JS).
     /// The spec says this is a list of Promises,
     /// NOT Resolvers. We store both: the promises here (used by
     /// FinishErroring to iterate and reject), and the matching resolvers
