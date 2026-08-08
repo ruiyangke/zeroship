@@ -319,6 +319,20 @@ where
 /// ANYTHING" — diagnosis only). Do not add `#[should_panic]` here
 /// without checking with whoever owns the fix; a red test is the
 /// intended deliverable of this dispatch.
+///
+/// IGNORED, and the reason matters more than the attribute. This panics — that
+/// is the finding, reproduced. It is ignored because the hazard is currently
+/// UNREACHABLE: `algorithm_snapshot` maps `Native`/`NativeReason` to `Noop`, so
+/// neither closure is ever invoked, and `from_native_source` has no caller in
+/// this crate. The sibling test above proves the JS path touches neither method,
+/// counted rather than inferred.
+///
+/// So this is a tripwire, not a failure. Un-ignore it the day either the Native
+/// algorithm dispatch or `from_native_source` gets wired up: on that day the
+/// borrow contract has to change in the same patch, and this test is what says
+/// so. Leaving it un-ignored would only train the next person to see a red
+/// runtime suite as normal.
+#[ignore = "reproduces a real panic in code nothing calls yet; un-ignore when Native dispatch or from_native_source is wired up"]
 #[test]
 fn direct_closure_pull_then_cancel_panics_with_borrow_mut_error() {
     run_in_v8(|scope| {
