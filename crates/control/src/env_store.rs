@@ -232,14 +232,18 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO zeroship.app_vars(app_id, key_name, value) VALUES($1, $2, $3)
-             ON CONFLICT (app_id, key_name) DO UPDATE
-                SET value = EXCLUDED.value, updated_at = NOW()",
+            "WITH upsert AS (
+                 INSERT INTO zeroship.app_vars(app_id, key_name, value) VALUES($1, $2, $3)
+                 ON CONFLICT (app_id, key_name) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = NOW()
+                 RETURNING app_id
+             )
+             UPDATE zeroship.apps SET env_version = env_version + 1
+             WHERE id = (SELECT app_id FROM upsert)",
             &[&app_id, &key, &value],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
-        self.bump_env_version(app_id).await;
         Ok(())
     }
 
@@ -249,27 +253,32 @@ impl EnvStore {
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
+        // The outer UPDATE's row count doubles as the "did anything get
+        // deleted" answer: no matching var leaves the subselect NULL, so the
+        // UPDATE touches nothing and reports 0.
         let n = conn
             .execute(
-                "DELETE FROM zeroship.app_vars WHERE app_id = $1 AND key_name = $2",
+                "WITH del AS (
+                     DELETE FROM zeroship.app_vars WHERE app_id = $1 AND key_name = $2
+                     RETURNING app_id
+                 )
+                 UPDATE zeroship.apps SET env_version = env_version + 1
+                 WHERE id = (SELECT app_id FROM del)",
                 &[&app_id, &key],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
-        if n > 0 {
-            self.bump_env_version(app_id).await;
-        }
         Ok(n > 0)
     }
 
-    /// Best-effort env_version bump. Failure logged but not propagated —
-    /// the mutation has already committed; worst case workers refetch
-    /// env on the next reconcile interval anyway.
-    async fn bump_env_version(&self, app_id: Uuid) {
-        if let Err(e) = self.registry.bump_env_version(app_id).await {
-            tracing::warn!(app_id = %app_id, error = %e, "env_store: bump_env_version failed");
-        }
-    }
+    // The bump used to live here as a separate best-effort call, justified by a
+    // comment saying workers would refetch on the next reconcile anyway. They
+    // do not: `worker/src/sync.rs` skips the env reload when the version it has
+    // matches the version the control plane reports, so a dropped bump left the
+    // worker serving the old value indefinitely while the API answered 204 and
+    // the console showed the new one. Every mutation below now carries its own
+    // bump in the same statement or the same transaction, which removes the
+    // failure mode rather than logging it.
 
     // ------------------------------------------------------------------
     // Secrets (encrypted at rest)
@@ -306,14 +315,18 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO zeroship.app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
-             ON CONFLICT (app_id, key_name) DO UPDATE
-                SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()",
+            "WITH upsert AS (
+                 INSERT INTO zeroship.app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
+                 ON CONFLICT (app_id, key_name) DO UPDATE
+                    SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
+                 RETURNING app_id
+             )
+             UPDATE zeroship.apps SET env_version = env_version + 1
+             WHERE id = (SELECT app_id FROM upsert)",
             &[&app_id, &key, &ct],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
-        self.bump_env_version(app_id).await;
         Ok(())
     }
 
@@ -325,14 +338,16 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM zeroship.app_secrets WHERE app_id = $1 AND key_name = $2",
+                "WITH del AS (
+                     DELETE FROM zeroship.app_secrets WHERE app_id = $1 AND key_name = $2
+                     RETURNING app_id
+                 )
+                 UPDATE zeroship.apps SET env_version = env_version + 1
+                 WHERE id = (SELECT app_id FROM del)",
                 &[&app_id, &key],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
-        if n > 0 {
-            self.bump_env_version(app_id).await;
-        }
         Ok(n > 0)
     }
 
@@ -464,10 +479,17 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         }
+        // Bump inside the transaction so the exposure set and the version that
+        // advertises it commit together. A bump that landed after the commit
+        // could be lost on its own, leaving workers pinned to the previous
+        // membership with no signal that anything changed.
+        tx.execute(
+            "UPDATE zeroship.apps SET env_version = env_version + 1 WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .map_err(|e| EnvError::Db(e.to_string()))?;
         tx.commit().await.map_err(|e| EnvError::Db(e.to_string()))?;
-        // Bump env_version so workers refetch and re-derive process.env
-        // membership on the next reconcile cycle.
-        self.bump_env_version(app_id).await;
         Ok(sorted)
     }
 

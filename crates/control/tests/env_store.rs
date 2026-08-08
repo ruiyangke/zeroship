@@ -365,6 +365,66 @@ async fn env_version_bumps_on_every_mutation() {
     common::drain_pg().await;
 }
 
+/// The two mutations the test above does not reach.
+///
+/// `delete_secret` is the one that needs pinning: its "did anything go away"
+/// boolean is now the row count of the statement that also bumps the version,
+/// not of the delete on its own, so a wrong join between the two halves would
+/// report a removal that did not happen (or miss one that did) while still
+/// looking plausible. `set_expose` bumps from inside its own transaction, and
+/// is checked here for the same reason - the count has to move exactly once.
+///
+/// Neither test can observe the failure this pair of changes actually removes:
+/// a bump that is dropped while the mutation commits needs fault injection to
+/// reproduce. What they pin is that the merged statements still report the
+/// same answers the split ones did.
+#[compio::test]
+async fn delete_secret_and_set_expose_bump_exactly_once() {
+    let url = db_url();
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let app = create_test_app(&registry).await;
+
+    store.set_secret(app, "TOKEN", "sk_1").await.unwrap();
+    let after_set = registry.get_versions().await.unwrap()[&app].env_version;
+
+    // A real removal reports true and advances the version by exactly one.
+    let removed = store.delete_secret(app, "TOKEN").await.unwrap();
+    assert!(removed, "deleting a secret that exists must report true");
+    let after_delete = registry.get_versions().await.unwrap()[&app].env_version;
+    assert_eq!(after_delete, after_set + 1);
+
+    // A removal that matches nothing reports false and leaves the version
+    // alone, so workers are not woken for a change that did not happen.
+    let removed_again = store.delete_secret(app, "TOKEN").await.unwrap();
+    assert!(
+        !removed_again,
+        "second delete of the same key must report false"
+    );
+    let after_noop = registry.get_versions().await.unwrap()[&app].env_version;
+    assert_eq!(after_noop, after_delete);
+
+    store.set_var(app, "PUBLIC_ONE", "1").await.unwrap();
+    let before_expose = registry.get_versions().await.unwrap()[&app].env_version;
+    let exposed = store
+        .set_expose(app, &["PUBLIC_ONE".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(exposed, vec!["PUBLIC_ONE".to_string()]);
+    let after_expose = registry.get_versions().await.unwrap()[&app].env_version;
+    assert_eq!(
+        after_expose,
+        before_expose + 1,
+        "set_expose commits its bump with the exposure set, so exactly one"
+    );
+
+    registry.delete_app(&app).await.ok();
+
+    drop(store);
+    drop(registry);
+    common::drain_pg().await;
+}
+
 #[compio::test]
 async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let url = db_url();
