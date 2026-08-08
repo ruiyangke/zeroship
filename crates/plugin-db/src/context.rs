@@ -9,7 +9,7 @@
 //! [`IsolateDbContext`] stashed in one [`thread_local!`]. Typed
 //! accessors enforce the invariants in one place:
 //!
-//! * [`IsolateDbContext::with`] / [`IsolateDbContext::with_mut`] are
+//! * [`crate::context::with`] / [`crate::context::with_mut`] are
 //!   the only entry points; every consumer goes through them.
 //! * `*_tx_*` methods coordinate the tx-state slots (`tx_conn`,
 //!   `savepoint_depth`) so the single-connection model the transaction
@@ -108,7 +108,7 @@ impl Drop for TxClientSlotGuard {
 /// by the [`ISOLATE_CTX`] thread-local.
 ///
 /// All fields are private. Every consumer goes through an accessor
-/// method on this `impl` — [`Self::pool`], [`Self::savepoint_depth`],
+/// method on this `impl` — [`Self::pool`], [`Self::savepoint_depth_for`],
 /// etc. Direct field access from inside the
 /// crate is rejected at compile time.
 #[allow(missing_debug_implementations)]

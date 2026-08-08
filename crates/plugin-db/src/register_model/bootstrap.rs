@@ -9,7 +9,7 @@
 //!    between pass 1 and pass 2.
 //! 2. `CREATE SCHEMA IF NOT EXISTS` for the app.
 //! 3. `CREATE TABLE IF NOT EXISTS __zeroship_migrations` (delegated to
-//!    [`crate::backend::Backend::ensure_audit_table`]).
+//!    [`crate::backend::AuditWriter::ensure_audit_table`]).
 //! 4. Compute `schema_version` from `MAX(schema_version) + 1` over the
 //!    audited DDL history.
 //! 5. Expand declared inline indexes + named indexes into a single
