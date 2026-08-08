@@ -390,6 +390,31 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
             ));
         }
         out.insert(entry.hash.clone());
+        // Compression variants are content-addressed blobs like any other, and
+        // were previously absent from this walk - so a manifest could name a
+        // `br` or `gzip` blob that was never packed, ingest cleanly, and then
+        // 500 at serve time for exactly the clients that send the matching
+        // `Accept-Encoding`.
+        //
+        // The blob keyspace has no app partition, so an unchecked variant hash
+        // is also the one place a manifest can name another app's blob and have
+        // the gateway serve it. Requiring presence in THIS tar closes that:
+        // a hash the deploy did not ship is now a 400.
+        //
+        // `Manifest::validate()` already enforces the hex format; this is the
+        // presence half, which nothing enforced.
+        for (enc, variant) in &entry.variants {
+            if !crate::blob::validate_hash_format(&variant.hash) {
+                return Err(IngestError::bad(
+                    "invalid manifest",
+                    format!(
+                        "assets[{path}].variants[{enc}].hash {h:?} is not lowercase sha256 hex",
+                        h = variant.hash
+                    ),
+                ));
+            }
+            out.insert(variant.hash.clone());
+        }
     }
     for (k, v) in &manifest.sourcemaps {
         // Manifest::validate() already enforces sha256 hex on both — defence in depth.
@@ -476,6 +501,39 @@ fn sha256_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A compression variant's blob must be required to be in the tar.
+    ///
+    /// **What this catches**: a variant hash absent from the set step 8 asserts
+    /// against - which is what let a manifest name a `br` blob that was never
+    /// packed. Verified by mutation: dropping the variants loop leaves the set
+    /// without the hash and fails this.
+    ///
+    /// **What this does NOT catch**: that step 8 then rejects the deploy. That
+    /// is a HANDOFF, not a hole - `ingest` asserts every hash in this set was
+    /// seen in the archive, and `blob_missing_from_tar_is_rejected` in
+    /// `tests/runtime_descriptor_ingest_test.rs` covers that arm for the
+    /// descriptor hash, which flows through the same check.
+    #[test]
+    fn variant_blob_hashes_are_required_to_be_present() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let manifest: Manifest = serde_json::from_value(json!({
+            "version": 1,
+            "assets": {
+                "/x.js": { "hash": a, "size": 2, "content_type": "text/javascript",
+                           "variants": { "br": { "hash": b, "size": 1 } } }
+            }
+        }))
+        .expect("manifest with a variant deserializes");
+
+        let expected = collect_expected_hashes(&manifest).expect("collect");
+        assert!(expected.contains(&a), "the asset's own hash must be required");
+        assert!(
+            expected.contains(&b),
+            "a variant blob can be named without ever being packed"
+        );
+    }
 
     /// Every `IngestError::bad` detail is bounded, whatever it was built from.
     ///
