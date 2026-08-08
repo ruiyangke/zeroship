@@ -1031,6 +1031,131 @@ async fn create_table_with_policy_injected_indexes_applies_under_creator_up() {
 }
 
 // ---------------------------------------------------------------------------
+// The denial diagnostic: a refused statement says WHAT was refused.
+//
+// A denied migration used to surface as the bare `Exec("authorization denied")`,
+// which named no action, no database and no mode. The authorizer now records the
+// last DENY and the actor appends it. These two tests pin the two halves that
+// matter: the message must NAME the refused action, and it must never claim a
+// denial that did not happen.
+// ---------------------------------------------------------------------------
+
+/// The message a user gets for a KNOWN denial names the action, the database and
+/// the mode. `PRAGMA writable_schema=ON` is the denial `confine_b` already proves;
+/// this asserts the DIAGNOSTIC on it.
+#[compio::test]
+async fn a_denied_up_names_the_refused_action() {
+    let p = paths("denial_named");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    let err = be
+        .apply_one_additive(&mig("PRAGMA writable_schema=ON;"), "tester")
+        .await
+        .expect_err("PRAGMA is denied in CreatorUp");
+    assert!(
+        err.is_authorizer_denied(),
+        "the fixture must be an authorizer deny for the diagnostic to apply: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("[denied: PRAGMA writable_schema"),
+        "the error must NAME the refused action, not just say 'authorization denied': {text}"
+    );
+    assert!(
+        text.contains("mode=CreatorUp"),
+        "the error must name the MODE in force: {text}"
+    );
+    // SQLite passes no database name for an unqualified connection-wide PRAGMA, so
+    // the diagnostic reports the absence rather than inventing `main`.
+    assert!(
+        text.contains(" on \"main\"") || text.contains(" on <unqualified>"),
+        "the error must say WHICH database the action targeted: {text}"
+    );
+}
+
+/// A failure that is NOT an authorizer denial never gets a denial appended: not a
+/// plain missing-table error, and not one whose own wording reads like a denial
+/// while a real denial sits one statement behind it.
+///
+/// The second half is the leak catcher. `is_authorizer_denied` classifies by
+/// message wording, so a trigger raising "not authorized ..." enters the append
+/// path; it runs IMMEDIATELY after a genuine `PRAGMA writable_schema=ON` deny on
+/// the same connection, so a slot that is not cleared per statement would attach
+/// that stale denial to it.
+#[compio::test]
+async fn an_unrelated_failure_never_carries_a_denial() {
+    let p = paths("denial_leak");
+    let be = backend(&p);
+    be.ensure_journal_sqlite().await.expect("bootstrap journal");
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("creator mode");
+
+    // A missing table: not a denial by any reading, so it comes back verbatim.
+    let missing = be
+        .actor()
+        .exec("SELECT 1 FROM no_such_table")
+        .await
+        .expect_err("a missing table must fail");
+    assert!(
+        !missing.is_authorizer_denied(),
+        "a missing table is not an authorizer deny: {missing}"
+    );
+    let missing_text = missing.to_string();
+    assert!(
+        !missing_text.contains("[denied:"),
+        "a non-authorizer failure must carry no denial: {missing_text}"
+    );
+
+    // A creator trigger that aborts with denial-shaped wording of its own.
+    be.actor()
+        .exec(
+            "CREATE TABLE probe (id INTEGER PRIMARY KEY); \
+             CREATE TRIGGER probe_guard BEFORE INSERT ON probe \
+             BEGIN SELECT RAISE(ABORT, 'not authorized by the app'); END;",
+        )
+        .await
+        .expect("the probe table and trigger are ordinary creator DDL on main");
+
+    // A REAL denial, recorded on this connection.
+    let denied = be
+        .actor()
+        .exec("PRAGMA writable_schema=ON")
+        .await
+        .expect_err("PRAGMA is denied in CreatorUp");
+    assert!(
+        denied.to_string().contains("writable_schema"),
+        "the real denial must name its action: {denied}"
+    );
+
+    // The very next statement fails for an unrelated reason.
+    let raised = be
+        .actor()
+        .exec("INSERT INTO probe DEFAULT VALUES")
+        .await
+        .expect_err("the trigger aborts the insert");
+    let text = raised.to_string();
+    assert!(
+        text.contains("not authorized by the app"),
+        "the probe must fail through its own RAISE, or it tests nothing: {text}"
+    );
+    assert!(
+        raised.is_authorizer_denied(),
+        "the probe must be CLASSIFIED as a denial, or the append path is never \
+         reached and the leak would go unnoticed: {text}"
+    );
+    assert!(
+        !text.contains("[denied:"),
+        "a stale denial leaked onto an unrelated failure: {text}"
+    );
+    assert!(
+        !text.contains("writable_schema"),
+        "the previous statement's denial leaked into this error: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Version floor: the bundled SQLite satisfies the floor the
 // journal-immutability proof needs (authorizer zDb-on-DROP_TABLE semantics +
 // RETURNING + window functions). If the linked lib were below floor, open() would

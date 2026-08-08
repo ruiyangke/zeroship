@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::config::DbConfig;
 use rusqlite::Connection;
 
-use super::authorizer::{make_authorizer, AuthMode, Mode, MIG_ALIAS};
+use super::authorizer::{make_authorizer, AuthMode, DenialLog, Mode, MIG_ALIAS};
 
 /// The version floor the journal-immutability + feature set requires:
 /// DEFENSIVE/TRUSTED_SCHEMA (≥3.31/3.26), DQS dbconfig (≥3.29), RETURNING (≥3.35),
@@ -509,12 +509,71 @@ async fn recv<T>(rx: flume::Receiver<T>) -> Result<T, SqliteActorError> {
 struct HardenedConn {
     conn: Connection,
     mode: AuthMode,
+    denials: DenialLog,
     journal_attached: bool,
 }
 
 impl HardenedConn {
     fn flip_mode(&self, mode: Mode) {
         self.mode.store(mode);
+    }
+
+    /// Open the statement-scoped denial window. EVERY statement runs inside one.
+    fn denial_scope(&self) -> DenialScope<'_> {
+        DenialScope::open(&self.denials)
+    }
+}
+
+/// The statement-scoped view of the connection's last-denial slot.
+///
+/// The slot is emptied when the scope opens AND again when it drops, so a denial
+/// recorded by one command can never be read by the next, including on an early
+/// return, an error path, or a panic unwinding out of a statement. An RAII guard
+/// rather than paired manual stores: there is no path that can forget the clear.
+///
+/// Cross-command observation is impossible for a second reason too: the actor is a
+/// single OS thread draining one queue, so exactly one scope exists at a time and
+/// no other command can read the slot while a statement holds it.
+struct DenialScope<'a> {
+    log: &'a DenialLog,
+}
+
+impl<'a> DenialScope<'a> {
+    fn open(log: &'a DenialLog) -> Self {
+        log.clear();
+        DenialScope { log }
+    }
+
+    /// Map a rusqlite failure to [`SqliteActorError::Exec`], naming the refused
+    /// action when the failure is an authorizer DENY.
+    fn exec(&self, error: &rusqlite::Error) -> SqliteActorError {
+        self.exec_message(error.to_string())
+    }
+
+    /// A non-authorizer failure is returned VERBATIM: the denial is appended only
+    /// when [`SqliteActorError::is_authorizer_denied`] holds AND a denial was
+    /// actually recorded for this statement, so the message can never claim a
+    /// denial that did not happen.
+    fn exec_message(&self, message: String) -> SqliteActorError {
+        let error = SqliteActorError::Exec(message);
+        if !error.is_authorizer_denied() {
+            return error;
+        }
+        let Some(denial) = self.log.last() else {
+            return error;
+        };
+        match error {
+            SqliteActorError::Exec(message) => {
+                SqliteActorError::Exec(format!("{message} [denied: {denial}]"))
+            }
+            other => other,
+        }
+    }
+}
+
+impl Drop for DenialScope<'_> {
+    fn drop(&mut self) {
+        self.log.clear();
     }
 }
 
@@ -623,12 +682,14 @@ fn open_hardened(
     // the most-restrictive CreatorUp; the engine opts into EngineJournal only
     // for its own bootstrap + journal writes.
     let mode = AuthMode::new();
-    conn.authorizer(Some(make_authorizer(mode.clone())))
+    let denials = DenialLog::new();
+    conn.authorizer(Some(make_authorizer(mode.clone(), denials.clone())))
         .map_err(|e| SqliteActorError::Open(format!("install authorizer: {e}")))?;
 
     Ok(HardenedConn {
         conn,
         mode,
+        denials,
         journal_attached,
     })
 }
@@ -695,9 +756,9 @@ fn path_str(p: &Path) -> Result<String, SqliteActorError> {
 /// [`SqliteActorError::Exec`]. We use `execute_batch` for a single statement so
 /// PRAGMA/DDL that return no rows are handled uniformly — but callers MUST pass a
 /// single statement (a mode-spanning batch would be prepared under one mode).
-fn run_exec(conn: &Connection, sql: &str) -> Result<(), SqliteActorError> {
-    conn.execute_batch(sql)
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))
+fn run_exec(conn: &HardenedConn, sql: &str) -> Result<(), SqliteActorError> {
+    let denials = conn.denial_scope();
+    conn.execute_batch(sql).map_err(|e| denials.exec(&e))
 }
 
 /// Run ONE parameterized statement, binding `params` natively to its
@@ -705,16 +766,17 @@ fn run_exec(conn: &Connection, sql: &str) -> Result<(), SqliteActorError> {
 /// the current authorizer mode (a DENY surfaces as [`SqliteActorError::Exec`]).
 /// MUST be a single statement (the mode is read at prepare).
 fn run_exec_params(
-    conn: &Connection,
+    conn: &HardenedConn,
     sql: &str,
     params: &[SqliteBind],
 ) -> Result<(), SqliteActorError> {
+    let denials = conn.denial_scope();
     let values: Vec<rusqlite::types::Value> = params.iter().map(SqliteBind::to_sql_value).collect();
     let refs: Vec<&dyn rusqlite::ToSql> =
         values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
     conn.execute(sql, refs.as_slice())
         .map(|_| ())
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))
+        .map_err(|e| denials.exec(&e))
 }
 
 /// Run ONE parameterized statement that returns rows, binding `params`
@@ -722,16 +784,15 @@ fn run_exec_params(
 /// Prepared under the current authorizer mode (a DENY surfaces as
 /// [`SqliteActorError::Exec`]). MUST be a single statement.
 fn run_query_params(
-    conn: &Connection,
+    conn: &HardenedConn,
     sql: &str,
     params: &[SqliteBind],
 ) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
+    let denials = conn.denial_scope();
     let values: Vec<rusqlite::types::Value> = params.iter().map(SqliteBind::to_sql_value).collect();
     let refs: Vec<&dyn rusqlite::ToSql> =
         values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+    let mut stmt = conn.prepare(sql).map_err(|e| denials.exec(&e))?;
     let col_count = stmt.column_count();
     let rows = stmt
         .query_map(refs.as_slice(), |row| {
@@ -758,36 +819,27 @@ fn run_query_params(
             }
             Ok(out)
         })
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+        .map_err(|e| denials.exec(&e))?;
     let mut materialized = Vec::new();
     for r in rows {
-        materialized.push(r.map_err(|e| SqliteActorError::Exec(e.to_string()))?);
+        materialized.push(r.map_err(|e| denials.exec(&e))?);
     }
     Ok(materialized)
 }
 
-fn run_validate_text_utf8(conn: &Connection, sql: &str) -> Result<(), SqliteActorError> {
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+fn run_validate_text_utf8(conn: &HardenedConn, sql: &str) -> Result<(), SqliteActorError> {
+    let denials = conn.denial_scope();
+    let mut stmt = conn.prepare(sql).map_err(|error| denials.exec(&error))?;
     if stmt.column_count() != 1 {
         return Err(SqliteActorError::Exec(
             "UTF-8 cursor preflight must select exactly one column".to_string(),
         ));
     }
-    let mut rows = stmt
-        .query([])
-        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    let mut rows = stmt.query([]).map_err(|error| denials.exec(&error))?;
     let mut row_number = 0_u64;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| SqliteActorError::Exec(error.to_string()))?
-    {
+    while let Some(row) = rows.next().map_err(|error| denials.exec(&error))? {
         row_number += 1;
-        match row
-            .get_ref(0)
-            .map_err(|error| SqliteActorError::Exec(error.to_string()))?
-        {
+        match row.get_ref(0).map_err(|error| denials.exec(&error))? {
             rusqlite::types::ValueRef::Text(value) => {
                 if let Err(error) = std::str::from_utf8(value) {
                     return Err(SqliteActorError::Exec(format!(
@@ -812,10 +864,9 @@ fn run_validate_text_utf8(conn: &Connection, sql: &str) -> Result<(), SqliteActo
 }
 
 /// Run one query, stringifying every cell so the reply crosses the actor boundary.
-fn run_query(conn: &Connection, sql: &str) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+fn run_query(conn: &HardenedConn, sql: &str) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
+    let denials = conn.denial_scope();
+    let mut stmt = conn.prepare(sql).map_err(|e| denials.exec(&e))?;
     let col_count = stmt.column_count();
     let rows = stmt
         .query_map([], |row| {
@@ -843,10 +894,10 @@ fn run_query(conn: &Connection, sql: &str) -> Result<Vec<Vec<Option<String>>>, S
             }
             Ok(out)
         })
-        .map_err(|e| SqliteActorError::Exec(e.to_string()))?;
+        .map_err(|e| denials.exec(&e))?;
     let mut materialized = Vec::new();
     for r in rows {
-        materialized.push(r.map_err(|e| SqliteActorError::Exec(e.to_string()))?);
+        materialized.push(r.map_err(|e| denials.exec(&e))?);
     }
     Ok(materialized)
 }

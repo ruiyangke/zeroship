@@ -35,8 +35,9 @@
 //! field. So the deny keys on `ctx.database_name == Some(MIG_ALIAS)`, never a
 //! pattern-matched `DropTable.database`.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
@@ -112,6 +113,185 @@ impl AuthMode {
     /// The current mode, read at each `prepare`-time authorizer invocation.
     pub(crate) fn load(&self) -> Mode {
         Mode::from_u8(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// One recorded DENY: what was refused, where, on whose behalf, and under which
+/// mode. Owned `String`s because [`AuthContext`] borrows from SQLite's callback
+/// frame and cannot outlive it.
+///
+/// This is DIAGNOSTIC ONLY. Recording happens strictly AFTER the decision is
+/// computed and never feeds back into it: the deny matrix is unchanged, and a
+/// failure to record can never turn a Deny into an Allow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Denial {
+    /// The refused action, rendered in SQL-ish shape (`PRAGMA data_version`,
+    /// `DROP TABLE "schema_migrations"`, `FUNCTION "load_extension"`).
+    action: String,
+    /// The OUTER `AuthContext::database_name` (`main` / `_mig` / absent).
+    database: Option<String>,
+    /// The inner-most trigger or view responsible, when the access came from a
+    /// creator-authored body rather than top-level SQL.
+    accessor: Option<String>,
+    /// The mode that produced the decision -- the SAME value the deny matrix
+    /// branched on, not a re-read of the flag.
+    mode: Mode,
+}
+
+impl fmt::Display for Denial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} on ", self.action)?;
+        match &self.database {
+            Some(db) => write!(f, "{db:?}")?,
+            // SQLite passes NO database name on some actions (an unqualified
+            // connection-wide PRAGMA, for one). Reported as what it is rather than
+            // as `main`: the deny matrix treats an absent name as the app file, but
+            // the callback did not actually say `main`, and inventing it would put a
+            // fact in the message that SQLite never supplied.
+            None => write!(f, "<unqualified>")?,
+        }
+        if let Some(accessor) = &self.accessor {
+            write!(f, ", via {accessor:?}")?;
+        }
+        write!(f, ", mode={:?}", self.mode)
+    }
+}
+
+/// The connection's LAST denial slot, shared between the installed authorizer
+/// closure and the actor that maps a failure into an error message.
+///
+/// `Arc<Mutex<_>>` for the same reason the mode is an `Arc<AtomicU8>`: the closure
+/// must be `Send + 'static`, so an `Rc<RefCell<_>>` would not compile. The slot
+/// holds only the most recent denial -- a statement is refused at the first DENY,
+/// so the last one recorded is the one that failed the prepare.
+#[derive(Clone, Debug)]
+pub(crate) struct DenialLog(Arc<Mutex<Option<Denial>>>);
+
+impl DenialLog {
+    /// An empty slot, one per hardened connection.
+    pub(crate) fn new() -> Self {
+        DenialLog(Arc::new(Mutex::new(None)))
+    }
+
+    /// The recorded denial, if a DENY happened since the last clear.
+    pub(crate) fn last(&self) -> Option<Denial> {
+        self.guard().clone()
+    }
+
+    /// Empty the slot. The actor clears before AND after every statement so a
+    /// denial can never be attached to a later, unrelated failure.
+    pub(crate) fn clear(&self) {
+        *self.guard() = None;
+    }
+
+    fn record(&self, denial: Denial) {
+        *self.guard() = Some(denial);
+    }
+
+    /// Never `unwrap()`: this runs inside SQLite's authorizer callback and inside a
+    /// `Drop`, both of which can execute while a panic is unwinding. A poisoned
+    /// mutex only means an earlier panic happened while the slot was held, and the
+    /// slot is a diagnostic string -- recovering the inner value is always sound,
+    /// whereas panicking here would abort the process during an unwind.
+    fn guard(&self) -> MutexGuard<'_, Option<Denial>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Render the refused action in a SQL-ish shape. Object names are quoted via
+/// `{:?}` so an empty or whitespace-bearing identifier is still legible.
+fn describe_action(action: &AuthAction<'_>) -> String {
+    match action {
+        AuthAction::Unknown { code, .. } => format!("unknown action code {code}"),
+        AuthAction::CreateIndex {
+            index_name,
+            table_name,
+        } => format!("CREATE INDEX {index_name:?} ON {table_name:?}"),
+        AuthAction::CreateTable { table_name } => format!("CREATE TABLE {table_name:?}"),
+        AuthAction::CreateTempIndex {
+            index_name,
+            table_name,
+        } => format!("CREATE TEMP INDEX {index_name:?} ON {table_name:?}"),
+        AuthAction::CreateTempTable { table_name } => format!("CREATE TEMP TABLE {table_name:?}"),
+        AuthAction::CreateTempTrigger {
+            trigger_name,
+            table_name,
+        } => format!("CREATE TEMP TRIGGER {trigger_name:?} ON {table_name:?}"),
+        AuthAction::CreateTempView { view_name } => format!("CREATE TEMP VIEW {view_name:?}"),
+        AuthAction::CreateTrigger {
+            trigger_name,
+            table_name,
+        } => format!("CREATE TRIGGER {trigger_name:?} ON {table_name:?}"),
+        AuthAction::CreateView { view_name } => format!("CREATE VIEW {view_name:?}"),
+        AuthAction::Delete { table_name } => format!("DELETE FROM {table_name:?}"),
+        AuthAction::DropIndex {
+            index_name,
+            table_name,
+        } => format!("DROP INDEX {index_name:?} ON {table_name:?}"),
+        AuthAction::DropTable { table_name } => format!("DROP TABLE {table_name:?}"),
+        AuthAction::DropTempIndex {
+            index_name,
+            table_name,
+        } => format!("DROP TEMP INDEX {index_name:?} ON {table_name:?}"),
+        AuthAction::DropTempTable { table_name } => format!("DROP TEMP TABLE {table_name:?}"),
+        AuthAction::DropTempTrigger {
+            trigger_name,
+            table_name,
+        } => format!("DROP TEMP TRIGGER {trigger_name:?} ON {table_name:?}"),
+        AuthAction::DropTempView { view_name } => format!("DROP TEMP VIEW {view_name:?}"),
+        AuthAction::DropTrigger {
+            trigger_name,
+            table_name,
+        } => format!("DROP TRIGGER {trigger_name:?} ON {table_name:?}"),
+        AuthAction::DropView { view_name } => format!("DROP VIEW {view_name:?}"),
+        AuthAction::Insert { table_name } => format!("INSERT INTO {table_name:?}"),
+        // The pragma NAME is the whole diagnostic for the PRAGMA deny, so it is
+        // rendered bare (`PRAGMA data_version`) rather than quoted, with the value
+        // appended when the statement carried one.
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value,
+        } => match pragma_value {
+            Some(value) => format!("PRAGMA {pragma_name}={value}"),
+            None => format!("PRAGMA {pragma_name}"),
+        },
+        AuthAction::Read {
+            table_name,
+            column_name,
+        } => format!("READ {table_name:?}.{column_name:?}"),
+        AuthAction::Select => "SELECT".to_string(),
+        AuthAction::Transaction { operation } => format!("TRANSACTION {operation:?}"),
+        AuthAction::Update {
+            table_name,
+            column_name,
+        } => format!("UPDATE {table_name:?}.{column_name:?}"),
+        // The ATTACH filename is deliberately omitted: it is a filesystem path the
+        // statement already names, and it adds no diagnostic the author lacks.
+        AuthAction::Attach { .. } => "ATTACH".to_string(),
+        AuthAction::Detach { database_name } => format!("DETACH {database_name:?}"),
+        AuthAction::AlterTable {
+            database_name,
+            table_name,
+        } => format!("ALTER TABLE {database_name:?}.{table_name:?}"),
+        AuthAction::Reindex { index_name } => format!("REINDEX {index_name:?}"),
+        AuthAction::Analyze { table_name } => format!("ANALYZE {table_name:?}"),
+        AuthAction::CreateVtable {
+            table_name,
+            module_name,
+        } => format!("CREATE VIRTUAL TABLE {table_name:?} USING {module_name:?}"),
+        AuthAction::DropVtable {
+            table_name,
+            module_name,
+        } => format!("DROP VIRTUAL TABLE {table_name:?} USING {module_name:?}"),
+        AuthAction::Function { function_name } => format!("FUNCTION {function_name:?}"),
+        AuthAction::Savepoint {
+            operation,
+            savepoint_name,
+        } => format!("SAVEPOINT {operation:?} {savepoint_name:?}"),
+        AuthAction::Recursive => "RECURSIVE".to_string(),
+        // `AuthAction` is `#[non_exhaustive]`: a variant added by a future rusqlite
+        // still records SOMETHING rather than dropping the denial on the floor.
+        other => format!("{other:?}"),
     }
 }
 
@@ -263,21 +443,40 @@ fn function_allowed(name: &str) -> bool {
 /// It is the load-bearing line-2: the deny is at prepare, BEFORE
 /// execution, for EVERY statement compiled on the connection — including
 /// runtime-constructed SQL and the AI/raw path.
+///
+/// It also captures the [`DenialLog`] and writes the LAST DENY into it. The write
+/// happens after [`decide`] has already returned, from the decision's own value, so
+/// the deny matrix is untouched: `Exec("authorization denied")` gains a name for
+/// what was refused without any action becoming more permitted.
 pub(crate) fn make_authorizer(
     mode: AuthMode,
+    denials: DenialLog,
 ) -> impl for<'r> FnMut(AuthContext<'r>) -> Authorization + Send + 'static {
-    move |ctx: AuthContext<'_>| -> Authorization { authorize(&mode, &ctx) }
+    move |ctx: AuthContext<'_>| -> Authorization {
+        // Read the mode ONCE and hand the same value to the decision and to the
+        // record, so the reported mode is provably the one that was branched on.
+        let current = mode.load();
+        let decision = decide(current, &ctx);
+        if decision == Authorization::Deny {
+            denials.record(Denial {
+                action: describe_action(&ctx.action),
+                database: ctx.database_name.map(str::to_string),
+                accessor: ctx.accessor.map(str::to_string),
+                mode: current,
+            });
+        }
+        decision
+    }
 }
 
-/// The pure deny-matrix decision (extracted so it is unit-testable without a live
-/// connection — though every claim is ALSO proven against a real temp-file SQLite
-/// in `tests/sqlite_confinement.rs`).
+/// The deny matrix under an explicitly-supplied mode. `authorize` is the
+/// `AuthMode`-reading wrapper the unit tests drive; it is plain text rather than
+/// a link because it is `cfg(test)` and rustdoc never compiles that.
 ///
 /// `database_name` is the OUTER `AuthContext.database_name` — the attach alias
 /// SQLite passes as the `xAuth` `zDb` argument. We match on it, never on a
 /// per-action `database` field (which several variants lack).
-fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
-    let current = mode.load();
+fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
     let db = ctx.database_name;
     let targets_mig = db == Some(MIG_ALIAS);
     // The creator-writable database is `main` (the app file). SQLite names it
@@ -558,6 +757,15 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
     }
 }
 
+/// The deny-matrix decision driven through the shared mode flag, exactly as the
+/// installed closure drives it (extracted so the matrix is unit-testable without a
+/// live connection, though every claim is ALSO proven against a real temp-file
+/// SQLite in `tests/sqlite_confinement.rs`).
+#[cfg(test)]
+fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
+    decide(mode.load(), ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +781,200 @@ mod tests {
             database_name: db,
             accessor,
         }
+    }
+
+    /// The contexts the recorder is exercised over: a spread of denied and allowed
+    /// actions across both modes, reused by the "changes no decision" proof.
+    fn decision_matrix<'a>() -> Vec<AuthContext<'a>> {
+        vec![
+            ctx(
+                AuthAction::Pragma {
+                    pragma_name: "data_version",
+                    pragma_value: None,
+                },
+                Some(MAIN_DB),
+                None,
+            ),
+            ctx(
+                AuthAction::Pragma {
+                    pragma_name: "foreign_keys",
+                    pragma_value: Some("OFF"),
+                },
+                None,
+                None,
+            ),
+            ctx(
+                AuthAction::Attach {
+                    filename: "evil.db",
+                },
+                None,
+                None,
+            ),
+            ctx(
+                AuthAction::Function {
+                    function_name: "load_extension",
+                },
+                None,
+                None,
+            ),
+            ctx(
+                AuthAction::Function {
+                    function_name: "abs",
+                },
+                None,
+                None,
+            ),
+            ctx(
+                AuthAction::CreateTable {
+                    table_name: "users",
+                },
+                Some(MAIN_DB),
+                None,
+            ),
+            ctx(
+                AuthAction::Insert {
+                    table_name: "users",
+                },
+                Some(MAIN_DB),
+                None,
+            ),
+            ctx(
+                AuthAction::Insert {
+                    table_name: "schema_migrations",
+                },
+                Some(MIG_ALIAS),
+                None,
+            ),
+            ctx(
+                AuthAction::Insert {
+                    table_name: "schema_migrations",
+                },
+                Some(MIG_ALIAS),
+                Some("creator_trg"),
+            ),
+            ctx(
+                AuthAction::Read {
+                    table_name: "schema_migrations",
+                    column_name: "version",
+                },
+                Some(MIG_ALIAS),
+                None,
+            ),
+            ctx(
+                AuthAction::AlterTable {
+                    database_name: MAIN_DB,
+                    table_name: "users",
+                },
+                Some("nickname"),
+                None,
+            ),
+            ctx(
+                AuthAction::Reindex {
+                    index_name: "ix_users",
+                },
+                Some(MIG_ALIAS),
+                None,
+            ),
+            ctx(AuthAction::CreateTempTable { table_name: "t" }, None, None),
+        ]
+    }
+
+    /// The denial recorder is DIAGNOSTIC ONLY. The installed closure returns
+    /// exactly what the deny matrix returns for every context in both modes, and it
+    /// records a denial for every Deny and nothing at all for an Allow.
+    #[test]
+    fn recording_a_denial_changes_no_decision() {
+        let m = AuthMode::new();
+        let log = DenialLog::new();
+        let mut installed = make_authorizer(m.clone(), log.clone());
+        for mode in [Mode::CreatorUp, Mode::EngineJournal] {
+            m.store(mode);
+            for case in decision_matrix() {
+                let expected = authorize(&m, &case);
+                log.clear();
+                let actual = installed(case);
+                assert_eq!(
+                    actual, expected,
+                    "the installed closure must return the deny-matrix decision unchanged \
+                     for {case:?} in {mode:?}"
+                );
+                let recorded = log.last();
+                match expected {
+                    Authorization::Deny => assert!(
+                        recorded.is_some(),
+                        "a Deny must be recorded for {case:?} in {mode:?}"
+                    ),
+                    _ => assert!(
+                        recorded.is_none(),
+                        "an Allow must record nothing for {case:?} in {mode:?}, got {recorded:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// A recorded denial names the ACTION, the DATABASE, and the MODE, plus the
+    /// responsible trigger/view when the access came from a creator-authored body.
+    #[test]
+    fn a_recorded_denial_names_the_action_database_and_mode() {
+        let m = AuthMode::new();
+        m.store(Mode::CreatorUp);
+        let log = DenialLog::new();
+        let mut installed = make_authorizer(m.clone(), log.clone());
+
+        // The FTS5 case that motivated the diagnostic: FTS5 issues this pragma
+        // internally, the authorizer denies it, and the message must say so.
+        assert_eq!(
+            installed(ctx(
+                AuthAction::Pragma {
+                    pragma_name: "data_version",
+                    pragma_value: None
+                },
+                Some(MAIN_DB),
+                None
+            )),
+            Authorization::Deny
+        );
+        assert_eq!(
+            log.last().expect("the deny was recorded").to_string(),
+            "PRAGMA data_version on \"main\", mode=CreatorUp"
+        );
+
+        // A creator trigger body writing the journal names the trigger too.
+        log.clear();
+        assert_eq!(
+            installed(ctx(
+                AuthAction::Insert {
+                    table_name: "schema_migrations"
+                },
+                Some(MIG_ALIAS),
+                Some("creator_trg")
+            )),
+            Authorization::Deny
+        );
+        assert_eq!(
+            log.last().expect("the deny was recorded").to_string(),
+            "INSERT INTO \"schema_migrations\" on \"_mig\", via \"creator_trg\", mode=CreatorUp"
+        );
+
+        // A pragma carrying a value keeps the value; the mode is the one in force.
+        log.clear();
+        m.store(Mode::EngineJournal);
+        assert_eq!(
+            installed(ctx(
+                AuthAction::Pragma {
+                    pragma_name: "writable_schema",
+                    pragma_value: Some("ON")
+                },
+                None,
+                None
+            )),
+            Authorization::Deny
+        );
+        assert_eq!(
+            log.last().expect("the deny was recorded").to_string(),
+            "PRAGMA writable_schema=ON on <unqualified>, mode=EngineJournal"
+        );
     }
 
     #[test]
