@@ -1399,10 +1399,19 @@ async fn bootstrap_initial_hmac_key(pool: &Pool) -> Result<bool, DbError> {
 
 /// Compose the per-app PG role name from an `app_id`.
 ///
-/// Convention `app_<id>_role` — pinned by the `auth::mod` docstring on
-/// [`APP_ROLE_TEMPLATE`] ("Per-app roles (`app_<id>_role`) are created
-/// downstream by the control plane during app provisioning"). The
-/// platform-managed roles use the `__zeroship_` prefix; per-app roles
+/// Convention `app_<id>_role` - pinned by the unit test
+/// `tests::per_app_role_name_uses_app_id_role_convention` in this file,
+/// which asserts the composed name for three shapes of `app_id`.
+/// (Deliberately not an intra-doc link: `tests` is `#[cfg(test)]`, so
+/// rustdoc cannot resolve it and the workspace doc-link gate would
+/// fail.) The
+/// `auth::mod` docstring on [`APP_ROLE_TEMPLATE`] DESCRIBES the same
+/// convention ("Per-app roles (`app_<id>_role`) are created downstream
+/// by the control plane during app provisioning") but cannot pin it:
+/// prose is not compiled against this function, so it can drift from
+/// the code silently. Read it for the why, not as a guarantee.
+///
+/// The platform-managed roles use the `__zeroship_` prefix; per-app roles
 /// deliberately do NOT, so they are visually distinct from the trust
 /// anchors in `pg_roles` and `\du` output.
 ///
@@ -1686,7 +1695,14 @@ mod tests {
 
     #[test]
     fn per_app_role_name_uses_app_id_role_convention() {
-        // Convention pinned by the `APP_ROLE_TEMPLATE` docstring.
+        // THIS assertion is the pin for the `app_<id>_role` convention.
+        // The `APP_ROLE_TEMPLATE` docstring describes the same rule in
+        // prose; nothing compiles prose against `per_app_role_name`, so
+        // if the two disagree it is this test that decides.
+        //
+        // What it does NOT catch: a change to the convention made here
+        // AND in the composer together. It pins the shape against a
+        // hardcoded literal, not against the docstring's text.
         assert_eq!(per_app_role_name("app_demo"), "app_app_demo_role");
         assert_eq!(per_app_role_name("app-abc"), "app_app-abc_role");
         assert_eq!(per_app_role_name("App_X"), "app_App_X_role");
