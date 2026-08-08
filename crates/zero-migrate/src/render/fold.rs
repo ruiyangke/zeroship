@@ -1538,11 +1538,44 @@ pub fn fold_ops_onto(
                 // fold and `fold_ops != snapshot_schema(live)`, corrupting
                 // gen-types and producing permanent phantom drift.
                 //
-                // (1) Drop every index covering the column. `IndexSnapshot::columns`
-                //     is the raw key-column list, so an exact name compare suffices;
-                //     a multi-column index partially covering it is dropped too.
-                snap.indexes
-                    .retain(|i| !i.columns.iter().any(|c| c == column));
+                // (1) Drop every index covering the column. An index carries column
+                //     names in three STRUCTURED places, and PG cascades on any of
+                //     them: `columns` (the raw key-column list), the `Column` variant
+                //     of `elements` (the same keys, carrying sort order / opclass),
+                //     and `include` (the non-key payload, whose attributes are
+                //     `indkey` entries past `indnkeyatts` and so depend on the column
+                //     exactly as a key does - measured on PG 18.4:
+                //     `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a`
+                //     leaves no `i` in `pg_indexes`). All three are exact names, so an
+                //     exact compare suffices; a multi-column index partially covering
+                //     the column is dropped whole, identically. This mirrors the three
+                //     fields the `RenameColumn` arm below rewrites.
+                //
+                //     NOT matched, and a KNOWN GAP: `IndexSnapshot::predicate` (a
+                //     partial index's `WHERE`) and the `Expr` variant of `elements` (an
+                //     expression key). Both cascade in PG - measured on PG 18.4, both
+                //     `CREATE INDEX i ON t (b) WHERE (a > 0)` and
+                //     `CREATE INDEX i ON t ((a + 1))` vanish from `pg_indexes` on
+                //     `DROP COLUMN a` - so the fold keeps a phantom index for either
+                //     shape. They are RENDERED SQL TEXT here, not names, and matching a
+                //     name inside rendered SQL is the trap the CHECK cascade below
+                //     exists to avoid: measured on PG 18.4,
+                //     `CREATE INDEX i ON t (note) WHERE (note <> 'a')` SURVIVES
+                //     `DROP COLUMN a`, so a text match would drop an index PG KEPT -
+                //     worse than the phantom it fixes. The fix is the same discipline
+                //     `cascade_columns` already uses for a CHECK: have
+                //     `create_index_snapshot` record the columns the predicate and each
+                //     expression key read via `render::dml::expr_column_refs` over the
+                //     CLOSED `Expr`, and cascade on that provenance instead of the
+                //     text. Deliberately left for that change rather than guessed at
+                //     here.
+                snap.indexes.retain(|i| {
+                    !i.columns.iter().any(|c| c == column)
+                        && !i.elements.iter().any(|e| {
+                            matches!(e, IndexElementSnapshot::Column { name, .. } if name == column)
+                        })
+                        && !i.include.iter().any(|c| c == column)
+                });
                 // (2) Drop every constraint whose LOCAL column list contains the
                 //     column. A producer that recorded `cascade_columns` is believed
                 //     verbatim - that list is structural provenance, collected from
