@@ -752,3 +752,37 @@ async fn attach_standalone_table_as_partition() {
     )
     .await;
 }
+
+#[compio::test]
+async fn detach_partition_lifecycle() {
+    // Exercise detachPartition after observing the created partition. This does not
+    // cover CONCURRENTLY.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "detach_partition_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"detach_parent","columns":[
+          {"name":"bucket","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":false}
+        ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":false}},
+        {"op":"createPartition","name":"detach_child","of":"detach_parent",
+         "bounds":{"kind":"range",
+           "from":[{"kind":"int","value":200}],
+           "to":[{"kind":"int","value":300}]}},
+        {"op":"detachPartition","parent":"detach_parent","name":"detach_child"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "detach partition lifecycle",
+        source,
+        &[
+            ("create partitioned parent", 1),
+            ("create partition", 2),
+            ("detach partition", 3),
+        ],
+        lifecycle_policy,
+    )
+    .await;
+}

@@ -2859,7 +2859,12 @@ pub(crate) fn push_primary_key_snapshot(snap: &mut TableSnapshot, columns: &[Str
 /// (`<table>_<col>_idx`), matching plugin-db's `index_name(table, &[col], false)`
 /// and NAMEDATALEN-capped via [`crate::plan::author::cap_ident_name`] so a long
 /// table+col round-trips to the same (truncated) live name.
-fn non_unique_index_name(table: &str, col: &str) -> String {
+///
+/// Offline replay uses this to derive a short created-partition clone name from
+/// the child relation rather than the parent index's authored name. This does
+/// not cover PostgreSQL's native truncation of overlong generated names; the
+/// fold rejects those instead of using this authored-name hash cap.
+pub(crate) fn non_unique_index_name(table: &str, col: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{col}_idx"))
 }
 

@@ -64,7 +64,8 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::declarative::build_table_snapshot;
 use crate::render::declarative::{
     build_resolved_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot_for_columns,
-    push_primary_key_snapshot, quote_ident_if_needed, CollectionDescriptor, DeclarativeError,
+    non_unique_index_name, push_primary_key_snapshot, quote_ident_if_needed, CollectionDescriptor,
+    DeclarativeError,
 };
 use crate::render::lower::{
     author_type_override, create_index_snapshot, derived_check_constraint_name,
@@ -628,21 +629,21 @@ fn sqlite_folded_rowid_generation(
     })
 }
 
-/// Allocate the name PostgreSQL gives an implicit PRIMARY KEY relation.
+/// Allocate a PostgreSQL-generated name against the modeled relation namespace.
 ///
-/// This covers relation kinds represented by `SchemaSnapshot`. It does not
-/// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
-fn implicit_primary_key_name(
-    table: &str,
+/// HOLE: Relations created out of band are invisible to the folded IR, so this
+/// cannot reserve a suffix they already occupy. This is the same accepted limit
+/// as implicit primary-key allocation elsewhere in the fold.
+fn allocate_implicit_relation_name(
+    default_name: &str,
     dialect: SqlDialect,
     tables: &BTreeMap<String, TableSnapshot>,
     partitions: &BTreeMap<String, PartitionSnapshot>,
     views: &BTreeMap<String, ViewSnapshot>,
     sequences: &BTreeMap<String, SequenceSnapshot>,
 ) -> String {
-    let default_name = format!("{table}_pkey");
     if dialect != SqlDialect::Postgres {
-        return default_name;
+        return default_name.to_string();
     }
 
     let name_is_taken = |candidate: &str| {
@@ -665,13 +666,35 @@ fn implicit_primary_key_name(
     (0..=relation_count)
         .map(|suffix| {
             if suffix == 0 {
-                default_name.clone()
+                default_name.to_string()
             } else {
                 format!("{default_name}{suffix}")
             }
         })
         .find(|candidate| !name_is_taken(candidate))
-        .expect("one more primary-key name candidate than relations must leave a free name")
+        .expect("one more implicit relation-name candidate than relations must leave a free name")
+}
+
+/// Allocate the name PostgreSQL gives an implicit PRIMARY KEY relation.
+///
+/// This covers relation kinds represented by `SchemaSnapshot`. It does not
+/// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
+fn implicit_primary_key_name(
+    table: &str,
+    dialect: SqlDialect,
+    tables: &BTreeMap<String, TableSnapshot>,
+    partitions: &BTreeMap<String, PartitionSnapshot>,
+    views: &BTreeMap<String, ViewSnapshot>,
+    sequences: &BTreeMap<String, SequenceSnapshot>,
+) -> String {
+    allocate_implicit_relation_name(
+        &format!("{table}_pkey"),
+        dialect,
+        tables,
+        partitions,
+        views,
+        sequences,
+    )
 }
 
 fn apply_fold_alter_primary_key(
@@ -898,6 +921,8 @@ pub fn fold_ops_onto(
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = base.tables.clone();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = base.partitions.clone();
+    let mut attached_partition_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut created_partition_comments: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = base.views.clone();
     let mut sequences: BTreeMap<String, SequenceSnapshot> = base.sequences.clone();
     let mut named_types = NamedTypeRegistry::default();
@@ -1088,6 +1113,8 @@ pub fn fold_ops_onto(
                 if tables.contains_key(name) || partitions.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
+                attached_partition_tables.remove(name);
+                created_partition_comments.remove(name);
                 partitions.insert(
                     name.clone(),
                     PartitionSnapshot {
@@ -1113,7 +1140,10 @@ pub fn fold_ops_onto(
                 if partitions.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
-                tables.remove(name);
+                let attached = tables
+                    .remove(name)
+                    .ok_or_else(|| FoldError::MissingTable(name.clone()))?;
+                attached_partition_tables.insert(name.clone(), attached);
                 partitions.insert(
                     name.clone(),
                     PartitionSnapshot {
@@ -1139,7 +1169,159 @@ pub fn fold_ops_onto(
                         "detachPartition child belongs to a different parent",
                     ));
                 }
+                let attached = attached_partition_tables.remove(name);
+                let created_comment = created_partition_comments.remove(name).flatten();
                 partitions.remove(name);
+                if let Some(mut detached) = attached {
+                    detached.partition_by = None;
+                    for column in &mut detached.columns {
+                        if column.identity.take().is_some() {
+                            column.id_default = None;
+                        }
+                    }
+                    tables.insert(name.clone(), detached);
+                } else {
+                    let mut detached = parent_snap.clone();
+                    detached.partition_by = None;
+                    detached.stored_create_sql = None;
+                    detached.comment = created_comment;
+                    for column in &mut detached.columns {
+                        if column.identity.take().is_some() {
+                            column.id_default = None;
+                        }
+                        column.comment = None;
+                    }
+                    for constraint in &mut detached.constraints {
+                        constraint.comment = None;
+                    }
+
+                    let parent_indexes = std::mem::take(&mut detached.indexes);
+                    if parent_indexes.iter().any(|index| {
+                        index
+                            .elements
+                            .iter()
+                            .any(|element| matches!(element, IndexElementSnapshot::Expr(_)))
+                    }) {
+                        return Err(FoldError::Unsupported(
+                            "detachPartition cannot derive a created partition's expression-index clone name",
+                        ));
+                    }
+
+                    tables.insert(name.clone(), detached);
+                    let mut renamed_constraint_indexes = BTreeMap::new();
+                    for mut index in parent_indexes {
+                        let constraint_kind = tables[name]
+                            .constraints
+                            .iter()
+                            .find(|constraint| constraint.name == index.name)
+                            .map(|constraint| constraint.kind.clone());
+                        let generated_name = match constraint_kind.as_deref() {
+                            Some("PRIMARY KEY") => {
+                                let natural = format!("{name}_pkey");
+                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                    return Err(FoldError::Unsupported(
+                                        "detachPartition cannot derive an overlong created-partition clone name",
+                                    ));
+                                }
+                                implicit_primary_key_name(
+                                    name,
+                                    dialect,
+                                    &tables,
+                                    &partitions,
+                                    &views,
+                                    &sequences,
+                                )
+                            }
+                            Some("UNIQUE") => {
+                                let natural = format!("{name}_{}_key", index.columns.join("_"));
+                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                    return Err(FoldError::Unsupported(
+                                        "detachPartition cannot derive an overlong created-partition clone name",
+                                    ));
+                                }
+                                let base = derived_constraint_name(name, &index.columns, "key");
+                                allocate_implicit_relation_name(
+                                    &base,
+                                    dialect,
+                                    &tables,
+                                    &partitions,
+                                    &views,
+                                    &sequences,
+                                )
+                            }
+                            _ => {
+                                let columns = index
+                                    .elements
+                                    .iter()
+                                    .map(|element| match element {
+                                        IndexElementSnapshot::Column { name, .. } => name.clone(),
+                                        IndexElementSnapshot::Expr(_) => unreachable!(
+                                            "expression indexes fail closed before clone naming"
+                                        ),
+                                    })
+                                    .collect::<Vec<_>>();
+                                let natural = format!("{name}_{}_idx", columns.join("_"));
+                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                    return Err(FoldError::Unsupported(
+                                        "detachPartition cannot derive an overlong created-partition clone name",
+                                    ));
+                                }
+                                let base = if let [column] = columns.as_slice() {
+                                    non_unique_index_name(name, column)
+                                } else {
+                                    derived_constraint_name(name, &columns, "idx")
+                                };
+                                allocate_implicit_relation_name(
+                                    &base,
+                                    dialect,
+                                    &tables,
+                                    &partitions,
+                                    &views,
+                                    &sequences,
+                                )
+                            }
+                        };
+                        // Reject native PostgreSQL truncation rather than compare a
+                        // hash-capped name. This does not cover overlong clone bases
+                        // or collision suffixes that exceed NAMEDATALEN.
+                        if crate::plan::author::cap_ident_name(&generated_name) != generated_name {
+                            return Err(FoldError::Unsupported(
+                                "detachPartition cannot derive an overlong created-partition clone name",
+                            ));
+                        }
+                        if matches!(constraint_kind.as_deref(), Some("PRIMARY KEY" | "UNIQUE")) {
+                            renamed_constraint_indexes
+                                .insert(index.name.clone(), generated_name.clone());
+                        }
+                        index.name = generated_name;
+                        index.comment = None;
+                        tables
+                            .get_mut(name)
+                            .expect("detached child was inserted before cloning indexes")
+                            .indexes
+                            .push(index);
+                    }
+
+                    let detached = tables
+                        .get_mut(name)
+                        .expect("detached child remains present after cloning indexes");
+                    for constraint in &mut detached.constraints {
+                        if matches!(constraint.kind.as_str(), "PRIMARY KEY" | "UNIQUE") {
+                            constraint.name = renamed_constraint_indexes
+                                .get(&constraint.name)
+                                .cloned()
+                                .ok_or(FoldError::Unsupported(
+                                    "detachPartition parent constraint has no backing index",
+                                ))?;
+                        }
+                    }
+                    detached
+                        .constraints
+                        .sort_by(|left, right| left.name.cmp(&right.name));
+                    detached
+                        .indexes
+                        .sort_by(|left, right| left.name.cmp(&right.name));
+                }
             }
             Op::DropPartition { parent, name, .. } => {
                 let partition = partitions
@@ -1153,6 +1335,8 @@ pub fn fold_ops_onto(
                 if partitions.remove(name).is_none() {
                     return Err(FoldError::MissingTable(name.clone()));
                 }
+                attached_partition_tables.remove(name);
+                created_partition_comments.remove(name);
             }
             Op::SetTableOptions { table, options, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1182,6 +1366,8 @@ pub fn fold_ops_onto(
                     return Err(FoldError::MissingTable(table.clone()));
                 }
                 partitions.retain(|_, partition| &partition.of != table);
+                attached_partition_tables.retain(|name, _| partitions.contains_key(name));
+                created_partition_comments.retain(|name, _| partitions.contains_key(name));
             }
             Op::RenameTable { table, to, .. } => {
                 // A whole-table rename moves the snapshot WHOLESALE from the old key
@@ -1868,6 +2054,16 @@ pub fn fold_ops_onto(
             // DML: schema no-ops (rows, not shape).
             Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {}
             Op::Comment { target, comment } => {
+                if let CommentTarget::Table { name, .. } = target {
+                    if let Some(attached) = attached_partition_tables.get_mut(name) {
+                        attached.comment.clone_from(comment);
+                        continue;
+                    }
+                    if partitions.contains_key(name) {
+                        created_partition_comments.insert(name.clone(), comment.clone());
+                        continue;
+                    }
+                }
                 apply_comment(
                     &mut tables,
                     &mut views,
