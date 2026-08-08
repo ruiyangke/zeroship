@@ -860,9 +860,11 @@ impl ClusterClient {
         let keys_arr = crate::protocol::expect_array(keys_frame)?;
         let keys: Vec<String> = keys_arr
             .into_iter()
-            .filter_map(|f| match crate::protocol::expect_bulk_or_null(f).ok().flatten() {
-                Some(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-                None => None,
+            .filter_map(|f| {
+                crate::protocol::expect_bulk_or_null(f)
+                    .ok()
+                    .flatten()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             })
             .collect();
         Ok((cursor, keys))
