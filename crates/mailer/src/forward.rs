@@ -70,8 +70,9 @@ pub fn build_forward(
             email: alias.to_owned(),
             name: None,
         }),
-        // MAIL FROM / Return-Path pinned to the relay bounce mailbox, keyed by
-        // the alias token so a bounce maps back to the alias for suppression.
+        // MAIL FROM / Return-Path pinned to the relay bounce mailbox. The
+        // alias token is ENCODED into the `+tag`; nothing decodes it today -
+        // see `bounce_mailbox` for what that does and does not buy.
         envelope_from: Some(bounce_mailbox(alias, relay_domain)),
         subject: inbound.subject.clone(),
         text: inbound.text_body.clone(),
@@ -149,9 +150,25 @@ impl BounceReason {
     }
 }
 
-/// The per-alias bounce mailbox (`bounce+<token>@{relay_domain}`). Keying the
-/// `+tag` to the alias token lets the delivery webhook map a forward-bounce
-/// back to the alias for suppression, while keeping a single bounce mailbox.
+/// The per-alias bounce mailbox (`bounce+<token>@{relay_domain}`), so bounces
+/// for every alias land in one mailbox with the alias recoverable from the
+/// `+tag`.
+///
+/// # The token is written but NOTHING READS IT BACK
+///
+/// This previously claimed the `+tag` "lets the delivery webhook map a
+/// forward-bounce back to the alias for suppression". The encode half is real;
+/// the decode half does not exist. MEASURED: `bounce+` appears only here and in
+/// tests - no consumer parses it. And the one inbound entry point actively
+/// destroys it: `inbound::normalize_alias` does `local.split(char::from(43)).next()`,
+/// so a bounce addressed to `bounce+abc@relay` normalises to `bounce@relay`,
+/// an alias that does not exist.
+///
+/// So a downstream hard-bounce does NOT suppress the alias by this route.
+/// Postmark bounce webhooks do call `suppressions::add`, but keyed on the
+/// bounced address itself, not on this token. Keep the encoding - it is the
+/// precondition for building the decode side - but do not read it as shipped
+/// alias-level suppression.
 fn bounce_mailbox(alias: &str, relay_domain: &str) -> String {
     let token = alias.split('@').next().unwrap_or(alias);
     format!("bounce+{token}@{relay_domain}")
