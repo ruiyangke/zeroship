@@ -2834,8 +2834,8 @@ pub(crate) fn column_snapshot_for_field(
     })
 }
 
-/// Stamp a resolved primary-key constraint and its implicit index onto a snapshot.
-pub(crate) fn push_primary_key_snapshot(table: &str, snap: &mut TableSnapshot, columns: &[String]) {
+/// Stamp a named primary-key constraint and its backing index onto a snapshot.
+pub(crate) fn push_primary_key_snapshot(snap: &mut TableSnapshot, columns: &[String], name: &str) {
     // PRIMARY KEY implies NOT NULL for every component. Normalize that semantic
     // consequence into the desired snapshot before rendering/diffing so the
     // table-level spelling has the same column nullability as `.primaryKey()`.
@@ -2845,9 +2845,8 @@ pub(crate) fn push_primary_key_snapshot(table: &str, snap: &mut TableSnapshot, c
         }
     }
 
-    let name = format!("{table}_pkey");
     snap.constraints.push(ConstraintSnapshot {
-        name: name.clone(),
+        name: name.to_string(),
         kind: "PRIMARY KEY".into(),
         definition: format!("PRIMARY KEY ({})", constraintdef_cols(columns)),
         comment: None,

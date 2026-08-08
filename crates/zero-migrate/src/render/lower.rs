@@ -4167,7 +4167,8 @@ impl IrAuthor {
                     build_resolved_table_snapshot(&eff_schema, &desc, self.dialect, &inject)?;
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
-                    push_primary_key_snapshot(name, &mut snap, pk);
+                    let primary_key_name = format!("{name}_pkey");
+                    push_primary_key_snapshot(&mut snap, pk, &primary_key_name);
                 }
                 apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 apply_structured_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;

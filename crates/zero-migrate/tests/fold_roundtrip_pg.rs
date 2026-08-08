@@ -54,9 +54,9 @@ fn cfg_for(schema: &str) -> ExecutorConfig {
 
 #[derive(Debug)]
 struct PrimaryKeyCatalogRow {
-    table_name: String,
-    constraint_name: String,
-    index_name: String,
+    table: String,
+    constraint: String,
+    index: String,
 }
 
 async fn primary_key_catalog(
@@ -84,13 +84,13 @@ async fn primary_key_catalog(
     rows.iter()
         .map(|row| {
             Ok(PrimaryKeyCatalogRow {
-                table_name: row
+                table: row
                     .try_get("table_name")
                     .map_err(|error| format!("decode primary-key table name: {error}"))?,
-                constraint_name: row
+                constraint: row
                     .try_get("constraint_name")
                     .map_err(|error| format!("decode primary-key constraint name: {error}"))?,
-                index_name: row
+                index: row
                     .try_get("index_name")
                     .map_err(|error| format!("decode primary-key index name: {error}"))?,
             })
@@ -100,9 +100,7 @@ async fn primary_key_catalog(
 
 fn has_primary_key(catalog: &[PrimaryKeyCatalogRow], table_name: &str, object_name: &str) -> bool {
     catalog.iter().any(|row| {
-        row.table_name == table_name
-            && row.constraint_name == object_name
-            && row.index_name == object_name
+        row.table == table_name && row.constraint == object_name && row.index == object_name
     })
 }
 

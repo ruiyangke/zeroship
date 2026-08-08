@@ -628,31 +628,50 @@ fn sqlite_folded_rowid_generation(
     })
 }
 
-fn push_named_primary_key_snapshot(
+/// Allocate the name PostgreSQL gives an implicit PRIMARY KEY relation.
+///
+/// This covers relation kinds represented by `SchemaSnapshot`. It does not
+/// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
+fn implicit_primary_key_name(
     table: &str,
-    snap: &mut TableSnapshot,
-    columns: &[String],
-    name: &str,
-) {
+    dialect: SqlDialect,
+    tables: &BTreeMap<String, TableSnapshot>,
+    partitions: &BTreeMap<String, PartitionSnapshot>,
+    views: &BTreeMap<String, ViewSnapshot>,
+    sequences: &BTreeMap<String, SequenceSnapshot>,
+) -> String {
     let default_name = format!("{table}_pkey");
-    push_primary_key_snapshot(table, snap, columns);
-    if name != default_name {
-        if let Some(constraint) =
-            snap.constraints.iter_mut().rev().find(|constraint| {
-                constraint.name == default_name && constraint.kind == "PRIMARY KEY"
-            })
-        {
-            constraint.name = name.to_string();
-        }
-        if let Some(index) = snap
-            .indexes
-            .iter_mut()
-            .rev()
-            .find(|index| index.name == default_name)
-        {
-            index.name = name.to_string();
-        }
+    if dialect != SqlDialect::Postgres {
+        return default_name;
     }
+
+    let name_is_taken = |candidate: &str| {
+        tables.contains_key(candidate)
+            || partitions.contains_key(candidate)
+            || views.contains_key(candidate)
+            || sequences.contains_key(candidate)
+            || tables
+                .values()
+                .any(|snapshot| snapshot.indexes.iter().any(|index| index.name == candidate))
+    };
+    let relation_count = tables.len()
+        + partitions.len()
+        + views.len()
+        + sequences.len()
+        + tables
+            .values()
+            .map(|snapshot| snapshot.indexes.len())
+            .sum::<usize>();
+    (0..=relation_count)
+        .map(|suffix| {
+            if suffix == 0 {
+                default_name.clone()
+            } else {
+                format!("{default_name}{suffix}")
+            }
+        })
+        .find(|candidate| !name_is_taken(candidate))
+        .expect("one more primary-key name candidate than relations must leave a free name")
 }
 
 fn apply_fold_alter_primary_key(
@@ -660,6 +679,7 @@ fn apply_fold_alter_primary_key(
     snap: &mut TableSnapshot,
     action: &AlterPrimaryKeyAction,
     dialect: SqlDialect,
+    implicit_name: &str,
 ) -> Result<(), FoldError> {
     zero_migrate_ir::validate::validate_alter_primary_key_action(action)
         .map_err(FoldError::InvalidPrimaryKeyAction)?;
@@ -791,7 +811,7 @@ fn apply_fold_alter_primary_key(
         || {
             reusable_candidate
                 .clone()
-                .unwrap_or_else(|| format!("{table}_pkey"))
+                .unwrap_or_else(|| implicit_name.to_string())
         },
         |(name, _)| name.clone(),
     );
@@ -822,7 +842,7 @@ fn apply_fold_alter_primary_key(
         snap.indexes.retain(|index| index.name != candidate);
     }
     if let Some(target) = action.target_columns() {
-        push_named_primary_key_snapshot(table, snap, target, &replacement_constraint_name);
+        push_primary_key_snapshot(snap, target, &replacement_constraint_name);
     }
     snap.constraints
         .sort_by(|left, right| left.name.cmp(&right.name));
@@ -1020,7 +1040,15 @@ pub fn fold_ops_onto(
                 )?;
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
-                    push_primary_key_snapshot(name, &mut snap, pk);
+                    let primary_key_name = implicit_primary_key_name(
+                        name,
+                        dialect,
+                        &tables,
+                        &partitions,
+                        &views,
+                        &sequences,
+                    );
+                    push_primary_key_snapshot(&mut snap, pk, &primary_key_name);
                 }
                 apply_fold_author_type_overrides_to_snapshot(name, columns, &mut snap, dialect)?;
                 apply_fold_structured_defaults_to_snapshot(name, columns, &mut snap, dialect)?;
@@ -1624,8 +1652,16 @@ pub fn fold_ops_onto(
                 }
             }
             Op::AlterPrimaryKey { table, action, .. } => {
+                let primary_key_name = implicit_primary_key_name(
+                    table,
+                    dialect,
+                    &tables,
+                    &partitions,
+                    &views,
+                    &sequences,
+                );
                 let snap = table_mut(&mut tables, table)?;
-                apply_fold_alter_primary_key(table, snap, action, dialect)?;
+                apply_fold_alter_primary_key(table, snap, action, dialect, &primary_key_name)?;
             }
             Op::SynchronizeIdentity { table, column, .. } => {
                 let snap = table_mut(&mut tables, table)?;
