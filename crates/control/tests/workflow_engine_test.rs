@@ -4670,6 +4670,16 @@ async fn caught_step_failure_continues_run_to_completion() {
         vec![(0, "may-fail".to_string(), "run".to_string(), "failed".to_string())]
     );
 
+    // The replay is scheduled at a wake_at slightly in the future, and `wait_for_run_state`
+    // above watches the RUN ROW, not the scheduler store's timer. Firing immediately races
+    // that deadline and claims nothing.
+    //
+    // Baseline on the tree before this line existed, 20 isolated runs: 12 passed, 8 failed,
+    // every failure at the assertion below - 6 as `left: 0` (this race) and 2 as `left: 2`
+    // (the count race the assertion change addresses). So one assertion carried both, which
+    // is why both are fixed together here.
+    wait_until_scheduler_timer_due(&fx, &run_id).await;
+
     let second = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
@@ -4678,7 +4688,13 @@ async fn caught_step_failure_continues_run_to_completion() {
     )
     .await
     .expect("second tick");
-    assert_eq!(second, 1);
+    // Not an exact count: `fire_once` returns TIMERS FIRED, and one run can contribute more
+    // than one. Redundant as well as unstable - the three assertions after this one already
+    // pin the real contract (the run completes, exactly 2 dispatches, both step rows).
+    assert!(
+        second >= 1,
+        "second tick claimed nothing; the replay was due but was not picked up"
+    );
     wait_for_completed(&fx, &[run_id.clone()]).await;
     assert_eq!(dispatcher.requests().len(), 2);
     assert_eq!(
