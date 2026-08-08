@@ -4,10 +4,40 @@
  * collecting all field errors before throwing a single ValidationError.
  */
 import { NormalizedSchema } from "./schema";
-import { FieldDef, PlainObject } from "./types";
+import { FieldDef, PlainObject, TypeName } from "./types";
 import { ValidationError, FieldError } from "./errors";
 
 type Doc = PlainObject;
+
+/**
+ * Every member of {@link TypeName}, so an unrecognised type name can be told
+ * apart from one this file simply has no branch for.
+ *
+ * Typed as `ReadonlySet<TypeName>` and built from a `TypeName[]` literal on
+ * purpose: adding a member to the union without adding it here is then a
+ * compile error rather than a silent hole, which is the failure this set exists
+ * to close. `vector`, `geoPoint`, `bytes` and `actor` are listed and are
+ * deliberately not field-validated — they belong to the union, so they must not
+ * trip the unknown-type guard.
+ */
+const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
+  "string",
+  "number",
+  "boolean",
+  "date",
+  "json",
+  "calendarDate",
+  "array",
+  "ref",
+  "object",
+  "literal",
+  "union",
+  "vector",
+  "geoPoint",
+  "bytes",
+  "id",
+  "actor",
+]);
 
 /**
  * Strict ISO 8601 date-or-datetime check. `Date.parse("2026")` returns
@@ -163,7 +193,13 @@ function checkField(
       };
       return;
     }
-  } else if (type === "number") {
+  } else if (
+    type === "number" ||
+    type === "int" ||
+    type === "integer" ||
+    type === "bigInt" ||
+    type === "float"
+  ) {
     // `Number.isFinite` rather than `!isNaN`: the old guard caught NaN and let both
     // infinities through, and all three are lost identically downstream.
     //
@@ -181,6 +217,30 @@ function checkField(
     if (typeof value !== "number" || !Number.isFinite(value)) {
       errors[key] = { path: key, message: `${key} must be a finite number` };
       return;
+    }
+    // The integral column tokens. The runtime descriptor emits `int`,
+    // `integer`, `bigInt` and `float` — the generator keeps the column's real
+    // type even though the TypeScript renderer collapses all five to
+    // `t.number()` — so they arrive here and are numbers, not a separate kind.
+    //
+    // Enforcing integrality is the point. Without it `create({ points: 1.5 })`
+    // reaches an INTEGER column and Postgres assignment-casts it to 2, so the
+    // value a creator wrote and the value stored differ with nothing objecting.
+    // `bigInt` additionally has to be a safe integer: BIGINT spans the full 64
+    // bits, a JS number stops being exact above 2^53, and a value past that is
+    // already the wrong number by the time it gets here.
+    if (type === "int" || type === "integer" || type === "bigInt") {
+      if (!Number.isInteger(value)) {
+        errors[key] = { path: key, message: `${key} must be a whole number` };
+        return;
+      }
+      if (!Number.isSafeInteger(value)) {
+        errors[key] = {
+          path: key,
+          message: `${key} is outside the range JavaScript can represent exactly (${Number.MAX_SAFE_INTEGER})`,
+        };
+        return;
+      }
     }
     if (min !== undefined && (value as number) < min) {
       errors[key] = {
@@ -359,6 +419,29 @@ function checkField(
         }
       }
     }
+  } else if (!KNOWN_FIELD_TYPES.has(type)) {
+    // Fail closed on a type name this SDK does not know.
+    //
+    // The chain above has no final else, so before this an unrecognised name
+    // matched nothing and the value passed through untouched — the field was
+    // not validated at all, silently. That is not hypothetical: the generated
+    // runtime descriptor emits `int` for integer columns, `TypeName` has no
+    // integer member, and the measured result was that an `int` field accepted
+    // the string "abc" while the same field declared `number` rejected it.
+    //
+    // A type the SDK does not recognise means the descriptor and this validator
+    // disagree about the schema, which is a generation or version fault rather
+    // than bad user input. It gets a thrown error, not a field-level message,
+    // because there is no sound answer to "is this value valid" when the type
+    // is unknown, and answering "yes" is the one option that loses data.
+    //
+    // Names that ARE in `TypeName` but have no branch above (vector, geoPoint,
+    // bytes, actor) keep passing: they are deliberately not field-validated at
+    // this layer, and this guard is about unknown names, not missing branches.
+    throw new Error(
+      `unknown field type ${JSON.stringify(type)} for field ${JSON.stringify(key)}: ` +
+        `the schema descriptor names a type this version of @zeroship/db cannot validate`,
+    );
   }
 
   // Enum check — only meaningful for scalar types, not for arrays/objects.
