@@ -127,9 +127,14 @@ struct WorkerCli {
     #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
     storage_url: String,
 
-    /// Test-only unsigned durable-workflow replay ingress. Hidden because
-    /// signed workflow advance is the production transport; DW-07 uses this
-    /// flag to exercise the real replay path before that signing task lands.
+    /// Enable the unsigned durable-workflow replay ingress, which performs NO
+    /// signature or nonce verification. Hidden because signed advance is the
+    /// production transport; this exercises the real replay path.
+    ///
+    /// The handler itself always ships - this flag is what refuses it at
+    /// runtime, so the default here IS the production protection. Deliberately
+    /// no `env = ...`: a stray environment variable must not be able to turn
+    /// signature verification off.
     #[arg(long = "workflow-advance-unsigned", hide = true, default_value_t = false)]
     workflow_advance_unsigned: bool,
 
