@@ -1134,7 +1134,8 @@ async fn execute_pending<B: MigrationBackend>(
 ///    is held to the SAME security bar as a versioned one), evaluate its
 ///    preconditions read-only under the lock, then run `up` under the
 ///    least-privilege migrator role inside a transaction and append a NEW
-///    `completed` event carrying the new checksum (via [`apply_transactional`]).
+///    `completed` event carrying the new checksum (via [`MigrationBackend::apply_one`],
+///    whose transactional leg the repeatable always takes).
 ///
 /// A repeatable is ALWAYS transactional (replace-style `CREATE OR REPLACE …`,
 /// `down: None`), so it never takes the non-txn two-phase path. Its `supersedes`

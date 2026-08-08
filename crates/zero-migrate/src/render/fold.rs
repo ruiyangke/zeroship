@@ -2857,7 +2857,8 @@ fn apply_fold_named_type_column_metadata(
 /// Fold a `createTable`'s TABLE-LEVEL constraints + indexes onto the
 /// `build_table_snapshot`-built [`TableSnapshot`].
 ///
-/// This fold and the lower ([`IrAuthor::fold_create_table_specs`]) agree on every
+/// This fold and the lower
+/// ([`crate::render::lower::IrAuthor::fold_create_table_specs`]) agree on every
 /// constraint/index NAME and on the UNIQUE definition body (both route through the
 /// shared `constraintdef_cols` speller), so an op-authored table re-diffs clean
 /// against the apply path. They DELIBERATELY differ on one point — NOT "byte
@@ -3323,7 +3324,7 @@ pub enum RecoveredCheck {
     },
 }
 
-/// Convert a numeric [`IrScalar`] literal to `f64` for a `min`/`max` bound, or
+/// Convert a numeric [`crate::model::ir::IrScalar`] literal to `f64` for a `min`/`max` bound, or
 /// `None` for a non-numeric literal (which is not a recognized range bound).
 ///
 /// **Precision note.** A `Decimal` bound is narrowed to `f64` here. This is
@@ -3345,7 +3346,7 @@ fn ir_scalar_as_f64(s: &crate::model::ir::IrScalar) -> Option<f64> {
     }
 }
 
-/// Convert an [`IrScalar`] literal to the `serde_json::Value` an enum membership
+/// Convert a [`crate::model::ir::IrScalar`] literal to the `serde_json::Value` an enum membership
 /// carries (string / number / bool), mirroring the declarative `enum_values`
 /// domain. `None` for a non-scalar (`Bytes`) the enum facet does not model.
 fn ir_scalar_to_json(s: &crate::model::ir::IrScalar) -> Option<serde_json::Value> {

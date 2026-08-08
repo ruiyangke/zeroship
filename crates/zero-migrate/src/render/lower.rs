@@ -1274,7 +1274,8 @@ pub struct IrAuthor {
     /// the schema-confinement scope this author's
     /// [`default_schema`](Self::default_schema) is validated against at lower time.
     /// The friendly cross-schema VALIDATE gate
-    /// ([`crate::model::validate::validate_op_schema_and_guard`]) inspects ONLY the op's own
+    /// (`crate::model::validate::validate_op_schema_and_guard`, named in plain text
+    /// because a module-private fn is not a linkable doc target) inspects ONLY the op's own
     /// `schema()` qualifier — it never sees the connection
     /// [`default_schema`](Self::default_schema). So a `default_schema` pointing at a
     /// FOREIGN schema would slip the gate and render every guard-less op into that
@@ -3947,7 +3948,7 @@ impl IrAuthor {
     /// Lower a SINGLE op, advancing the working `live` table set when the op creates
     /// a table (so a later intra-IR FK inlines). Factored out of
     /// [`lower_steps`](Self::lower_steps) so the guard-per-fragment path
-    /// ([`lower_guarded`]) can attribute each op's rendered fragments to its op
+    /// ([`lower_guarded`](Self::lower_guarded)) can attribute each op's rendered fragments to its op
     /// index. Returns a [`LoweredOp`] — DDL units OR a single online-rename
     /// step.
     ///
@@ -8803,7 +8804,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 /// the common case; a non-`btree` `using` carries the access method. Pure
 /// translation (no state), so a free function.
 ///
-/// **Offline replay**: `pub(crate)` so the offline [`crate::fold`] replays a
+/// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] replays a
 /// `createIndex` op through the SAME index-shaping the lower uses (no re-spell).
 pub(crate) fn create_index_snapshot(
     table: &str,
@@ -8896,7 +8897,7 @@ pub(crate) fn create_index_snapshot(
 /// consumes. Pure structural translation of the type + nullability + default +
 /// unique; the snapshot's default/sentinel rendering is the shared builder's job.
 ///
-/// **Offline replay**: `pub(crate)` so the offline [`crate::fold`] builds the
+/// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] builds the
 /// SAME `CollectionDescriptor` the lower builds — reusing one column-shaping path.
 pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // `nullable` defaults to TRUE (the `t.*` lexicon — the lexicon default); `required` is the
@@ -9473,7 +9474,7 @@ pub(crate) fn derived_exclusion_constraint_name(
 /// authored name matches what PG stores (an un-capped name would be truncated on
 /// CREATE and never round-trip).
 ///
-/// **Offline replay**: `pub(crate)` so the offline [`crate::fold`] derives an
+/// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] derives an
 /// unnamed UNIQUE/PK constraint name byte-identically to the lower.
 pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
@@ -9581,7 +9582,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
 
 /// the catalog `(name, kind)` an `addConstraint` op will create,
 /// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
-/// stamped [`crate::render::existence_probe::GuardProbe::Constraint`] names the constraint the
+/// stamped [`crate::model::probe::GuardProbe::Constraint`] names the constraint the
 /// executor will see in the live `information_schema` / `pg_get_constraintdef`.
 /// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
 /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
@@ -9646,7 +9647,7 @@ fn ir_constraint_name_and_kind(
 
 /// The access-method string for a closed [`IndexMethod`] — matches the spellings
 /// the snapshot's `access_method` carries (and `render_create_index` emits).
-/// **Offline replay**: `pub(crate)` so the offline [`crate::fold`] resolves a
+/// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] resolves a
 /// `createTable` index's access method byte-identically to the lower.
 pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
     match m {

@@ -62,7 +62,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 /// # Errors
 /// - [`RollbackError::SqliteRebuildRequired`] if the `down` needs the 12-step
 /// rebuild — refused before any statement runs; nothing changes.
-/// - [`RollbackError::DownFailedSqlite`]-shaped `Backend` error if the `down` SQL
+/// - [`RollbackError::DownFailed`]-shaped `Backend` error if the `down` SQL
 /// fails or is denied by the authorizer (the txn is rolled back).
 /// - [`RollbackError::Backend`] on a journal-write / commit failure.
 pub(crate) async fn rollback_one_transactional(

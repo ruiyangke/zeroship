@@ -328,7 +328,10 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// `conn` / `executor` / `precondition` / `baseline` /
 /// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
 /// seam byte-identical and makes the "no remaining bare escape seam" claim
-/// *structurally* true — enforced by [`no_bare_escape_seam_outside_dml`] below.
+/// *structurally* true - enforced by `no_bare_escape_seam_outside_dml` below.
+/// (Plain text, not a doc link: that enforcer is a `#[cfg(test)]` test fn, and
+/// rustdoc never compiles `cfg(test)`, so no flag combination can resolve a link
+/// to it.)
 ///
 /// It is infallible by construction: double-quote escaping neutralises every byte
 /// EXCEPT the empty string and a NUL (which PG rejects in an identifier outright).

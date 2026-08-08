@@ -240,9 +240,9 @@ fn dml_set_local_session_sql(
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
-/// These DO mutate the session, but [`apply`] restores the original GUCs on exit
-/// via [`restore_session`] so they never leak. Per-migration timeout
-/// override applied.
+/// These DO mutate the session, but [`crate::apply::executor::apply`] restores the
+/// original GUCs on exit via [`restore_session`] so they never leak.
+/// Per-migration timeout override applied.
 ///
 /// Runs as the **admin** role (no `SET ROLE` here): the non-txn journal I/O
 /// (`record_started` / `record_completed` / `clear_inflight`) runs as admin, and

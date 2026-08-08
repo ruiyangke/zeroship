@@ -227,7 +227,7 @@ fn mac_tag(
 
 /// The CANONICAL byte encoding of the resolved rule set WITH ITS LAYER BOUNDARIES
 /// (H-4): each layer, in stack order (TOP/innermost first), is emitted with its
-/// [`LayerTag`] byte, then its grants (key-sorted, each rule's scope+value), requires,
+/// [`crate::compose::LayerTag`] byte, then its grants (key-sorted, each rule's scope+value), requires,
 /// injects (sealed doc order), and validates — each rule length-prefixed and
 /// field-tagged so no two distinct rule sets collide and no boundary is ambiguous (the
 /// 1b-i discipline). Because the layer boundaries are ENCODED, two stacks with the same

@@ -144,7 +144,9 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
-/// and contains only `[A-Za-z0-9_]`. Mirrors [`crate::apply::backend::postgres::backfill`]'s `validate_ident`
+/// and contains only `[A-Za-z0-9_]`. Mirrors the `validate_ident` in the
+/// module-private `crate::apply::backend::postgres::backfill_sql` (named in plain
+/// text because a private module is not a linkable doc target)
 /// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary — not
 /// only safe-by-quoting downstream. Rejects schema-qualified names
 /// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.

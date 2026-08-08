@@ -335,7 +335,7 @@ impl StructuralDrift {
 ///
 /// # Preconditions
 /// The caller MUST pass an **admin/read** connection — this function takes
-/// whatever [`Client`] it is handed and never elevates to the `migrator` role.
+/// whatever [`SqlSession`] it is handed and never elevates to the `migrator` role.
 /// Binding `project_schema` by `$1` prevents cross-schema leakage regardless of
 /// the connection, but choosing a least-privileged read connection is the
 /// caller's obligation.

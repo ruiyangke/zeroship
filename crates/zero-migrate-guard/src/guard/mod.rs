@@ -3671,7 +3671,7 @@ fn regproc_leading_ident(lit: &str) -> &str {
 /// Function *definition* targets (`CreateFunctionStmt`/`AlterFunctionStmt`
 /// funcname) are NOT walked here — they are a *creation target*, never a call
 /// qualifier, so they are checked directly against the project schema in
-/// [`SqlGuard::check_func_def_target`] with NO shared-schema exemption
+/// [`GuardWalker::check_func_def_target`] with NO shared-schema exemption
 /// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
 ///
 /// Returns the first foreign schema found. `permits` is the PDP cross-schema
@@ -3770,7 +3770,7 @@ enum SchemaSlot {
     TypeRef,
     /// A function-name *call* qualifier (`FuncCall`/trigger/CALL `funcname`).
     /// Function *definition* targets are NOT this slot — they are checked
-    /// against the project schema directly in [`SqlGuard::check_func_def_target`]
+    /// against the project schema directly in [`GuardWalker::check_func_def_target`]
     /// (no shared-schema exemption).
     FuncCall,
 }

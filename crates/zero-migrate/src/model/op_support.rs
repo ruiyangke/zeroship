@@ -73,7 +73,7 @@ const BY_DEFAULT_IDENTITY_SINGLE_PK: &str =
     "identity({ always: false }) / autoIncrement() must be the sole primary-key \
          column on SQLite/MySQL";
 
-/// Assemble one per-dialect [`SupportDecision`] from the generated dialect
+/// Assemble one per-dialect [`crate::model::support::SupportDecision`] from the generated dialect
 /// table's disposition for this (op-kind, variant): an `Unsupported`
 /// disposition becomes the engine-internal refusal reason; any supported
 /// disposition (portable / vendor / transparent-degradable) becomes the op's
@@ -355,7 +355,7 @@ fn trigger_reason(
 /// Tier cannot be read off the generated table's dispositions — a vendor op
 /// can be unsupported on every dialect (e.g. `createRole` superuser+ifNotExists,
 /// `createView` materialized+replace) — so it stays a per-op declaration, kept
-/// in lock-step with [`Op::vendor_capabilities`] by `op_support_matrix`.
+/// in lock-step with [`vendor_capabilities`] by `op_support_matrix`.
 fn support_tier(op: &Op) -> crate::model::support::SupportTier {
     use crate::model::support::{
         SupportTier, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT, CAP_MATERIALIZED_VIEW, CAP_PARTITION,
@@ -535,7 +535,7 @@ feature_support_registry! {
 /// The generated-dialect-table lookup key for this op: its wire kind token and
 /// the variant that selects the payload-dependent support branch. The variant
 /// derivation is the SINGLE source shared with `dialect_table_faithfulness`'s
-/// corpus (via [`Op::op_variant`]) — the branch-selection that used to live in
+/// corpus (via [`op_variant`]) - the branch-selection that used to live in
 /// the hand-written `support()` dialect arms.
 fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
     match op {

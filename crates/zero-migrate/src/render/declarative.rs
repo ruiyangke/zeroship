@@ -276,7 +276,7 @@ pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
 /// constraint `definition` body — `<col>, <col>, …` with CONDITIONAL per-column
 /// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
 /// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
-/// body spelling: BOTH the offline fold ([`crate::fold`]) and the IR lower's
+/// body spelling: BOTH the offline fold ([`crate::render::fold`]) and the IR lower's
 /// snapshot half ([`crate::render::lower`]) consume it, so the folded and the
 /// lower-emitted UNIQUE/PK `definition` cannot drift (an unconditional quote would
 /// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
@@ -3098,7 +3098,7 @@ pub fn desired_snapshot_for_dialect(
 /// SQLite folds it into an FTS5 virtual-table index, and SQLite FK targets are
 /// unqualified. Column `data_type` remains in the PG `information_schema`
 /// spelling; SQLite comparison canonicalises it (see [`ddl_to_information_schema`]
-/// / [`canonical_sqlite_type`]).
+/// / [`sqlite_canonical_type`]).
 ///
 /// # Errors
 /// - [`DeclarativeError::UnsupportedType`] — a field used an unknown type token.
@@ -6797,9 +6797,9 @@ impl DeclarativeAuthor {
             .join(";\n")
     }
 
-    /// **Structural** form of [`render_create_table`]: the CREATE statement plus
+    /// **Structural** form of [`Self::render_create_table`]: the CREATE statement plus
     /// every follow-on `COMMENT ON COLUMN` sentinel, as a per-statement `Vec`.
-    /// `join(";\n")` is byte-identical to [`render_create_table`].
+    /// `join(";\n")` is byte-identical to [`Self::render_create_table`].
     fn render_create_table_statements(
         &self,
         table: &str,
@@ -7154,7 +7154,7 @@ impl DeclarativeAuthor {
         self.render_add_column_with_statements(table, c).0
     }
 
-    /// **Structural** form of [`render_add_column`]: the migration plus its
+    /// **Structural** form of [`Self::render_add_column`]: the migration plus its
     /// per-statement list (`ADD COLUMN` + optional follow-on `COMMENT ON COLUMN`).
     /// `join(";\n")` over the statements is byte-identical to the migration's `up`.
     /// The IR lower path consumes the statement list so a string-literal DEFAULT
