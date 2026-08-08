@@ -107,7 +107,7 @@ pub(crate) fn refuse_if_query_capability<'s>(
 
 /// Walk a `v8::Local<v8::Value>` directly into a `serde_json::Value`,
 /// skipping the JSON.stringify / serde_json::from_str round trip used by
-/// [`parse_json_arg`]. Used by the v8_class `Collection` methods on the
+/// `read_json_arg`. Used by the v8_class `Collection` methods on the
 /// hot path so we don't pay two parse costs per CRUD call.
 ///
 /// Mirrors the small walker in `runtime/src/rpc/superjson.rs`. We
@@ -245,7 +245,7 @@ fn v8_value_to_serde_json_depth(
 
 /// Read a CRUD method's object/array argument directly from V8 into a
 /// `serde_json::Value`. `undefined`/missing → empty object (matches
-/// [`parse_json_arg`]'s default).
+/// `read_json_arg`'s default).
 pub(crate) fn read_json_arg(
     scope: &mut v8::PinScope<'_, '_>,
     v: Option<v8::Local<v8::Value>>,

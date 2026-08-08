@@ -8,7 +8,7 @@
 //! search SQL composition (`SELECT … JOIN … MATCH … ORDER BY bm25`).
 //!
 //! The actual `ensure_fts_index` / `fts_search` orchestration lives in
-//! [`crate::backend::sqlite::mod.rs`]'s `impl FullTextIndex for
+//! `backend/sqlite/mod.rs`'s `impl FullTextIndex for
 //! SqliteBackend` block — this module is the strict primitive layer so
 //! the SQL string shapes stay unit-testable in isolation against the
 //! plan's documented form.

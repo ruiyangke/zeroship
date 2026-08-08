@@ -10,7 +10,7 @@
 //!
 //! The actual `spatial_near` orchestration (flat scan over base-rows,
 //! per-row distance, top-`limit` selection, JSON re-emission) lives in
-//! [`crate::backend::sqlite::mod.rs`]'s `impl SpatialIndex for
+//! `backend/sqlite/mod.rs`'s `impl SpatialIndex for
 //! SqliteBackend` block — this module is the strict primitive layer
 //! so the math stays unit-testable in isolation against
 //! hand-computed values.
