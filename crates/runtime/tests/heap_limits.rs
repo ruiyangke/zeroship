@@ -199,6 +199,19 @@ fn runtime_heap_cap_enforces_oom() {
     // this number separates them.
     println!("near-heap-limit callback fired {fired} time(s) during this dispatch");
 
+    // WITNESS, asserted before the outcome: the heap cap is what refused this
+    // request. A non-2xx alone is satisfied by any failure - a CPU kill, a
+    // module error, a panic mapped to 500 - none of which exercise the cap.
+    // This test previously "failed" for a reason unrelated to the cap and I
+    // read the failure as a cap defect, so the same confusion in the passing
+    // direction is exactly what needs closing off.
+    assert!(
+        fired > 0,
+        "the near-heap-limit callback never fired, so whatever produced status \
+         {status} was not the heap cap and this test did not exercise it; \
+         body: {body}",
+    );
+
     // Either:
     //   (a) JS observed the throw → user-handler 500 with `oom:true`.
     //   (b) V8 terminated mid-allocation before JS regained control →
