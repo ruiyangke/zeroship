@@ -619,11 +619,11 @@ fn authoring_tables_from_ops(
                         state.primary_key = None;
                     }
                     state.constraints.retain(|constraint| {
-                        !constraint_uses_local_column(constraint, table, column)
+                        !constraint_uses_local_column(constraint, table, column, dialect)
                     });
                     state
                         .indexes
-                        .retain(|index| !index_uses_column(index, table, column));
+                        .retain(|index| !index_uses_column(index, table, column, dialect));
                 }
             }
             Op::RenameColumn {
@@ -799,12 +799,19 @@ fn replace_name(names: &mut [String], from: &str, to: &str) {
     }
 }
 
-fn constraint_uses_local_column(constraint: &IrConstraint, table: &str, column: &str) -> bool {
+fn constraint_uses_local_column(
+    constraint: &IrConstraint,
+    table: &str,
+    column: &str,
+    dialect: SqlDialect,
+) -> bool {
     match &constraint.kind {
         IrConstraintKind::Fk { columns, .. } | IrConstraintKind::Unique { columns } => {
             columns.iter().any(|name| name == column)
         }
-        IrConstraintKind::Check { expr, .. } => expr_references_column(expr, table, column, true),
+        IrConstraintKind::Check { expr, .. } => {
+            expr_references_column(expr, table, column, true, dialect)
+        }
         IrConstraintKind::Exclusion {
             elements,
             where_predicate,
@@ -812,10 +819,12 @@ fn constraint_uses_local_column(constraint: &IrConstraint, table: &str, column: 
         } => {
             elements.iter().any(|element| match &element.target {
                 ColumnOrExpr::Column { name } => name == column,
-                ColumnOrExpr::Expr { expr } => expr_references_column(expr, table, column, true),
+                ColumnOrExpr::Expr { expr } => {
+                    expr_references_column(expr, table, column, true, dialect)
+                }
             }) || where_predicate
                 .as_ref()
-                .is_some_and(|expr| expr_references_column(expr, table, column, true))
+                .is_some_and(|expr| expr_references_column(expr, table, column, true, dialect))
         }
     }
 }
@@ -834,19 +843,24 @@ fn rename_constraint_local_column(constraint: &mut IrConstraint, from: &str, to:
                 }
             }
         }
+        // A CHECK carries no column-NAME list to rewrite - its only column
+        // reference lives inside the expression, which the `for_each_expr_mut`
+        // pass in the `Op::RenameColumn` arm rewrites through
+        // `rename_expr_column` for every table in the replay. Renaming it here
+        // too would be a second pass over the same colRefs.
         IrConstraintKind::Check { .. } => {}
     }
 }
 
-fn index_uses_column(index: &IrIndex, table: &str, column: &str) -> bool {
+fn index_uses_column(index: &IrIndex, table: &str, column: &str, dialect: SqlDialect) -> bool {
     index.columns.iter().any(|element| match element {
         IndexElement::Column { name, .. } => name == column,
-        IndexElement::Expr { expr } => expr_references_column(expr, table, column, true),
+        IndexElement::Expr { expr } => expr_references_column(expr, table, column, true, dialect),
     }) || index.include.iter().any(|name| name == column)
         || index
             .r#where
             .as_ref()
-            .is_some_and(|expr| expr_references_column(expr, table, column, true))
+            .is_some_and(|expr| expr_references_column(expr, table, column, true, dialect))
 }
 
 fn rename_index_column(index: &mut IrIndex, from: &str, to: &str) {
@@ -952,15 +966,63 @@ fn visit_expr_values_mut(
     }
 }
 
+/// The `Expr::Dialectal` wire tag. The walks here read the SERIALIZED expression
+/// rather than matching the closed AST's variants, so they name the node and its
+/// legs the way serde spells them; `dialect_leg_wire_keys_match_a_serialized_expr`
+/// pins that spelling against a real `Expr::Dialectal`.
+const DIALECT_NODE: &str = "dialect";
+
+/// The leg a serialized `dialect({ default?, pg?, sqlite?, mysql? })` node renders
+/// for `dialect`: the target's OWN leg, else `default`. The same rule
+/// `render::dml::select_dialect_leg` applies, which is what actually
+/// reaches the database. A node with neither is refused per-target by
+/// `crate::model::validate` long before here; it renders nothing on this target, so
+/// it reads no column here either.
+fn selected_dialect_leg(
+    node: &serde_json::Map<String, Value>,
+    dialect: SqlDialect,
+) -> Option<&Value> {
+    let own = match dialect {
+        SqlDialect::Postgres => "pg",
+        SqlDialect::Sqlite => "sqlite",
+        SqlDialect::Mysql => "mysql",
+    };
+    node.get(own).or_else(|| node.get("default"))
+}
+
+/// Whether `expr` reads `table`.`column` AS IT RENDERS FOR `dialect`.
+///
+/// The `DropColumn` cascade is the caller: a `true` verdict DROPS the constraint /
+/// index from the replayed table. So a `dialect()` node must contribute only the
+/// leg the target installs. Unioning every leg made the artifact drop a CHECK and a
+/// partial index that PostgreSQL kept, because a SQLite leg named the dropped
+/// column and the rendered `CHECK (("a" > 0))` never did.
+///
+/// The RENAME walks (`rename_expr_column` / `rename_expr_table`) deliberately do
+/// the opposite and rewrite EVERY leg: `render_expr` emits the whole dialectal node
+/// into `env.db.ts`, so an inactive leg left naming the old column would be a stale
+/// artifact the moment the project retargets.
 fn expr_references_column(
     expr: &Expr,
     table: &str,
     column: &str,
     include_unqualified: bool,
+    dialect: SqlDialect,
 ) -> bool {
-    fn contains(value: &Value, table: &str, column: &str, include_unqualified: bool) -> bool {
+    fn contains(
+        value: &Value,
+        table: &str,
+        column: &str,
+        include_unqualified: bool,
+        dialect: SqlDialect,
+    ) -> bool {
         match value {
             Value::Object(node) => {
+                if node.get("node").and_then(Value::as_str) == Some(DIALECT_NODE) {
+                    return selected_dialect_leg(node, dialect).is_some_and(|leg| {
+                        contains(leg, table, column, include_unqualified, dialect)
+                    });
+                }
                 let is_match = node.get("node").and_then(Value::as_str) == Some("colRef")
                     && node.get("name").and_then(Value::as_str) == Some(column)
                     && (node.get("table").and_then(Value::as_str) == Some(table)
@@ -969,17 +1031,17 @@ fn expr_references_column(
                 is_match
                     || node
                         .values()
-                        .any(|value| contains(value, table, column, include_unqualified))
+                        .any(|value| contains(value, table, column, include_unqualified, dialect))
             }
             Value::Array(values) => values
                 .iter()
-                .any(|value| contains(value, table, column, include_unqualified)),
+                .any(|value| contains(value, table, column, include_unqualified, dialect)),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
         }
     }
 
     let value = serde_json::to_value(expr).expect("Expr serializes");
-    contains(&value, table, column, include_unqualified)
+    contains(&value, table, column, include_unqualified, dialect)
 }
 
 fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
@@ -2247,5 +2309,72 @@ mod tests {
         );
         assert!(artifacts.env_db_ts.contains("id: t.uuid()"));
         assert!(!artifacts.env_db_ts.contains("id: t.id("));
+    }
+
+    /// `expr_references_column` reads the SERIALIZED expression, so it names the
+    /// dialectal node and its legs as strings. Pin those against a real
+    /// `Expr::Dialectal` so a serde rename cannot silently turn leg selection back
+    /// into the union it replaced.
+    #[test]
+    fn dialect_leg_wire_keys_match_a_serialized_expr() {
+        let leg = |name: &str| {
+            Box::new(Expr::ColRef {
+                name: name.to_string(),
+                table: None,
+            })
+        };
+        let expr = Expr::Dialectal {
+            default: Some(leg("d")),
+            pg: Some(leg("p")),
+            sqlite: Some(leg("s")),
+            mysql: Some(leg("m")),
+        };
+        let value = serde_json::to_value(&expr).expect("Expr serializes");
+        let node = value
+            .as_object()
+            .expect("a dialectal Expr is a JSON object");
+        assert_eq!(node.get("node").and_then(Value::as_str), Some(DIALECT_NODE));
+        for (dialect, name) in [
+            (SqlDialect::Postgres, "p"),
+            (SqlDialect::Sqlite, "s"),
+            (SqlDialect::Mysql, "m"),
+        ] {
+            assert_eq!(
+                selected_dialect_leg(node, dialect).and_then(|leg| leg.get("name")),
+                Some(&Value::String(name.to_string())),
+                "{dialect:?} selects its own leg"
+            );
+        }
+
+        let default_only = Expr::Dialectal {
+            default: Some(leg("d")),
+            pg: None,
+            sqlite: None,
+            mysql: None,
+        };
+        let value = serde_json::to_value(&default_only).expect("Expr serializes");
+        let node = value
+            .as_object()
+            .expect("a dialectal Expr is a JSON object");
+        assert_eq!(
+            selected_dialect_leg(node, SqlDialect::Postgres).and_then(|leg| leg.get("name")),
+            Some(&Value::String("d".to_string())),
+            "a target with no own leg falls back to default"
+        );
+
+        let pg_only = Expr::Dialectal {
+            default: None,
+            pg: Some(leg("p")),
+            sqlite: None,
+            mysql: None,
+        };
+        let value = serde_json::to_value(&pg_only).expect("Expr serializes");
+        let node = value
+            .as_object()
+            .expect("a dialectal Expr is a JSON object");
+        assert!(
+            selected_dialect_leg(node, SqlDialect::Mysql).is_none(),
+            "a target with neither an own leg nor a default renders nothing"
+        );
     }
 }
