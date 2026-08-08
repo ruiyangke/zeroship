@@ -324,7 +324,21 @@ fn fastcall_cinfo_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Iden
 /// Cross-class deception (e.g. `Headers.prototype.has.call(blob)`) hits
 /// a shape-mismatch deopt and falls through to the slow callback, which
 /// runs the prototype-walk brand check and throws "Illegal invocation".
-/// See the design doc for the chain-of-trust analysis.
+///
+/// NOT VERIFIED IN THIS REPOSITORY, and worth knowing before relying on
+/// it. The paragraph above IS the argument - there is no fuller write-up
+/// behind it. This previously ended "See the design doc for the
+/// chain-of-trust analysis"; MEASURED, the phrase "chain-of-trust"
+/// appears in no file under `docs/`, and no doc discusses the fastcall
+/// brand-check reasoning. A reader sent looking for the analysis that
+/// justifies omitting a security check would have found nothing, and
+/// "it is analysed elsewhere" is exactly the sentence that stops them
+/// looking.
+///
+/// The claim rests on V8/Turbofan internals, so confirming it needs
+/// either the engine's C++ source or a live JIT trace: force a
+/// cross-class fastcall to tier up, then observe the deopt actually
+/// reaching the slow callback. No in-repo test does that today.
 pub(super) fn gen_fastcall_callback(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,
