@@ -2,8 +2,14 @@
 //!
 //! Copied byte-identically from the upstream db-url module so this crate can be
 //! embedded as a lean library without a runtime dependency on the upstream core.
-//! A `tests/core_id_parity.rs` drift guard asserts this copy stays identical to
-//! core while both crates coexist in-tree.
+//! Nothing in THIS repository checks this copy against its upstream: the core it was
+//! copied from is not here, so there is no second copy to compare against. An earlier
+//! version of this note promised a `tests/core_id_parity.rs` guard "while both crates
+//! coexist in-tree" - that condition is false where it was written, and no such test
+//! has ever existed here.
+//!
+//! Unlike the id encoding, this classifier has no cross-repository guard either. That
+//! is a HOLE, not a handoff.
 
 /// `true` iff `url` selects the SQLite (dev-tier) backend under the canonical
 /// grammar: `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare filesystem

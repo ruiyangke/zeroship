@@ -2,9 +2,20 @@
 //!
 //! Copied byte-identically from the upstream typed-id module so this crate can be
 //! embedded as a lean library without a runtime dependency on the upstream core.
-//! The base62/uuid encoding is a wire contract; a `tests/core_id_parity.rs`
-//! drift guard asserts these copies stay identical to core while both crates
-//! coexist in-tree.
+//! The base62/uuid encoding is a WIRE CONTRACT, and nothing in THIS repository can
+//! check it: the upstream core it was copied from is not here, so there is no second
+//! copy to compare against. An earlier version of this note promised a
+//! `tests/core_id_parity.rs` guard "while both crates coexist in-tree" - that
+//! condition is false where it was written.
+//!
+//! The guard lives where the condition holds. zeroship vendors this crate alongside
+//! its own `crates/core/src/typed_id.rs`, so both copies coexist there, and its
+//! `crates/migrated/tests/typed_id_parity.rs` cross-decodes the two encodings.
+//! Reported agreeing over 200,003 ids including all-zero, all-ones and low-bit
+//! edges, with the harness proven to fail on a planted alphabet swap.
+//!
+//! Does NOT cover the parse/validate prefix helpers - that guard is encode/decode
+//! only, and nothing covers the rest on either side.
 
 /// Base62 alphabet — sorted so lexicographic order matches numeric order
 /// for the high bits (timestamp), preserving `UUIDv7` sort order.
