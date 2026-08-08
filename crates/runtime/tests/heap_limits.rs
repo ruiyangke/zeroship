@@ -257,3 +257,50 @@ fn near_heap_limit_callback_counter_can_fire() {
          about V8 - it may just mean this instrument is dead"
     );
 }
+
+/// Defect B: heap-limit termination fires as designed and then nothing settles
+/// the request.
+///
+/// This is a REGULAR old-space allocation, so unlike the large-string case
+/// above the near-heap-limit callback does run, reaches its hit threshold, and
+/// calls `terminate_execution`. The isolate really is terminated; the failure
+/// is that no one converts that into a result, so the caller waits forever.
+///
+/// The assertion is only "settles, non-2xx". Which error surfaces is not
+/// pinned - a terminated isolate can be reported as a DispatchError or as a
+/// 500, and both satisfy the contract that an app never hangs.
+#[test]
+fn heap_termination_settles_the_request_instead_of_hanging() {
+    init_v8();
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                const live = [];
+                for (let i = 0; i < 20000; i++) {
+                    const o = {};
+                    for (let k = 0; k < 100; k++) { o["k_" + i + "_" + k] = "v_" + i + "_" + k; }
+                    live.push(o);
+                }
+                return Response.json({ oom: false, iterations: live.length });
+            }
+        };
+    "#);
+    let before = zeroship_runtime::heap_limit_callback_hits();
+    let rt = Runtime::builder().modules(modules).heap_limit_mb(32).build();
+    let (status, body) = dispatch_against(&rt);
+    let fired = zeroship_runtime::heap_limit_callback_hits() - before;
+
+    // Reported so a future failure can distinguish "termination never fired"
+    // from "it fired and the result still did not arrive".
+    println!("callback fired {fired} time(s); status {status}");
+    assert!(
+        fired > 0,
+        "this test is meant to exercise the path where termination DOES fire; \
+         it fired 0 times, so the allocation no longer trips the cap and the \
+         test is measuring something else"
+    );
+    assert!(
+        !(200..300).contains(&status),
+        "expected non-2xx after heap termination, got {status}; body: {body}",
+    );
+}
