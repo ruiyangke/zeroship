@@ -10,20 +10,23 @@
 //! has to do anything: the other two tests allocate comfortably under their
 //! limits, so they would pass against a cap that never fires at all.
 //!
-//! Two distinct failures were measured against `heap_limit_mb(32)`:
+//! Two distinct failures were measured against `heap_limit_mb(32)`, and the
+//! callback counter separates them into different defects rather than one:
 //!
-//!   Large-object space evades the cap. 400 retained 1 MiB strings return
-//!   HTTP 200 with `oom:false`, and the process peaked at 229 MB RSS - about
-//!   7x the configured cap. This is the case asserted below.
+//!   Large-object space is never checked. 400 retained 1 MiB strings return
+//!   HTTP 200 with `oom:false`, the process peaks at 229 MB RSS - about 7x the
+//!   cap - and the near-heap-limit callback fires ZERO times. V8 does not
+//!   consult it for this allocation shape, so nothing in the growth/terminate
+//!   logic ever runs. This is the case asserted below.
 //!
-//!   Regular old-space allocation hangs instead. 20k objects of 100 unique
-//!   keys each produce a `Pending` that never settles; observed at both a 30s
-//!   and a 150s deadline, so it is a hang and not slow JS.
+//!   Regular old space is checked, and the enforcement hangs. The callback
+//!   fires exactly `MAX_HEAP_LIMIT_HITS` (5) times, `terminate_execution` is
+//!   called as designed, and the dispatch then returns a `Pending` that never
+//!   settles - observed at a 30s and a 150s deadline. Termination works; what
+//!   is missing is anything that turns a terminated isolate into a response.
 //!
-//! Both were measured here; NOT measured is whether the near-heap-limit
-//! callback fires in either case, which would separate "the cap is never
-//! consulted" from "it fires and the growth outpaces the termination". That
-//! needs a tracing subscriber this test target does not currently install.
+//! So the first is a hole in what the cap covers, and the second is a missing
+//! completion path after it fires. A single fix will not address both.
 
 mod common;
 use common::*;
@@ -168,8 +171,15 @@ fn runtime_heap_cap_enforces_oom() {
             }
         };
     "#);
+    let before = zeroship_runtime::heap_limit_callback_hits();
     let rt = Runtime::builder().modules(modules).heap_limit_mb(32).build();
     let (status, body) = dispatch_against(&rt);
+    let fired = zeroship_runtime::heap_limit_callback_hits() - before;
+
+    // Reported unconditionally, including on the passing path: "the cap held"
+    // and "V8 never consulted the cap" produce the same green here, and only
+    // this number separates them.
+    println!("near-heap-limit callback fired {fired} time(s) during this dispatch");
 
     // Either:
     //   (a) JS observed the throw → user-handler 500 with `oom:true`.
@@ -205,4 +215,45 @@ fn runtime_heap_cap_normal_load_passes() {
     let (status, body) = dispatch_against(&rt);
     assert_eq!(status, 200, "body: {body}");
     assert!(body.contains(r#""count":100"#), "body: {body}");
+}
+
+// Positive control for the counter used above. A zero from a freshly-written
+// counter is indistinguishable from a counter that can never increment, so
+// this asserts the instrument can move at all before the zero above is read as
+// a result about V8.
+#[test]
+fn near_heap_limit_callback_counter_can_fire() {
+    init_v8();
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                const live = [];
+                try {
+                    // Regular old-space objects, sized to cross a 32 MiB cap
+                    // without running away: small unique-keyed property bags.
+                    for (let i = 0; i < 3000; i++) {
+                        const o = {};
+                        for (let k = 0; k < 100; k++) {
+                            o["k_" + i + "_" + k] = "v_" + i + "_" + k;
+                        }
+                        live.push(o);
+                    }
+                } catch (e) {
+                    return Response.json({ oom: true, iterations: live.length });
+                }
+                return Response.json({ oom: false, iterations: live.length });
+            }
+        };
+    "#);
+    let before = zeroship_runtime::heap_limit_callback_hits();
+    let rt = Runtime::builder().modules(modules).heap_limit_mb(32).build();
+    let (status, body) = dispatch_against(&rt);
+    let fired = zeroship_runtime::heap_limit_callback_hits() - before;
+    println!("control: status {status}, fired {fired}, body {body}");
+    assert!(
+        fired > 0,
+        "the near-heap-limit counter never incremented even for a regular \
+         old-space allocation past the cap, so a zero elsewhere says nothing \
+         about V8 - it may just mean this instrument is dead"
+    );
 }
