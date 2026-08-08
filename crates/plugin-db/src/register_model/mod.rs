@@ -17,22 +17,38 @@
 //!   `RuntimeSchemaDescriptor`, injected as `globalThis.__zsRuntimeDescriptor`.
 //!   So on PG this registers a model's metadata; it creates nothing.
 //!
-//! * **SQLite dev tier - the four phases below really run**, applying against
-//!   the local developer file at first `registerModel` (the cold path), so
-//!   `pnpm dev` gets a schema without a separate deploy step.
+//! * **SQLite dev tier - applies, but through the MIGRATION ENGINE, not the
+//!   phases below.** The arm calls [`sqlite_engine::run_sqlite_via_engine`],
+//!   which drives the security-hardened engine (journal / versioning / drift /
+//!   12-step rebuild / baseline / dev auto-approve) against the developer's
+//!   local file at first `registerModel`, so `pnpm dev` gets a schema without a
+//!   separate deploy step.
 //!
-//! The name is therefore wider than the PG behaviour. Anyone reading it as
-//! "this creates my tables" is right only on the dev tier.
+//! So the name is wider than either backend's behaviour. On PG it registers
+//! metadata; on SQLite the engine does the applying. Reading it as "this
+//! creates my tables" is wrong on PG and, on SQLite, credits the wrong
+//! component.
 //!
 //! Not reachable from creator code either way: `env.db.registerModel` is
 //! `undefined` inside a handler and `env.db.__platform` throws
 //! `platform_internal_only` - see `tests/platform_fence.rs`.
 //!
-//! # The four-phase pipeline (SQLite dev tier)
+//! # The four-phase pipeline - TEST-ONLY, run by NEITHER runtime arm
+//!
+//! `bootstrap`, `plan`, `validate` and `apply` are each
+//! `#[cfg(any(test, feature = "test-helpers"))]` (see the `mod` declarations
+//! below); `sqlite_engine` is the only ungated one. So the phases compile for
+//! this crate's tests and for downstream test targets, and for nothing else.
+//! The PG arm no-ops and the SQLite arm goes through the engine, so no
+//! production path executes them.
+//!
+//! They are still worth reading - the integration tests drive the stages
+//! directly, and the shape is the reference for what an apply must do - but
+//! read them as a tested design, not as the code serving a request.
 //!
 //! Proposal A2 (docs/archive/zeroship-db.md, section "A2. Deploy-time
-//! data validation") defines the contract. It is accurate for the phases; it
-//! predates the PG cutover above, so read it as the SQLite-arm design:
+//! data validation") defines the contract. It is accurate for the phases and
+//! predates both cutovers above:
 //!
 //! 1. **Bootstrap** (`bootstrap`) — create the per-app schema, the
 //!    `__zeroship_migrations` audit table (idempotent), acquire the
