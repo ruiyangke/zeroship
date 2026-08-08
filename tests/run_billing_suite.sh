@@ -75,6 +75,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Distinguishes a real failure from a run that could not happen. See the library
+# header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/measurement_integrity.sh"
+
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
@@ -172,6 +176,18 @@ run_group() {
   "$@" 2>&1 | tee "$group_log"
   status="${PIPESTATUS[0]}"
   cat "$group_log" >> "$SUITE_LOG"
+
+  # A full disk surfaces as compile and link errors, mid-log, indistinguishable
+  # from a defect in the change under test. Say so and STOP: once the volume is
+  # full every later group produces the same garbage, so continuing spends an hour
+  # manufacturing more misleading output. Checked before the ran-count below,
+  # because a build that died for want of space also ran zero tests and would
+  # otherwise be reported as a filter that matched nothing.
+  if [ "$status" -ne 0 ] && log_shows_disk_full "$group_log"; then
+    report_measurement_did_not_run "$group_log" "$1"
+    rm -f "$group_log"
+    exit 90
+  fi
 
   ran=$(grep -oP '^running \K[0-9]+' "$group_log" | awk '{s+=$1} END {print s+0}')
   rm -f "$group_log"
