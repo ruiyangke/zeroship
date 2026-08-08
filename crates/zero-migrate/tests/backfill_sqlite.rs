@@ -773,3 +773,135 @@ async fn sqlite_backfill_rejects_schema_qualified_table() {
         "{err:?}"
     );
 }
+
+// ---- the armed-fault registry is per-thread ---------------------------------
+// `fault::arm` writes a `thread_local!`, so a fault armed on one thread must not
+// fire on another. That per-thread scoping is the ONLY reason the ungated
+// `fault` module is unreachable from the shipping Node consumer, which runs every
+// apply on a freshly spawned worker thread (`run_engine_blocking` in
+// `zero-migrate-node/src/runtime.rs`) that never arms anything. These tests pin
+// the boundary through the same surface the crash-fuzz suite uses: a real SQLite
+// backfill over the real BACKFILL_MID_BATCHES trip point.
+//
+// What this does NOT cover: it does not make the seam safe for a Rust embedder
+// that arms and applies on ONE thread. The positive control below is exactly that
+// case and it fires. It also does not cover the PG/MySQL trip points, which are
+// the same `fault::trip` call and the same registry.
+
+/// Seed 500 rows into a fresh temp `SQLite` pair and run one unbounded backfill
+/// to completion on the CURRENT thread, driving the future with a reactor-less
+/// `futures::executor::block_on` (the shape the node worker thread uses).
+/// `arm_here` first arms the mid-batches fault ON THIS THREAD, to fire after the
+/// 2nd committed batch.
+fn backfill_on_this_thread(
+    tag: &str,
+    arm_here: bool,
+) -> Result<zero_migrate::apply::backend::BackfillOutcome, BackfillError> {
+    use zero_migrate::fault;
+
+    futures::executor::block_on(async {
+        let p = paths(tag);
+        let be = backend(&p);
+        seed_nums(&be, 500).await;
+        if arm_here {
+            fault::arm(fault::points::BACKFILL_MID_BATCHES, 1);
+        }
+        let s = spec(100);
+        be.run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+            .await
+    })
+}
+
+#[test]
+fn armed_fault_does_not_cross_thread_boundary() {
+    use zero_migrate::fault;
+
+    let _g = serial();
+    fault::disarm_all();
+
+    // Thread A (this one) arms the fault the backfill loop trips once per
+    // committed batch, and never runs a backfill itself.
+    fault::arm(fault::points::BACKFILL_MID_BATCHES, 1);
+
+    // Thread B runs the whole apply. It trips the armed point 5 times (500 rows /
+    // 100 per batch) and must never see thread A's fault.
+    let out = std::thread::spawn(|| backfill_on_this_thread("bf_xthread_neg", false))
+        .join()
+        .expect("worker thread did not panic")
+        .expect("a fault armed on another thread must not abort this apply");
+    assert!(out.complete, "the apply completed");
+    assert_eq!(out.batches, 5, "all 5 batches ran; none was cut short");
+    assert_eq!(out.rows_updated, 500, "every row touched");
+
+    // Thread A's fault is still armed and still unfired: `disarm_all` clears the
+    // CALLING thread's registry, so this is the call that releases it.
+    fault::disarm_all();
+    assert_eq!(
+        fault::armed_thread_count(),
+        0,
+        "disarm_all released this thread's claim"
+    );
+}
+
+// The positive control for the test above. Without it a never-firing fault would
+// pass the negative test against any implementation, including one where `arm` is
+// a no-op.
+#[test]
+fn armed_fault_fires_when_armed_on_the_applying_thread() {
+    use zero_migrate::fault;
+
+    let _g = serial();
+    fault::disarm_all();
+
+    // Same worker-thread shape as the negative test, except the worker arms the
+    // fault ITSELF before applying: the Rust-embedder case, where the seam is live.
+    let out = std::thread::spawn(|| backfill_on_this_thread("bf_xthread_pos", true))
+        .join()
+        .expect("worker thread did not panic");
+    let err = out.expect_err("a fault armed on the applying thread aborts the run");
+    assert!(matches!(err, BackfillError::Fault(_)), "{err:?}");
+
+    // The fault fired, which self-disarms and releases the worker's claim.
+    assert_eq!(
+        fault::armed_thread_count(),
+        0,
+        "a fired one-shot fault releases the arming thread's claim"
+    );
+}
+
+// A thread that arms a fault, never trips it, and exits without calling
+// `disarm_all` must not leak its ARMED_THREADS claim: a leaked claim permanently
+// disables `trip`'s single-atomic-load fast path, so every trip point in the
+// process would pay a TLS access plus a HashMap lookup for the rest of the run.
+// The `Registry` Drop guard releases it at thread exit. This does NOT cover a
+// thread killed without running destructors (process::exit/abort).
+#[test]
+fn armed_fault_claim_is_released_when_a_thread_exits_without_disarming() {
+    use zero_migrate::fault;
+
+    let _g = serial();
+    fault::disarm_all();
+    assert_eq!(
+        fault::armed_thread_count(),
+        0,
+        "no other test in this binary left a fault armed"
+    );
+
+    std::thread::spawn(|| {
+        fault::arm(fault::points::BACKFILL_MID_BATCHES, 1_000_000);
+        assert_eq!(
+            fault::armed_thread_count(),
+            1,
+            "arming claimed a slot for this thread"
+        );
+        // Exit WITHOUT disarming, with the fault still unfired.
+    })
+    .join()
+    .expect("worker thread did not panic");
+
+    assert_eq!(
+        fault::armed_thread_count(),
+        0,
+        "thread exit released the armed-fault claim (no leak)"
+    );
+}

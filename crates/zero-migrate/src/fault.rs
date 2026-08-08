@@ -10,12 +10,19 @@
 //! crash there: the open transaction rolls back, exactly as it would on a real
 //! crash, and the resume runs the same recovery path.
 //!
-//! **This is inert in production.** When no fault is armed (the only state outside
-//! the crash-fuzz test), [`trip`] is a single relaxed atomic load that returns
-//! `Ok(())`. Faults are armed only by the in-process crash-fuzz test via [`arm`]
-//! and cleared via [`disarm_all`]. Nothing here reads the environment or persists.
+//! **Inert until something arms it.** With no fault armed, [`trip`] is a single
+//! relaxed atomic load that returns `Ok(())`. Nothing here reads the environment
+//! or persists, so the seam cannot be switched on from outside the process.
 //!
-//! Hidden from the public docs — it is a test-support surface, not a stable API.
+//! That is a RUNTIME default, not a compile-time absence. This module carries no
+//! `cfg` gate and ships in release builds, and the boundaries it guards are the
+//! real executor's. Which consumers can and cannot reach it is a property of how
+//! each one drives the engine future, spelled out on [`arm`] - the shipping Node
+//! addon cannot, a Rust embedder driving the future on its own thread can. Do not
+//! read this paragraph as a guarantee that nothing arms it; read [`arm`].
+//!
+//! Hidden from the public docs by `doc(hidden)`, which removes it from rustdoc
+//! output and not from the build - it is a test-support surface, not a stable API.
 
 #![doc(hidden)]
 
@@ -27,34 +34,87 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// on a single relaxed load on every production boundary.
 static ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-// The armed faults: `point name -> remaining hits before it fires`. A fault armed
-// with `skip = k` fires on the `(k+1)`-th trip of that point (so `skip = 0`
-// fires on the first trip). It fires AT MOST ONCE, then disarms itself.
+/// One thread's armed faults: `point name -> remaining hits before it fires`. A
+/// fault armed with `skip = k` fires on the `(k+1)`-th trip of that point (so
+/// `skip = 0` fires on the first trip). It fires AT MOST ONCE, then disarms itself.
+///
+/// A newtype rather than a bare `HashMap` so the thread's claim on
+/// `ARMED_THREADS` can be released by `Drop` at thread exit. Without that, a
+/// thread that arms a fault, never trips it, and exits without calling
+/// [`disarm_all`] leaves the counter permanently incremented, which disables
+/// [`trip`]'s single-atomic-load fast path for every thread for the life of the
+/// process. This does NOT cover threads whose destructors never run (a
+/// `process::exit`, an abort, or the platforms where the main thread's TLS
+/// destructors are skipped); those cases end the process anyway.
+#[derive(Default)]
+struct Registry(HashMap<String, u32>);
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            ARMED_THREADS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
 thread_local! {
-    static REGISTRY: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
 }
 
 /// Arm a one-shot crash at `point`, firing after `skip` prior trips of it (so
-/// `skip = 0` ⇒ crash on the first trip of `point`). Test-only.
+/// `skip = 0` means crash on the first trip of `point`).
+///
+/// Armed faults live in a `thread_local!`, so this arms `point` for the CALLING
+/// THREAD ONLY; a [`trip`] of the same point on any other thread is unaffected.
+///
+/// The shipping Node consumer runs every apply on a freshly spawned worker
+/// thread: `run_engine_blocking` in `zero-migrate-node/src/runtime.rs:41` spawns
+/// the thread that drives the engine future, and that worker never calls `arm`.
+/// An external caller that arms a fault on its own thread therefore cannot reach
+/// a production apply through that consumer.
+///
+/// That inertness is a property of the zero-migrate-node worker spawn, NOT of
+/// this crate. This module carries no `cfg` gate and ships in release builds, and
+/// `arm` checks nothing about the build profile, the environment, or the caller.
+/// A Rust embedder that drives the engine future on a thread it also controls
+/// inherits a LIVE crash-injection seam: arm and apply on one thread and the
+/// eight executor trip points fire for real.
 pub fn arm(point: &str, skip: u32) {
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
-        if registry.is_empty() {
+        if registry.0.is_empty() {
             ARMED_THREADS.fetch_add(1, Ordering::SeqCst);
         }
-        registry.insert(point.to_string(), skip);
+        registry.0.insert(point.to_string(), skip);
     });
 }
 
-/// Clear every armed fault (call between crash-fuzz iterations). Test-only.
+/// Clear the CALLING THREAD's armed faults (call between crash-fuzz iterations).
+/// The registry is a `thread_local!`, so faults armed on other threads survive
+/// this call untouched.
+///
+/// Not a production-safety mechanism on its own: see [`arm`] for which consumer
+/// the seam is inert under and which one inherits it live.
 pub fn disarm_all() {
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
-        if !registry.is_empty() {
-            registry.clear();
+        if !registry.0.is_empty() {
+            registry.0.clear();
             ARMED_THREADS.fetch_sub(1, Ordering::SeqCst);
         }
     });
+}
+
+/// Number of threads that currently hold at least one armed fault.
+///
+/// TEST-ONLY read accessor, exposed for one reason: the integration suite pins
+/// that a thread which arms a fault and then exits without disarming releases its
+/// claim on `ARMED_THREADS` (the `Registry` `Drop` guard), which is otherwise
+/// unobservable from outside the module. The engine never reads this; [`trip`]
+/// reads the atomic directly.
+#[must_use]
+pub fn armed_thread_count() -> usize {
+    ARMED_THREADS.load(Ordering::SeqCst)
 }
 
 /// The executor's boundary check: returns an injected [`crate::apply::executor::ApplyError`] (a simulated
@@ -70,7 +130,7 @@ pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
     }
     let fire = REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
-        let fire = match registry.get_mut(point) {
+        let fire = match registry.0.get_mut(point) {
             Some(0) => true,
             Some(n) => {
                 *n -= 1;
@@ -79,8 +139,8 @@ pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
             None => false,
         };
         if fire {
-            registry.remove(point);
-            if registry.is_empty() {
+            registry.0.remove(point);
+            if registry.0.is_empty() {
                 ARMED_THREADS.fetch_sub(1, Ordering::SeqCst);
             }
         }
