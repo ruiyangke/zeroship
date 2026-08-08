@@ -93,8 +93,8 @@ pub use sqlite::SqliteBackend;
 /// instead of the omnibus `Backend` super-trait. That carve is
 /// finished: nothing takes `dyn Backend`, and the `&PostgresBackend`
 /// parameters that remain are the deliberate Postgres-only accessors
-/// on [`BackendHandle`] (`as_postgres`, `as_backup_pg`,
-/// `as_encrypted_column_pg`) plus their private callers. Those sit
+/// on [`BackendHandle`] (`as_postgres`, `as_encrypted_column_pg`)
+/// plus their private callers. Those sit
 /// outside the capability traits by design - replication and WAL
 /// consumption are Postgres-specific - rather than being a migration
 /// someone left half-done.
@@ -1954,36 +1954,12 @@ impl BackendHandle {
         }
     }
 
-    /// Borrow a [`Backup`] capability over the PG arm.
-    ///
-    /// Returns `Some(&PostgresBackend)` on the PG arm.
-    /// The real `Backup` impl is pg_dump/pg_restore shell-out plus a
-    /// PITR placeholder that writes to `__zeroship_admin.pitr_targets`.
-    /// Mirrors the [`Self::as_encrypted_column_pg`] shape.
-    ///
-    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    #[cfg(feature = "test-helpers")]
-    pub fn as_backup_pg(&self) -> Option<&PostgresBackend> {
-        match self {
-            Self::Postgres(b) => Some(b),
-            Self::Sqlite(_) => None,
-        }
-    }
-
-    /// Borrow a [`Backup`] capability over the SQLite arm.
-    ///
-    /// Returns `Some(&SqliteBackend)` on the SQLite
-    /// arm. The real body is `VACUUM INTO` snapshot + atomic-rename
-    /// restore + `pitr_pg_only` refusal.
-    ///
-    /// Returns `Some` on the SQLite arm; `None` on the PG arm.
-    #[cfg(feature = "test-helpers")]
-    pub fn as_backup_sqlite(&self) -> Option<&SqliteBackend> {
-        match self {
-            Self::Postgres(_) => None,
-            Self::Sqlite(b) => Some(b),
-        }
-    }
+    // The `as_backup_pg` / `as_backup_sqlite` accessors were removed: both were
+    // `#[cfg(feature = "test-helpers")]`, no crate in the workspace enables that
+    // feature, and neither had a caller anywhere - including this crate's own
+    // tests, which reach the impls through the `Backup` trait instead. Whether
+    // the capability itself ships is still open; the impls stay, and reviving
+    // an accessor is a line of code if a consumer ever appears.
 }
 
 #[cfg(test)]
