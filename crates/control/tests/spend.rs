@@ -127,6 +127,85 @@ async fn read_state(
     (state, h[0].get::<_, i64>("n"))
 }
 
+/// A period rewrite that LOWERS a stored total must report it.
+///
+/// `replace_period_snapshot` is an overwrite, not a `+=`: it writes whatever the source
+/// scan saw. If the usage stream ages out early-period events, or a fetch stalls
+/// mid-read, the recompute rebuilds a SMALLER total and overwrites the correct one -
+/// and spend enforcement then reads the smaller number, so apps escape their limits.
+/// It fails OPEN, and silently: missing early-month events are indistinguishable from
+/// no usage early in the month.
+///
+/// A total can only grow within a billing month, so a decrease is the one in-band
+/// signal that the projection is unsound. This asserts the signal exists; it does NOT
+/// assert any enforcement behaviour, because refusing a decrease is an operator policy
+/// call (a legitimate dedup fix or bad-event purge also lowers a total).
+#[compio::test]
+async fn period_rewrite_reports_a_total_that_shrank() {
+    let url = db_url();
+    let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry);
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    let period = current_period_start_unix();
+
+    let agg = |total: i64| {
+        vec![UsageAggregate {
+            app_id: app,
+            metric: "requests".to_string(),
+            total,
+        }]
+    };
+
+    // Establish the period at 100.
+    let first = metering
+        .replace_period_snapshot(period, &agg(100))
+        .await
+        .expect("seed period");
+    assert!(
+        first.decreased.is_empty(),
+        "writing a period for the first time cannot be a decrease, got {:?}",
+        first.decreased
+    );
+
+    // The failure this exists to catch: the scan saw less than last time.
+    let shrunk = metering
+        .replace_period_snapshot(period, &agg(40))
+        .await
+        .expect("rewrite period lower");
+    assert_eq!(shrunk.decreased.len(), 1, "a shrink must be reported");
+    let drop = &shrunk.decreased[0];
+    assert_eq!(drop.app_id, app);
+    assert_eq!(drop.metric, "requests");
+    assert_eq!(drop.prior_total, 100);
+    assert_eq!(drop.new_total, 40);
+    // Reporting only - the write still lands, by design.
+    assert_eq!(metering.total(&app, period, "requests").await.unwrap(), 40);
+
+    // POSITIVE CONTROL. The assertions above are satisfied by an implementation that
+    // reports EVERY rewrite as a decrease, which would make the signal useless. Growth
+    // and an identical rewrite must both stay silent.
+    let grew = metering
+        .replace_period_snapshot(period, &agg(250))
+        .await
+        .expect("rewrite period higher");
+    assert!(
+        grew.decreased.is_empty(),
+        "growth is not a decrease, got {:?}",
+        grew.decreased
+    );
+    let same = metering
+        .replace_period_snapshot(period, &agg(250))
+        .await
+        .expect("rewrite period identical");
+    assert!(
+        same.decreased.is_empty(),
+        "an identical rewrite is not a decrease, got {:?}",
+        same.decreased
+    );
+}
+
 #[compio::test]
 async fn evaluate_all_persists_and_returns_transitions() {
     let url = db_url();

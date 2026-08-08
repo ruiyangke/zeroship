@@ -65,6 +65,28 @@ pub struct UsageAggregate {
     pub total: i64,
 }
 
+/// One period total that came back SMALLER than the row it replaced.
+///
+/// Within a billing month a total can only grow, so this is the projection reporting
+/// that its own source scan was incomplete. See
+/// [`Metering::replace_period_snapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeriodTotalDecrease {
+    pub app_id: Uuid,
+    pub metric: String,
+    pub prior_total: i64,
+    pub new_total: i64,
+}
+
+/// Outcome of a period rewrite: rows written, plus any total that SHRANK.
+#[derive(Debug, Clone, Default)]
+pub struct PeriodSnapshotWrite {
+    pub written: usize,
+    /// Empty on a healthy rewrite. Non-empty means spend enforcement is now reading a
+    /// total LOWER than it previously read for the same period.
+    pub decreased: Vec<PeriodTotalDecrease>,
+}
+
 /// Period snapshot writer + aggregate read helpers.
 #[derive(Clone, Debug)]
 pub struct Metering {
@@ -178,14 +200,45 @@ impl Metering {
     /// This is intentionally overwrite semantics, not `+=`: re-running the same
     /// recompute writes the same totals and cannot double-count. The caller must
     /// pass a complete snapshot for the period it is replacing.
+    ///
+    /// Overwrite semantics are also the hazard, which is why this reports
+    /// [`PeriodSnapshotWrite::decreased`]. The snapshot is not accumulated - it is
+    /// whatever the source scan saw. A scan that saw LESS than the previous one (the
+    /// stream dropped early-period events past its retention, a fetch stalled mid-read)
+    /// silently overwrites a correct total with a smaller one, and spend enforcement
+    /// reads that total. Usage appears to shrink and apps escape their limits: it fails
+    /// OPEN.
+    ///
+    /// A period total should only grow within its month, so a DECREASE is the one
+    /// in-band signal that the projection is unsound. Absence of early-month events is
+    /// otherwise indistinguishable from no usage early in the month, which is why this
+    /// compares against the STORED row rather than inspecting the source.
+    ///
+    /// Reporting only. This does not refuse the write - refusing would block legitimate
+    /// downward corrections (a dedup fix, a purge of bad events) and could freeze
+    /// enforcement at a wrong high value. Whether to refuse is an operator policy call.
     pub async fn replace_period_snapshot(
         &self,
         period_start_unix_secs: i64,
         aggregates: &[UsageAggregate],
-    ) -> Result<usize, RegistryError> {
+    ) -> Result<PeriodSnapshotWrite, RegistryError> {
         let mut conn = self.registry.conn().await?;
         let tx = conn.transaction().await?;
         let period = period_date(period_start_unix_secs);
+
+        // Read BEFORE the DELETE below: it is the only moment the prior totals still
+        // exist, and they are what makes a shrink detectable at all.
+        let prior_rows = tx
+            .query(
+                "SELECT app_id, metric, total FROM zeroship.usage_aggregates \
+                  WHERE period = $1::date",
+                &[&period],
+            )
+            .await?;
+        let mut prior = HashMap::<(Uuid, String), i64>::new();
+        for row in &prior_rows {
+            prior.insert((row.get("app_id"), row.get("metric")), row.get("total"));
+        }
 
         tx.execute(
             "DELETE FROM zeroship.usage_aggregates WHERE period = $1::date",
@@ -193,6 +246,7 @@ impl Metering {
         )
         .await?;
 
+        let mut decreased = Vec::new();
         let mut written = 0usize;
         let mut resolved_cache = HashSet::<(Uuid, String)>::new();
         for aggregate in aggregates {
@@ -237,10 +291,23 @@ impl Metering {
             )
             .await?;
             written += 1;
+
+            // Compared per (app, metric) rather than on a period sum: one app's total
+            // shrinking is invisible in a sum that another app's growth covers.
+            if let Some(&was) = prior.get(&(aggregate.app_id, aggregate.metric.clone())) {
+                if aggregate.total < was {
+                    decreased.push(PeriodTotalDecrease {
+                        app_id: aggregate.app_id,
+                        metric: aggregate.metric.clone(),
+                        prior_total: was,
+                        new_total: aggregate.total,
+                    });
+                }
+            }
         }
 
         tx.commit().await?;
-        Ok(written)
+        Ok(PeriodSnapshotWrite { written, decreased })
     }
 
     async fn register_metric<C: compio_postgres::GenericClient + Sync>(

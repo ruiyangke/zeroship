@@ -383,9 +383,31 @@ pub async fn recompute_usage_aggregates(
             .then_with(|| a.metric.cmp(&b.metric))
     });
     cycle.aggregates = aggregates.len();
-    cycle.written = Metering::new(registry.clone())
+    let write = Metering::new(registry.clone())
         .replace_period_snapshot(period_start, &aggregates)
         .await?;
+    cycle.written = write.written;
+
+    // A period total that SHRANK is the only in-band evidence that this scan saw less
+    // than the last one did - the stream aged out early-period events, or a fetch
+    // stalled mid-read. The snapshot is an overwrite, so the smaller number is now what
+    // spend enforcement reads: usage appears to fall and apps escape their limits.
+    //
+    // ERROR, not warn: this is a billing-correctness event that fails OPEN, and it is
+    // invisible otherwise - missing early-month events look exactly like no usage early
+    // in the month. Reporting only; refusing the write is an operator policy call,
+    // because a decrease is also what a legitimate dedup fix or bad-event purge produces.
+    for drop in &write.decreased {
+        tracing::error!(
+            app_id = %drop.app_id,
+            metric = %drop.metric,
+            prior_total = drop.prior_total,
+            new_total = drop.new_total,
+            billing_event = "usage_total_decreased",
+            "spend recompute rewrote a period total DOWNWARD - the source scan saw less \
+             than the previous one; spend enforcement now reads the smaller total"
+        );
+    }
     Ok(cycle)
 }
 
