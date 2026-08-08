@@ -602,16 +602,6 @@ impl Registry {
     /// after every var/secret mutation. Best-effort: failure is logged
     /// upstream, the mutation has already committed; worst case the
     /// worker takes one extra reconcile interval to refetch env.
-    pub(crate) async fn bump_env_version(&self, app_id: Uuid) -> Result<(), RegistryError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "UPDATE zeroship.apps SET env_version = env_version + 1 WHERE id = $1",
-            &[&app_id],
-        )
-        .await?;
-        Ok(())
-    }
-
     /// Build the full route table for the gateway.
     ///
     /// The `manifest_json` column carries the per-app routing manifest
