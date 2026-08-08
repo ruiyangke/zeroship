@@ -4,7 +4,7 @@
 //! `SqliteBackend` is the security core for SQLite migrations. It owns a
 //! dedicated, hardened, CDC-free connection ([`actor::MigrationActor`])
 //! and enforces second-line confinement through a two-mode `prepare`-time authorizer
-//! ([`authorizer`]) — the runtime analog of Postgres's least-privilege
+//! ([`authorizer`]) - the runtime analog of Postgres's least-privilege
 //! `migrator` role. The journal lives in an attached `_mig` database, immutable by
 //! authorizer construction + DEFENSIVE + append-only triggers, with the
 //! native `event_seq` AUTOINCREMENT PK as the total order. One migration's DDL and
@@ -12,10 +12,35 @@
 //! `up` confined from `_mig` and the journal write done under engine mode, the
 //! mode flip landing between separate prepares.
 //!
-//! See the module-level docs of [`authorizer`] and [`actor`] for the mechanism;
-//! every confinement claim is proven against a real temp-file SQLite in
-//! `tests/sqlite_confinement.rs` / `tests/sqlite_journal.rs` /
-//! `tests/sqlite_apply.rs`.
+//! See the module-level docs of [`authorizer`] and [`actor`] for the mechanism.
+//! Every claim above is proven against a real temp-file SQLite, split across two
+//! files rather than the three this comment used to name - there is no
+//! `tests/sqlite_journal.rs` and there never was, though the coverage it stood for
+//! does exist:
+//!
+//! - `tests/sqlite_confinement.rs` covers the authorizer line. A creator `up` may
+//!   not drop the `_mig` table (`confine_d_drop_mig_table_denied`) or its triggers
+//!   (`confine_e_drop_mig_trigger_denied`), may not insert a journal row directly
+//!   (`confine_f_direct_journal_insert_denied`), may not reach `_mig` through a
+//!   trigger it defines (`confine_g_creator_trigger_writing_mig_denied`), and may
+//!   not even read the journal (`confine_i_creator_read_of_mig_journal_denied`).
+//! - `tests/sqlite_apply.rs` covers the journal's own properties. `event_seq` is a
+//!   total order (`native_event_seq_is_monotonic`), rows resist UPDATE and DELETE
+//!   under confinement (`journal_update_delete_denied_confined`) and again at the
+//!   trigger when confinement is off (`journal_immutability_trigger_backstop` -
+//!   the backstop is what makes append-only a property of the schema rather than
+//!   of the authorizer alone), and a failing `up` takes its journal row with it
+//!   (`failed_up_rolls_back_atomically`).
+//!
+//! Does NOT cover the mode flip as an interleaving. What is covered is each side
+//! of it: `is_autocommit_detects_open_transaction` (sqlite_apply.rs) drives the
+//! actor through `set_mode(EngineJournal)` and proves the transaction state it
+//! produces is detectable, and `confine_g_creator_trigger_writing_mig_denied`
+//! proves creator-defined SQL cannot reach `_mig` by deferring itself to a trigger.
+//! What no test asserts is that engine mode is unreachable to creator SQL BETWEEN
+//! the two prepares - the window is argued from the mode being flipped by the
+//! backend rather than shown closed by a test that tries to open it. A hole, and
+//! nothing else covers it.
 
 pub mod actor;
 pub mod authorizer;
