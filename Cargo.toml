@@ -176,11 +176,15 @@ tracing-log = "0.2"
 tracing-logfmt = "0.3"
 tracing-bunyan-formatter = "0.3"
 
-# Bounded MPMC queue. Used by `crates/sandbox/src/db.rs` for the
-# Phase-1 worker queue (design § 14.14): handlers `try_send` writes
-# onto a bounded `flume` channel, a fixed pool of workers drains.
-# Phase 0 wires the dep but does not use the queue yet — declaring
-# it now eliminates a Phase-1 dep churn.
+# MPMC channel. Consumed by `crates/plugin-db`, `crates/gateway` and
+# `crates/workflow-scheduler`.
+#
+# This comment used to justify the dependency by a planned worker queue in a
+# sandbox-crate module that no longer exists here - the sandbox was extracted to
+# the standalone `zeroship-sandbox` project. The dependency is
+# not stale, but its stated reason was: the real consumers arrived elsewhere and
+# nothing updated the note. A citation to a path that cannot resolve is worth
+# less than no citation, because it invites a reader to go looking.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 # Kafka-family stream transport. Default features stay OFF so rust-rdkafka does
 # not enable its tokio-backed async producer/consumer helpers; the stream crate
