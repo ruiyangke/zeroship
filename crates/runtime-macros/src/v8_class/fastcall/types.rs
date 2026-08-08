@@ -12,7 +12,7 @@
 //! [`FastcallType`] enum drives the CTypeInfo entry, the extern "C"
 //! signature, the per-arg adaption snippet, and the Result-arm
 //! sentinel. Argument vs. return positions select between
-//! [`FastcallType::from_arg_ty`] and [`FastcallType::from_return_ty`]
+//! [`FastcallType::from_arg_ty`] and [`FastcallType::from_return_inner`]
 //! — they share the same backing variants but accept different shapes
 //! (no `Void` for args, no `FastOneByteString` for returns; the latter
 //! is only valid as a borrowed input).
@@ -36,7 +36,7 @@ use syn::{Ident, Type};
 /// previous string-keyed cases plus `Void` for the return position.
 ///
 /// Use [`FastcallType::from_arg_ty`] for argument positions and
-/// [`FastcallType::from_return_ty`] for return positions; mismatched
+/// [`FastcallType::from_return_inner`] for return positions; mismatched
 /// variants (e.g. `Void` as an arg, `FastOneByteString` as a return)
 /// are statically unrepresentable.
 #[derive(Clone, Copy)]

@@ -2,7 +2,9 @@
 //!
 //! Generates a `from_v8(scope, value) -> Result<Self, OpError>` impl
 //! that reads each dictionary member from a JS object. Coercion uses
-//! the [`WebIdlConvertible`] trait, which is auto-impl'd for primitives
+//! the `WebIdlConvertible` trait (emitted as
+//! `::zeroship_runtime::macro_runtime::convert::WebIdlConvertible`), which is
+//! auto-impl'd for primitives
 //! and (via this derive + WebIdlEnum) for user types.
 //!
 //! # Spec mapping

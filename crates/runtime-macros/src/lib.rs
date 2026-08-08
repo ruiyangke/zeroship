@@ -292,7 +292,7 @@ pub fn v8_state_marker(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Result<Self, OpError>` impl that reads the JS object's properties as
 /// the struct's named fields, per WebIDL §3.10 (dictionaries).
 ///
-/// Each field type must implement [`WebIdlConvertible`]. The trait is
+/// Each field type must implement `WebIdlConvertible`. The trait is
 /// hand-implemented for primitives (USVString, ByteString, String, bool,
 /// u32, i32, f64), for `Option<T>` (lifts the blanket impl), for
 /// `v8::Local<Value>` (passthrough for union-typed members), and is
@@ -324,13 +324,13 @@ pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
 }
 
 /// `#[derive(WebIdlEnum)]` — generate `from_str` / `as_str` / a
-/// [`WebIdlConvertible`] impl for a unit-variant enum, per WebIDL
+/// `WebIdlConvertible` impl for a unit-variant enum, per WebIDL
 /// §3.7.10 (enumeration types).
 ///
 /// By default each variant maps to its kebab-cased name (`NoCors` →
 /// `"no-cors"`); override with `#[webidl_name = "..."]` on the variant.
 ///
-/// The emitted [`WebIdlConvertible`] impl ToString-coerces the JS
+/// The emitted `WebIdlConvertible` impl ToString-coerces the JS
 /// value, runs `from_str`, and throws TypeError on unknown name (per
 /// WebIDL §3.13.7 step 4). The error message includes both the
 /// offending value and the accepted-name set.

@@ -5,7 +5,7 @@
 //!   driver + per-attribute impls (closes F5 / H5-H7).
 //! - This module — `MethodKind` classifier (`classify`),
 //!   receiver/return-shape predicates, `resolve_state_and_marker`, and
-//!   the [`extract_*`] wrappers preserved for the per-method emit
+//!   the `extract_*` wrappers preserved for the per-method emit
 //!   helpers (`emit::method`, `emit::constructor`, `emit::getter`,
 //!   `emit::static_op`) that walk method-attrs in isolation.
 //!
