@@ -3,9 +3,9 @@
 # metering_rowlock_pgbench.sh — ISOLATE the usage_aggregates hot-row UPSERT
 # contention (#29) at the DB level, with PERSISTENT POOLED connections.
 #
-# The Rust harness (crates/control/benches/metering_load.rs, BENCH 1) drives the
-# REAL Metering::ingest_at path, but the no-pool `Registry` opens a fresh PG
-# connection PER report — so per-report connection-open overhead (~10-15ms)
+# This exists because measuring the same contention THROUGH the control plane
+# masks it. That path opens a fresh PG connection per report via the no-pool
+# `Registry`, so per-report connection-open overhead (~10-15ms)
 # dominates and MASKS the row-lock cost at the concurrency the dev box sustains
 # (≤32, capped by max_connections=100). This script removes that mask: pgbench
 # holds one persistent connection per client and hammers the bare UPSERT, so the
