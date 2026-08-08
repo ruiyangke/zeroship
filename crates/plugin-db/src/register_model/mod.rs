@@ -1,7 +1,38 @@
-//! `db.registerModel(collection, schema, indexes)` — the four-phase DDL
-//! pipeline.
+//! `db.registerModel(collection, schema, indexes)` - schema registration.
 //!
-//! Proposal A2 (docs/archive/zeroship-db.md) defines the contract:
+//! # What this does depends on the backend, and on PG it is not DDL
+//!
+//! Read this before the pipeline below, because the pipeline does not run on
+//! the production backend:
+//!
+//! * **PostgreSQL - metadata only, NO DDL.** The apply arm is
+//!   `(Some(_pg), _) => Ok(())`. `zeroship-migrate` is the sole PG schema
+//!   authority and creates the schema at DEPLOY time, before the app serves.
+//!   What the call still earns is metadata: the dispatch caller stamps
+//!   readiness (`mark_model_registered`) and the declared cache
+//!   (`cache_schema`) on the returned `Ok(())`. The PG CRUD passes read that
+//!   cache for declared-only facets - `t.id(prefix)` idPrefix, encrypted and
+//!   mask facets - which introspection cannot recover. Since the
+//!   migration-first cutover the schema value originates from the bundled
+//!   `RuntimeSchemaDescriptor`, injected as `globalThis.__zsRuntimeDescriptor`.
+//!   So on PG this registers a model's metadata; it creates nothing.
+//!
+//! * **SQLite dev tier - the four phases below really run**, applying against
+//!   the local developer file at first `registerModel` (the cold path), so
+//!   `pnpm dev` gets a schema without a separate deploy step.
+//!
+//! The name is therefore wider than the PG behaviour. Anyone reading it as
+//! "this creates my tables" is right only on the dev tier.
+//!
+//! Not reachable from creator code either way: `env.db.registerModel` is
+//! `undefined` inside a handler and `env.db.__platform` throws
+//! `platform_internal_only` - see `tests/platform_fence.rs`.
+//!
+//! # The four-phase pipeline (SQLite dev tier)
+//!
+//! Proposal A2 (docs/archive/zeroship-db.md, section "A2. Deploy-time
+//! data validation") defines the contract. It is accurate for the phases; it
+//! predates the PG cutover above, so read it as the SQLite-arm design:
 //!
 //! 1. **Bootstrap** (`bootstrap`) — create the per-app schema, the
 //!    `__zeroship_migrations` audit table (idempotent), acquire the
