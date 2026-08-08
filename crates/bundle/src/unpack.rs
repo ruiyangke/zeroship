@@ -531,7 +531,8 @@ mod tests {
         assert!(expected.contains(&a), "the asset's own hash must be required");
         assert!(
             expected.contains(&b),
-            "a variant blob can be named without ever being packed"
+            "a variant hash is missing from the expected set, so a manifest could \
+             name a `br` blob that was never packed"
         );
     }
 
