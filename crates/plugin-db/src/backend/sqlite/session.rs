@@ -135,7 +135,7 @@ pub enum TypedCell {
 }
 
 /// A typed row + column names, returned by the `QueryTyped` command
-/// variant. Consumers: [`super::SqliteBackend::vector_search`]
+/// variant. Consumers: [`crate::backend::VectorIndex::vector_search`]
 /// (vec0 JOIN result), `fts_search`, `spatial_near`.
 ///
 /// Column names are carried alongside the cells so each caller can
@@ -177,8 +177,8 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<(), DbError>>,
     },
     /// Run a row-returning statement; reply with the materialised
-    /// rows. [`super::SqliteBackend::introspect_schema`] +
-    /// [`super::SqliteBackend::estimate_row_count`] route through this
+    /// rows. `SchemaIntrospect::introspect_schema` +
+    /// `SchemaIntrospect::estimate_row_count` route through this
     /// variant for the PRAGMA-walk catalog inspection.
     Query {
         sql: String,
@@ -187,7 +187,7 @@ pub(crate) enum Command {
     },
     /// Run a row-returning statement; reply with typed rows + column
     /// names. Consumers:
-    /// [`super::SqliteBackend::vector_search`] (the vec0 JOIN result
+    /// [`crate::backend::VectorIndex::vector_search`] (the vec0 JOIN result
     /// path, using the typed surface for the post-search row
     /// re-emission to JSON), `fts_search` (FTS5 + bm25 ranking),
     /// `spatial_near` (haversine distance ordering). All three need
@@ -500,8 +500,8 @@ impl SqliteSession {
 
     /// Send a `Query` command and await the materialised row slice.
     ///
-    /// Consumer: [`super::SqliteBackend::introspect_schema`]
-    /// + [`super::SqliteBackend::estimate_row_count`] route through
+    /// Consumer: `SchemaIntrospect::introspect_schema`
+    /// + `SchemaIntrospect::estimate_row_count` route through
     /// this method to read PRAGMA / COUNT(*) results. Each call is one
     /// round-trip through the actor's mpsc queue + one
     /// `rusqlite::Statement` lifecycle on the worker thread.
@@ -518,7 +518,7 @@ impl SqliteSession {
 
     /// Send a `QueryTyped` command and await typed rows + column names.
     ///
-    /// Consumers: [`super::SqliteBackend::vector_search`]
+    /// Consumers: [`crate::backend::VectorIndex::vector_search`]
     /// (vec0 JOIN row decode), `fts_search` (bm25 + row re-emit),
     /// `spatial_near` (haversine distance + row re-emit). The
     /// [`TypedCell`] discriminant lets each caller branch on
