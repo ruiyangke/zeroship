@@ -149,6 +149,14 @@ impl Cipher {
         buffer::emit_output(scope, &result, output_encoding.as_deref())
     }
 
+    /// `_options` is ignored DELIBERATELY, not by oversight.
+    ///
+    /// Node defines exactly one option here, `plaintextLength`, and it is
+    /// meaningful only for CCM/OCB. [`CipherAlg`] carries no CCM or OCB
+    /// variant, so there is no value it could change. Add handling in the
+    /// same change that adds one - see `reject_unhonoured_cipher_options`,
+    /// which refuses `authTagLength` for the same reason in reverse: that
+    /// option DOES have meaning here and was being dropped.
     #[v8_method]
     #[v8_name = "setAAD"]
     fn set_aad(
