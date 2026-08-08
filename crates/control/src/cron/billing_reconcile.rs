@@ -86,20 +86,6 @@ pub const DEFAULT_SETTLE_WINDOW_SECS: u64 = DEFAULT_TICK_SECS + 5 * 60;
 /// part of the request path.
 pub const DEFAULT_SAFETY_NET_TICK_SECS: u64 = 300;
 
-/// Stable `pg_advisory_lock` key for the billing-reconcile sweep. Distinct from
-/// the spend-sweep key. Two control instances racing this sweep would both try
-/// to claim+bill; the per-period `invoices(creator_id, period)` UNIQUE claim
-/// already prevents a double invoice, but the advisory lock avoids the wasted
-/// duplicate Stripe round-trips and keeps the sweep single-flight fleet-wide.
-/// Arbitrary FIXED 64-bit constant (derived from "zsbill01").
-const BILLING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6269_6c6c_0001;
-
-/// Stable `pg_advisory_lock` key for the §6.3 reconciliation safety-net sweep.
-/// Distinct from the invoice close sweep above: the safety net may run on a
-/// tighter cadence and must not serialize invoice finalization behind read-back
-/// drift checks.
-const BILLING_SAFETY_NET_ADVISORY_LOCK_KEY: i64 = 0x7a73_6273_6166_0001;
-
 /// Currency for infra-cost invoices (v1: USD only).
 const BILLING_CURRENCY: &str = "usd";
 
@@ -445,7 +431,7 @@ pub async fn tick_with<S: StripeApi>(
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&BILLING_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_SWEEP],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -459,7 +445,7 @@ pub async fn tick_with<S: StripeApi>(
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&BILLING_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_SWEEP],
         )
         .await
     {
@@ -622,7 +608,7 @@ pub async fn safety_net_tick_at(
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_SAFETY_NET],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -638,7 +624,7 @@ pub async fn safety_net_tick_at(
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::BILLING_SAFETY_NET],
         )
         .await
     {

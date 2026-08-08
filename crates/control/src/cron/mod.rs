@@ -14,6 +14,7 @@
 //!     `system = true` apps (the platform console). See ISS-12b.
 
 pub mod audit_retention;
+pub(crate) mod lock_keys;
 pub mod billing_notify;
 pub mod billing_reconcile;
 pub mod deploy_retention;

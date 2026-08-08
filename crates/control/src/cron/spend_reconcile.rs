@@ -20,18 +20,6 @@ use crate::registry::RegistryError;
 use crate::spend::{spend_state_str, SpendEngine, SpendTransition};
 use crate::AppState;
 
-/// Stable `pg_advisory_lock` key for the spend-reconcile sweep (#2).
-///
-/// Multiple control instances run this cron concurrently. Without a lock, two
-/// instances racing the same sweep would BOTH derive a transition and BOTH
-/// append a `spend_state_history` row (duplicate audit rows, possibly
-/// mis-recorded flaps). A session-scoped `pg_try_advisory_lock(<key>)` makes
-/// the sweep single-flight fleet-wide: the instance that wins runs it; the
-/// others skip this tick and retry next cadence. The key is an arbitrary but
-/// FIXED 64-bit constant unique to this sweep (derived from "zsspend1" — must
-/// never collide with another advisory-lock user).
-const SPEND_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_7370_6e64_0001;
-
 /// Run one reconcile sweep. Exposed so an integration test can drive a single
 /// tick deterministically without sitting on the cron sleep. Returns the
 /// number of apps that transitioned.
@@ -48,7 +36,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
-            &[&SPEND_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::SPEND_SWEEP],
         )
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
@@ -65,7 +53,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     if let Err(e) = lock_conn
         .execute(
             "SELECT pg_advisory_unlock($1)",
-            &[&SPEND_SWEEP_ADVISORY_LOCK_KEY],
+            &[&super::lock_keys::SPEND_SWEEP],
         )
         .await
     {
