@@ -31,9 +31,9 @@ pub mod outbox;
 
 pub use meter::Meter;
 pub use outbox::{
-    build_usage_outbox, spawn_disabled_drain_task, spawn_outbox_task, OutboxConfig, OutboxFailure,
-    OutboxPublishResult, UsageOutbox, UsageStreamSettings, DEFAULT_OUTBOX_INTERVAL,
-    DEFAULT_USAGE_EVENTS_TOPIC,
+    build_usage_outbox, spawn_disabled_drain_task, spawn_outbox_task, wal_identity, OutboxConfig,
+    OutboxFailure, OutboxPublishResult, UsageOutbox, UsageStreamSettings, WalIdentity,
+    DEFAULT_OUTBOX_INTERVAL, DEFAULT_USAGE_EVENTS_TOPIC,
 };
 
 /// The injection vehicle for the trusted producers (the db/kv/storage

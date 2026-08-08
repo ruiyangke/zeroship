@@ -677,16 +677,19 @@ fn main() -> std::io::Result<()> {
     // into `GateState` (so the response path records `gateway_egress_bytes` for
     // static/redirect/error bodies the worker never sees) AND drained by the
     // usage outbox spawned just below. Mirrors the worker: same `Meter`, same
-    // shared `build_usage_outbox_from_env` producer → the billing stream. The
+    // shared `build_usage_outbox` producer → the billing stream. The
     // `gate-…-<uuid>` source is unique per boot so gateway and worker producer
     // ids never collide; their events simply SUM in `usage_aggregates`.
-    let gate_meter_source = {
-        let base = std::env::var("HOSTNAME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("gate-{port}"));
-        format!("gate-{base}-{}", uuid::Uuid::new_v4())
-    };
+    // `gate_base` is the part that must stay STABLE across restarts, because
+    // the WAL is named for it. The uuid below is the part that must CHANGE per
+    // boot, because two live producers must not share a client id. They were
+    // one string until the WAL turned out to be keyed on the changing half.
+    let gate_base = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("gate-{port}"));
+    let gate_meter_source = format!("gate-{gate_base}-{}", uuid::Uuid::new_v4());
+    let gate_wal = zeroship_metering::wal_identity("gate", &gate_base);
     let meter = Arc::new(zeroship_metering::Meter::with_source(gate_meter_source.clone()));
 
     let state = Arc::new(GateState {
@@ -746,7 +749,11 @@ fn main() -> std::io::Result<()> {
             wal_path: fm.outbox_wal_path.clone(),
         },
     );
-    match zeroship_metering::build_usage_outbox(&gate_meter_source, &gate_stream_settings) {
+    match zeroship_metering::build_usage_outbox(
+        &gate_meter_source,
+        &gate_wal,
+        &gate_stream_settings,
+    ) {
         Ok(Some((outbox, outbox_config))) => {
             let topic = outbox.topic().to_string();
             zeroship_metering::spawn_outbox_task(Arc::clone(&meter), outbox, outbox_config);
@@ -759,13 +766,24 @@ fn main() -> std::io::Result<()> {
                 "REDPANDA_BROKERS is not set".to_string(),
             );
         }
+        // FATAL, matching the worker. Brokers are configured, so the operator
+        // intends this gateway to bill; the common cause on a stable WAL path
+        // is a co-located producer holding the single-writer redb lock. The
+        // old arm degraded to a drain-and-drop task, which loses every event
+        // for the life of the process - permanent total loss substituted for
+        // intermittent partial loss.
         Err(error) => {
-            tracing::warn!(producer = %gate_meter_source, error = %error, "gateway usage stream configuration failed; metering outbox disabled");
-            zeroship_metering::spawn_disabled_drain_task(
-                Arc::clone(&meter),
-                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
-                format!("usage stream configuration failed: {error}"),
+            tracing::error!(
+                producer = %gate_meter_source,
+                wal = %gate_wal.as_str(),
+                error = %error,
+                "gateway usage outbox could not be built; refusing to boot \
+                 rather than dropping billable usage"
             );
+            return Err(std::io::Error::other(format!(
+                "gateway usage outbox could not be built (wal={}): {error}",
+                gate_wal.as_str()
+            )));
         }
     }
     if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {

@@ -228,8 +228,8 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
     zeroship_core::db_url::is_sqlite_url(db_url)
 }
 
-// The usage-stream producer wiring (`usage_stream_config_from_env` +
-// `build_usage_outbox_from_env`) is shared with the gateway producer; it lives in
+// The usage-stream producer wiring (`UsageStreamSettings::from_env` +
+// `build_usage_outbox`) is shared with the gateway producer; it lives in
 // `zeroship_metering`.
 
 #[allow(missing_debug_implementations)]
@@ -628,7 +628,12 @@ fn main() -> std::io::Result<()> {
             wal_path: fm.outbox_wal_path.clone(),
         },
     );
-    match zeroship_metering::build_usage_outbox(&meter_source, &stream_settings) {
+    // Keyed on the host, NOT on `meter_source`: the source carries a per-boot
+    // uuid so two live producers never share a client id, and naming the WAL
+    // after it meant every restart opened a new empty file and orphaned
+    // whatever the previous boot had not published.
+    let wal = zeroship_metering::wal_identity("worker", &worker_base);
+    match zeroship_metering::build_usage_outbox(&meter_source, &wal, &stream_settings) {
         Ok(Some((outbox, outbox_config))) => {
             let topic = outbox.topic().to_string();
             let stream = format!("{outbox:?}");
@@ -651,17 +656,26 @@ fn main() -> std::io::Result<()> {
                 "REDPANDA_BROKERS is not set".to_string(),
             );
         }
+        // FATAL, not a warning. Brokers are configured, so the operator
+        // intends this worker to bill; the common cause on a stable WAL path
+        // is a co-located second producer holding the single-writer redb lock.
+        // The old behaviour degraded to `spawn_disabled_drain_task`, which
+        // drains the meter and DROPS every event for the life of the process -
+        // permanent total loss standing in for an intermittent partial one.
+        // Refusing to boot is the recoverable failure; silent free hosting is
+        // not.
         Err(error) => {
-            tracing::warn!(
+            tracing::error!(
                 meter_source = %meter_source,
+                wal = %wal.as_str(),
                 error = %error,
-                "usage stream configuration failed; metering outbox disabled"
+                "usage outbox could not be built; refusing to boot rather than \
+                 dropping billable usage"
             );
-            zeroship_metering::spawn_disabled_drain_task(
-                Arc::clone(&meter),
-                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
-                format!("usage stream configuration failed: {error}"),
-            );
+            return Err(std::io::Error::other(format!(
+                "usage outbox could not be built (wal={}): {error}",
+                wal.as_str()
+            )));
         }
     }
 
