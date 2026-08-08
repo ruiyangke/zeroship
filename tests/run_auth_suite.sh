@@ -39,6 +39,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Distinguishes a real failure from a run that could not happen. See the library
+# header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/measurement_integrity.sh"
+
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
@@ -197,6 +201,15 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+'
 # on 2026-08-07 is the same ~7 percent headroom the CI test-target floor carries.
 # Raise it as the suite grows; a fixed floor gets looser with every test added,
 # which is the wrong direction for a guard against coverage loss.
+# Checked BEFORE the floor, because a build that died for want of disk space also
+# passes zero tests. Without this the gate blames coverage loss and tells you to
+# lower AUTH_MIN_PASSED - advice that would permanently weaken the guard in
+# response to a full volume.
+if log_shows_disk_full "$LOG"; then
+  report_measurement_did_not_run "$LOG" "the auth suite"
+  exit 90
+fi
+
 AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-505}"
 if [ "$passed" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} auth tests passed, fewer than the ${AUTH_MIN_PASSED} this gate expects." >&2
