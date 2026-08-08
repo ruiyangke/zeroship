@@ -48,6 +48,21 @@ pub struct ColumnSnapshot {
     /// is rendered only by the DDL emitter. Emission-only: live introspection tracks
     /// table constraints separately; only recognized ID format CHECKs project
     /// into [`Self::value_format`].
+    ///
+    /// KNOWN GAP: these bodies NAME THEIR OWN COLUMN, and the fold's
+    /// `Op::RenameColumn` arm does not rewrite them. After a rename the entry still
+    /// names the old column, and it is emitted verbatim into rebuild DDL. SQLite
+    /// resolves an unknown double-quoted identifier as a STRING LITERAL rather than
+    /// rejecting it, so the clause becomes a constant-false CHECK that the database
+    /// ACCEPTS: the rebuild's own `INSERT ... SELECT` copy then fails, mid-rebuild.
+    /// Not reachable today, and only because two unrelated things happen to block it
+    /// - the node crate never populates `LiveSchema::sqlite_schemas`, so a SQLite
+    /// rename fails closed first, and a SQLite catalog snapshot carries this field
+    /// empty. Neither is a guard anyone designed.
+    ///
+    /// The repair is to REGENERATE the clause from the renamed column and its facets,
+    /// not to substitute the name inside the stored text. These bodies come from known
+    /// generators (uuid, value format, enum, domain), so nothing has to be parsed.
     pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
@@ -724,6 +739,24 @@ pub struct ConstraintSnapshot {
     /// is still recorded because the existence guard's fail-closed refusal prints it,
     /// which is the difference between naming the installed predicate and saying
     /// `<present>`.
+    ///
+    /// That printer reads a LIVE snapshot, never a folded one. All four production
+    /// call sites of `render::existence_probe::decide` pass freshly introspected
+    /// input, so the value a user is shown is always the catalog's. This matters
+    /// because a folded CHECK body GOES STALE: `Op::RenameColumn` rewrites the
+    /// UNIQUE, PRIMARY KEY and FOREIGN KEY definitions, whose leading group is a
+    /// column list a string literal cannot appear in, and deliberately leaves a CHECK
+    /// body alone rather than substituting a name inside an arbitrary expression.
+    /// A folded stale body has no reader: the differ exempts it, the guard prints the
+    /// live one, and the three per-dialect emitters that write a `definition` into
+    /// `CREATE TABLE` DDL cannot receive a folded CHECK - the PostgreSQL and MySQL
+    /// ones are only ever handed a freshly built desired snapshot, and the fold
+    /// refuses to put a CHECK constraint in a SQLite snapshot at all.
+    ///
+    /// Do NOT read that as "stale fold text is harmless" in general. It is a fact
+    /// about THIS field, established by tracing its consumers. `ColumnSnapshot::
+    /// inline_checks` is fold-produced CHECK text on the same rename path, is not
+    /// dialect-gated, and IS emitted into rebuild DDL.
     ///
     /// `ConstraintSnapshot`'s own `PartialEq` below DOES compare this field, for every
     /// kind including `CHECK`, and that divergence is deliberate. The exemption above
