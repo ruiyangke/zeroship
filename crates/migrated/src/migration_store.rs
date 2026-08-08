@@ -605,7 +605,63 @@ mod tests {
             )
             .await
             .expect("ensure migrated migration table");
+        assert_platform_schema_present(&client).await;
         client
+    }
+
+    /// Tables the fixtures need that this crate does NOT own.
+    ///
+    /// `test_client` creates `migrated_migrations` itself, so the boundary is exactly
+    /// these three: they come from the platform migrations, carry `citext` and foreign
+    /// keys, and reproducing them here would be a second, drifting copy of the control
+    /// schema. So the fixtures cannot create what they need, and this suite genuinely
+    /// requires a migrated platform database rather than merely a reachable one.
+    const REQUIRED_PLATFORM_TABLES: [&str; 3] = ["plans", "users", "apps"];
+
+    /// Fail with an actionable message when the target database has no platform schema.
+    ///
+    /// Without this the first fixture insert panics on a bare
+    /// `E42P01 relation "zeroship.plans" does not exist`, which reads like a code defect
+    /// and sends the reader into the store rather than to their DSN. The default DSN
+    /// names `zeroship_control_test`, which on a normal dev box does NOT carry these
+    /// tables, so hitting it is the expected first experience rather than an edge case.
+    ///
+    /// Checked up front rather than left to the insert so the failure names the cause,
+    /// the variable to set, and a database that works. CI is unaffected either way -
+    /// `tests/run_billing_suite.sh` creates a fresh migrated database and exports
+    /// `MIGRATED_TEST_DB`, so this check passes there and only ever fires locally.
+    async fn assert_platform_schema_present(client: &Client) {
+        let rows = client
+            .query(
+                "SELECT table_name FROM information_schema.tables \
+                  WHERE table_schema = 'zeroship'",
+                &[],
+            )
+            .await
+            .expect("read information_schema for platform tables");
+        let present: std::collections::HashSet<String> = rows
+            .iter()
+            .map(|row| row.get::<_, String>("table_name"))
+            .collect();
+        let missing: Vec<&str> = REQUIRED_PLATFORM_TABLES
+            .iter()
+            .copied()
+            .filter(|table| !present.contains(*table))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the target database has no platform schema - missing zeroship.{}.\n\
+             This suite needs a database the PLATFORM migrations have been applied to; \
+             it creates only its own migrated_migrations table.\n\
+             Point it at one, e.g.:\n  \
+             MIGRATED_TEST_DB=\"host=localhost port=5440 user=postgres password=zeroship \
+             dbname=zeroship_billing_test\" cargo test -p zeroship-migrated \
+             --features live-db-tests\n\
+             Resolution order is MIGRATED_TEST_DB, CONTROL_TEST_DB, PG_TEST_URL, then the \
+             built-in default ({}), which on a stock dev box is NOT migrated.",
+            missing.join(", zeroship."),
+            DEFAULT_TEST_DSN,
+        );
     }
 
     async fn insert_transition_row(
