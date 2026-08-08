@@ -1,0 +1,5 @@
+error: #[v8_method(fastcall)]: return type `Option` is not a fastcall primitive — String, Vec<u8>, Option<T>, and Local<...> are forbidden (the fast path can't allocate or represent null). Allowed: bool, i32, u32, i64, u64, f32, f64, (), or Result<primitive, OpError>
+  --> tests/compile_fail_fastcall/v8_fastcall_option_return.rs:23:22
+   |
+23 |     fn opt(&self) -> Option<u32> {
+   |                      ^^^^^^^^^^^
