@@ -160,7 +160,12 @@ export interface BuildInfo {
    * Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
    * every `crates/*\/src` file. This is what tells a pre-fix artifact from a
    * post-fix one when the version has not moved. It does NOT cover the JS
-   * packages, the rustc version, the cargo profile, or the enabled features.
+   * packages, the rustc version, the cargo profile, or the enabled features -
+   * and NOTHING ELSE IN THIS REPLY COVERS THEM EITHER. The only other fields are
+   * `version` (which moves on a release, not on a rebuild) and `ir_version` (a
+   * format floor), so two `.node` artifacts built from the same Rust sources
+   * under a different toolchain, profile, or feature set report an identical
+   * identity here. A hole, not a handoff.
    */
   sourceDigest: string
 }
@@ -314,7 +319,12 @@ export interface GenArtifactsSource {
    * columns its database does not have. Making the field optional would put that
    * mistake back within reach, so omitting it is a type error rather than a
    * silent Postgres fallback. This does not cover choosing the dialect for the
-   * caller: there is no URL or config in scope here.
+   * caller: there is no URL or config in scope here, so the caller owns it. The
+   * only in-repo call site is
+   * `packages/zero-migrate-cli/tests/host/gen-artifacts-dialect.test.ts`, which
+   * names the dialect explicitly per arm; no shipped code path resolves one for
+   * this verb, so the `DriverConfig`-to-dialect mapping `apply`/`status` use
+   * (`packages/zero-migrate-cli/src/index.ts` `dialectOf`) does NOT reach it.
    */
   dialect: string
   /**

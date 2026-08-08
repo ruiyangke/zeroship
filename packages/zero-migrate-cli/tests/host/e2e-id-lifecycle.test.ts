@@ -4,8 +4,16 @@
 // lowered/applied by the real native addon, and verified against the live catalog
 // and rows through the real pg/mysql2 drivers. PostgreSQL and MySQL are gated
 // independently by their URL environment variables. SQLite deliberately is not
-// duplicated here: the Node host DriverConfig has no SQLite seam; its lifecycle
-// matrix remains covered in-process by the Rust crate.
+// duplicated here - a placement choice, not a missing seam: the Node host
+// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// (`packages/zero-migrate-cli/src/index.ts:73`) and `apply()` routes it to
+// `applyIrSqlite`. The SQLite lifecycle matrix is caught in-process by the Rust crate
+// instead (`crates/zero-migrate/tests/uuid_generation.rs`,
+// `ulid_value_format.rs`, `type_id_value_format.rs`,
+// `synchronize_identity_sqlite.rs`). What a SQLite arm here could NOT reach either
+// way is `status`, which refuses a `sqlite` driver outright
+// (`packages/zero-migrate-cli/src/index.ts:409`); only
+// `statusEnvelopes({ readOnly: true })` accepts one.
 //
 // Plan-aware status takes a live catalog snapshot before reconciliation, so the
 // clean drift controls below are also a regression witness for PostgreSQL name[]

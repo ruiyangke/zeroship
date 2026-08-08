@@ -73,11 +73,19 @@
 // `lower_ordered_envelopes_to_plans` and does. Those arms therefore assert plan and
 // apply AGREE, which is the property a split path can silently lose.
 //
-// Does NOT cover guarded ops other than `createTable`, and does NOT cover a partially
-// matching table whose secondary index is still absent. The first gap grew when the
+// Does NOT cover guarded ops other than `createTable`. That gap grew when the
 // projection's ownership check was removed: a guarded `dropTable`/`renameTable` whose
 // guard is satisfied also used to be refused by it, for a registry change that was
-// never about foreign ownership, and no arm here drives one either way.
+// never about foreign ownership, and no arm here drives one either way. What DOES
+// cover part of it is the projection's own shape: `projection_guard_verdict`
+// (`crates/zero-migrate-node/src/lower.rs`) runs `decide` over every step's probe with
+// no per-op branch, so the `createTable` arms below exercise the identical code path
+// for any op. What NOTHING covers is that a guarded `dropTable`/`renameTable` LOWERS a
+// probe the projection can satisfy at all - that residue is a hole.
+//
+// Does NOT cover a partially matching table whose secondary index is still absent.
+// NOTHING ELSE COVERS IT: the per-unit rule is designed for exactly that shape and no
+// arm in this workspace drives one. A hole, noted rather than silently narrowed.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

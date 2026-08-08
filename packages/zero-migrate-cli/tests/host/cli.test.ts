@@ -163,9 +163,20 @@ test("CLI value-taking flags reject a following flag as their value", () => {
   // absent. Runs in a throwaway cwd because `new` resolves `--dir` relative to cwd and
   // would otherwise write into the package root.
   //
-  // Does NOT cover: whether `new` accepts or honors `--json` itself, dash-leading
-  // values for any flag other than `--dir`, or the space-separated form, which the
-  // loop above rejects.
+  // Does NOT cover: whether `new` accepts or honors `--json` itself. `--json` is a
+  // real boolean flag in the parser (`src/cli.ts` `case "json"`), borrowed here only
+  // as a dash-leading STRING. Its FLAG meaning is covered further down this file on
+  // `plan` and on `lint` ("lint defaults to all dialects and --dialect narrows"), and
+  // its inline-value refusal by the `help --json=true` arm above; what no arm covers
+  // is `new` + `--json`, which is a hole.
+  //
+  // Does NOT cover dash-leading values for any flag other than `--dir` - and does
+  // not need to: the inline-`=` escape hatch and the following-flag refusal are ONE
+  // shared closure (`takeVal` in `src/cli.ts`) that every value-taking flag routes
+  // through, and the loop above already drives the refusal half through
+  // `--database-url`.
+  //
+  // Does NOT cover the space-separated form, which the loop above rejects.
   const inlineCwd = temporaryDirectory(".cli-inline-dash-value-");
   try {
     const inline = spawnCli(["new", "add_users", "--dir=--json"], { cwd: inlineCwd });
@@ -195,9 +206,20 @@ test("CLI value-taking flags reject a following flag as their value", () => {
 // The arm above stays ungated so the escape hatch keeps a guard on a machine with no
 // database; this one adds the database half where PostgreSQL is available.
 //
-// Does NOT cover: MySQL, which has no scaffold-to-apply arm here; the space-separated
-// `--dir --json` form, which the loop above rejects; `--json` as a flag on any verb;
-// or any scaffold content beyond the stub.
+// Does NOT cover: MySQL, which has no scaffold-to-apply arm here and none elsewhere -
+// the argv routing under test is dialect-independent (`--dir` is resolved before any
+// driver is opened), but nothing proves that end to end on MySQL, so it is a hole.
+//
+// Does NOT cover the space-separated `--dir --json` form, which the loop above
+// rejects.
+//
+// Does NOT cover `--json` as a flag on any verb: here it is only a dash-leading
+// string. Its flag meaning is covered further down this file on `plan` and on `lint`
+// ("lint defaults to all dialects and --dialect narrows"); the one verb no arm pairs
+// it with is `new`, which is a hole.
+//
+// Does NOT cover any scaffold content beyond the stub; what `new` writes into the
+// file is not asserted here or in the arm above.
 //
 // If the apply throws, the finally still drops both schemas, so a failure does not
 // leak. Only a crash of the test process itself would leave `<schema>_migrations`

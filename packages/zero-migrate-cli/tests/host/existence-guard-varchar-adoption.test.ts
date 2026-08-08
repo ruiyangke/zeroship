@@ -25,9 +25,27 @@
 // so the adoption is genuine rather than a re-run of the engine's own DDL.
 //
 // Does NOT cover MySQL (`mysql_canonical_type` folds `varchar(N)` to `text`, so the
-// MySQL guard never compared the length in the first place), does NOT cover SQLite,
-// does NOT cover `character(N)` (already recovered by the snapshot), and does NOT
-// cover the stand-alone `addColumn ifNotExists` probe shape.
+// MySQL guard never compared the length in the first place).
+//
+// Does NOT cover SQLite, and the reason is the same class as MySQL's, not a missing
+// seam: the SQLite leg of `existence_probe::decide` canonicalises BOTH sides through
+// `schema::query::sqlite_canonical_type`, whose fallback arm maps every unrecognised
+// spelling -- `character varying` and `character varying(255)` alike -- to the `text`
+// affinity, so no length ever reaches the compare and the defect this file pins
+// cannot arise there. NOTHING STRUCTURAL BLOCKS A SQLITE ARM: the Node host
+// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
+// `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this same
+// directory drives live SQLite arms through it.
+//
+// Does NOT cover `character(N)` (already recovered by the snapshot, by the
+// `character`-only arm this one widens).
+//
+// Does NOT cover the stand-alone `addColumn ifNotExists` probe shape: no arm here or
+// elsewhere drives one over a length-qualified column. The recomposition it would
+// depend on lives in the SHARED snapshot builder (`crates/zero-migrate/src/apply/
+// drift.rs`) that every probe shape reads, so the fix is not table-shaped -- but the
+// addColumn shape itself is unpinned end to end, which is a hole, not a handoff.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

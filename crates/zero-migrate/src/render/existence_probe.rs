@@ -49,8 +49,13 @@
 //!   complete over an index that was never created. Where it is per table
 //!   (MySQL) the other table's index is unrelated and the verdict is a plain
 //!   `RunBare`. This does NOT check the index's SHAPE on the other table (the name
-//!   is the collision) and does NOT cover the fold's own name bookkeeping, which
-//!   runs before lowering.
+//!   is the collision). It does NOT cover a name collision INSIDE one migration
+//!   unit either, and nothing else does: the fold's `DuplicateIndex` check keys on
+//!   the target table's own index list (`render::fold`), so it never asks which
+//!   OTHER table owns a name, and the fold-level widening that would have closed
+//!   this was rejected on purpose (review-log F48). This probe is the only
+//!   cross-table name-to-owner check that runs, and it reads ONE catalog snapshot
+//!   per unit.
 //! - **SQLite affinity compare (F1)** — the engine's declared snapshot data_type is
 //!   ALWAYS the PG `information_schema` spelling (`field_data_type` maps via the PG
 //!   dialect, dialect-agnostically), but a REAL SQLite catalog reports the SQLite
@@ -625,9 +630,19 @@ fn decide_index(
     // gated on [`Capability::SchemaWideIndexNames`]: PostgreSQL and SQLite scope an
     // index name schema-wide, so a hit elsewhere IS the named object; MySQL scopes
     // it PER TABLE, where two tables in one database may each carry
-    // `idx_created_at` and a hit elsewhere is an unrelated index. Does NOT cover
-    // cross-SCHEMA name reuse (the snapshot is one schema) and does NOT cover
-    // the name-to-owner question the fold answers before lowering.
+    // `idx_created_at` and a hit elsewhere is an unrelated index.
+    //
+    // Does NOT cover cross-SCHEMA name reuse, because there is nothing to cover: the
+    // snapshot is one schema, and an index is a schema-qualified relation on
+    // PostgreSQL, so a same-name index in a DIFFERENT schema is a legal unrelated
+    // object the CREATE does not contend with. SQLite has the single `main` schema,
+    // so the question cannot arise there at all.
+    //
+    // Does NOT cover a name a preceding statement in the SAME migration unit
+    // creates, and nothing else covers that: the snapshot is read once per unit
+    // (`apply::backend::postgres::session`), and the fold's `DuplicateIndex` check
+    // keys on the target table's own index list, never on which OTHER table owns a
+    // name. Noted, not silently narrowed.
     let schema_wide = dialect.supports(Capability::SchemaWideIndexNames);
     let on_probe_table = |candidate: &str| {
         live.tables
@@ -657,8 +672,15 @@ fn decide_index(
     // same-table re-run the idempotent no-op crash recovery replays. Returns before the
     // truncation backstop on purpose: that backstop refuses EVERY over-long
     // `IfNotExists` name, and an unguarded create carries no author request to be
-    // refused on a name PostgreSQL accepts today. Does NOT verify shape, does NOT
-    // cover truncation collisions, and does NOT cover MySQL (per-table names).
+    // refused on a name PostgreSQL accepts today.
+    //
+    // Does NOT verify shape (ownership is the whole decision here; the guarded path
+    // below keeps the shape verify). Does NOT cover truncation collisions: authoring
+    // validation refuses an over-long create-side identifier on every dialect before
+    // lowering, and the `truncated_identifier_backstop` just below owns them for the
+    // guarded path. Does NOT cover MySQL, where nothing needs covering - index names
+    // are per table there, so a same name on another table is not a collision, and
+    // the MySQL backend calls `decide` nowhere in any case.
     if ownership_only {
         return match other_owner(name) {
             Some(owner) => drift(
@@ -684,7 +706,13 @@ fn decide_index(
             // absent/empty on this path (the probe carries `String::new()` when the
             // op omitted it), so a schema-wide name still resolves through the wider
             // scan. Does NOT cover MySQL, where the drop names its table and an
-            // index found under another table is a different object.
+            // index found under another table is a different object - and where
+            // nothing needs to cover it, because the MySQL backend evaluates no
+            // probe at all, so this arm is unreachable on that dialect.
+            //
+            // This branch has NO test on any dialect: no test in this workspace
+            // authors a guarded `dropIndex`, and every `GuardProbe::Index` unit test
+            // below drives `IfNotExists`. A hole, not a handoff.
             if live_idx.is_some() || other_owner(name).is_some() {
                 GuardVerdict::RunBare
             } else {

@@ -124,9 +124,15 @@ pub enum GuardProbe {
         ///
         /// Does NOT verify the index shape and can never resolve to a satisfied
         /// no-op, so the same-table re-run stays an `IF NOT EXISTS` no-op that
-        /// non-transactional crash recovery depends on. Does NOT cover a name a
-        /// PostgreSQL identifier truncation would collide into, and does NOT cover
-        /// a guarded create (which keeps the full shape verify).
+        /// non-transactional crash recovery depends on.
+        ///
+        /// Does NOT cover a name a PostgreSQL identifier truncation would collide
+        /// into: authoring validation refuses an over-long create-side identifier on
+        /// every dialect before lowering, so no such name reaches this flag from the
+        /// authoring API, and the guarded path additionally carries the
+        /// truncated-spelling backstop in `render::existence_probe`.
+        ///
+        /// Does NOT cover a guarded create, which keeps the full shape verify.
         #[serde(default, skip_serializing_if = "is_false")]
         ownership_only: bool,
     },

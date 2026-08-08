@@ -1010,8 +1010,16 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
 /// was never created.
 ///
 /// Does NOT cover MySQL, which scopes index names per table (there the same shape
-/// is a plain absent-index `RunBare`), and does NOT cover the `ifExists` drop
-/// path, where a schema-wide name still resolves through the wider scan.
+/// is a plain absent-index `RunBare`) - and which needs no arm here in any case,
+/// because the MySQL backend evaluates no existence-guard probe at all. The
+/// decider's MySQL contract is pinned by the unit test
+/// `index_ownership_only_ignores_a_foreign_owner_where_names_are_per_table` in
+/// `render::existence_probe`.
+///
+/// Does NOT cover the `ifExists` drop path, where a schema-wide name still resolves
+/// through the wider scan - AND NOTHING ELSE COVERS IT: no test in this workspace
+/// authors a guarded `dropIndex`, and every `GuardProbe::Index` unit test drives
+/// `IfNotExists`. A hole, not a handoff.
 #[compio::test]
 async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
     let p = paths("sq_idx_name_scope");
@@ -1106,9 +1114,19 @@ async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
 /// refuses, with no author guard behind it. The control in the same test is the free
 /// name, which must still reach the CREATE.
 ///
-/// Does NOT cover MySQL (per-table index names), does NOT cover a shape divergence
-/// (the unguarded decision is ownership and nothing else), and does NOT cover a
-/// collision the same batch creates before the statement runs.
+/// Does NOT cover MySQL (per-table index names), where there is nothing to cover:
+/// the MySQL emitter writes no `IF NOT EXISTS` and the MySQL backend evaluates no
+/// probe, so the silent-skip shape this arm pins cannot occur there.
+///
+/// Does NOT cover a shape divergence - by design, not by omission: the unguarded
+/// decision is ownership and nothing else, and the GUARDED path
+/// (`create_index_ifnotexists_name_owned_by_another_table_fails_closed` above, plus
+/// the `index_ifnotexists_*` unit tests in `render::existence_probe`) owns shape.
+///
+/// Does NOT cover a collision the same migration UNIT creates before the statement
+/// runs, AND NOTHING ELSE COVERS IT: the probe reads one catalog snapshot per unit,
+/// and the fold's `DuplicateIndex` check keys on the target table's own index list,
+/// so it never asks which OTHER table owns a name. A hole, not a handoff.
 #[compio::test]
 async fn create_index_unguarded_name_owned_by_another_table_fails_closed() {
     let p = paths("sq_idx_bare_scope");

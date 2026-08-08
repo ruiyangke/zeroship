@@ -3996,9 +3996,16 @@ async fn journal_applied(
 /// journaled-but-absent sibling is the bug; an absent sibling with the unit still
 /// pending would merely be an incomplete deploy.
 ///
-/// Does NOT cover MySQL (that backend evaluates no probe at all, so the guard is
-/// dropped and the bare DDL runs - a separate defect), and asserts the sibling COLUMN
-/// only, not the `zero-migrate:mask` sentinel `COMMENT` riding the same `up`.
+/// Does NOT cover MySQL, and nothing else covers it: that backend evaluates no probe
+/// at all, so the guard is dropped and the bare DDL runs. A separate defect, noted
+/// rather than silently narrowed.
+///
+/// Asserts the sibling COLUMN only, not the `zero-migrate:mask` sentinel `COMMENT`
+/// riding the same `up`. The sentinel's EMISSION is owned by
+/// `ir_author_render_parity.rs` (the `COMMENT ON COLUMN` side output) and its
+/// live-catalog RECOVERY is owned by `sqlite_drift.rs` on the SQLite side; what no
+/// test in this workspace does is read the sentinel back out of a live PostgreSQL
+/// catalog. That residue is a hole.
 #[compio::test]
 async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
     let url = skip_if_no_pg!();
@@ -4377,9 +4384,12 @@ async fn drop_partition_outcome(
 /// surviving partition under a green journal is the bug; a surviving partition with
 /// the migration still pending would merely be a failed deploy.
 ///
-/// Does NOT cover MySQL or SQLite (both collapse `dropPartition` to a bounded
-/// DELETE, a different path with no catalog probe), and does NOT cover
-/// `detachPartition`, which carries no existence guard.
+/// Does NOT cover MySQL or SQLite, where nothing needs covering: both collapse
+/// `dropPartition` to a bounded DELETE, a different path with no catalog probe, so
+/// the partition-resolved-as-a-table failure this arm pins cannot occur there.
+///
+/// Does NOT cover `detachPartition`, which carries no existence guard, so there is
+/// no guard verdict for any layer to get wrong.
 #[compio::test]
 async fn a_guarded_drop_partition_drops_the_child_and_its_rows() {
     let url = skip_if_no_pg!();

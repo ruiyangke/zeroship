@@ -496,7 +496,11 @@ struct AuthoringTable {
 /// `render_runtime_descriptor_v1` folds under or the two artifacts describe
 /// different tables. This does not cover `runtime_metadata_from_ops`, which reads
 /// the unflattened op list and so has never seen inside a dialectal leg on any
-/// target.
+/// target. NOTHING ELSE COVERS IT: `render_runtime_descriptor_v1` takes that map as
+/// given and falls back to `unwrap_or_default()` for a collection it lacks, and the
+/// map has no other producer, so a table created only inside an `Op::Dialectal` leg
+/// emits its FIELDS but loses its runtime options and plain indexes. A hole, not a
+/// handoff.
 fn authoring_tables_from_ops(
     ops: &[Op],
     dialect: SqlDialect,

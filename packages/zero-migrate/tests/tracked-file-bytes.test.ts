@@ -46,9 +46,18 @@
 // text - if that ever stops being true, the right response is a deliberate
 // decision recorded here, not a silently growing exemption list.
 //
-// Does NOT cover untracked or gitignored files, does NOT cover other control
-// characters, and does NOT check file ENCODING (a valid UTF-8 file with unusual
-// codepoints passes; that is `tsc`/`cargo fmt`'s business, not this gate's).
+// Does NOT cover untracked or gitignored files, and no other gate scans them either -
+// deliberately, per the scoping decision above: the gitignored set here is build
+// output (the compiled addon, `packages/*/dist` bar the one tracked bundle), which is
+// legitimately binary and has nothing to be protected from.
+//
+// Does NOT cover other control characters, and NOTHING ELSE COVERS THEM: no gate in
+// this repo looks for any byte but NUL. A hole, not a handoff - NUL earned its own
+// gate because it is the byte that makes grep and the tooling around it report
+// backwards, and the rest were never measured.
+//
+// Does NOT check file ENCODING (a valid UTF-8 file with unusual codepoints passes;
+// that is `tsc`/`cargo fmt`'s business, not this gate's).
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

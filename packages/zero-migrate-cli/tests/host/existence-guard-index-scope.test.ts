@@ -11,9 +11,18 @@
 // read back from the live catalog (`pg_index` / `information_schema.STATISTICS`)
 // rather than from an engine return value.
 //
-// Does NOT cover SQLite (the Node host DriverConfig has no SQLite seam; the SQLite
-// arm lives in `crates/zero-migrate/tests/existence_guard_sqlite.rs`) and does NOT
-// cover expression or partial indexes, which the probe already fails closed.
+// Does NOT cover SQLite here. That is a placement choice, not a seam that is
+// missing: the Node host `DriverConfig` DOES carry
+// `{ kind: "sqlite"; appPath; journalPath }`
+// (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
+// `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this directory
+// drives live SQLite arms through exactly that. The SQLite arm for THIS question is
+// caught in `crates/zero-migrate/tests/existence_guard_sqlite.rs`
+// (`create_index_ifnotexists_name_owned_by_another_table_fails_closed`), against a
+// real SQLite catalog in process.
+//
+// Does NOT cover expression or partial indexes, which the probe already fails closed
+// on (`existence_probe.rs` `FailDrift` naming `expression`).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

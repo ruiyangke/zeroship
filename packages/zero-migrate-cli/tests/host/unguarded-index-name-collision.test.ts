@@ -12,9 +12,28 @@
 // read back from the live catalog (`pg_index` / `information_schema.STATISTICS`)
 // and from the journal table rather than from an engine return value.
 //
-// Does NOT cover SQLite (the Node host DriverConfig has no SQLite seam), does NOT
-// cover a collision the same batch creates before the statement runs, and does NOT
-// cover an index name long enough for PostgreSQL to truncate it into a collision.
+// Does NOT cover SQLite here. Not for want of a seam: the Node host `DriverConfig`
+// DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
+// `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this directory
+// drives live SQLite arms through it. The SQLite arm for this exact shape is caught
+// in `crates/zero-migrate/tests/existence_guard_sqlite.rs`
+// (`create_index_unguarded_name_owned_by_another_table_fails_closed`).
+//
+// Does NOT cover a collision the same migration UNIT creates before the statement
+// runs, AND NOTHING ELSE COVERS IT EITHER - this is a hole, not a handoff. The probe
+// reads one catalog snapshot per unit (`apply/backend/postgres/session.rs:430`), so a
+// name an earlier statement in the same `up` created is invisible to it; and the
+// fold's `DuplicateIndex` check keys on the target table's own index list
+// (`render/fold.rs:1765`, `:2733`, `:2788`), so it never asks which OTHER table owns
+// a name. The fold-level widening that would have closed it was rejected on purpose
+// (review-log F48).
+//
+// Does NOT cover an index name long enough for PostgreSQL to truncate it into a
+// collision: authoring validation refuses an over-long create-side identifier on
+// every dialect before lowering (`crates/zero-migrate/tests/
+// authored_identifier_lengths.rs`), so a name that could truncate never reaches this
+// path from the authoring API.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

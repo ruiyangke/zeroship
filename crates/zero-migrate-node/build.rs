@@ -16,6 +16,14 @@
 // feature set. Two builds of the same sources under a different toolchain or
 // profile report the same digest. It also hashes bytes as checked out, so a
 // CRLF checkout digests differently from an LF one.
+//
+// NOTHING ELSE COVERS THAT GAP - it is a hole, not a handoff. `BuildInfo` carries
+// only `version` (which moves on a release, not on a rebuild), `ir_version` (a
+// format floor), and this digest, so no field of the reported identity separates
+// two artifacts that differ only in toolchain, profile, or features. Committed JS
+// under `packages/` has its own drift gates in CI (`embedded-recorder.js` and
+// `index.d.ts` are each diffed against a fresh build), but those gate the
+// REPOSITORY, not the identity a loaded `.node` reports about itself.
 
 use std::env;
 use std::fs;

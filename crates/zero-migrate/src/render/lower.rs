@@ -4408,11 +4408,22 @@ impl IrAuthor {
                     // created. Stamp an ownership-only probe so that case fails closed
                     // naming the owner. Ownership is the whole decision: no shape
                     // verify and no satisfied no-op, so the same-table re-run stays the
-                    // `IF NOT EXISTS` no-op crash recovery replays. Does NOT cover
-                    // MySQL (index names are per-table there, and the MySQL emitter
-                    // writes no `IF NOT EXISTS`), does NOT cover a collision the batch
-                    // itself creates before this statement runs, and does NOT make an
-                    // unguarded create idempotent in any other respect.
+                    // `IF NOT EXISTS` no-op crash recovery replays.
+                    //
+                    // Does NOT cover MySQL, where nothing needs covering: index names
+                    // are per-table there, the MySQL emitter writes no
+                    // `IF NOT EXISTS`, and the MySQL backend evaluates no probe.
+                    //
+                    // Does NOT cover a collision the same migration UNIT creates
+                    // before this statement runs, and NOTHING ELSE COVERS IT: the
+                    // probe reads one catalog snapshot per unit, and the fold's
+                    // `DuplicateIndex` check keys on the target table's own index
+                    // list, so it never asks which OTHER table owns a name. The
+                    // fold-level widening that would have closed this was rejected
+                    // on purpose (review-log F48). A hole, not a handoff.
+                    //
+                    // Does NOT make an unguarded create idempotent in any other
+                    // respect; nothing else claims to.
                     probe = Some(crate::model::probe::GuardProbe::Index {
                         schema: eff_schema.clone(),
                         table: table.clone(),
