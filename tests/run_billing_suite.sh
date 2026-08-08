@@ -132,12 +132,35 @@ fi
 # here; override TEST_THREADS to trade it back.
 THREAD_ARG=(--test-threads "${TEST_THREADS:-1}")
 
+# Capture every group's output so the run can be COUNTED, not just exit-checked.
+#
+# `cargo test` with a filter matching nothing runs zero tests and exits 0.
+# Measured: `cargo test -p zeroship-metering --lib no_such_filter_xyz` reports
+# "running 0 tests ... 0 passed ... 12 filtered out" and returns 0. The
+# metering group below uses exactly that shape (`--lib outbox`), so renaming
+# those tests would cover nothing while this script printed ALL GROUPS PASSED.
+#
+# `--test <target>` is NOT exposed to this: an unmet required-feature or a
+# missing target both exit 101, checked. Only filters degrade silently.
+SUITE_LOG="$(mktemp)"
+trap 'rm -f "$SUITE_LOG"' EXIT
+
+# Run a group, tee its output into SUITE_LOG, return the CARGO exit status.
+#
+# PIPESTATUS is load-bearing. Piping into tee makes `$?` tee's status, which is
+# 0 whenever tee could write - so every group would look green regardless of
+# what cargo did.
+run_group() {
+  "$@" 2>&1 | tee -a "$SUITE_LOG"
+  return "${PIPESTATUS[0]}"
+}
+
 fail=0
 declare -a failed=()
 
 echo "------------------------------------------------------------------"
 echo "==> zeroship-control live-database suite (--features live-db-tests)"
-if cargo test -p zeroship-control --features live-db-tests --no-fail-fast \
+if run_group cargo test -p zeroship-control --features live-db-tests --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
@@ -147,7 +170,7 @@ fi
 
 echo "------------------------------------------------------------------"
 echo "==> zeroship-migrated live-database suite (--features live-db-tests)"
-if cargo test -p zeroship-migrated --features live-db-tests --no-fail-fast \
+if run_group cargo test -p zeroship-migrated --features live-db-tests --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
@@ -159,7 +182,7 @@ echo "------------------------------------------------------------------"
 echo "==> zeroship-metering outbox WAL unit tests"
 # Not a zeroship-control target and not feature-gated, so the invocations above
 # do not reach it; the metering outbox is the producer half of the money path.
-if cargo test -p zeroship-metering --lib outbox -- "${THREAD_ARG[@]}"; then
+if run_group cargo test -p zeroship-metering --lib outbox -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
@@ -176,7 +199,7 @@ fi
 if [ -n "${REDPANDA_BROKERS:-}" ]; then
   echo "------------------------------------------------------------------"
   echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
-  if cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
+  if run_group cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
     fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
   fi
 else
@@ -189,4 +212,32 @@ if [ "$fail" -ne 0 ]; then
   echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
   exit 1
 fi
-echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED"
+
+# Exit codes alone cannot distinguish "every group passed" from "a group ran
+# nothing and said so politely". Require a MINIMUM, the same shape as
+# run_auth_suite.sh.
+passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
+  | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
+
+# 660 against 713 measured on 2026-08-08 (61 groups, 0 failures), the same ~7
+# percent headroom the auth gate carries.
+#
+# The measurement was taken WITHOUT REDPANDA_BROKERS, so it excludes the
+# real-broker group that CI runs. That makes 713 the LOWER of the two legitimate
+# configurations, which is the one a floor has to sit under - a floor derived
+# from the richer CI run would fail every local invocation.
+#
+# Raise it deliberately when the suite grows. A fixed floor gets looser with
+# every test added, which is the wrong direction for a guard against coverage
+# loss.
+BILLING_MIN_PASSED="${BILLING_MIN_PASSED:-660}"
+if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
+  echo "FAIL: only ${passed} billing tests passed, fewer than the ${BILLING_MIN_PASSED} this gate expects." >&2
+  echo "A group that silently stopped running is indistinguishable from a group that passed." >&2
+  echo "If the suite really did shrink, lower BILLING_MIN_PASSED deliberately; do not treat the gap as slack." >&2
+  exit 1
+fi
+
+# Printed on SUCCESS, not only inside a failure message: a count nobody sees
+# until the gate has already failed cannot warn anyone.
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED})"
