@@ -68,7 +68,7 @@ impl SupabaseConfig {
         }
 
         let verification = if let Some(jwt_secret) = jwt_secret {
-            let trimmed_len = jwt_secret.trim().as_bytes().len();
+            let trimmed_len = jwt_secret.trim().len();
             if trimmed_len == 0 || trimmed_len < SUPABASE_HS256_JWT_SECRET_MIN_BYTES {
                 return Err(SupabaseConfigError::EmptyJwtSecret);
             }
