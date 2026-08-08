@@ -81,6 +81,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Names a full volume as the cause when the crate-count control fires. See the
+# library header; `tests/lib_measurement_integrity_selftest.sh` covers both
+# directions and is itself gated in CI.
+. "$ROOT/tests/lib/measurement_integrity.sh"
+
 DOC_MAX_DEFAULT="${DOC_MAX_DEFAULT:-1}"
 DOC_MAX_ALL="${DOC_MAX_ALL:-0}"
 DOC_MIN_CRATES="${DOC_MIN_CRATES:-26}"
@@ -112,6 +117,16 @@ run_config() {
   # Checked BEFORE the unresolved count, because a build that did not run
   # produces the most reassuring number in this whole script. See note 3.
   if [ "$crates" -lt "$DOC_MIN_CRATES" ]; then
+    # Name the cause when it is knowable. The crate-count control already turns a
+    # dead build into a FAIL rather than a false green, so the verdict was never
+    # wrong - but "documented only 3 crates" sends the reader looking for a doc
+    # problem, and a full volume is the one cause that is both common here and
+    # invisible in the message. Checked first so the diagnosis leads.
+    if log_shows_disk_full "$LOG"; then
+      report_measurement_did_not_run "$LOG" "${label} cargo doc"
+      status=1
+      return
+    fi
     echo "FAIL: ${label} documented only ${crates} crates, expected ${DOC_MIN_CRATES}." >&2
     echo "      A doc build that did not run reports 0 unresolved links, which is" >&2
     echo "      indistinguishable from a clean pass by that count alone. Treat this" >&2
