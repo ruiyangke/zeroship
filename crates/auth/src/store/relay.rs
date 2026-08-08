@@ -2,7 +2,7 @@
 //!
 //! Four things live here, all keyed on the row the gateway (Slice 4) writes:
 //!
-//! 1. [`ensure_relay_alias`] — mint (or reuse) the `{token}@{relay_domain}`
+//! 1. [`mint_alias_at_consent`] — mint (or reuse) the `{token}@{relay_domain}`
 //!    alias at consent time (sub-spec §2/§6.1). Off the hot path, with
 //!    collision generate-and-retry and re-grant stability (the SAME alias is
 //!    reused on re-grant, never rotated — Apple Hide-My-Email model).

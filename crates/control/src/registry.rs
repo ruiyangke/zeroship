@@ -616,7 +616,7 @@ impl Registry {
     ///
     /// The `manifest_json` column carries the per-app routing manifest
     /// (dispatch rules + asset maps) emitted by the build adapter. NULL
-    /// or invalid → synthesize [`Manifest::passthrough`] so dispatch is
+    /// or invalid → synthesize [`zeroship_bundle::Manifest::passthrough`] so dispatch is
     /// always defined (legacy fallback path was removed).
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;

@@ -2,7 +2,7 @@
 //! #26, PR-2; design `0048 credit_ledger` + flow A "credit-apply at finalize").
 //!
 //! The Stripe customer-balance model: a creator's credit BALANCE is
-//! `SUM(amount_cents)` over [`credit_ledger`], never a stored column (so it can
+//! `SUM(amount_cents)` over `credit_ledger`, never a stored column (so it can
 //! never drift from its history). A grant is a POSITIVE entry; consumption is one
 //! NEGATIVE `consumed` entry PER DRAWN GRANT (`consumed_from_grant_id`), written at
 //! invoice finalize — so credit-expiry attribution stays exact.

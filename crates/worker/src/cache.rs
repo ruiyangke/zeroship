@@ -209,7 +209,7 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
 /// unset (degraded config).
 ///
 /// Feeds all five platform auto-counters in one shot via
-/// [`Meter::record_request`] — `requests` (always +1) plus the four the
+/// [`zeroship_metering::Meter::record_request`] — `requests` (always +1) plus the four the
 /// dispatch handler measures per request:
 /// - `cpu_us` — V8 thread CPU microseconds (CLOCK_THREAD_CPUTIME_ID delta
 ///   around the synchronous isolate entry; the same clock the CPU limiter
@@ -276,7 +276,7 @@ pub fn record_workflow_blob_write(app_id: &Uuid, bytes: u64) {
 /// `stream_wall_us` continuously while it is open, so (a) usage bills
 /// throughout a multi-hour stream instead of only at close, and (b) a worker
 /// crash loses at most one recording interval's delta rather than the whole
-/// stream. The streaming drain task ([`crate::handler::stream_response`])
+/// stream. The streaming drain task (`handler::stream_response`, in the worker binary)
 /// calls this every ~10s / ~1 MiB and once more at finalize with the
 /// trailing delta.
 ///

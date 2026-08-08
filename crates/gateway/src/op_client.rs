@@ -8,10 +8,10 @@
 //! together:
 //!
 //! 1. **One reused `cyper::Client` per worker thread.** `cyper::Client`'s
-//!    connector wraps its connect future in [`send_wrapper::SendWrapper`]
+//!    connector wraps its connect future in `send_wrapper::SendWrapper`
 //!    (cyper-0.8 `connector.rs`), which *panics* if the client is used on a
 //!    thread other than the one that created it. It is therefore effectively
-//!    `!Send` in practice — exactly like the compio-postgres [`Pool`] in
+//!    `!Send` in practice — exactly like the compio-postgres [`compio_postgres::Pool`] in
 //!    [`crate::db`]. We mirror that crate's per-worker-thread `thread_local`:
 //!    the first OP touch on a worker thread builds the client; every
 //!    subsequent call on that thread reuses it. NO `cyper::Client::new()`

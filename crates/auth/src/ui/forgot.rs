@@ -6,7 +6,7 @@
 //! failed. Enumeration defense.
 //!
 //! When the address does have an account, we issue a 1-hour password
-//! reset token (via [`identity::password_reset::issue`]) and send the
+//! reset token (via [`crate::identity::password_reset::issue`]) and send the
 //! reset email. Failures are logged and silently swallowed so the
 //! response remains uniform.
 

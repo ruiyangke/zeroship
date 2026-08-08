@@ -169,7 +169,7 @@ pub struct ProjectedCharge {
 /// # Errors
 /// - [`RegistryError`] on a DB failure.
 /// - A pricing failure (unresolved FX / CU overflow) maps to
-///   [`RegistryError::Pricing`] so the handler can surface a clean 5xx rather
+///   [`RegistryError::FxUnresolved`] so the handler can surface a clean 5xx rather
 ///   than fabricating a $0 projection.
 pub async fn projected_charge(
     registry: &Registry,

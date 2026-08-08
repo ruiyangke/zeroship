@@ -33,7 +33,7 @@
 //!   magic-link primitive enforces its own per-email superseding for
 //!   `'login'` rows).
 //!
-//! Reuses [`zeroship.magic_links`] with `purpose='reset'` rather than
+//! Reuses `zeroship.magic_links` with `purpose='reset'` rather than
 //! introducing yet another single-use-token table — the shape is
 //! identical (`token_hash`, email, purpose, expiry, `consumed_at`). The
 //! `csrf_nonce` column is required by the table schema but unused for

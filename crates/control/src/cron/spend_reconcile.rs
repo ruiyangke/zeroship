@@ -1,7 +1,7 @@
 //! Spend-reconcile cron.
 //!
 //! Every ~60s it runs the [`SpendEngine::evaluate_all`] sweep: price each
-//! app's current-period usage, derive the new [`SpendState`] with hysteresis,
+//! app's current-period usage, derive the new [`zeroship_core::types::SpendState`] with hysteresis,
 //! and persist transitions to `zeroship.app_spend_state` (+ history). The
 //! gateway picks up the new state on its next `/internal/routes` pull (the
 //! registry JOINs `app_spend_state`); enforcement rides the PULLed

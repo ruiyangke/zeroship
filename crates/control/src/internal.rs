@@ -156,7 +156,7 @@ pub async fn get_routes(
 ///
 /// The production reconcile cron only ever bills the PREVIOUS calendar month
 /// (`previous_period_start_unix(now)`), which an end-to-end test cannot wait a
-/// month for. This endpoint drives the SAME [`billing_reconcile::tick_with`]
+/// month for. This endpoint drives the SAME [`crate::cron::billing_reconcile::tick_with`]
 /// sweep against a caller-chosen `period` so a harness (or an operator
 /// re-running a missed close) can reconcile a specific closed period on demand.
 /// Idempotency is unchanged: the `billing_runs` / `billing_run_items` guards
@@ -207,11 +207,11 @@ pub async fn force_reconcile(
 }
 
 /// POST /internal/spend/reconcile — operator-gated on-demand trigger of ONE
-/// spend-reconcile sweep ([`spend_reconcile::tick`]).
+/// spend-reconcile sweep ([`crate::cron::spend_reconcile::tick`]).
 ///
 /// Same gate as every other `/internal/*` endpoint ([`check_auth`]). The
 /// spend cron runs every ~60s on its own; this lets an operator (or an E2E)
-/// force a single sweep immediately so the derived [`SpendState`] is persisted
+/// force a single sweep immediately so the derived [`zeroship_core::types::SpendState`] is persisted
 /// without waiting a full tick. The gateway still picks the new state up on its
 /// next `/internal/routes` poll (decision D1) — this endpoint only advances the
 /// CONTROL-side derivation, it does not push to the gateway. Idempotent: a

@@ -261,7 +261,7 @@ impl S3Config {
         })
     }
 
-    /// Build the host and base URL (<scheme://host>[:port]) plus the object-key
+    /// Build the host and base URL (`<scheme://host>[:port]`) plus the object-key
     /// path prefix for a given storage key, honouring addressing style.
     ///
     /// Returns `(scheme, host, base_path)` where `base_path` already contains a
@@ -319,7 +319,7 @@ impl S3Config {
 pub struct EndpointParts {
     /// `http` or `https`.
     pub scheme: String,
-    /// Host[:port] used both for the URL authority and the signed `host` header.
+    /// `Host[:port]` used both for the URL authority and the signed `host` header.
     pub host: String,
     /// If true, the object path is prefixed with `/{bucket}`.
     pub bucket_in_path: bool,

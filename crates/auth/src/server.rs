@@ -303,7 +303,7 @@ async fn style() -> web::HttpResponse {
 ///   the same predicate, so handlers always find this state present at
 ///   request time.
 /// - `Arc<dyn Mailer>` — outbound transactional mailer (stdout / SMTP /
-///   Resend). Selected by `--mailer` in [`crate::main`]; threaded
+///   Resend). Selected by `--mailer` in the `zeroship-auth` binary main; threaded
 ///   uniformly so handlers can always extract `State<Arc<dyn Mailer>>`.
 /// - `RelayForwardMailer` — the SECOND, dedicated relay-forward mailer
 ///   (sub-spec §5.2a). Built from `--relay-forward-mailer` (SMTP/stdout,

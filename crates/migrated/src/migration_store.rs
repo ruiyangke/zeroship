@@ -133,7 +133,7 @@ impl MigrationStore {
     /// reviewed). The apply gate later re-resolves the migration to X' and proceeds
     /// only if `X' == approved_checksum` — so this checksum closes the approve/apply
     /// TOCTOU. The write is guarded on the current status so a double-approve or an
-    /// approve of an already-applied/rejected row is a no-op ([`Self::NotPending`]).
+    /// approve of an already-applied/rejected row is a no-op ([`MigrationStoreError::NotPending`]).
     pub async fn mark_approved(
         &self,
         app_id: Uuid,
