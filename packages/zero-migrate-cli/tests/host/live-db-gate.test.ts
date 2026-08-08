@@ -189,6 +189,9 @@ test("a configured DSN that cannot authenticate fails the suite and names the dr
 test("an unset DSN under ZERO_MIGRATE_REQUIRE_LIVE_DB fails the suite", () => {
   const run = runGatedSuite({ ZERO_MIGRATE_REQUIRE_LIVE_DB: "1" });
 
+  // Same third-state trap as the arm above: a killed child reports a null status and
+  // `notEqual(null, 0)` passes, so "did not succeed" and "never ran" collapse together.
+  assert.equal(typeof run.status, "number", "the child must exit on its own, not be killed");
   assert.notEqual(run.status, 0, "a required live database with no DSN must fail the suite");
   assert.match(
     run.output,
