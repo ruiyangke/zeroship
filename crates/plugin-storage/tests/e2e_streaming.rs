@@ -457,6 +457,87 @@ export default {
 };
 "#;
 
+// A producer that yields several good chunks and then THROWS. The stream is
+// errored, not closed: no well-formed object was ever produced, so a commit
+// here stores a prefix of the bytes the app tried to upload.
+//
+// The handler reports which of the two happened rather than asserting, so a
+// failure names the observed size instead of just a rejected promise.
+const STORAGE_STREAM_PRODUCER_THROWS_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const s = env.storage;
+        const BUCKET = "uploads";
+        const KEY = "stream/truncated.bin";
+        const CHUNK = 64 * 1024;
+        const GOOD = 4;
+
+        let produced = 0;
+        const upload = new ReadableStream({
+            pull(controller) {
+                if (produced < GOOD) {
+                    controller.enqueue(new Uint8Array(CHUNK));
+                    produced += 1;
+                    return;
+                }
+                throw new Error("producer exploded mid-upload");
+            },
+        });
+
+        let putResult = null;
+        try {
+            putResult = JSON.parse(await s.putStream(BUCKET, KEY, upload, "application/octet-stream"));
+        } catch (e) {
+            // Desired: the failed producer surfaces as a failed upload.
+            return Response.json({ ok: true, rejected: (e && e.message) || String(e) });
+        }
+
+        // putStream RESOLVED despite the producer failing. Report what it
+        // committed, and whether the truncated object is now readable back.
+        let storedSize = null;
+        try {
+            const handleRaw = await s.getStream(BUCKET, KEY);
+            if (handleRaw && handleRaw !== "null") {
+                const handle = JSON.parse(handleRaw);
+                storedSize = 0;
+                for (;;) {
+                    const chunk = await s.readChunk(handle.streamId);
+                    if (chunk === undefined || chunk === null) break;
+                    storedSize += chunk.length;
+                }
+            }
+        } catch (e) {
+            storedSize = "readback threw: " + ((e && e.message) || String(e));
+        }
+        return Response.json({
+            ok: false,
+            step: "put.resolved",
+            committedSize: putResult && putResult.size,
+            producedBeforeThrow: produced * CHUNK,
+            storedSize,
+        }, { status: 500 });
+    },
+};
+"#;
+
+/// A creator upload whose `ReadableStream` throws must not be committed as a
+/// complete object. The producer's failure reaches the forwarder as a rejected
+/// `read()`; if that is forwarded as a plain EOF, the consumer finishes the
+/// multipart and `putStream` resolves with the truncated size, which is also
+/// what metering then bills.
+#[test]
+fn e2e_storage_upload_with_a_throwing_producer_is_not_committed() {
+    let (status, body) = run_app(STORAGE_STREAM_PRODUCER_THROWS_APP);
+    assert_eq!(
+        status, 200,
+        "a throwing upload producer was committed as a successful object; body: {body}"
+    );
+    assert!(
+        body.contains(r#""ok":true"#),
+        "putStream did not reject on producer failure; body: {body}"
+    );
+}
+
 #[test]
 fn e2e_storage_streaming_backpressure_over_cap() {
     let (status, body) = run_app(STORAGE_STREAM_BACKPRESSURE_APP);
