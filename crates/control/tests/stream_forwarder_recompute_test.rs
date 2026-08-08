@@ -136,7 +136,14 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     .expect("spend recompute");
     assert_eq!(recomputed.polled, events.len());
     assert_eq!(recomputed.decoded, events.len());
-    assert_eq!(recomputed.skipped, 0);
+    // All four skip causes, not an aggregate. Every event here is stamped
+    // in-period and distinct, so nothing should land in any of them - and
+    // asserting them separately means a future event that IS skipped names
+    // which reason, instead of moving one opaque number.
+    assert_eq!(recomputed.skipped_other_period, 0);
+    assert_eq!(recomputed.skipped_duplicate, 0);
+    assert_eq!(recomputed.skipped_no_app, 0);
+    assert_eq!(recomputed.skipped_zero_value, 0);
     assert_eq!(recomputed.aggregates, 2);
     assert_eq!(recomputed.written, 2);
     assert_total(&client, app, period, "requests", 15).await;
