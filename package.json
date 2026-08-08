@@ -12,10 +12,10 @@
       "default": "./sdks/zeroship-stub/index.js"
     }
   },
-  "packageManager": "pnpm@9.15.4",
+  "packageManager": "pnpm@11.20.0",
   "engines": {
     "node": ">=20",
-    "pnpm": ">=9"
+    "pnpm": ">=11"
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
