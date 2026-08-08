@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -70,7 +70,7 @@ pub struct CpuTimerSystem {
     pipe_read: RawFd,
     #[allow(dead_code)]
     pipe_write: RawFd,
-    handles: Arc<Mutex<HashMap<u64, v8::IsolateHandle>>>,
+    handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>,
     #[allow(dead_code)]
     _watchdog: std::thread::JoinHandle<()>,
 }
@@ -127,7 +127,7 @@ impl CpuTimerSystem {
             }
         }
 
-        let handles: Arc<Mutex<HashMap<u64, v8::IsolateHandle>>> =
+        let handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let handles_clone = handles.clone();
 
@@ -145,8 +145,16 @@ impl CpuTimerSystem {
     }
 
     /// Register an isolate's V8 handle for termination by app_id hash.
-    pub fn register(&self, app_id: u64, handle: v8::IsolateHandle) {
-        self.handles.lock().unwrap().insert(app_id, handle);
+    /// Register an isolate for termination, along with the flag the watchdog
+    /// sets when it fires.
+    ///
+    /// The flag is necessary because `is_execution_terminating` reads FALSE by
+    /// the time the dispatch path regains control - V8 clears the terminating
+    /// state once the exception unwinds out of JS. Without a note left behind,
+    /// a terminated dispatch is indistinguishable from one that simply has no
+    /// result yet, and the request hangs.
+    pub fn register(&self, app_id: u64, handle: v8::IsolateHandle, terminated: Arc<AtomicBool>) {
+        self.handles.lock().unwrap().insert(app_id, (handle, terminated));
     }
 
     /// Unregister an isolate by app_id hash.
@@ -167,7 +175,10 @@ impl CpuTimerSystem {
 ///
 /// Runs in normal thread context, so V8 mutex acquisition is safe.
 #[allow(unsafe_code)]
-fn watchdog_loop(pipe_read: RawFd, handles: Arc<Mutex<HashMap<u64, v8::IsolateHandle>>>) {
+fn watchdog_loop(
+    pipe_read: RawFd,
+    handles: Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>,
+) {
     loop {
         let mut app_id: u64 = 0;
         let n = unsafe {
@@ -187,7 +198,10 @@ fn watchdog_loop(pipe_read: RawFd, handles: Arc<Mutex<HashMap<u64, v8::IsolateHa
         }
 
         let handles = handles.lock().unwrap();
-        if let Some(handle) = handles.get(&app_id) {
+        if let Some((handle, terminated)) = handles.get(&app_id) {
+            // Set the note BEFORE terminating, so the dispatch path cannot
+            // observe the termination without also seeing the cause.
+            terminated.store(true, Ordering::Relaxed);
             handle.terminate_execution();
             tracing::warn!(app_id = format!("{app_id:#x}"), "cpu-timer terminated isolate: CPU limit exceeded");
         }
