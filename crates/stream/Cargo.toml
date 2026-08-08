@@ -10,6 +10,10 @@ rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# The only logging in this crate, and it earns its place: `drain_batch` drops a
+# transport error when it already holds records, and a swallow with no signal
+# at all is the shape that produced the defect it fixes.
+tracing = { workspace = true }
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
