@@ -60,7 +60,7 @@ pub struct RpcCtx {
     /// global URL constructor and caches the result.
     pub cached_url: RefCell<Option<v8::Global<v8::Object>>>,
     /// Lazily-materialized `ctx.signal` wrapper. First read extracts the
-    /// signal V8 object from `abort_controller`; cached for [SameObject].
+    /// signal V8 object from `abort_controller`; cached for `[SameObject]`.
     pub cached_signal: RefCell<Option<v8::Global<v8::Object>>>,
     /// Lazily-materialized `ctx.user` wrapper. JSON.parse is deferred
     /// until first read. `null` is materialized once on first call.
@@ -182,7 +182,7 @@ impl RpcCtx {
 
     /// `ctx.signal` — extract the AbortSignal from the AbortController
     /// (minting one lazily if the caller didn't request eager construction);
-    /// cache for [SameObject].
+    /// cache for `[SameObject]`.
     #[v8_getter]
     #[v8_name = "signal"]
     fn signal_getter<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {

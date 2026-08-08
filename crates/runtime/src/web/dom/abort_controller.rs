@@ -11,7 +11,7 @@
 //!   ```
 //!
 //! Storage rule: the signal lives on a private symbol on the
-//! controller wrapper (so `c.signal === c.signal` per [SameObject]).
+//! controller wrapper (so `c.signal === c.signal` per `[SameObject]`).
 //! Per design §XIII.3 / spec §3.3.
 
 use zeroship_runtime_macros::v8_class;
@@ -23,7 +23,7 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 // ---------------------------------------------------------------------------
 
 /// Backing state for AbortController. The owned signal is stored as
-/// a `v8::Global<v8::Object>` so the [SameObject] invariant on the
+/// a `v8::Global<v8::Object>` so the `[SameObject]` invariant on the
 /// `signal` getter is automatic — we hand back the same JS object
 /// on every access.
 pub struct AbortController {
@@ -49,7 +49,7 @@ impl AbortController {
         }
     }
 
-    /// `controller.signal` getter — DOM §3.3. [SameObject] preserved
+    /// `controller.signal` getter — DOM §3.3. `[SameObject]` preserved
     /// via the stored Global.
     #[v8_getter]
     fn signal<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
