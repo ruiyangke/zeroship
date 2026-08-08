@@ -57,9 +57,45 @@ impl IngestError {
     fn bad(error: &str, detail: String) -> Self {
         Self::BadRequest {
             error: error.to_string(),
-            detail,
+            detail: truncate_detail(detail),
         }
     }
+}
+
+/// Longest `detail` an `IngestError` will carry.
+///
+/// Every `detail` here is built from creator-controlled input - a tar entry
+/// name, a hash, a serde message quoting the manifest - and the control plane
+/// puts it straight into the 400 response body. Without a bound the two
+/// multiply: a tar entry name is capped only by the 256 MiB decompressed take,
+/// and JSON-escaping a name made of NUL bytes expands it sixfold, so a 6.5 KiB
+/// request can produce a gigabyte-scale response from a process that serves
+/// every tenant.
+///
+/// 2 KiB is far above anything a human reads off an error and far below
+/// anything that matters for memory. It does not reject any archive: this
+/// shortens a message on a request that is already being refused.
+const MAX_DETAIL_BYTES: usize = 2048;
+
+/// Truncate on a CHARACTER boundary, never a byte one.
+///
+/// `detail` can carry a non-ASCII entry name, and slicing UTF-8 at an arbitrary
+/// byte index panics. Cutting mid-character would also produce invalid UTF-8 in
+/// the response body - the same defect that made a file in this repo
+/// unsearchable when it was trimmed by bytes.
+fn truncate_detail(detail: String) -> String {
+    if detail.len() <= MAX_DETAIL_BYTES {
+        return detail;
+    }
+    let mut end = MAX_DETAIL_BYTES;
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = detail.len() - end;
+    let mut out = detail;
+    out.truncate(end);
+    out.push_str(&format!(" ... [{omitted} more bytes omitted]"));
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +476,48 @@ fn sha256_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Every `IngestError::bad` detail is bounded, whatever it was built from.
+    ///
+    /// **What this catches**: a `detail` that carries creator-controlled input
+    /// through to the response body unbounded. Verified by mutation - making
+    /// `bad` store `detail` unchanged fails this with a 4 MiB length.
+    ///
+    /// **What this does NOT catch**: the ~270 MiB that `entries.next()` itself
+    /// allocates before any ingest check runs. That is a HOLE, not a handoff -
+    /// nothing here or anywhere else asserts it, and bounding it means bounding
+    /// the legitimate 256 MiB bundle budget, which is a separate decision.
+    #[test]
+    fn ingest_error_detail_is_bounded_however_large_the_input() {
+        let huge = "A".repeat(4 * 1024 * 1024);
+        let IngestError::BadRequest { detail, .. } = IngestError::bad("x", huge) else {
+            panic!("bad() must build a BadRequest");
+        };
+        assert!(
+            detail.len() < MAX_DETAIL_BYTES + 64,
+            "detail reached the response body unbounded at {} bytes",
+            detail.len()
+        );
+        assert!(detail.contains("more bytes omitted"), "the cut must be visible");
+    }
+
+    /// Truncation never splits a character.
+    ///
+    /// A tar entry name can be non-ASCII, and slicing UTF-8 at an arbitrary
+    /// byte index panics. Cutting mid-character would also emit invalid UTF-8 -
+    /// which is exactly how a file in this repo became unsearchable by grep.
+    #[test]
+    fn detail_truncation_cuts_on_a_character_boundary() {
+        // 3 bytes per char, so a 2048-byte cut lands mid-character.
+        let multibyte = "\u{4e16}".repeat(4096);
+        assert_eq!(multibyte.len() % 3, 0);
+        let IngestError::BadRequest { detail, .. } = IngestError::bad("x", multibyte) else {
+            panic!("bad() must build a BadRequest");
+        };
+        // Reaching here at all means no panic; this pins the output as valid.
+        assert!(std::str::from_utf8(detail.as_bytes()).is_ok());
+        assert!(detail.len() < MAX_DETAIL_BYTES + 64);
+    }
 
     #[test]
     fn canonical_sorts_keys_recursively() {
