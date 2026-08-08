@@ -871,6 +871,22 @@ pub(crate) struct RuntimeInner {
     #[allow(dead_code)]
     wall_timeout: Option<Duration>,
 
+    /// Set by `near_heap_limit_callback` when it terminates this isolate for
+    /// exceeding its heap cap. Shared with the leaked callback data block.
+    ///
+    /// This exists because `Isolate::is_execution_terminating` CANNOT answer
+    /// the question after the fact: V8 clears the terminating state once the
+    /// termination exception has unwound out of JS, which has already happened
+    /// by the time the dispatch path regains control. Measured - the check
+    /// reads `false` on a dispatch whose callback fired the full five times.
+    /// So the dispatch cannot ask V8 whether it was heap-terminated; the
+    /// callback has to leave a note.
+    heap_terminated: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Cause of the most recent detected termination, set by
+    /// `check_v8_terminated` so call sites report the right limit.
+    last_termination_was_heap: bool,
+
     /// POSIX CPU timer — kills V8 on CPU limit exceeded (Linux only).
     #[cfg(target_os = "linux")]
     cpu_timer: Option<crate::cpu_timer::CpuTimer>,
@@ -1036,12 +1052,17 @@ impl RuntimeInner {
             hits: u32,
             handle: v8::IsolateHandle,
             initial_limit: usize,
+            /// Note left for the dispatch path, which cannot ask V8 after the
+            /// fact - see `RuntimeInner::heap_terminated`.
+            terminated: Arc<std::sync::atomic::AtomicBool>,
         }
         const MAX_HEAP_LIMIT_HITS: u32 = 5;
+        let heap_terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let heap_data = Box::into_raw(Box::new(HeapLimitData {
             hits: 0,
             handle: isolate.thread_safe_handle(),
             initial_limit: heap_max,
+            terminated: Arc::clone(&heap_terminated),
         }));
 
         unsafe extern "C" fn near_heap_limit_callback(
@@ -1075,6 +1096,7 @@ impl RuntimeInner {
                 // interrupt boundary, surfacing as a catchable
                 // `RangeError` to JS or a terminated-state to the
                 // dispatch loop.
+                d.terminated.store(true, std::sync::atomic::Ordering::Relaxed);
                 d.handle.terminate_execution();
             } else {
                 tracing::warn!(
@@ -1146,6 +1168,8 @@ impl RuntimeInner {
             pump_notify_tx: None,
             cpu_limit,
             wall_timeout,
+            heap_terminated,
+            last_termination_was_heap: false,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
             #[cfg(target_os = "linux")]
@@ -1842,42 +1866,65 @@ impl RuntimeInner {
         }
     }
 
-    /// Check if V8 was terminated by the CPU timer. If so, cancel termination,
-    /// disarm the timer, and drain all pending requests with an error.
-    /// Returns `true` if termination was detected.
-    /// Check if V8 was terminated by the CPU timer. If so, cancel the
-    /// termination so the isolate can continue serving other requests.
-    /// Returns true if termination was detected.
+    /// Check whether V8 execution was terminated. If so, cancel the
+    /// termination so the isolate can continue serving other requests, disarm
+    /// the CPU timer if one is armed, and return true.
     ///
     /// Does NOT drain pending requests — the caller decides which request
-    /// to error (only the one that was executing when the timer fired).
+    /// to error (only the one that was executing when termination fired).
     ///
-    /// Fast path: when `cpu_limit` is None, no CPU timer exists, so V8 can
-    /// never be terminated by us. Skipping the isolate state read saves a
-    /// vdso syscall on every dispatch in the common (no-limit) case — this
-    /// is the benchmark configuration and also the default for many deploys.
+    /// TWO things terminate execution, not one:
+    ///
+    ///   the CPU timer (`cpu_timer.rs`), Linux-only, and
+    ///   `near_heap_limit_callback`, on every platform, once an isolate has
+    ///   hit its heap cap `MAX_HEAP_LIMIT_HITS` times.
+    ///
+    /// This used to return early unless a CPU timer was configured, on the
+    /// stated grounds that "other code paths never call terminate_execution".
+    /// The heap-limit callback does, and an app can carry a heap cap with no
+    /// CPU limit at all - so a heap-terminated isolate went undetected, the
+    /// dispatch never settled, and the request hung indefinitely rather than
+    /// failing. The same reasoning made the whole check compile to `false` off
+    /// Linux, where the heap callback still fires.
+    ///
+    /// There is no timer-shaped fast path to keep: whether the isolate is
+    /// terminating is exactly the question, and `is_execution_terminating` is
+    /// a plain isolate flag read.
+    /// Message for the limit that caused the most recent detected
+    /// termination. Only meaningful right after `check_v8_terminated`
+    /// returned true.
+    fn termination_message(&self) -> &'static str {
+        if self.last_termination_was_heap {
+            "memory limit exceeded"
+        } else {
+            "CPU time limit exceeded"
+        }
+    }
+
     fn check_v8_terminated(&mut self) -> bool {
-        // The CPU timer is the only thing that calls terminate_execution, and
-        // it only exists on Linux. On other targets V8 can never have been
-        // terminated by us, so this is always false.
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
+        // Take the heap-limit note first. Ordering matters only in that it
+        // must be cleared either way, so a terminated dispatch does not leave
+        // the flag set and fail the NEXT request on this isolate.
+        let heap_terminated = self
+            .heap_terminated
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+
+        let v8_terminating = self.isolate.is_execution_terminating();
+        if !heap_terminated && !v8_terminating {
+            return false;
+        }
+        // Recorded so the call sites can name the actual cause. They all used
+        // to say "CPU time limit exceeded", which is now reachable by a second
+        // route and would misreport a heap kill as a CPU kill.
+        self.last_termination_was_heap = heap_terminated;
+        if v8_terminating {
+            self.isolate.cancel_terminate_execution();
         }
         #[cfg(target_os = "linux")]
-        {
-            // If no timer is configured, V8 cannot have been terminated by us.
-            // (Other code paths never call terminate_execution.)
-            if self.cpu_timer.is_none() {
-                return false;
-            }
-            if !self.isolate.is_execution_terminating() {
-                return false;
-            }
-            self.isolate.cancel_terminate_execution();
+        if self.cpu_timer.is_some() {
             self.disarm_cpu_timer();
-            true
         }
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -1956,7 +2003,7 @@ impl RuntimeInner {
             return crate::WorkflowOutcome::Response {
                 json: serde_json::json!({
                     "kind": "RunFailed",
-                    "error": { "type": "Error", "message": "CPU time limit exceeded" },
+                    "error": { "type": "Error", "message": self.termination_message() },
                 })
                 .to_string(),
                 logs: vec![],
@@ -2335,7 +2382,7 @@ impl RuntimeInner {
                 body: crate::dispatch::build_error_body(
                     503,
                     request_id,
-                    "CPU time limit exceeded",
+                    self.termination_message(),
                     "Error",
                     crate::dispatch::ErrorExtras::default(),
                 )
@@ -2676,7 +2723,7 @@ impl RuntimeInner {
                     // Only error the request whose JS was executing when the timer fired
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, "CPU time limit exceeded");
+                            send_pending_error(req, self.termination_message());
                         }
                     }
                     self.clear_executing_request();
@@ -2738,7 +2785,7 @@ impl RuntimeInner {
                 if self.check_v8_terminated() {
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, "CPU time limit exceeded");
+                            send_pending_error(req, self.termination_message());
                         }
                     }
                     self.clear_executing_request();
@@ -2902,7 +2949,7 @@ impl RuntimeInner {
                 if self.check_v8_terminated() {
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            send_pending_error(req, "CPU time limit exceeded");
+                            send_pending_error(req, self.termination_message());
                         }
                     }
                     self.clear_executing_request();
@@ -3067,7 +3114,7 @@ impl RuntimeInner {
             // Only error the request whose timer callback was executing
             if let Some(rid) = owner_request_id {
                 if let Some(req) = self.pending_requests.remove(&rid) {
-                    send_pending_error(req, "CPU time limit exceeded");
+                    send_pending_error(req, self.termination_message());
                 }
             }
             self.clear_executing_request();
@@ -3162,7 +3209,7 @@ impl RuntimeInner {
                 // Only error the request whose timer callback was executing
                 if let Some(rid) = owner_request_id {
                     if let Some(req) = self.pending_requests.remove(&rid) {
-                        send_pending_error(req, "CPU time limit exceeded");
+                        send_pending_error(req, self.termination_message());
                     }
                 }
                 self.clear_executing_request();
@@ -3326,7 +3373,7 @@ impl RuntimeInner {
         if req.cpu_accumulated > cpu_limit {
             let req = self.pending_requests.remove(&request_id).unwrap();
             let _logs = self.drain_request_logs(request_id);
-            send_pending_error(req, "CPU time limit exceeded");
+            send_pending_error(req, self.termination_message());
         }
     }
 
