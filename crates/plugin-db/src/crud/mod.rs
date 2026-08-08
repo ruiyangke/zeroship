@@ -126,7 +126,7 @@ pub use write_pipeline::{
 /// / `"invalid_identifier"`.
 ///
 /// `exec` runs against either the pool or the active
-/// [`crate::context::IsolateDbContext::tx_conn`] (transparently —
+/// `IsolateDbContext::tx_conns` (transparently —
 /// `exec::run_sql` already handles that).
 ///
 /// `resolve` lowers the exec's success value to the V8-bound

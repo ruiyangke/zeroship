@@ -45,7 +45,7 @@
 //! ## Single-connection model & backend scope
 //!
 //! V8 is single-threaded per isolate, so only one transaction connection
-//! is active at a time. It lives in [`crate::context::IsolateDbContext::tx_conn`];
+//! is active at a time. It lives in `IsolateDbContext::tx_conns`;
 //! every CRUD callback ([`crate::exec::run_sql`]) routes through that slot
 //! when it is set. Nested savepoints reuse the **same** connection (that
 //! is the whole point of `SAVEPOINT`), so no new connection is acquired
