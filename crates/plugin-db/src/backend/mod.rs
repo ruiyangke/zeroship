@@ -1742,10 +1742,10 @@ impl BackendHandle {
     }
 
     /// Borrow the inner [`PostgresBackend`] as a `&PostgresBackend`
-    /// reference — the async-friendly companion to [`Self::with_postgres`].
+    /// reference — the async-friendly companion to `BackendHandle::with_postgres`.
     ///
     /// **Why both shapes**: the sync
-    /// closure ([`Self::with_postgres`]) composes cleanly when the
+    /// closure (`BackendHandle::with_postgres`) composes cleanly when the
     /// caller's body is sync, but it cannot `.await` across the
     /// closure boundary without lifetime gymnastics (the closure's
     /// inner future would have to outlive the closure scope). The
@@ -1775,7 +1775,7 @@ impl BackendHandle {
     /// Run `f` against the inner [`SqliteBackend`], yielding
     /// `Some(R)` on the SQLite arm or `None` otherwise.
     ///
-    /// Symmetric counterpart to [`Self::with_postgres`].
+    /// Symmetric counterpart to `BackendHandle::with_postgres`.
     /// The `Option`-shaped return makes the consumer code style
     /// identical across backend arms.
     ///
@@ -1795,7 +1795,7 @@ impl BackendHandle {
     }
 
     /// Borrow the inner [`SqliteBackend`] as a `&SqliteBackend`
-    /// reference — async-friendly companion to [`Self::with_sqlite`].
+    /// reference — async-friendly companion to `BackendHandle::with_sqlite`.
     /// Returns `Some(&SqliteBackend)` on the SQLite arm; `None` on
     /// the PG arm.
     ///
