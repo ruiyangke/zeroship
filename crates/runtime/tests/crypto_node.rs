@@ -1153,3 +1153,86 @@ fn unknown_cipher_throws_err_crypto_unknown_cipher() {
     );
     assert_eq!(result, "ERR_CRYPTO_UNKNOWN_CIPHER");
 }
+
+/// An options bag whose CRYPTOGRAPHIC keys we do not honour must be refused,
+/// not silently dropped.
+///
+/// `create_cipheriv` / `create_decipheriv` took the 4th argument as
+/// `_options` - underscore-prefixed and ignored - so the whole bag vanished.
+/// A creator writing
+///
+///     crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 12 })
+///
+/// got 16-byte tags and no error. Node honours that option (GCM permits
+/// 4,8,12,13,14,15,16), so the value silently meant something else here.
+///
+/// Refusing beats implementing under the pre-launch stance: a wrong-but-quiet
+/// security parameter is worse than a loud stop, and the caller can still get
+/// 16-byte tags by omitting the option.
+///
+/// Deliberately NOT a blanket rejection of the options bag: `Cipher` is a
+/// stream, so Node callers legitimately pass stream options (`highWaterMark`,
+/// `encoding`) that have no cryptographic meaning. Only the keys that change
+/// crypto behaviour are refused.
+#[compio::test]
+async fn cipher_options_that_change_crypto_behaviour_are_refused_not_ignored() {
+    let refused_cipher = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            const iv = new Uint8Array(12);
+            try {
+                __zeroship_node_crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 12 });
+                return false;
+            } catch (e) {
+                return String(e && e.message || e).includes('authTagLength');
+            }
+        })()
+        "#,
+    );
+    assert!(
+        refused_cipher,
+        "createCipheriv must refuse an authTagLength it does not honour, \
+         rather than silently producing a 16-byte tag"
+    );
+
+    let refused_decipher = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            const iv = new Uint8Array(12);
+            try {
+                __zeroship_node_crypto.createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 12 });
+                return false;
+            } catch (e) {
+                return String(e && e.message || e).includes('authTagLength');
+            }
+        })()
+        "#,
+    );
+    assert!(
+        refused_decipher,
+        "createDecipheriv must refuse authTagLength the same way createCipheriv does"
+    );
+
+    // Stream options stay accepted: refusing them would break ordinary Node
+    // callers for no security benefit.
+    let stream_opts_ok = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            const iv = new Uint8Array(12);
+            try {
+                __zeroship_node_crypto.createCipheriv('aes-256-gcm', key, iv, { highWaterMark: 1024 });
+                return true;
+            } catch (e) {
+                return false;
+            }
+        })()
+        "#,
+    );
+    assert!(
+        stream_opts_ok,
+        "a non-cryptographic stream option must still be accepted"
+    );
+}

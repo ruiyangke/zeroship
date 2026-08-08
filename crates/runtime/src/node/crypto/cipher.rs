@@ -95,9 +95,7 @@ pub struct Cipher {
     iv: Vec<u8>,
     aad: Vec<u8>,
     in_buf: Vec<u8>,
-    out_buf: Vec<u8>,
     auth_tag: Option<Vec<u8>>,
-    auth_tag_length: usize,
     finalised: bool,
     auto_padding: bool,
 }
@@ -428,13 +426,62 @@ fn run_aes_ctr(c: &mut Cipher) -> Result<Vec<u8>, OpError> {
 // Factories
 // ---------------------------------------------------------------------------
 
+/// Refuse options that change CRYPTOGRAPHIC behaviour and that this runtime
+/// does not honour.
+///
+/// The options bag used to be taken as `_options` and dropped entirely, so
+/// `createCipheriv(alg, key, iv, { authTagLength: 12 })` produced 16-byte tags
+/// and no error. Node honours `authTagLength` (GCM permits 4, 8, 12, 13, 14,
+/// 15, 16), so the value silently meant something else here. A wrong-but-quiet
+/// security parameter is worse than a loud stop, and a caller who wants the
+/// default can simply omit the option.
+///
+/// NOT a blanket rejection. `Cipher` is a stream, so Node callers legitimately
+/// pass stream options (`highWaterMark`, `encoding`) with no cryptographic
+/// meaning; refusing those would break ordinary code for no benefit. Only keys
+/// that would change the crypto are refused.
+///
+/// `plaintextLength` is deliberately absent: it is a CCM/OCB option, and
+/// [`CipherAlg`] carries no CCM or OCB variant. Add it here in the same change
+/// that adds one, or it becomes the next silently-dropped parameter.
+fn reject_unhonoured_cipher_options(
+    scope: &mut v8::PinScope,
+    options: Option<v8::Local<v8::Value>>,
+    fn_name: &str,
+) -> Result<(), OpError> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
+        return Ok(());
+    };
+    let key = v8::String::new(scope, "authTagLength").ok_or_else(|| {
+        OpError::node("ERR_CRYPTO_OPERATION_FAILED", "option key allocation failed")
+    })?;
+    // `has_own_property`, not `has`: a prototype-chain hit would refuse calls
+    // that never mentioned the option.
+    if obj.has_own_property(scope, key.into()).unwrap_or(false) {
+        return Err(OpError::node(
+            "ERR_INVALID_ARG_VALUE",
+            format!(
+                "{fn_name}: `authTagLength` is not supported by this runtime; \
+                 authentication tags are always 16 bytes. Omit the option to \
+                 accept that, or the call would silently produce a tag length \
+                 you did not ask for."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_cipheriv<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     algorithm: &str,
     key: v8::Local<v8::Value>,
     iv: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    reject_unhonoured_cipher_options(scope, options, "createCipheriv")?;
     create_cipher_inner(scope, algorithm, key, iv, true)
 }
 
@@ -443,8 +490,9 @@ pub fn create_decipheriv<'s>(
     algorithm: &str,
     key: v8::Local<v8::Value>,
     iv: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    reject_unhonoured_cipher_options(scope, options, "createDecipheriv")?;
     create_cipher_inner(scope, algorithm, key, iv, false)
 }
 
@@ -484,9 +532,7 @@ fn create_cipher_inner<'s>(
         iv: iv_bytes,
         aad: Vec::new(),
         in_buf: Vec::new(),
-        out_buf: Vec::new(),
         auth_tag: None,
-        auth_tag_length: 16,
         finalised: false,
         auto_padding: true,
     };
