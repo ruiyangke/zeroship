@@ -5,11 +5,16 @@
 //! **compatible** (auto-apply, may need a validation backfill), or
 //! **destructive** (refused; surfaces a `validation_refused` envelope).
 //!
-//! The engine intentionally does not run any DDL on its own — it returns
-//! a `Vec<DiffOp>` that the orchestrator in
-//! `crate::register_model::exec_register_model_with_pool`
-//! then sequences with the advisory lock, audit writes, and validation
-//! pass.
+//! The engine intentionally does not run any DDL on its own - it returns
+//! a `Vec<DiffOp>` that an orchestrator sequences with the advisory lock,
+//! audit writes, and validation pass.
+//!
+//! That orchestrator is NOT in this workspace, and the `crate::`-rooted path
+//! this comment used to carry (`crate::register_model::exec_register_model_with_pool`)
+//! never resolved here. This kernel was extracted from appbase's `zeroship-schema`,
+//! where the sentence is true: the function is a live `pub async fn` at
+//! `crates/plugin-db/src/register_model/mod.rs:341`, confirmed by that project on
+//! 2026-08-08. Nothing in this repository consumes the diff that way.
 //!
 //! ## Volatile-default trap
 //!
@@ -351,8 +356,10 @@ impl Default for ColumnInfo {
 /// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
 ///
 /// Populated by schema introspection:
-/// - **PG**: from `<meta>.encrypted_columns` rows the
-///   `register_model` DDL emitter writes alongside the table create.
+/// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
+///   create by whichever orchestrator drives this kernel. In appbase that is
+///   `plugin-db`'s `register_model`; this workspace has no such module, so the
+///   rows are the consumer's to write.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern used for

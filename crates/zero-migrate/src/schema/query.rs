@@ -1694,8 +1694,15 @@ pub struct IndexSpec {
     pub unique: bool,
     /// `CREATE …` DDL ready for execution.
     pub sql: String,
-    /// Index shape — selects the backend builder branch. `Vector` /
-    /// `Fts` / `Spatial` dispatch through the `register_model::apply` Pass 2.
+    /// Index shape - selects the backend builder branch.
+    ///
+    /// EVERY index, not just the exotic kinds, is deferred to a second pass by
+    /// the orchestrator that consumes these ops: appbase's `plugin-db` splits on
+    /// `ChangeKind::AddIndex`, releasing the advisory lock before pass 2 because
+    /// holding it through `CREATE INDEX CONCURRENTLY` deadlocks. This comment
+    /// used to name `Vector` / `Fts` / `Spatial` as the ones that "dispatch
+    /// through Pass 2", which would read as false the moment a fifth kind is
+    /// added. The partition is by op, not by kind.
     pub kind: IndexKind,
 }
 
@@ -1703,8 +1710,9 @@ pub struct IndexSpec {
 /// `registerModel` can materialise.
 ///
 /// The default is [`IndexKind::BTree`] so every existing call site keeps
-/// the same observable behaviour; `Vector` / `Fts` /
-/// `Spatial` dispatch through the `register_model::apply` Pass 2.
+/// the same observable behaviour. Which kind an index carries does NOT decide
+/// when it is created: a consuming orchestrator defers every `AddIndex` op
+/// alike (see [`IndexSpec::kind`]).
 ///
 /// **Why an enum, not a string**: same rationale as
 /// [`crate::schema::descriptors::VectorMetric`] — the rustc exhaustiveness check
@@ -1834,10 +1842,12 @@ pub fn build_create_indexes(
         // spec regardless of the `index`/`unique` markers; the SDK's
         // `t.vector()` builder doesn't expose those modifiers (they
         // would be meaningless on an ivfflat-indexed column). The
-        // builder dispatches to `VectorIndex::ensure_vector_index` in
-        // `register_model::apply` Pass 2 — the `sql` field stays empty
-        // because the impl builds the DDL itself (it needs the
-        // metric-specific opclass that isn't carried in the spec).
+        // builder leaves the `sql` field EMPTY because the consumer builds the
+        // DDL itself - it needs the metric-specific opclass, which the spec
+        // does not carry. In appbase that consumer is
+        // `VectorIndex::ensure_vector_index`, reached from plugin-db's
+        // second index pass; this workspace ships no such builder, so an empty
+        // `sql` here is a contract with the embedder rather than an omission.
         if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
             let dims = def
                 .get("vectorDims")

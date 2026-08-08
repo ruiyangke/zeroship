@@ -959,10 +959,13 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 // re-plan against the REAL introspected live schema yields an EMPTY diff — no
 // spurious DROP of either table — and BOTH tables stay usable (a write into each
 // succeeds). This is the declared-set path on the SQLite schema authority (the
-// migrate engine; `register_model`/`run_pipeline` is PG-only by construction —
-// its `RegisterBackend` bound requires `PgSqlExecutor` +
-// `LockManager<Client = compio_postgres::Client>`, which SQLite does not satisfy,
-// so the warm-boot authority on SQLite is the engine, not the runtime pipeline).
+// migrate engine). The engine is the ONLY warm-boot authority on SQLite here,
+// which needs no argument in this workspace: there is no runtime pipeline to
+// compete with it. The clause this comment used to carry - that
+// `register_model`/`run_pipeline` is PG-only because its `RegisterBackend` bound
+// requires `PgSqlExecutor` + `LockManager<Client = compio_postgres::Client>` -
+// described appbase's plugin-db, and named a compio-postgres client that was
+// deleted from this tree along with the native driver.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
