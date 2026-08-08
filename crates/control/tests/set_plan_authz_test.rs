@@ -371,3 +371,95 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     drop(fx);
     common::drain_pg().await;
 }
+
+/// An ARCHIVED plan must be refused with a reason, not reported as a missing app.
+///
+/// Lives in the authz file because this is the only harness that drives the real
+/// `api::set_plan` through ntex; the property itself is plan validity, not authz.
+///
+/// `api.rs` says above the catalog lookup that "The target plan must be a real,
+/// non-archived plan; validate it via the catalog", but the arm is
+/// `Ok(Some(_)) => {}` and `PlanCatalog::get` selects `archived` WITHOUT
+/// filtering on it. The proration UPDATE downstream is guarded on
+/// `EXISTS (... AND NOT archived)`, so an archived plan matches zero rows and
+/// becomes `PlanChangeOutcome::AppNotFound` -> 404 "app not found", for an app
+/// that plainly exists.
+///
+/// Uses the OPERATOR token deliberately: a creator would be stopped earlier by
+/// the `assignable_by_creator` gate, which would hide the defect behind a 403.
+#[compio::test]
+async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app() {
+    let url = db_url();
+    let fx = build_test_state(&url, "archived-plan").await;
+    let pg = fx.state.control_pg.clone();
+    let catalog = PlanCatalog::new(fx.state.registry.clone());
+
+    let start = seed_plan(&catalog, "start-tier", true).await;
+    // Seed assignable, then archive it. `upsert`'s second arg is `archived`.
+    let retired = seed_plan(&catalog, "retired-tier", true).await;
+    catalog.upsert(&retired, Some(true)).await.expect("archive the plan");
+
+    let owner = make_user(&pg, "creator").await;
+    let app = fx
+        .state
+        .registry
+        .create_app(&format!("setplan-arch-{}", Uuid::new_v4().simple()), &start.id, &owner)
+        .await
+        .expect("create app");
+
+    let op_user = make_user(&pg, "operator").await;
+    let operator_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_write_any()).await;
+
+    let app_svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/plan").route(web::put().to(api::set_plan)),
+        ),
+    )
+    .await;
+
+    let status = test::call_service(
+        &app_svc,
+        test::TestRequest::put()
+            .uri(&format!("/api/apps/{}/plan", app.id))
+            .header("authorization", operator_pat.bearer())
+            .set_json(&serde_json::json!({ "plan_id": retired.id }))
+            .to_request(),
+    )
+    .await
+    .status();
+
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an archived plan must not surface as 404 app-not-found: the app exists, \
+         and that status sends the operator looking for a deleted app",
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "assigning an archived plan is a bad request, like an unknown plan id",
+    );
+    assert_eq!(
+        app_plan_id(&pg, app.id).await,
+        start.id,
+        "a refused assignment must leave the plan untouched",
+    );
+
+    let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&operator_pat.token_id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&operator_pat.token_id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&operator_pat.user_id])
+        .await;
+    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
+
+    drop(app_svc);
+    drop(catalog);
+    drop(pg);
+    drop(fx);
+    common::drain_pg().await;
+}
