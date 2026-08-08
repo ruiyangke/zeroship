@@ -1686,6 +1686,24 @@ pub fn fold_ops_onto(
                 // still name `from`, the drop of `to` would find no match, and
                 // `rename qty -> amount; drop amount` would leave a phantom CHECK
                 // behind - the exact drift this provenance exists to prevent.
+                //
+                // `ConstraintSnapshot::definition` names the column too, and drift
+                // DOES compare it for every kind but EXCLUDE and CHECK
+                // (`apply::drift::constraint_definition_is_comparable`). PG holds
+                // `conkey` as attribute NUMBERS, so `pg_get_constraintdef` deparses
+                // `UNIQUE (b)` / `FOREIGN KEY (b) REFERENCES ...` / `PRIMARY KEY (b)`
+                // the moment the rename commits (measured on PG 18.4) while the fold
+                // kept the old rendering and reported drift on the next introspection.
+                //
+                // Only the LEADING PARENTHESIZED GROUP is re-rendered, and only for the
+                // three kinds whose leading group is a LOCAL COLUMN LIST. That group
+                // cannot contain a string literal, so the trap that rules out text
+                // matching for a CHECK body is structurally unreachable - see
+                // `rename_constraint_definition_column`, which also carries the
+                // round-trip guard that leaves a definition the parser mishandles STALE
+                // rather than CORRUPT. A CHECK body stays stale here (it reads its
+                // columns out of an expression, needs the `Expr` the snapshot
+                // discarded, and reports nothing because the differ exempts it).
                 for constraint in &mut snap.constraints {
                     if let Some(cascade_columns) = &mut constraint.cascade_columns {
                         for local in cascade_columns.iter_mut() {
@@ -1695,15 +1713,23 @@ pub fn fold_ops_onto(
                         }
                         cascade_columns.sort();
                     }
+                    if matches!(
+                        constraint.kind.as_str(),
+                        "UNIQUE" | "PRIMARY KEY" | "FOREIGN KEY"
+                    ) {
+                        if let Some(definition) =
+                            rename_constraint_definition_column(&constraint.definition, from, to)
+                        {
+                            constraint.definition = definition;
+                        }
+                    }
                 }
-                // NOT rewritten, and measured stale on PG 18.4:
-                // `ConstraintSnapshot::definition`, which drift DOES compare for
-                // UNIQUE and FOREIGN KEY. PG deparses `UNIQUE (a)` as `UNIQUE (b)`
-                // and `FOREIGN KEY (a) REFERENCES ...` as `FOREIGN KEY (b) ...` the
-                // moment the rename commits, while the fold keeps the old rendering.
-                // (A CHECK definition goes stale identically but is EXCLUDED from
-                // drift comparison, so it reports nothing.) Rewriting a name inside
-                // rendered SQL is text surgery, not the structural swap below.
+                // STILL NOT rewritten: a FK in ANOTHER table whose REFERENCES tail
+                // names this renamed column. PG follows that too (`confkey` is
+                // attribute numbers), but this arm never leaves `snap`, so the other
+                // table's definition stays stale - measured on PG 18.4. The table-rename
+                // analogue `rewrite_incoming_fk_targets` exists and the column-rename
+                // one does not; it is a separate change with its own live oracle.
                 //
                 // An index names columns too, and a rename has to follow it for the
                 // same reason. `pg_index` references the attribute by `attnum`, never
@@ -1739,9 +1765,10 @@ pub fn fold_ops_onto(
                 // `expr:(b + 1)`. A column LIST cannot fix that - re-rendering needs the
                 // `Expr` the snapshot discarded - and swapping the name inside the text
                 // is the exact false-positive the provenance above exists to avoid
-                // (`WHERE (note <> 'a')` would become `WHERE (note <> 'b')`). Same shape
-                // as the `ConstraintSnapshot::definition` staleness noted above, and
-                // left to the same separate change.
+                // (`WHERE (note <> 'a')` would become `WHERE (note <> 'b')`). That trap
+                // is why the `ConstraintSnapshot::definition` rewrite above is confined
+                // to a leading COLUMN LIST, where a string literal cannot appear: these
+                // two sites are arbitrary expressions and admit no such argument.
                 for index in &mut snap.indexes {
                     for column in &mut index.columns {
                         if column == from {
@@ -3264,6 +3291,58 @@ fn constraint_local_columns_contain(definition: &str, column: &str) -> bool {
     let cols = &definition[open + 1..open + 1 + close_rel];
     cols.split(',')
         .any(|tok| tok.trim().trim_matches('"') == column)
+}
+
+/// Re-render a constraint `definition`'s LEADING PARENTHESIZED GROUP with `from`
+/// renamed to `to`, or `None` to leave the definition untouched.
+///
+/// Only sound for a kind whose leading group is a LOCAL COLUMN LIST - `UNIQUE`,
+/// `PRIMARY KEY`, `FOREIGN KEY`. A string literal is not legal in that grammar, so
+/// the trap that rules out text matching for a CHECK body
+/// (`CHECK ((status <> 'qty'::text))` survives dropping `qty` - measured) is
+/// structurally unreachable here. Callers must kind-gate; this does not.
+///
+/// The group is RE-RENDERED through [`constraintdef_cols`] rather than
+/// substring-swapped because quoting is CONDITIONAL: `a` -> `order` has to produce
+/// `UNIQUE ("order")`, and a naive swap gives `UNIQUE (order)`, trading one drift
+/// for another. Everything outside the group - the `FOREIGN KEY` tail's
+/// `REFERENCES ...`, MATCH, `ON UPDATE` / `ON DELETE`, DEFERRABLE and any ` NOT VALID`
+/// suffix - is spliced through byte-identically.
+///
+/// ROUND-TRIP GUARD: the UNCHANGED parse is re-rendered first and must equal the
+/// original group BYTE FOR BYTE. A definition the parser mishandles therefore stays
+/// stale rather than becoming corrupt - `UNIQUE ("a""b")` parses to `a""b` (the
+/// `trim_matches('"')` in [`constraint_ordered_columns`] cannot see an embedded
+/// escaped quote), re-renders to `"a""""b"`, fails the compare, and is left alone.
+/// The same guard catches a name carrying a `,` or a `)`, both of which the
+/// split-on-comma / first-`)` parse gets wrong.
+fn rename_constraint_definition_column(definition: &str, from: &str, to: &str) -> Option<String> {
+    let open = definition.find('(')?;
+    let close = definition[open + 1..].find(')')? + open + 1;
+    let group = &definition[open + 1..close];
+    let columns = constraint_ordered_columns(definition)?;
+    if constraintdef_cols(&columns) != group {
+        return None;
+    }
+    if !columns.iter().any(|column| column == from) {
+        return None;
+    }
+    let renamed = columns
+        .into_iter()
+        .map(|column| {
+            if column == from {
+                to.to_string()
+            } else {
+                column
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "{}{}{}",
+        &definition[..=open],
+        constraintdef_cols(&renamed),
+        &definition[close..]
+    ))
 }
 
 /// Canonical snapshot shape for a named UNIQUE key.
@@ -8336,6 +8415,78 @@ columns = [
         assert!(
             matches!(err, ProduceError::UnknownType { .. }),
             "unmappable token fails closed"
+        );
+    }
+
+    /// The rename rewrites ONLY the leading parenthesized group. The FOREIGN KEY
+    /// tail - `REFERENCES ...`, the referential actions, DEFERRABLE, ` NOT VALID` -
+    /// is spliced through byte-identically, and quoting is re-derived rather than
+    /// swapped (a bare `order` would be a syntax error live reports as `"order"`).
+    #[test]
+    fn constraint_definition_rename_rewrites_only_the_leading_column_group() {
+        assert_eq!(
+            rename_constraint_definition_column("UNIQUE (a)", "a", "b").as_deref(),
+            Some("UNIQUE (b)")
+        );
+        assert_eq!(
+            rename_constraint_definition_column("PRIMARY KEY (a)", "a", "b").as_deref(),
+            Some("PRIMARY KEY (b)")
+        );
+        assert_eq!(
+            rename_constraint_definition_column("UNIQUE (note, a)", "a", "b").as_deref(),
+            Some("UNIQUE (note, b)"),
+            "a composite list keeps its ORDER and rewrites in place"
+        );
+        assert_eq!(
+            rename_constraint_definition_column("UNIQUE (a)", "a", "order").as_deref(),
+            Some("UNIQUE (\"order\")"),
+            "quoting is CONDITIONAL and re-derived, never carried over from the source"
+        );
+        assert_eq!(
+            rename_constraint_definition_column(
+                "FOREIGN KEY (a) REFERENCES proj.parent(id) ON UPDATE RESTRICT \
+                 ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED NOT VALID",
+                "a",
+                "b",
+            )
+            .as_deref(),
+            Some(
+                "FOREIGN KEY (b) REFERENCES proj.parent(id) ON UPDATE RESTRICT \
+                 ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED NOT VALID"
+            ),
+            "the FK tail survives byte-for-byte, including the referenced column"
+        );
+        assert_eq!(
+            rename_constraint_definition_column("UNIQUE (note)", "a", "b"),
+            None,
+            "a constraint the rename does not touch is left alone"
+        );
+    }
+
+    /// The round-trip guard. A definition whose leading group the parser mishandles
+    /// is left STALE rather than rewritten into something CORRUPT: an embedded
+    /// escaped quote, a `,` inside a quoted name, and a `)` inside a quoted name all
+    /// survive the parse as the wrong tokens, and all three fail the byte-for-byte
+    /// re-render compare before any swap happens.
+    #[test]
+    fn constraint_definition_rename_guard_refuses_a_mishandled_group() {
+        for definition in [
+            r#"UNIQUE ("a""b")"#,
+            r#"UNIQUE ("a,b")"#,
+            r#"UNIQUE ("a)b")"#,
+            r#"UNIQUE ("a""b", c)"#,
+        ] {
+            assert_eq!(
+                rename_constraint_definition_column(definition, "a", "b"),
+                None,
+                "the guard leaves `{definition}` untouched: stale is acceptable, corrupt is not"
+            );
+        }
+        assert_eq!(
+            rename_constraint_definition_column(r#"UNIQUE ("a""b")"#, r#"a""b"#, "c"),
+            None,
+            "the guard fires on the SHAPE, so even a parse that happens to name the \
+             renamed column cannot get through it"
         );
     }
 }
