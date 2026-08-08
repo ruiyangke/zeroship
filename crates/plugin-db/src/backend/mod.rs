@@ -2,7 +2,7 @@
 //!
 //! ## What this is
 //!
-//! A single trait, [`Backend`], that captures everything the
+//! A single trait, `Backend`, that captures everything the
 //! orchestrator and audit-row layer ask of "the database" — connection
 //! lifecycle, advisory locks, schema introspection, and audit-table
 //! reads/writes. Today the only impl is [`PostgresBackend`]; the goal
@@ -37,7 +37,7 @@
 //!
 //! ## Capability traits
 //!
-//! [`Backend`] is a **pure composition marker** — every operation lives
+//! `Backend` is a **pure composition marker** — every operation lives
 //! on one of five focused capability traits:
 //!
 //! - [`SqlExecutor`] — connection lifecycle + run-a-statement.
@@ -86,11 +86,11 @@ pub use sqlite::SqliteBackend;
 /// SQL execution capability — the "connection lifecycle + run a
 /// statement" slice of the data-store boundary.
 ///
-/// Carved out of the monolithic [`Backend`] trait (see
+/// Carved out of the monolithic `Backend` trait (see
 /// `docs/archive/p0-implementation-plan.md` and the
 /// converged design at `docs/archive/db-system-design.md` §7).
 /// Consumer bounds narrow onto this trait (and [`LockManager`])
-/// instead of the omnibus [`Backend`] super-trait. That carve is
+/// instead of the omnibus `Backend` super-trait. That carve is
 /// finished: nothing takes `dyn Backend`, and the `&PostgresBackend`
 /// parameters that remain are the deliberate Postgres-only accessors
 /// on [`BackendHandle`] (`as_postgres`, `as_backup_pg`,
@@ -272,7 +272,7 @@ impl LockScope {
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
 /// on a [`SqlExecutor::Client`].
 ///
-/// Carved out of the monolithic [`Backend`] trait (see
+/// Carved out of the monolithic `Backend` trait (see
 /// `docs/archive/p0-implementation-plan.md` and
 /// `docs/archive/db-system-design.md` §7). The `: SqlExecutor`
 /// super-bound is load-bearing — every method takes a `&Self::Client`
@@ -533,11 +533,11 @@ pub trait LockManager: SqlExecutor {
 /// Per-app schema-namespace capability — "idempotently provision the
 /// app's logical namespace".
 ///
-/// Carved out of the monolithic [`Backend`] trait (see
+/// Carved out of the monolithic `Backend` trait (see
 /// `docs/archive/p0-implementation-plan.md` and the
 /// converged design at `docs/archive/db-system-design.md` §7). Carries
 /// the single `ensure_app_schema` method that used to live on
-/// [`Backend`] directly; consumer bounds in
+/// `Backend` directly; consumer bounds in
 /// `register_model/bootstrap.rs` narrow onto this trait.
 ///
 /// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
@@ -555,14 +555,14 @@ pub trait NamespaceManager: 'static {
 /// Live-schema introspection capability — "read the catalog and return
 /// a typed snapshot the diff engine can consume".
 ///
-/// Carved out of the monolithic [`Backend`] trait (see
+/// Carved out of the monolithic `Backend` trait (see
 /// `docs/archive/p0-implementation-plan.md` and
 /// `docs/archive/db-system-design.md` §7). The trait owns the
-/// `LiveSchema` associated type that used to live on [`Backend`] —
+/// `LiveSchema` associated type that used to live on `Backend` —
 /// pinning it here means consumer bounds like
 /// `<B: SchemaIntrospect<LiveSchema = LiveSchema>>` in
 /// `register_model::plan` go through a narrow capability trait instead
-/// of the omnibus super-trait. [`Backend`] re-anchors the same
+/// of the omnibus super-trait. `Backend` re-anchors the same
 /// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
 /// super-bound below so the constraint is unchanged for existing
 /// callers.
@@ -590,7 +590,7 @@ pub trait SchemaIntrospect: 'static {
 /// Online index-build capability — "create an index without blocking
 /// writers, classify SQLSTATE failures, audit retries".
 ///
-/// Carved out of the monolithic [`Backend`] trait (see
+/// Carved out of the monolithic `Backend` trait (see
 /// `docs/archive/p0-implementation-plan.md` and
 /// `docs/archive/db-system-design.md` §7). The single method —
 /// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
@@ -875,7 +875,7 @@ pub trait DialectBuilder: 'static {
 /// naming the concrete backend type.
 ///
 /// **Open Q1 resolution**: the 16 audit-table operations
-/// that used to live as methods on [`Backend`] were deleted; the
+/// that used to live as methods on `Backend` were deleted; the
 /// helpers stay as free functions in `crate::audit::*` taking
 /// `&Pool` / `&Client`, and generic consumers reach the pool through
 /// `backend.pool_handle()`. See `docs/archive/p0-implementation-plan.md`
@@ -947,7 +947,7 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
 /// across arms without bleeding into the per-isolate `BackendHandle`
 /// enum.
 ///
-/// **Why not on [`Backend`] super-bound** (plan §2.1): consumers route
+/// **Why not on `Backend` super-bound** (plan §2.1): consumers route
 /// via `BackendHandle::as_change_stream_pg(...)` /
 /// `as_change_stream_sqlite(...)` accessors that mirror
 /// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`]. The
@@ -1113,7 +1113,7 @@ impl Drop for BrokerPauseGuard {
 /// little-endian `[f32]` payloads — dev tier only, ≤50k rows, ≤1024
 /// dims, HNSW deferred (riskiest-decision Q-P4-D, plan §10).
 ///
-/// ## Why not on [`Backend`] super-bound
+/// ## Why not on `Backend` super-bound
 ///
 /// Same rationale as [`ChangeStream`] / [`SessionMinter`] (plan §2):
 /// consumers route via concrete-backend accessors —
@@ -1303,7 +1303,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 //
 // Two capability traits defined per
 // `docs/archive/p5-encryption-backup-implementation-plan.md` §2 + §9.
-// Neither joins the [`Backend`] super-trait composition or the
+// Neither joins the `Backend` super-trait composition or the
 // [`RegisterBackend`] marker — they're admin-surface accessors routed
 // via dedicated `BackendHandle::as_encrypted_column_*` /
 // `as_backup_*` accessors (mirror of the `as_change_stream_*` shape
@@ -1321,7 +1321,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 
 /// AEAD encrypt/decrypt at the storage boundary.
 ///
-/// **Why a capability trait** (not on the [`Backend`] super-trait):
+/// **Why a capability trait** (not on the `Backend` super-trait):
 ///
 /// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
 ///   so per-backend trait impls are thin delegations.
@@ -1403,7 +1403,7 @@ pub use zeroship_schema::descriptors::EncryptionMode;
 ///
 /// **Admin surface** — like [`ChangeStream`] / [`VectorIndex`], this
 /// trait is routed through the `BackendHandle::as_backup_*`
-/// accessors rather than joining the [`Backend`] super-trait. App
+/// accessors rather than joining the `Backend` super-trait. App
 /// code never reaches this; only the platform's backup orchestrator
 /// does. PG ships `pg_dump`/`pg_restore` shell-out + PITR
 /// placeholder; SQLite ships `VACUUM INTO`
@@ -1653,6 +1653,16 @@ impl<T> RegisterBackend for T where
 ///   on the per-isolate context (e.g.
 ///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
 ///   of a transaction.
+/// NOTE FOR DOC LINKS: this trait is `cfg(any(test, feature = "test-helpers"))`,
+/// so it DOES NOT EXIST in a default build. References to it elsewhere in this
+/// crate are deliberately code spans rather than intra-doc links - rustdoc
+/// cannot resolve an item that is compiled out, and 15 of them were reporting
+/// as broken links on every doc build.
+///
+/// It is a conformance marker, not the production abstraction: nothing takes
+/// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
+/// that enum, and this trait exists so tests can assert the concrete backends
+/// implement the whole sub-trait set.
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait Backend:
     SqlExecutor
@@ -1921,7 +1931,7 @@ impl BackendHandle {
 
 #[cfg(test)]
 mod tests {
-    //! Interface-level (compile-time) tests for the [`Backend`] trait.
+    //! Interface-level (compile-time) tests for the `Backend` trait.
     //!
     //! The trait is `async fn`-in-trait and every method needs a real
     //! Postgres listener via [`PostgresBackend`]; we cannot exercise
@@ -1942,7 +1952,7 @@ mod tests {
     use super::*;
 
     /// Compile-time: the canonical impl [`PostgresBackend`] satisfies
-    /// the [`Backend`] trait. Function body type-checks at build time;
+    /// the `Backend` trait. Function body type-checks at build time;
     /// it's a deliberate no-op at runtime.
     fn assert_postgres_backend_impls_backend() {
         fn assert_impl<T: Backend>() {}
@@ -2134,7 +2144,7 @@ mod tests {
     /// regression here would silently change every `B::Client` /
     /// `B::LiveSchema` consumer's expectations. `LiveSchema` flows
     /// through [`SchemaIntrospect`] now (moved off
-    /// [`Backend`]); `Backend` re-anchors it via the
+    /// `Backend`); `Backend` re-anchors it via the
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {

@@ -13,7 +13,7 @@
 //! `transient`, …) is preserved via [`coded_sql`] which wraps the
 //! Postgres error in [`DbError`] through the `From<compio_postgres::Error>`
 //! impl in `crate::error`. Callers `?`-flow these through the
-//! [`Backend`](crate::backend::Backend) trait — there is no string
+//! `Backend` trait — there is no string
 //! flattening at any boundary inside the crate.
 //!
 //! ## Divergence from proposal
