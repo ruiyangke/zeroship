@@ -225,7 +225,7 @@ pub const PLAN_PREFIX: &str = "pln";
 /// string (`inv_<base62>`); the provider-ref + line side tables FK into it.
 pub const INVOICE_PREFIX: &str = "inv";
 
-/// Invoice-payment typed-id prefix (billing-ops gap #26, PR-1). Three chars to
+/// Invoice-payment typed-id prefix. Three chars to
 /// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
 /// (R16-API2). `ipy` (NOT the design's 4-char `ipay`, which would break the
 /// 3-char invariant) and disjoint from `inv` so a payment id can never be
@@ -235,7 +235,7 @@ pub const INVOICE_PREFIX: &str = "inv";
 /// generator).
 pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
 
-/// Credit-ledger typed-id prefix (billing-ops gap #26, PR-2). Three chars to
+/// Credit-ledger typed-id prefix. Three chars to
 /// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
 /// (R16-API2), and disjoint from `inv`/`ipy` so a credit-entry id can never be
 /// confused with the invoice it relates to. The `zeroship.credit_ledger.id`
@@ -244,7 +244,7 @@ pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
 /// SQL `DEFAULT` — there is no in-DB base62 generator).
 pub const CREDIT_PREFIX: &str = "crd";
 
-/// Refund typed-id prefix (billing-ops gap #26, PR-3). Three chars to match the
+/// Refund typed-id prefix. Three chars to match the
 /// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
 /// (R16-API2), and disjoint from `inv`/`ipy`/`crd` so a refund id can never be
 /// confused with the invoice it FKs into or the credit grant a `refund_to_credit`
@@ -254,7 +254,7 @@ pub const CREDIT_PREFIX: &str = "crd";
 /// `DEFAULT` — there is no in-DB base62 generator).
 pub const REFUND_PREFIX: &str = "ref";
 
-/// Plan-change-event typed-id prefix (billing-ops gap #26, PR-4: full usage-segment
+/// Plan-change-event typed-id prefix (full usage-segment
 /// proration). Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
 /// every other entity uses (R16-API2), and disjoint from `inv`/`ipy`/`crd`/`ref`/`pln`
 /// so a plan-change-event id can never be confused with the plan it names or the
@@ -264,7 +264,7 @@ pub const REFUND_PREFIX: &str = "ref";
 /// base62 generator).
 pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
 
-/// Spend-state-history surrogate-id prefix (billing-ops gap #26, PR-6: notifications).
+/// Spend-state-history surrogate-id prefix.
 /// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
 /// `zeroship.spend_state_history.id` column stores the full typed-id string
 /// (`she_<base62>`), minted in Rust by `spend.rs::persist_transition` (no SQL
@@ -275,11 +275,15 @@ pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
 /// notification kinds. Its prefix MUST be pairwise-disjoint from every other
 /// notification source (`cbh`/`inv`/`ref`/`dsp`) so a `transition_id` from one source
 /// can never collide with another's in the send-ledger dedup key — asserted by
-/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+/// `tests::notification_source_prefixes_are_pairwise_disjoint`.
+///
+/// That name is a code span, not an intra-doc link, and must stay one: `tests`
+/// is `#[cfg(test)]`, so rustdoc does not compile it when documenting and a
+/// `[...]` link there resolves to nothing. Five of them did, and reported as
+/// broken links on every doc build.
 pub const SPEND_HISTORY_PREFIX: &str = "she";
 
-/// Creator-billing-status-history surrogate-id prefix (billing-ops gap #26, PR-6:
-/// notifications). Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
+/// Creator-billing-status-history surrogate-id prefix. Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
 /// (R16-API2). The `zeroship.creator_billing_status_history.id` column stores the full
 /// typed-id string (`cbh_<base62>`), minted in Rust by `account_status.rs::append_history`
 /// (no SQL `DEFAULT` — see [`SPEND_HISTORY_PREFIX`]).
@@ -289,7 +293,7 @@ pub const SPEND_HISTORY_PREFIX: &str = "she";
 /// pairwise-disjoint from every other notification source — see [`SPEND_HISTORY_PREFIX`].
 pub const CREATOR_BILLING_HISTORY_PREFIX: &str = "cbh";
 
-/// Billing-dispute typed-id prefix (billing-ops gap #26, PR-8: disputes/chargebacks).
+/// Billing-dispute typed-id prefix.
 /// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
 /// `zeroship.billing_disputes.id` column stores the full typed-id string (`dsp_<base62>`),
 /// minted in Rust by the `charge.dispute.created` webhook branch.
@@ -298,7 +302,7 @@ pub const CREATOR_BILLING_HISTORY_PREFIX: &str = "cbh";
 /// prefix MUST be pairwise-disjoint from every other notification source
 /// (`she`/`cbh`/`inv`/`ref`) so a `transition_id` from one source can never collide with
 /// another's in the send-ledger dedup key — asserted by
-/// [`tests::notification_source_prefixes_are_pairwise_disjoint`]. Distinct from the
+/// `tests::notification_source_prefixes_are_pairwise_disjoint`. Distinct from the
 /// Stripe-side dispute id (`du_…`/`dp_…`), which is a provider ref, not a typed_id.
 pub const DISPUTE_PREFIX: &str = "dsp";
 
@@ -356,23 +360,21 @@ pub fn new_invoice_id() -> String {
 
 /// Generate a new invoice-payment ID: `ipy_{base62(uuidv7)}`. Minted by the
 /// payment-confirmation webhook when it appends a `charge` row recording the
-/// cash actually collected against a finalized invoice (billing-ops gap #26,
-/// PR-1).
+/// cash actually collected against a finalized invoice.
 pub fn new_invoice_payment_id() -> String {
     generate(INVOICE_PAYMENT_PREFIX)
 }
 
 /// Generate a new credit-ledger entry ID: `crd_{base62(uuidv7)}`. Minted by the
 /// operator `POST /billing/credit` grant endpoint and by the billing reconciler
-/// when it appends a per-grant `consumed` entry at finalize (billing-ops gap #26,
-/// PR-2).
+/// when it appends a per-grant `consumed` entry at finalize.
 pub fn new_credit_id() -> String {
     generate(CREDIT_PREFIX)
 }
 
 /// Generate a new refund ID: `ref_{base62(uuidv7)}`. Minted by the operator
 /// `POST /api/invoices/{id}/refunds` endpoint and by the void+reissue true-up
-/// bridge (billing-ops gap #26, PR-3).
+/// bridge.
 pub fn new_refund_id() -> String {
     generate(REFUND_PREFIX)
 }
@@ -380,7 +382,7 @@ pub fn new_refund_id() -> String {
 /// Generate a new plan-change-event ID: `pce_{base62(uuidv7)}`. Minted by
 /// `api.rs::set_plan` when it appends a proration-timeline row recording a plan
 /// change with its server-derived frozen base fees + cumulative `usage_at_change`
-/// snapshot (billing-ops gap #26, PR-4: full usage-segment proration).
+/// snapshot, for full usage-segment proration.
 pub fn new_plan_change_event_id() -> String {
     generate(PLAN_CHANGE_EVENT_PREFIX)
 }
@@ -388,7 +390,7 @@ pub fn new_plan_change_event_id() -> String {
 /// Generate a new spend-state-history surrogate ID: `she_{base62(uuidv7)}`. Minted by
 /// `spend.rs::persist_transition` when it appends a `spend_state_history` row; the value
 /// becomes the `billing_notifications.transition_id` for spend-driven notification kinds
-/// (billing-ops gap #26, PR-6).
+/// for spend-driven notification kinds.
 pub fn new_spend_history_id() -> String {
     generate(SPEND_HISTORY_PREFIX)
 }
@@ -396,15 +398,14 @@ pub fn new_spend_history_id() -> String {
 /// Generate a new creator-billing-status-history surrogate ID: `cbh_{base62(uuidv7)}`.
 /// Minted by `account_status.rs::append_history` when it appends a
 /// `creator_billing_status_history` row; the value becomes the
-/// `billing_notifications.transition_id` for the dunning-driven kinds (billing-ops
-/// gap #26, PR-6).
+/// `billing_notifications.transition_id` for the dunning-driven kinds.
 pub fn new_creator_billing_history_id() -> String {
     generate(CREATOR_BILLING_HISTORY_PREFIX)
 }
 
 /// Generate a new billing-dispute ID: `dsp_{base62(uuidv7)}`. Minted in Rust by the
 /// `charge.dispute.created` webhook branch in `stripe_handlers` when it records a
-/// chargeback (billing-ops gap #26, PR-8). The `zeroship.billing_disputes.id` column
+/// chargeback. The `zeroship.billing_disputes.id` column
 /// stores the full typed-id string; the value becomes the
 /// `billing_notifications.transition_id` for the `disputed` notification kind (no SQL
 /// `DEFAULT` — there is no in-DB base62 generator, and a bare `gen_random_uuid()` would
@@ -413,7 +414,7 @@ pub fn new_creator_billing_history_id() -> String {
 /// Distinct from the Stripe-side dispute id (`du_…`/`dp_…`, stored separately in
 /// `billing_disputes.provider_dispute_id`): the `dsp_…` is OUR typed id, the `du_…` is
 /// Stripe's. Its prefix is pairwise-disjoint from every other notification source
-/// (`she`/`cbh`/`inv`/`ref`) — see [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+/// (`she`/`cbh`/`inv`/`ref`) — see `tests::notification_source_prefixes_are_pairwise_disjoint`.
 pub fn new_dispute_id() -> String {
     generate(DISPUTE_PREFIX)
 }
@@ -427,7 +428,7 @@ pub fn new_dispute_id() -> String {
 /// prefix MUST be pairwise-disjoint from every other notification source
 /// (`she`/`cbh`/`inv`/`ref`/`dsp`/`cof`) so a `transition_id` from one source can never
 /// collide with another's in the send-ledger dedup key — asserted by
-/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+/// `tests::notification_source_prefixes_are_pairwise_disjoint`.
 pub const PAYOUT_FAILURE_PREFIX: &str = "pof";
 
 /// Generate a new payout-failure ID: `pof_{base62(uuidv7)}`.
@@ -444,7 +445,7 @@ pub fn new_payout_failure_id() -> String {
 /// The id IS the `billing_notifications.transition_id` for the `checkout_failed` kind. Its
 /// prefix MUST be pairwise-disjoint from every other notification source
 /// (`she`/`cbh`/`inv`/`ref`/`dsp`/`pof`) — see
-/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+/// `tests::notification_source_prefixes_are_pairwise_disjoint`.
 pub const CHECKOUT_FAILURE_PREFIX: &str = "cof";
 
 /// Generate a new connect-checkout-failure ID: `cof_{base62(uuidv7)}`.
@@ -828,18 +829,18 @@ mod tests {
         }
     }
 
-    /// PR-6 regression (brief test (d)): the `billing_notifications` dedup key is
+    /// Regression: the `billing_notifications` dedup key is
     /// `(creator_id, kind, transition_id)`, where `transition_id` is the typed-id of the
     /// SOURCE row (a `she_…` spend-history id, a `cbh_…` creator-billing-history id, an
     /// `inv_…` invoice id, a `ref_…` refund id, or a `dsp_…` dispute id). The design's
-    /// MINOR-3 cross-source dedup correctness REQUIRES these prefixes be pairwise-disjoint
+    /// Cross-source dedup correctness REQUIRES these prefixes be pairwise-disjoint
     /// so a `transition_id` from one source can NEVER collide with another's. This test is
     /// the typed-id-registry assertion the design names; it fails the day two sources
     /// share a prefix (which would let one source's id silently dedup against another's).
     #[test]
     fn notification_source_prefixes_are_pairwise_disjoint() {
-        // PR-8 wired the real `DISPUTE_PREFIX` const; it MUST still equal the `"dsp"`
-        // literal the PR-6 test reserved, so the dedup key stays disjoint and stable.
+        // `DISPUTE_PREFIX` MUST still equal the `"dsp"` literal this test reserved
+        // before the const existed, so the dedup key stays disjoint and stable.
         assert_eq!(DISPUTE_PREFIX, "dsp", "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)");
         let sources = [
             ("spend_state_history", SPEND_HISTORY_PREFIX),
