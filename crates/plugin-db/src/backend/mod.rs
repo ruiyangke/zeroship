@@ -1651,7 +1651,7 @@ impl<T> RegisterBackend for T where
 /// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
 ///   on the per-isolate context (e.g.
-///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
+///   `IsolateDbContext::tx_conns`) for the duration
 ///   of a transaction.
 /// NOTE FOR DOC LINKS: this trait is `cfg(any(test, feature = "test-helpers"))`,
 /// so it DOES NOT EXIST in a default build. References to it elsewhere in this

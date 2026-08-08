@@ -3,7 +3,7 @@
 //!
 //! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
 //! reads a per-app [`MaskPolicy`] cached on the per-isolate context
-//! ([`crate::context::IsolateDbContext::mask_policy`]). The cache is
+//! (`IsolateDbContext::mask_policies`). The cache is
 //! seeded from durable storage:
 //!
 //! - **PG** (`feature = "pg"`): `__zeroship_admin.mask_policies`
@@ -58,7 +58,7 @@ pub const VALID_CLASSIFICATIONS: &[&str] = &[
 /// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
 ///
-/// Stored on [`crate::context::IsolateDbContext::mask_policy`] for the
+/// Stored on `IsolateDbContext::mask_policies` for the
 /// life of the isolate; refreshed write-through when `setMaskPolicy`
 /// fires. A `None` cache slot means "no policy declared for this app
 /// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
@@ -214,7 +214,7 @@ impl MaskPolicy {
 ///    - **SQLite**: read sidecar JSON, update the app's entry, atomic
 ///      write back via `<file>.tmp + rename`.
 /// 3. Refresh the in-process cache on
-///    [`crate::context::IsolateDbContext::mask_policy`] so the next
+///    `IsolateDbContext::mask_policies` so the next
 ///    unmask sees the new policy without a re-read.
 ///
 /// Idempotent: re-running with the same policy is a no-op for the cache

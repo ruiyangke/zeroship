@@ -20,7 +20,7 @@
 //! `Collection`; every CRUD method on it routes through the open
 //! transaction connection automatically, since
 //! [`crate::exec::run_sql`] consults
-//! [`crate::context::IsolateDbContext::tx_conn`] whenever it is set (the
+//! `IsolateDbContext::tx_conns` whenever it is set (the
 //! orchestrator sets it for the duration of the transaction).
 //!
 //! ## Why collections-as-props (not a `Transaction` instance)
