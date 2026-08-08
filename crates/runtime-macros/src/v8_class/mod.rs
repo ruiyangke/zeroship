@@ -36,7 +36,7 @@
 //! `#[v8_name = "value"]` to both halves. The install codegen pairs
 //! by JS-visible name into a single `set_accessor_property("value",
 //! getter, setter, attrs)` call rather than two installs that would
-//! each overwrite the previous. See `tests/v8_paired_accessor_smoke.rs`
+//! each overwrite the previous. See `crates/runtime/tests/v8_paired_accessor_smoke.rs`
 //! for the supported shapes.
 //!
 //! ## Submodule layout
