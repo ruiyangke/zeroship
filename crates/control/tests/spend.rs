@@ -91,7 +91,7 @@ async fn make_app_on_priced_plan(
 }
 
 async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
-    metering
+    let write = metering
         .replace_period_snapshot(
             current_period_start_unix(),
             &[UsageAggregate {
@@ -102,6 +102,15 @@ async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
         )
         .await
         .expect("seed usage snapshot");
+    // Checked rather than silenced. `#[must_use]` flagged this call, and the honest
+    // response to that is to assert the seed is clean, not to bind it to `_`: a seed
+    // that reports a decrease means a previous test left a HIGHER total for this app in
+    // the same period, so the fixture is lying about its starting state.
+    assert!(
+        write.decreased.is_empty(),
+        "seeding must not lower an existing total; fixture state is dirty: {:?}",
+        write.decreased
+    );
 }
 
 /// Read the persisted `(state, history_count)` for an app.
