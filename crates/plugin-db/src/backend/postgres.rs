@@ -27,7 +27,7 @@ use super::Backend;
 #[cfg(any(test, feature = "test-helpers"))]
 use super::{AuditWriter, IndexBuilder, PgLockManager, SchemaIntrospect};
 
-/// Single concrete impl of [`Backend`] backed by `compio_postgres`.
+/// Single concrete impl of `Backend` backed by `compio_postgres`.
 ///
 /// Holds the `Rc<Pool>` for the configured URL. The pool itself is
 /// created by [`crate::init_pool_async`] and stashed in the per-isolate
