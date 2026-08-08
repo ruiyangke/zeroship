@@ -520,12 +520,22 @@ fn workflow_runtime_envelope(
     })
 }
 
-/// Test-only durable-workflow replay ingress.
+/// Durable-workflow replay ingress that performs NO signature or nonce
+/// verification. Signed advance is the production transport; this exists so
+/// the replay path could be exercised before the signing work landed.
 ///
-/// DW-05 deliberately leaves signature/nonce verification to a later task.
-/// Production config never enables this handler; tests can flip
-/// `workflow_advance_unsigned` and feed a run reference through the same
-/// worker-owned claim/replay/apply path.
+/// NOT test-only, and an earlier version of this comment said it was. There is
+/// no `cfg` gate: this function is compiled into the production worker and the
+/// route is registered unconditionally (see the `workflow/advance-unsigned`
+/// route above). What refuses it in production is a RUNTIME check, not its
+/// absence - the handler returns 403 unless `workflow_advance_unsigned` is set,
+/// and that flag is hidden, defaults to false, and has no environment binding,
+/// so it takes an explicit CLI argument to turn on. `deploy/` passes it
+/// nowhere; only `tests/e2e_durable_workflows.sh` does.
+///
+/// The distinction is the point: "production never enables this" is a statement
+/// about how the binary is invoked, not something the build enforces. Read it
+/// as a default that holds, not as an endpoint that is missing.
 pub async fn workflow_advance_unsigned(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
