@@ -467,6 +467,31 @@ pub async fn deploy(
         Err(e) => return error_response(e),
     }
 
+    // Count this deploy as in flight for the rest of the handler. Everything
+    // above resolves before a body byte is read, so a rejected caller occupies
+    // nothing and must not appear in the count; everything below holds the
+    // artifact on disk and then mapped, and returns from several places, so the
+    // release has to ride on `Drop` rather than a matched decrement.
+    //
+    // This admits every deploy - it measures concurrency, it does not limit it.
+    // The per-deploy take is bounded but the aggregate is not, and sizing a
+    // limit needs the peak a real deployment reaches rather than a guess.
+    //
+    // The placement is measured, not assumed: panicking here fails exactly the
+    // five `deploy_http_test` cases that stream an artifact (happy path, both
+    // scope cases, manifest-not-first, legacy-manifest) and leaves the five
+    // rejection cases passing - missing auth, wrong content type, unknown app,
+    // legacy migration query, rate limited. That pins the boundary and nothing
+    // more: no test drives two deploys at once, so the peak arithmetic is
+    // covered only by the unit tests in `deploy_inflight`.
+    let inflight = crate::deploy_inflight::DEPLOY_INFLIGHT.enter();
+    if inflight.is_new_peak() {
+        tracing::info!(
+            concurrent_deploys = inflight.depth(),
+            "deploy concurrency reached a new peak"
+        );
+    }
+
     // Stream the request body to a tmp file under the configured
     // deploy tmp dir. Tmp files live for the duration of the deploy
     // and are removed after ingest (success or error). Path includes
