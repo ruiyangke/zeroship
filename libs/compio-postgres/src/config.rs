@@ -594,9 +594,10 @@ impl Config {
     /// The startup handshake includes `replication=<value>`, putting the
     /// server in walsender mode. After authentication the connection
     /// accepts replication commands (`IDENTIFY_SYSTEM`,
-    /// `START_REPLICATION`, …) via [`Client::simple_query`] /
-    /// [`Client::copy_both_simple`]; regular query pipelining is not
-    /// supported on a replication connection.
+    /// `START_REPLICATION`, …) through the dedicated replication client in
+    /// [`crate::replication`] - `identify_system` and
+    /// `start_logical_replication`, not a `Client` method. Regular query
+    /// pipelining is not supported on a replication connection.
     pub fn replication(&mut self, mode: ReplicationMode) -> &mut Config {
         self.replication = Some(mode);
         self

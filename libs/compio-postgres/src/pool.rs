@@ -359,7 +359,7 @@ impl Pool {
         Ok(pool)
     }
 
-    /// Retry [`connect_one`] up to 3 times with 100ms, 400ms, 1.6s backoff.
+    /// Retry [`Self::connect_one`] up to 3 times with 100ms, 400ms, 1.6s backoff.
     /// Only used for pool warm-up — `get_inner`'s on-demand connect stays
     /// single-shot to keep the latency budget tight.
     async fn connect_with_retry(url: &str) -> Result<Client, Error> {

@@ -916,7 +916,7 @@ fn postgres_microseconds_since_epoch() -> i64 {
 ///
 /// Pure parser. The replication stream layer hands the caller raw
 /// pgoutput frames (the body of each XLogData); the caller feeds them
-/// to [`pgoutput::decode`] to obtain a [`PgOutputMessage`].
+/// to [`pgoutput::decode`] to obtain a [`pgoutput::PgOutputMessage`].
 ///
 /// Implements protocol version 1 — the minimum every PG 12+ server
 /// speaks. Streaming-of-large-transactions (proto v2+) is not
