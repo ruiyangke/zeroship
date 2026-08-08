@@ -2574,6 +2574,15 @@ fn queue_microtask_callback(
     promise.then(scope, func);
 }
 
+/// Drain `process.nextTick` callbacks and V8's microtask queue until both are
+/// empty, bounded so a callback that re-queues itself cannot spin forever.
+///
+/// This BRACKETS V8's checkpoint; it does not interleave with it. Ticks queued
+/// from inside a microtask therefore run after every promise job in that
+/// checkpoint, not before - a divergence from Node documented at the
+/// `process.nextTick` installation in `setup_globals`. Both drains are needed
+/// even so: the pre-drain catches ticks queued from synchronous code, and the
+/// post-drain catches the ones queued from microtasks.
 pub(crate) fn perform_microtask_checkpoint(scope: &mut v8::PinScope) {
     for _ in 0..1024 {
         let had_next_ticks_before = drain_next_ticks(scope);
@@ -3651,8 +3660,30 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
             install_stream(scope, process, "stderr", 2);
         }
 
-        // process.nextTick — Node-only. The runtime drains this queue before
-        // V8 Promise microtasks and restores the context captured per entry.
+        // process.nextTick - Node-only. Restores the context captured per entry.
+        //
+        // ORDERING DIVERGES FROM NODE, and this comment used to claim it did
+        // not ("drains this queue before V8 Promise microtasks"). What
+        // `perform_microtask_checkpoint` actually does is drain our queue
+        // BEFORE and AFTER V8's checkpoint - it brackets that checkpoint
+        // rather than interleaving with it. Node drains the nextTick queue
+        // ahead of the promise queue and again between microtasks.
+        //
+        // The difference is observable whenever the `nextTick` call itself
+        // happens inside a microtask, which is the common case: an async
+        // handler's synchronous prefix runs as a promise job, so at the
+        // pre-drain the queue is still empty, V8 then runs the whole promise
+        // queue (including any `.then` registered alongside), and only the
+        // post-drain sees the tick. Measured:
+        //
+        //     Promise.resolve().then(() => o.push("promise"));
+        //     process.nextTick(() => o.push("tick"));
+        //     -> Node: ["tick","promise"]   here: ["promise","tick"]
+        //
+        // and the tick does not land at all until the next macrotask boundary.
+        // Closing this needs interleaving with V8's microtask queue, not a
+        // reordering of the two drains. Pinned by the nextTickOrdering
+        // assertion in `tests/node_pg_e2e.rs`.
         {
             let key = v8::String::new(scope, "nextTick").unwrap();
             let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
