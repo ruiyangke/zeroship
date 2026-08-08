@@ -109,6 +109,30 @@ impl MigrationStore {
     /// retrying deploy inserts a fresh row per attempt: the operator sees several
     /// rows for one decision, approving one leaves the rest pending forever, and
     /// nothing reaps them.
+    ///
+    /// CHECK-THEN-ACT, and not closed by a unique index. This runs before the
+    /// insert, so two simultaneous submissions of the same content can both find
+    /// nothing and both insert. The obvious fix - a partial unique index on
+    /// `(app_id, request_body) WHERE status = 'pending_approval'`, mirroring
+    /// `invoices_active_period_claim` - does not work here, and the reason is a
+    /// size limit rather than a semantic one. Measured against PostgreSQL 16.14:
+    ///
+    ///   body ~1.9 KB      inserts
+    ///   larger body       ERROR: index row requires 12880 bytes, maximum size is 8191
+    ///
+    /// `invoices_active_period_claim` gets away with it because its key is two
+    /// small scalars. `request_body` is the whole IR submission, and a multi-
+    /// document migration passes 8 KB easily, so that index would convert a
+    /// legitimate large migration into a failed insert. Note the existing
+    /// `migrated_migrations_app_status_idx` is no basis for it either: its key is
+    /// `(app_id, status, submitted_at desc)`, and marking THAT unique would dedup
+    /// nothing, because `submitted_at` differs per row.
+    ///
+    /// The shape that works needs a fixed-width fingerprint column to index on
+    /// instead - `content_checksum`, which `content_checksum()` in `apply.rs`
+    /// already computes from migration content alone. That is a schema migration
+    /// plus a decision about whether a duplicate submission returns the EXISTING
+    /// `migration_id`, so it is filed rather than done here.
     pub async fn find_pending_for_request(
         &self,
         app_id: Uuid,
