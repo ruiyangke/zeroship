@@ -50,11 +50,49 @@ impl Default for SpendRecomputeConfig {
 pub struct SpendRecomputeCycle {
     pub polled: usize,
     pub decoded: usize,
-    pub skipped: usize,
+    /// Events read but not applied to this period's totals, split by CAUSE.
+    ///
+    /// These were one `skipped` counter, and the aggregate could not answer
+    /// the question it looked like it answered. The recompute rewinds and
+    /// re-reads the WHOLE retained stream for every period it rebuilds, so
+    /// each event belonging to any OTHER period is "skipped" on every cycle -
+    /// on a mature stream that is nearly the entire history, every time. A
+    /// genuinely late arrival, which is the case worth alerting on, added 1 to
+    /// a number already in the millions.
+    ///
+    /// `other_period` is EXPECTED to be large and is not an error signal by
+    /// itself; it is separated so it stops drowning the other three.
+    pub skipped_other_period: usize,
+    /// Duplicate `event_id` seen within one cycle - the at-least-once stream
+    /// delivering a replay. Small and non-zero is normal.
+    pub skipped_duplicate: usize,
+    /// Decoded and in-period but carrying no app subject, so it cannot be
+    /// attributed. Should be zero; non-zero is usage nobody gets billed for.
+    pub skipped_no_app: usize,
+    /// In-period and attributable but worth zero. Harmless.
+    pub skipped_zero_value: usize,
     pub skipped_undecodable: usize,
     pub aggregates: usize,
     pub written: usize,
     pub transitions: usize,
+}
+
+/// Why `apply_event` did or did not fold an event into the running totals.
+///
+/// Replaces a `bool`. The boolean forced every non-application into one
+/// counter, and the four causes have nothing in common operationally: one is
+/// expected in bulk, one is expected in trickle, one should never happen, and
+/// one is noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Applied {
+    Yes,
+    /// `event_time` belongs to a different billing period than the one being
+    /// rebuilt. Dominant by construction on any non-empty stream.
+    OtherPeriod,
+    /// In-period but no `subject.app`, so it cannot be attributed to anyone.
+    NoAppSubject,
+    /// In-period and attributable but zero-valued.
+    ZeroValue,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,7 +154,10 @@ pub async fn run(
                 tracing::info!(
                     polled = cycle.polled,
                     decoded = cycle.decoded,
-                    skipped = cycle.skipped,
+                    skipped_other_period = cycle.skipped_other_period,
+                    skipped_duplicate = cycle.skipped_duplicate,
+                    skipped_no_app = cycle.skipped_no_app,
+                    skipped_zero_value = cycle.skipped_zero_value,
                     skipped_undecodable = cycle.skipped_undecodable,
                     aggregates = cycle.aggregates,
                     written = cycle.written,
@@ -227,7 +268,10 @@ pub async fn recompute_unsettled_period_snapshots(
         let next = recompute_usage_aggregates(registry, stream, period_start, cfg).await?;
         total.polled += next.polled;
         total.decoded += next.decoded;
-        total.skipped += next.skipped;
+        total.skipped_other_period += next.skipped_other_period;
+        total.skipped_duplicate += next.skipped_duplicate;
+        total.skipped_no_app += next.skipped_no_app;
+        total.skipped_zero_value += next.skipped_zero_value;
         total.skipped_undecodable += next.skipped_undecodable;
         total.aggregates += next.aggregates;
         total.written += next.written;
@@ -288,13 +332,15 @@ pub async fn recompute_usage_aggregates(
                 Ok(event) => {
                     cycle.decoded += 1;
                     if !seen_event_ids.insert(event.event_id.clone()) {
-                        cycle.skipped += 1;
+                        cycle.skipped_duplicate += 1;
                         continue;
                     }
-                    if apply_event(&mut totals, &event, period_start) {
-                        continue;
+                    match apply_event(&mut totals, &event, period_start) {
+                        Applied::Yes => {}
+                        Applied::OtherPeriod => cycle.skipped_other_period += 1,
+                        Applied::NoAppSubject => cycle.skipped_no_app += 1,
+                        Applied::ZeroValue => cycle.skipped_zero_value += 1,
                     }
-                    cycle.skipped += 1;
                 }
                 Err(SpendRecomputeError::Decode {
                     partition,
@@ -347,9 +393,9 @@ fn apply_event(
     totals: &mut HashMap<(Uuid, String), i64>,
     event: &UsageEvent,
     period_start: i64,
-) -> bool {
+) -> Applied {
     if period_start_unix(event.event_time) != period_start {
-        return false;
+        return Applied::OtherPeriod;
     }
     let Some(app_id) = event.subject.app else {
         tracing::warn!(
@@ -357,7 +403,7 @@ fn apply_event(
             meter = %event.meter,
             "spend_recompute: usage event has no app subject — skipping"
         );
-        return false;
+        return Applied::NoAppSubject;
     };
     let value = match i64::try_from(event.value) {
         Ok(value) => value,
@@ -372,7 +418,7 @@ fn apply_event(
         }
     };
     if value == 0 {
-        return false;
+        return Applied::ZeroValue;
     }
 
     let total = totals.entry((app_id, event.meter.clone())).or_insert(0);
@@ -387,7 +433,7 @@ fn apply_event(
             );
         }
     }
-    true
+    Applied::Yes
 }
 
 fn decode_record(record: &StreamRecord) -> Result<UsageEvent, SpendRecomputeError> {
@@ -479,15 +525,21 @@ mod tests {
 
         let mut totals = HashMap::new();
 
-        assert!(
+        assert_eq!(
             apply_event(&mut totals, &mk("evt_in", 100, period + 10), period),
+            Applied::Yes,
             "an in-period event must be counted"
         );
         assert_eq!(totals.get(&(app, "requests".to_string())), Some(&100));
 
-        assert!(
-            !apply_event(&mut totals, &mk("evt_late", 5_000, previous + 10), period),
-            "an event from a settled period must not be counted"
+        // Asserts the REASON, not just the refusal. Under the old `bool` this
+        // read the same as an event with no app subject or a zero value - and
+        // conflating those is what made the aggregate counter unable to show
+        // that a late retry had lost its enforcement value.
+        assert_eq!(
+            apply_event(&mut totals, &mk("evt_late", 5_000, previous + 10), period),
+            Applied::OtherPeriod,
+            "an event from a settled period must not be counted, and must say why"
         );
         assert_eq!(
             totals.get(&(app, "requests".to_string())),
@@ -665,7 +717,10 @@ mod live_db_tests {
             .expect("first recompute");
         assert_eq!(first.polled, 5);
         assert_eq!(first.decoded, 5);
-        assert_eq!(first.skipped, 1);
+        // evt_old_period: right app, wrong period. Now named, not lumped.
+        assert_eq!(first.skipped_other_period, 1);
+        assert_eq!(first.skipped_duplicate, 0);
+        assert_eq!(first.skipped_no_app, 0);
         assert_eq!(first.aggregates, 3);
         assert_eq!(first.written, 3);
         assert_total(&client, warn_app, period, 80).await;
@@ -758,7 +813,10 @@ mod live_db_tests {
             .expect("recompute with duplicate event_id");
         assert_eq!(cycle.polled, 3);
         assert_eq!(cycle.decoded, 3);
-        assert_eq!(cycle.skipped, 1);
+        // evt_duplicate_replay: same event_id twice. This is the counter that
+        // used to be indistinguishable from a wrong-period event.
+        assert_eq!(cycle.skipped_duplicate, 1);
+        assert_eq!(cycle.skipped_other_period, 0);
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
         assert_total(&client, app, period, 42).await;
@@ -796,7 +854,8 @@ mod live_db_tests {
             .expect("recompute skips undecodable stream records");
         assert_eq!(cycle.polled, 3);
         assert_eq!(cycle.decoded, 2);
-        assert_eq!(cycle.skipped, 0);
+        assert_eq!(cycle.skipped_other_period, 0);
+        assert_eq!(cycle.skipped_duplicate, 0);
         assert_eq!(cycle.skipped_undecodable, 1);
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
@@ -835,7 +894,10 @@ mod live_db_tests {
             "each period recompute scans the retained stream"
         );
         assert_eq!(cycle.decoded, 4);
-        assert_eq!(cycle.skipped, 2);
+        // Two periods scanned, each seeing the other period+s event: the
+        // dominant-by-construction case the split exists to isolate.
+        assert_eq!(cycle.skipped_other_period, 2);
+        assert_eq!(cycle.skipped_duplicate, 0);
         assert_eq!(cycle.aggregates, 2);
         assert_eq!(cycle.written, 2);
         assert_total(&client, app, previous, 41).await;
