@@ -16,11 +16,20 @@
 //! key (invoice item / invoice / finalize / refund / meter event / connect
 //! PaymentIntent) carry an `Idempotency-Key` header (defense in depth on top of
 //! the `invoices` per-period claim) so an at-least-once retry replays the
-//! same Stripe object instead of creating a duplicate. The lazily-created,
-//! caller-deduped objects (customer, connect account, account_link, checkout
-//! setup session) do NOT carry one — at-most-once is enforced by the caller's
-//! own `creator_billing` / `creator_accounts` row check, and an account_link /
-//! checkout session is a short-lived hosted URL where a duplicate is harmless.
+//! same Stripe object instead of creating a duplicate. **Customer and connect
+//! account creation now carry one too**, keyed on `creator_id`.
+//!
+//! They previously did not, on the stated grounds that "at-most-once is
+//! enforced by the caller's own `creator_billing` / `creator_accounts` row
+//! check". That check is a plain check-then-act with no lock spanning it
+//! (`stripe_handlers.rs` 245/253/257), so two concurrent requests both observe
+//! no row and both post. The row's `ON CONFLICT` then keeps one and the other
+//! Stripe object is orphaned — an external side effect no local rollback
+//! reaches. A key collapses the race where a row check cannot.
+//!
+//! `account_link` and the checkout setup session still carry no key, and that
+//! one IS sound: both are short-lived hosted URLs, so a duplicate is discarded
+//! by expiry rather than persisted.
 //!
 //! EVERY request — GET, POST, DELETE — sends a pinned `Stripe-Version`
 //! header ([`STRIPE_API_VERSION`]) so the response wire shape is the one these
@@ -710,14 +719,30 @@ fn extract_id(json: &serde_json::Value, what: &str) -> Result<String, StripeErro
 
 impl StripeApi for StripeClient {
     async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, StripeError> {
-        // Customer creation is not retried with a deterministic key (the caller
-        // ensures at-most-once via the `creator_billing` row check), so no
-        // Idempotency-Key here.
+        // DETERMINISTIC key, keyed on the creator. The previous note here said
+        // the caller "ensures at-most-once via the `creator_billing` row
+        // check" and therefore needed no key. The caller does a plain
+        // check-then-act - `get_customer` -> None -> `create_customer` ->
+        // `set_customer` (stripe_handlers.rs:245/253/257) - with no lock
+        // spanning it, so two concurrent requests both see None and both post
+        // here. `set_customer`'s ON CONFLICT then keeps one row and the second
+        // Customer is orphaned in Stripe, which no local rollback can undo.
+        //
+        // A key rather than a DB advisory lock: nothing is held across an
+        // outbound HTTP call, and it holds across replicas and restarts, which
+        // a per-process lock does not.
+        //
+        // Bounded honestly: Stripe's Idempotency-Key window is 24h, so a replay
+        // beyond that can still create a second Customer. The row check is what
+        // covers the sequential case. The two together, not either alone.
+        let idempotency_key = format!("zs_customer_create:{creator_id}");
         let form = vec![
             ("email".to_string(), email.to_string()),
             ("metadata[creator_id]".to_string(), creator_id.to_string()),
         ];
-        let json = self.post_form("/v1/customers", &form, None).await?;
+        let json = self
+            .post_form("/v1/customers", &form, Some(&idempotency_key))
+            .await?;
         extract_id(&json, "customer")
     }
 
@@ -968,16 +993,23 @@ impl StripeApi for StripeClient {
         country: &str,
     ) -> Result<String, StripeError> {
         // Express Connect account. metadata[creator_id] is the OWNERSHIP signal
-        // the callback verifies (the account belongs to THIS creator). No
-        // Idempotency-Key here: the caller ensures at-most-once via the
-        // `creator_accounts` row check (reuse an existing acct_… on re-onboard).
+        // the callback verifies (the account belongs to THIS creator).
+        //
+        // DETERMINISTIC key, same reasoning as `create_customer`. The previous
+        // note said the caller "ensures at-most-once via the `creator_accounts`
+        // row check (reuse an existing acct_… on re-onboard)", but `onboard`
+        // reuses only what it can SEE: two concurrent onboards both read no
+        // row and both post, leaving a second Express account on the platform.
+        let idempotency_key = format!("zs_connect_account_create:{creator_id}");
         let form = vec![
             ("type".to_string(), "express".to_string()),
             ("email".to_string(), email.to_string()),
             ("country".to_string(), country.to_string()),
             ("metadata[creator_id]".to_string(), creator_id.to_string()),
         ];
-        let json = self.post_form("/v1/accounts", &form, None).await?;
+        let json = self
+            .post_form("/v1/accounts", &form, Some(&idempotency_key))
+            .await?;
         extract_id(&json, "connect account")
     }
 

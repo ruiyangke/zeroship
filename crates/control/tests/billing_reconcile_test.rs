@@ -3079,3 +3079,68 @@ async fn finalize_and_invoice_ref_commit_atomically() {
     drop(fx);
     common::drain_pg().await;
 }
+
+/// Customer and Connect-account creation must carry a DETERMINISTIC
+/// `Idempotency-Key`, so two concurrent creates for one creator collapse to a
+/// single Stripe object instead of two.
+///
+/// Both call sites previously passed `None` and justified it identically:
+/// "the caller ensures at-most-once via the `creator_billing` /
+/// `creator_accounts` row check". The caller does a plain check-then-act -
+/// `get_customer` -> None -> `create_customer` -> `set_customer` - with no lock
+/// spanning it (stripe_handlers.rs:245/253/257, zero `pg_advisory_lock` and
+/// zero `FOR UPDATE` in that handler). Two concurrent requests both see None
+/// and both post, and `ON CONFLICT` then keeps one row while the second Stripe
+/// object is orphaned - an external side effect no local rollback can undo.
+///
+/// A deterministic key is the right instrument here rather than a DB advisory
+/// lock: it needs no lock held across an outbound HTTP call, and it survives
+/// process restarts and multiple replicas, which a per-process lock does not.
+///
+/// Bounded honestly: Stripe's Idempotency-Key window is 24h. Beyond that a
+/// replay can still create a second object; the local row check is what covers
+/// the sequential case. The two together, not either alone.
+#[compio::test]
+async fn customer_and_connect_account_creation_carry_a_deterministic_idempotency_key() {
+    let mock = start_mock_stripe().await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(mock.base_url.clone());
+
+    let _ = client
+        .create_customer("idem@test.invalid", "creator-idem")
+        .await
+        .expect("create_customer must succeed against the mock");
+    let _ = client
+        .create_connect_account("idem@test.invalid", "creator-idem", "US")
+        .await;
+    // Same creator again: the key must be identical, which is what makes the
+    // race collapse rather than merely being retry-safe.
+    let _ = client
+        .create_customer("idem@test.invalid", "creator-idem")
+        .await
+        .expect("second create_customer must succeed against the mock");
+
+    let reqs = mock.requests();
+
+    let customers: Vec<_> = reqs.iter().filter(|r| r.path.starts_with("/v1/customers")).collect();
+    assert_eq!(customers.len(), 2, "expected both customer POSTs recorded: {reqs:?}");
+    assert!(
+        customers[0].idempotency_key.is_some(),
+        "customer creation must send an Idempotency-Key; without it two concurrent \
+         billing_setup calls create two Stripe Customers and orphan one"
+    );
+    assert_eq!(
+        customers[0].idempotency_key, customers[1].idempotency_key,
+        "the key must be DETERMINISTIC per creator - a random key per call is \
+         retry-safe but does not collapse a race"
+    );
+
+    let account = reqs
+        .iter()
+        .find(|r| r.path.starts_with("/v1/accounts"))
+        .expect("connect account POST recorded");
+    assert!(
+        account.idempotency_key.is_some(),
+        "connect-account creation must send an Idempotency-Key for the same reason"
+    );
+}
