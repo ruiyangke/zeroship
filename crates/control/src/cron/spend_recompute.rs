@@ -78,8 +78,26 @@ impl From<RegistryError> for SpendRecomputeError {
 }
 
 /// Cron entry point. A transient stream/PG error is logged and retried after
-/// the next cadence; no partial snapshot is written unless the full scan
-/// completed successfully.
+/// the next cadence.
+///
+/// This used to claim that "no partial snapshot is written unless the full scan
+/// completed successfully". Nothing in this function knows whether a scan
+/// completed. The drain loop's ONLY exit is `RECOMPUTE_DRAIN_EMPTY_ROUNDS`
+/// consecutive empty polls, and `replace_period_snapshot` DELETEs the whole
+/// period and rewrites it from whatever that scan happened to see - so a
+/// partial snapshot is written on every cycle that reads anything at all. The
+/// `polled == 0` guard below covers the read-nothing case and nothing else.
+///
+/// What the empty-poll heuristic actually measures is LATENCY, not
+/// end-of-stream: the redpanda adapter returns immediately once it has any
+/// record and only blocks `poll_timeout_ms` when it has none, so three empty
+/// rounds is roughly `3 x poll_timeout_ms` of tolerance. A mid-scan fetch stall
+/// longer than that - a partition leader failover, a broker pause - reads as
+/// "the topic ended here", and the period is rewritten from the truncated read.
+///
+/// No test can currently distinguish the two: every stream double in this
+/// repository is empty-forever once drained, so one empty poll IS end-of-stream
+/// for all of them and the constant could be 1 without any test noticing.
 #[allow(clippy::future_not_send)]
 pub async fn run(
     state: Arc<AppState>,
