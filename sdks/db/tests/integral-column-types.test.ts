@@ -70,6 +70,43 @@ describe("unknown field types fail closed", () => {
     assert.match((r as { message: string }).message, /unknown field type/);
   });
 
+  it("accepts every token the descriptor generator can emit", () => {
+    // The guard's blast radius. `renderGeneratedEnvDb` consumes the runtime
+    // descriptor, so its switch cases are the authoritative list of tokens a
+    // descriptor may carry; anything on that list which the validator does not
+    // know now throws instead of passing, which turns a silent hole into a
+    // broken column.
+    //
+    // This caught a real one: `timestamp` is emitted by the generator, is not a
+    // `TypeName`, and was not in the numeric aliases either, so the first cut of
+    // the unknown-type guard would have rejected every timestamp column. Keep
+    // this list in step with the renderer's cases rather than with `TypeName`.
+    const generatorTokens: Array<[string, unknown]> = [
+      ["string", "s"],
+      ["int", 1],
+      ["integer", 1],
+      ["bigInt", 1],
+      ["number", 1.5],
+      ["float", 1.5],
+      ["boolean", true],
+      ["json", { a: 1 }],
+      ["object", { a: 1 }],
+      ["array", []],
+      ["date", "2026-08-08"],
+      ["timestamp", "2026-08-08T00:00:00Z"],
+      ["bytes", "blob"],
+      ["geoPoint", { lat: 1, lon: 2 }],
+      ["calendarDate", "2026-08-08"],
+      ["id", "usr_1"],
+      ["ref", "usr_1"],
+      ["vector", [1, 2]],
+    ];
+    for (const [type, value] of generatorTokens) {
+      const r = validate(type, value);
+      assert.equal(r.ok, true, `generator token "${type}" was rejected by the validator`);
+    }
+  });
+
   it("still passes TypeName members that have no validation branch", () => {
     // vector / geoPoint / bytes / actor are deliberately not field-validated
     // here. They belong to the union, so the unknown-type guard must not catch

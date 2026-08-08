@@ -261,7 +261,11 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be a boolean` };
       return;
     }
-  } else if (type === "date") {
+    // `timestamp` alongside `date` for the same reason the integral tokens sit
+    // with `number`: the descriptor carries the column's own token, and the
+    // generator's renderer treats `date` and `timestamp` as one case. Leaving it
+    // out would send every timestamp column into the unknown-type guard below.
+  } else if (type === "date" || type === "timestamp") {
     if (!(value instanceof Date) && (typeof value !== "string" || !isParseableDateString(value))) {
       errors[key] = {
         path: key,
