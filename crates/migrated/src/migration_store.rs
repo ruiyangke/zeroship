@@ -12,6 +12,28 @@ pub struct MigrationStore {
     dsn: String,
 }
 
+/// The outcome of a TERMINAL status transition (`applied` / `rejected`).
+///
+/// Both guards are negative on purpose - `mark_applied` refuses a `rejected` row and
+/// `mark_rejected` refuses an `applied` one - so whichever transition lands first wins
+/// and losing is not an error. It is not success either: the row does not hold the
+/// status the caller just concluded, so a caller that reports its own conclusion
+/// onward would be contradicting the record. Both callers used to discard the row
+/// count and return `Ok(())`, which made a lost race indistinguishable from a won one.
+///
+/// The positive-guard transitions ([`MigrationStore::mark_approved`],
+/// [`MigrationStore::revert_to_pending`]) do treat a lost race as an error, because
+/// there the prior status is a precondition rather than a competitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum TerminalTransition {
+    /// The update matched the row, which now holds the requested terminal status.
+    Recorded,
+    /// The update matched nothing: a concurrent transition had already moved the row
+    /// to the OTHER terminal status, which it retains.
+    Lost,
+}
+
 impl MigrationStore {
     #[must_use]
     pub fn new(dsn: impl Into<String>) -> Self {
@@ -185,13 +207,17 @@ impl MigrationStore {
         Ok(())
     }
 
+    /// APPLY transition: a migration the engine applied moves to `applied` (terminal).
+    ///
+    /// Returns [`TerminalTransition::Lost`] when the row was already `rejected` - see
+    /// that type for why losing is reported rather than raised.
     pub async fn mark_applied(
         &self,
         app_id: Uuid,
         migration_id: Uuid,
-    ) -> Result<(), MigrationStoreError> {
+    ) -> Result<TerminalTransition, MigrationStoreError> {
         let client = self.connect().await?;
-        client
+        let updated = client
             .execute(
                 "UPDATE zeroship.migrated_migrations \
                     SET status = 'applied', applied_at = NOW(), last_error = NULL \
@@ -201,19 +227,26 @@ impl MigrationStore {
             )
             .await
             .map_err(MigrationStoreError::Query)?;
-        Ok(())
+        Ok(if updated == 0 {
+            TerminalTransition::Lost
+        } else {
+            TerminalTransition::Recorded
+        })
     }
 
     /// REJECT transition: a migration that failed preflight / drifted-and-abandoned /
     /// errored moves to `rejected` (terminal) with the failure message.
+    ///
+    /// Returns [`TerminalTransition::Lost`] when the row was already `applied` - see
+    /// that type for why losing is reported rather than raised.
     pub async fn mark_rejected(
         &self,
         app_id: Uuid,
         migration_id: Uuid,
         message: &str,
-    ) -> Result<(), MigrationStoreError> {
+    ) -> Result<TerminalTransition, MigrationStoreError> {
         let client = self.connect().await?;
-        client
+        let updated = client
             .execute(
                 "UPDATE zeroship.migrated_migrations \
                     SET status = 'rejected', last_error = $3 \
@@ -223,7 +256,11 @@ impl MigrationStore {
             )
             .await
             .map_err(MigrationStoreError::Query)?;
-        Ok(())
+        Ok(if updated == 0 {
+            TerminalTransition::Lost
+        } else {
+            TerminalTransition::Recorded
+        })
     }
 
     pub async fn record_audit(&self, input: AuditInput<'_>) -> Result<(), MigrationStoreError> {
@@ -267,10 +304,20 @@ impl MigrationStore {
     /// thing for a reason that does NOT apply here: its write path runs a
     /// transaction and so needs an owned session. Nothing in this store opens a
     /// transaction. Every method above is a single autocommit statement, and the
-    /// concurrency safety is in the SQL - each status transition carries its
-    /// expected prior status in the `WHERE` clause and reports `0 rows updated`
-    /// when it loses, so two racing callers cannot both win regardless of which
-    /// session they ran on.
+    /// concurrency safety is in the SQL - each status transition constrains the prior
+    /// status in its `WHERE` clause and matches zero rows when it loses, so two racing
+    /// callers cannot both win regardless of which session they ran on.
+    ///
+    /// The two GUARD SHAPES report a loss differently, and the difference is
+    /// deliberate. The positive guards (`mark_approved` on `pending_approval`,
+    /// `revert_to_pending` on `approved`) name a precondition, so losing is
+    /// [`MigrationStoreError::InvalidTransition`]. The negative guards
+    /// (`mark_applied` on `<> 'rejected'`, `mark_rejected` on `<> 'applied'`) name a
+    /// competitor between two terminal states, so losing is legitimate and comes back
+    /// as [`TerminalTransition::Lost`] for the caller to report. What neither shape
+    /// does any more is discard the count: a lost race used to return `Ok(())` from
+    /// both negative guards, and the caller then announced an outcome the row
+    /// contradicted.
     ///
     /// So a shared pipelined `Arc<Client>` would be correct here, and is what the
     /// control plane holds for exactly this kind of traffic. The trade taken
@@ -700,7 +747,8 @@ mod tests {
             .expect("delete transition test user");
     }
 
-    /// Terminal states are terminal: neither marking may overwrite the other.
+    /// Terminal states are terminal: neither marking may overwrite the other, and
+    /// the loser SAYS SO.
     ///
     /// `mark_applied` and `mark_rejected` updated purely on
     /// `(app_id, migration_id)` with no status precondition, so whichever ran
@@ -709,6 +757,17 @@ mod tests {
     /// would believe nothing changed while the engine journal recorded applied
     /// steps. `revert_to_pending` already guards on the prior status; these two
     /// did not.
+    ///
+    /// The guard fixed that, but both methods then DISCARDED the row count and
+    /// returned `Ok(())`, so a caller could not tell a won race from a lost one.
+    /// This test asserted only `.expect("call must not error")` - which is
+    /// precisely what the silent no-op did - so it passed over the second defect
+    /// while appearing to cover the pair. The `TerminalTransition::Lost`
+    /// assertions below are the part that discriminates; the status reads alone
+    /// do not, because they were already correct.
+    ///
+    /// What this does NOT cover: the two callers in `apply.rs` acting on `Lost`.
+    /// Those log and continue, and nothing here observes a log.
     #[ntex::test]
     async fn terminal_status_transitions_do_not_clobber_each_other_pg() {
         let client = test_client().await;
@@ -723,10 +782,15 @@ mod tests {
         insert_transition_row(&client, app_id, rejected_id, principal_id, "rejected").await;
 
         // An error path firing after a successful apply must not erase it.
-        store
+        let outcome = store
             .mark_rejected(app_id, applied_id, "late error on an applied migration")
             .await
             .expect("call must not error");
+        assert_eq!(
+            outcome,
+            TerminalTransition::Lost,
+            "a reject that matched no row must report the loss, not success"
+        );
         let row = client
             .query_one(
                 "SELECT status FROM zeroship.migrated_migrations \
@@ -742,10 +806,15 @@ mod tests {
         );
 
         // And the converse: a rejected migration must not silently become applied.
-        store
+        let outcome = store
             .mark_applied(app_id, rejected_id)
             .await
             .expect("call must not error");
+        assert_eq!(
+            outcome,
+            TerminalTransition::Lost,
+            "an apply that matched no row must report the loss, not success"
+        );
         let row = client
             .query_one(
                 "SELECT status FROM zeroship.migrated_migrations \
@@ -758,6 +827,35 @@ mod tests {
             row.get::<_, String>("status"),
             "rejected",
             "an applied marking must not overwrite a rejected migration"
+        );
+
+        // POSITIVE CONTROL. Both assertions above are satisfied by a method that
+        // returns `Lost` unconditionally, which is the same shape of mistake the
+        // discarded row count was. A transition that WINS must say `Recorded`, or
+        // `Lost` carries no information.
+        let winning_id = Uuid::now_v7();
+        insert_transition_row(&client, app_id, winning_id, principal_id, "approved").await;
+        let outcome = store
+            .mark_applied(app_id, winning_id)
+            .await
+            .expect("call must not error");
+        assert_eq!(
+            outcome,
+            TerminalTransition::Recorded,
+            "a transition that matched its row must report success"
+        );
+        let row = client
+            .query_one(
+                "SELECT status FROM zeroship.migrated_migrations \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &winning_id],
+            )
+            .await
+            .expect("read the winning row");
+        assert_eq!(
+            row.get::<_, String>("status"),
+            "applied",
+            "an approved migration must reach applied"
         );
     }
 }
