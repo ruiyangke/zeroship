@@ -305,13 +305,13 @@ pub(super) fn parse_params_skipping_self(f: &ImplItemFn) -> Vec<crate::Param> {
         .inputs
         .iter()
         .filter_map(|arg| {
-            if let FnArg::Typed(pt) = arg {
-                if let syn::Pat::Ident(pi) = &*pt.pat {
-                    return Some(crate::Param {
-                        name: pi.ident.clone(),
-                        ty: (*pt.ty).clone(),
-                    });
-                }
+            if let FnArg::Typed(pt) = arg
+                && let syn::Pat::Ident(pi) = &*pt.pat
+            {
+                return Some(crate::Param {
+                    name: pi.ident.clone(),
+                    ty: (*pt.ty).clone(),
+                });
             }
             None
         })

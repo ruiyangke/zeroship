@@ -11,8 +11,8 @@
 //! All quoted snippets bind in scope:
 //!   - `scope`  (the V8 scope, `&mut PinScope`)
 //!   - `rv`     (the V8 ReturnValue)
-//! Some additionally bind `__r`, `__ok`, `__inner`, `__vec`, `__bytes`
-//! depending on the wrapper shape — those names are documented per-helper.
+//!     Some additionally bind `__r`, `__ok`, `__inner`, `__vec`, `__bytes`
+//!     depending on the wrapper shape — those names are documented per-helper.
 //!
 //! See [`gen_call_return`] for the dispatcher; the per-shape emitters
 //! ([`gen_scalar_set`], [`gen_option_some_set`], [`gen_vec_set`],

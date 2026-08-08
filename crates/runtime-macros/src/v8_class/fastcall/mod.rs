@@ -149,9 +149,8 @@ pub(super) fn validate_fastcall_signature(func: &ImplItemFn) -> syn::Result<()> 
                     if matches!(
                         name,
                         "bool" | "i32" | "u32" | "i64" | "u64" | "f32" | "f64"
-                    ) {
-                        Ok(())
-                    } else if crate::is_unit_type(ret_ty) {
+                    ) || crate::is_unit_type(ret_ty)
+                    {
                         Ok(())
                     } else {
                         Err(syn::Error::new_spanned(

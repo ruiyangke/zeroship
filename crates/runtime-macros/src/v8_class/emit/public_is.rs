@@ -27,9 +27,9 @@ use super::super::shared::class_config::ClassConfig;
 ///    `Local::<Object>::try_from` fast-fail for non-Object values.
 /// 2. `impl ::zeroship_runtime::macro_runtime::__private::Sealed for <Class>`
 ///    + `impl ::zeroship_runtime::macro_runtime::V8ClassInstance for <Class>`
-///    — the sealed-trait pattern that lets generic code bound on
-///    `T: V8ClassInstance` while preventing third-party impls
-///    (Sealed lives in a private module).
+///      — the sealed-trait pattern that lets generic code bound on
+///      `T: V8ClassInstance` while preventing third-party impls
+///      (Sealed lives in a private module).
 ///
 /// The legacy `pub fn __zs_is_<Class>` shim is no longer emitted.
 /// `<Class>::is_instance` is the public entry point and now

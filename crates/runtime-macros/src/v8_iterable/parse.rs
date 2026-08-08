@@ -153,7 +153,7 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
 ///   - `fn value_pairs(&mut self, scope: &mut PinScope) -> Vec<(K, V)>`
 ///     — URLSearchParams' sync-from-parent. `is_mut = true, takes_scope
 ///     = true`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ValuePairsSig {
     /// True if the receiver is `&mut self`. Drives `*mut Self` + `&mut *ptr`
     /// recovery and a per-method per-instance re-entrancy guard.
@@ -163,15 +163,6 @@ pub(crate) struct ValuePairsSig {
     /// outer scope through to `value_pairs`. The user's body may then
     /// call any scope-taking helper (e.g. `sync_from_parent(scope)`).
     pub takes_scope: bool,
-}
-
-impl Default for ValuePairsSig {
-    fn default() -> Self {
-        ValuePairsSig {
-            is_mut: false,
-            takes_scope: false,
-        }
-    }
 }
 
 /// Find the `value_pairs` method in the impl block items and inspect

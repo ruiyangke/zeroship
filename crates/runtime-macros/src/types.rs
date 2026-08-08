@@ -103,14 +103,13 @@ pub(crate) fn is_option_usv_string(ty: &Type) -> bool {
 /// `Option<String>`). Used by the `Option<T>` / `Result<T, _>` /
 /// `Vec<T>` cascades to recurse into the wrapper's inner type.
 pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
-    if let Type::Path(TypePath { path, .. }) = ty {
-        if let Some(seg) = path.segments.last() {
-            if let PathArguments::AngleBracketed(ref ab) = seg.arguments {
-                for arg in &ab.args {
-                    if let GenericArgument::Type(t) = arg {
-                        return Some(t);
-                    }
-                }
+    if let Type::Path(TypePath { path, .. }) = ty
+        && let Some(seg) = path.segments.last()
+        && let PathArguments::AngleBracketed(ref ab) = seg.arguments
+    {
+        for arg in &ab.args {
+            if let GenericArgument::Type(t) = arg {
+                return Some(t);
             }
         }
     }
