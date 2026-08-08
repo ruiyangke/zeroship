@@ -552,12 +552,17 @@ impl SqliteSession {
     }
 
     /// Send a `VacuumInto` command and await the reply.
-    /// Consumer is the SQLite `Backup::snapshot` impl. The
-    /// `#[allow(dead_code)]` mirrors the `attach`/`detach` helpers
-    /// above — rustc's dead-code analysis doesn't follow the
-    /// `pub(crate)` visibility into the sibling `backup_sqlite` inner
-    /// module under `cfg(feature = "sqlite")`. The compile-time
-    /// dispatch via [`Command::VacuumInto`] is the load-bearing wire.
+    ///
+    /// The `#[allow(dead_code)]` is REAL and not defensive: the only caller is
+    /// in the `backup_sqlite` module (`backend/sqlite/mod.rs`), which is gated
+    /// on `feature = "test-helpers"`. In a default build that module does not
+    /// exist, so this method genuinely has no caller and rustc warns.
+    ///
+    /// The gate named here used to be `cfg(feature = "sqlite")`. There is no
+    /// such feature on this crate - both backends compile into every binary
+    /// and the url scheme picks one at runtime. Naming the wrong feature made
+    /// the allow look like it was covering for backend selection, which would
+    /// have made it removable; it is not.
     #[allow(dead_code)]
     pub(crate) async fn vacuum_into(
         &self,

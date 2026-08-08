@@ -186,13 +186,19 @@ fn lookup_mask_meta(
     }))
 }
 
-/// Encryption metadata for the target column (when present). The
-/// `key_id` and `wraps` fields are only consumed under the
-/// `feature = "pg"` or `feature = "sqlite"` arms of
-/// `fetch_and_decrypt`; a build with no backend feature never reads
-/// them. `#[allow(dead_code)]` keeps the build clean without
-/// duplicating the metadata struct per arm.
-#[allow(dead_code)]
+/// Encryption metadata for the target column (when present).
+///
+/// Carried no `#[allow(dead_code)]` justification that was true. The old one
+/// said `key_id` and `wraps` are "only consumed under the `feature = "pg"` or
+/// `feature = "sqlite"` arms" and that "a build with no backend feature never
+/// reads them". There is no backend feature on this crate: both arms compile
+/// into every binary and the url scheme picks one at runtime, so there is no
+/// such build.
+///
+/// All three fields are read unconditionally - `mode` in `fetch_and_decrypt`'s
+/// AAD branch and both decrypt calls, `key_id` in both `resolve_key` calls,
+/// `wraps` in both `wrap_plaintext_per_wraps` calls - so the allow was
+/// suppressing a warning that could not fire. Removed rather than reworded.
 struct ColumnEncryptionMeta {
     mode: crate::backend::EncryptionMode,
     key_id: String,

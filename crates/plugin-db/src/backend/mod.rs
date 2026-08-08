@@ -1919,11 +1919,16 @@ impl BackendHandle {
 
     /// Borrow an [`EncryptedColumn`] capability over the SQLite arm.
     ///
-    /// Returns `Some(&SqliteBackend)` on the SQLite
-    /// arm. The SQLite impl is gated only by `feature = "sqlite"`
-    /// (env-var key sourcing, no admin schema).
+    /// Returns `Some(&SqliteBackend)` on the SQLite arm, `None` on the PG arm.
     ///
-    /// Returns `Some` on the SQLite arm; `None` on the PG arm.
+    /// The arm is a RUNTIME property of this handle, not a build
+    /// configuration. Both backends are compiled into every binary and the
+    /// url scheme picks one (`lib.rs`'s `postgres://` / `sqlite://` branch).
+    /// This comment used to say the SQLite impl was "gated only by
+    /// `feature = "sqlite"`"; there is no such feature on this crate.
+    ///
+    /// What distinguishes the SQLite impl is its key sourcing: env vars rather
+    /// than an admin schema.
     pub fn as_encrypted_column_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
             Self::Postgres(_) => None,
