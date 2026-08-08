@@ -29,7 +29,7 @@ pub enum QueryError {
     /// Creator declared a field whose name collides with one
     /// of the seven platform-managed system fields (`id`, `created_at`,
     /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
-    /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
+    /// Distinct from [`QueryError::InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
     /// generic `invalid_identifier` thrown by the `_*` / `__zs_*` prefix
     /// reservations. Filter-time use of these names is unrestricted
@@ -1011,7 +1011,7 @@ pub fn build_create_schema(app_id: &str) -> String {
 
 // `build_create_table` (the non-`_with_fks` wrapper that hardcoded
 // `FkEmission::Inline`) was removed during the v2-only consolidation.
-// Production paths (`exec_register_model_with_pool`) always pass the
+// Production paths (`zeroship_plugin_db::register_model::exec_register_model_with_pool`) always pass the
 // orchestrator's live table set to `build_create_table_with_fks` so
 // FKs to not-yet-created targets get deferred to a separate
 // `ALTER TABLE … ADD CONSTRAINT`. Tests that need the legacy "always
@@ -1071,7 +1071,7 @@ pub enum SqliteEmitScope {
 //
 // PG-flavoured shim around
 // [`build_create_table_with_fks_for_dialect`]. Every call site
-// (orchestrator `register_model::plan`, integration tests, internal
+// (orchestrator `zeroship_plugin_db::register_model::plan`, integration tests, internal
 // query helpers) stays on this signature; the dialect-aware emitter
 // lives behind the other symbol and routes the SQLite arm independently.
 pub fn build_create_table_with_fks(
@@ -1172,7 +1172,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 ///
 /// `join(";\n")` over the returned vector is byte-identical to the joined form, so
 /// the two entry points never diverge. The migrate engine's guard-per-statement
-/// lower ([`zeroship_migrate`]) consumes this list so a string-literal column
+/// lower (the `zeroship_migrate` engine) consumes this list so a string-literal column
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
 /// split mid-statement — the split is structural, not a textual `;\n` heuristic.
 pub fn build_create_table_with_fks_for_dialect_scoped_statements(
@@ -1744,7 +1744,7 @@ pub struct IndexSpec {
     pub sql: String,
     /// Index shape — selects the backend builder branch, wiring
     /// `Vector` / `Fts` / `Spatial` dispatch through the
-    /// `register_model::apply` Pass 2.
+    /// `zeroship_plugin_db::register_model::apply` Pass 2.
     pub kind: IndexKind,
 }
 
@@ -1753,7 +1753,7 @@ pub struct IndexSpec {
 ///
 /// The default is [`IndexKind::BTree`] so every call site keeps
 /// the same observable behaviour; `Vector` / `Fts` /
-/// `Spatial` dispatch is wired through the `register_model::apply` Pass 2.
+/// `Spatial` dispatch is wired through the `zeroship_plugin_db::register_model::apply` Pass 2.
 ///
 /// **Why an enum, not a string**: same rationale as
 /// [`crate::descriptors::VectorMetric`] — the rustc exhaustiveness check
@@ -1884,7 +1884,7 @@ pub fn build_create_indexes(
         // `t.vector()` builder doesn't expose those modifiers (they
         // would be meaningless on an ivfflat-indexed column). The
         // builder dispatches to `VectorIndex::ensure_vector_index` in
-        // `register_model::apply` Pass 2 — the `sql` field stays empty
+        // `zeroship_plugin_db::register_model::apply` Pass 2 — the `sql` field stays empty
         // because the impl builds the DDL itself (it needs the
         // metric-specific opclass that isn't carried in the spec).
         if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
@@ -3662,7 +3662,7 @@ pub fn build_set_clauses(
 ///
 /// Three independent bumps, each suppressed when the creator's patch
 /// already provided an explicit value for that column (per
-/// [`crate::crud::system_fields_pass::apply_system_fields_on_update`]
+/// `zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_update`
 /// which inspects the patch and surfaces these flags via
 /// `UpdateAutoBumpHints`):
 ///
@@ -5096,7 +5096,7 @@ pub fn build_fts_search(
 /// `$4 = limit`. Filter parameters start at `$5`.
 ///
 /// **Column type**: the indexed column must be
-/// `geography(POINT, 4326)`. The PG DDL emitter ([`field_to_column`])
+/// `geography(POINT, 4326)`. The PG DDL emitter ([`field_to_column_for_dialect`])
 /// wires this when the schema field type is `geoPoint`.
 pub fn build_spatial_near(
     app_id: &str,
