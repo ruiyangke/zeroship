@@ -18,6 +18,69 @@ use crate::{StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTranspo
 /// for a cold-start partition to become seekable before surfacing the error.
 const REWIND_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Drain up to `max` records, then decide what to do with an error that ends
+/// the drain early.
+///
+/// `poll_one` yields the next record: `None` when the broker has nothing right
+/// now, `Some(Err(..))` on a transport error. It is called with the full
+/// `poll_timeout` only for the FIRST record - once a batch has started, a
+/// zero timeout keeps the cycle from blocking on a partial batch.
+///
+/// THE ERROR POLICY IS THE POINT OF THIS FUNCTION. An error is only surfaced
+/// when NO records were collected. If any record was already handed over, the
+/// batch is returned and the error is dropped.
+///
+/// Dropping an error reads like the wrong instinct, so the reasoning, which
+/// runs the other way:
+///
+///   * rdkafka has already advanced its consumer position past every record it
+///     handed us. Returning `Err` discards those records but does NOT put them
+///     back, so the next poll resumes AFTER them.
+///   * the forwarder's commit is cumulative - `commit()` takes the max offset
+///     per partition and adds one. So the next cycle that succeeds commits a
+///     HIGHER offset and buries the discarded records for good. This is not a
+///     delay that a restart repairs; it is silent, permanent under-billing.
+///   * nothing is swallowed. The condition that produced the error is still
+///     there on the next call, and that call starts with an empty batch, so it
+///     propagates - one cycle later, with no records at risk.
+///
+/// The caller gets at-least-once either way: it commits only what it processed.
+fn drain_batch<F>(
+    max: usize,
+    poll_timeout: Duration,
+    mut poll_one: F,
+) -> Result<Vec<StreamRecord>, StreamError>
+where
+    F: FnMut(Duration) -> Option<Result<StreamRecord, StreamError>>,
+{
+    let mut records = Vec::with_capacity(max);
+    while records.len() < max {
+        let timeout = if records.is_empty() {
+            poll_timeout
+        } else {
+            Duration::from_millis(0)
+        };
+        match poll_one(timeout) {
+            Some(Ok(record)) => records.push(record),
+            Some(Err(error)) => {
+                if records.is_empty() {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    error = %error,
+                    records = records.len(),
+                    "redpanda poll failed mid-batch; returning the records already \
+                     consumed and deferring the error to the next poll"
+                );
+                break;
+            }
+            None => break,
+        }
+    }
+
+    Ok(records)
+}
+
 type DeliveryAck = Result<(i32, i64), String>;
 type DeliverySender = mpsc::SyncSender<DeliveryAck>;
 
@@ -225,26 +288,23 @@ impl StreamTransport for RedpandaTransport {
             .consumer
             .lock()
             .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
-        let mut records = Vec::with_capacity(max);
-        while records.len() < max {
-            let timeout = if records.is_empty() {
-                self.poll_timeout
-            } else {
-                Duration::from_millis(0)
-            };
-            match consumer.poll(timeout) {
-                Some(Ok(message)) => records.push(StreamRecord {
-                    partition: message.partition(),
-                    offset: message.offset(),
-                    key: message.key().unwrap_or_default().to_vec(),
-                    payload: message.payload().unwrap_or_default().to_vec(),
-                }),
-                Some(Err(error)) => return Err(StreamError::from(error)),
-                None => break,
-            }
-        }
 
-        Ok(records)
+        // The whole body is `drain_batch` so the batching AND the
+        // error-vs-records policy are reachable from a test. Everything left
+        // inline here is the rdkafka message->StreamRecord field copy, which
+        // has no branches.
+        drain_batch(max, self.poll_timeout, |timeout| {
+            consumer.poll(timeout).map(|result| {
+                result
+                    .map(|message| StreamRecord {
+                        partition: message.partition(),
+                        offset: message.offset(),
+                        key: message.key().unwrap_or_default().to_vec(),
+                        payload: message.payload().unwrap_or_default().to_vec(),
+                    })
+                    .map_err(StreamError::from)
+            })
+        })
     }
 
     async fn commit(&self, offsets: &[StreamOffset]) -> Result<(), StreamError> {
@@ -330,5 +390,98 @@ impl StreamTransport for RedpandaTransport {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(offset: i64) -> StreamRecord {
+        StreamRecord {
+            partition: 0,
+            offset,
+            key: Vec::new(),
+            payload: Vec::new(),
+        }
+    }
+
+    /// Drives `drain_batch` off a scripted sequence, which is the same
+    /// function `poll` runs - the rdkafka closure it wraps has no branches, so
+    /// nothing about the batching or the error policy is left untested.
+    fn drain(script: Vec<Option<Result<StreamRecord, StreamError>>>, max: usize) -> (Result<Vec<StreamRecord>, StreamError>, usize) {
+        let mut it = script.into_iter();
+        let mut calls = 0usize;
+        let out = drain_batch(max, Duration::from_millis(5), |_timeout| {
+            calls += 1;
+            it.next().flatten()
+        });
+        (out, calls)
+    }
+
+    #[test]
+    fn an_error_after_partial_success_keeps_the_records_already_consumed() {
+        // THE DEFECT. rdkafka has already advanced its position past every
+        // record handed to us, and the forwarder's commit is CUMULATIVE
+        // (max offset + 1). So discarding these does not merely delay them:
+        // the next successful cycle commits a HIGHER offset and buries them
+        // permanently. Billing under-reports and nothing logs it.
+        let (out, _) = drain(
+            vec![
+                Some(Ok(record(100))),
+                Some(Ok(record(101))),
+                Some(Err(StreamError::Unavailable("broker went away"))),
+            ],
+            10,
+        );
+
+        let records = out.expect("a batch that already yielded records must not surface as Err");
+        assert_eq!(
+            records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            vec![100, 101],
+            "records consumed before the error were dropped; they are unrecoverable \
+             once a later cycle commits past them"
+        );
+    }
+
+    #[test]
+    fn an_error_with_nothing_consumed_still_propagates() {
+        // The other half, and the reason this is not just "swallow errors":
+        // with no records in hand there is nothing to lose by surfacing the
+        // error, and the caller needs to see it. If this regressed to Ok(vec![])
+        // the forwarder would treat a dead broker as an idle topic forever.
+        let (out, _) = drain(
+            vec![Some(Err(StreamError::Unavailable("broker went away")))],
+            10,
+        );
+        assert!(
+            out.is_err(),
+            "an error with no records collected must reach the caller"
+        );
+    }
+
+    #[test]
+    fn a_full_batch_stops_at_max_without_polling_again() {
+        // Guards the loop bound itself: `max` must cap the batch, and the
+        // drain must not make a further poll call after reaching it (an extra
+        // call would consume a record it then never returns - the same class
+        // of loss as the test above, by a different route).
+        let (out, calls) = drain(
+            vec![
+                Some(Ok(record(1))),
+                Some(Ok(record(2))),
+                Some(Ok(record(3))),
+            ],
+            2,
+        );
+        assert_eq!(out.expect("ok").len(), 2);
+        assert_eq!(calls, 2, "drain polled {calls} times for a max of 2");
+    }
+
+    #[test]
+    fn an_empty_broker_yields_an_empty_batch() {
+        let (out, calls) = drain(vec![None], 10);
+        assert!(out.expect("ok").is_empty());
+        assert_eq!(calls, 1);
     }
 }
