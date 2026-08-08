@@ -41,12 +41,19 @@
 # Both are listed in ALLOW below, by "file:citation" pair rather than by
 # citation alone, so the same path cited wrongly somewhere else is still caught.
 #
-# This file excludes ITSELF from the scan. Its prose and its allowlist both spell
-# out paths, several of which are examples that deliberately do not exist, so a
-# self-scan reports the documentation as broken citations. That is the tool
-# describing paths, not citing them. The cost is that the scanner cannot police
-# its own comments, which is the right trade only because this is the one file in
-# the tree whose job is to contain path spellings.
+# This file and its self-test are excluded from the scan. Both spell out paths
+# that deliberately do not exist - examples here, a planted probe there - so a
+# self-scan reports them as broken citations. That is a tool describing paths,
+# not citing them. The cost is that neither can police its own comments, which is
+# the right trade only because these two are the files in the tree whose job is
+# to contain path spellings.
+#
+# Worth knowing before adding a third: this trap has bitten three times. The
+# scanner flagged itself; a comment explaining why a bare path is wrong was
+# flagged for containing the bare path; and the self-test was flagged for naming
+# its own probe. Any file whose subject is paths will need the same treatment,
+# and the alternative - building the strings at runtime so they never appear
+# literally - makes those files harder to read for no gain.
 #
 # Exit 0 when every citation resolves or is allowed; 1 otherwise.
 
@@ -114,6 +121,7 @@ done < <(grep -roP "$PAT" \
     --exclude-dir=wpt --exclude-dir=dist \
     --exclude-dir=node_modules --exclude-dir=target \
     --exclude=source_citation_scan.sh \
+    --exclude=source_citation_selftest.sh \
     $ROOTS 2>/dev/null | sort -u)
 
 # Printed on success too. A number nobody sees until the gate has already failed

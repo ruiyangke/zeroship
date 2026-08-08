@@ -151,6 +151,17 @@ jobs:
       # wrong repair.
       - name: Source citations resolve
         run: tests/source_citation_scan.sh
+      # And the control for the step above, for the same reason the
+      # measurement-integrity self-test exists: that gate passes at zero
+      # unresolvable citations, which is also what a gate that has quietly
+      # stopped matching reports. A drifted pattern, a renamed root, a file grep
+      # declines to read - all of them look exactly like a clean tree. This
+      # plants a citation at a path that does not exist and asserts the gate
+      # both NAMES it and exits non-zero, then asserts removing it returns the
+      # gate to green. A gate that always fails is as useless as one that
+      # always passes.
+      - name: Source-citation gate self-test
+        run: tests/source_citation_selftest.sh
       - name: Test-target enumeration floor
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
