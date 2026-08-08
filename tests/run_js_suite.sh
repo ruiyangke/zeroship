@@ -50,11 +50,17 @@ trap 'rm -f "$LOG"' EXIT
 
 # The exclusions are debts with owners, not a permanent allow-list; see the
 # comment on this step in .github/workflows/ci.yml.
+# FILTERS GO BEFORE THE SCRIPT NAME. Anything after it is forwarded TO the
+# script, so `pnpm -r test --filter=!x` passes `--filter=!x` to the test command
+# and pnpm never sees it. pnpm 9 tolerated the wrong order; pnpm 11 does not.
+# Measured: filters after the name give "Scope: 44 of 45" and all three excluded
+# packages run; before the name gives "Scope: 41 of 45", which is correct.
 set +e
-pnpm -r --no-bail test \
+pnpm -r --no-bail \
   --filter='!zero-migrate' \
   --filter='!@zeroship/migrate' \
-  --filter='!@zeroship/vite-plugin' 2>&1 | tee "$LOG"
+  --filter='!@zeroship/vite-plugin' \
+  test 2>&1 | tee "$LOG"
 # PIPESTATUS, not $?: piping into tee makes $? tee's status, which is 0 whenever
 # tee could write - every failing run would look green.
 run_status="${PIPESTATUS[0]}"
