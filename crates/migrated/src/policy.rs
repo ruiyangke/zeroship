@@ -219,38 +219,6 @@ impl EffectivePolicy {
         require_approval_level(&self.policy, &schema_object(app_schema))
     }
 
-    /// Project for preflight: anything other than `Forbid` → `Warn` (preflight surfaces
-    /// destructive ops as gated, without blocking the classification pass).
-    #[must_use]
-    pub fn project_for_preflight(&self) -> Result<Self, ManagedPolicyError> {
-        if self.managed.destructive_ops != DestructiveOps::Allow {
-            return Ok(self.clone());
-        }
-        const PREFLIGHT_WARN_LAYER: &str = r#"policy_version = 1
-
-[[grant]]
-key = "safety.destructive_ops"
-value = "warn"
-scope = "all"
-"#;
-        let registry = builtin_registry();
-        let draft = PolicyDoc::parse_toml(
-            PREFLIGHT_WARN_LAYER,
-            &registry,
-            LoadContext::NonRootLayer,
-        )
-        .map_err(|error| {
-            ManagedPolicyError::CeilingCompose(format!(
-                "load fixed preflight policy layer: {error:?}"
-            ))
-        })?;
-        let policy = admit(&self.policy, &draft, &registry).map_err(|error| {
-            ManagedPolicyError::CeilingCompose(format!(
-                "compose fixed preflight policy layer: {error:?}"
-            ))
-        })?;
-        Ok(Self::new(self.ceiling_id.clone(), self.ceiling_version, policy))
-    }
 }
 
 /// The managed knobs read from the composed engine policy for approval decisions and
@@ -809,21 +777,6 @@ scope = "all"
             .expect_err("authority outside the app schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
-    }
-
-    #[test]
-    fn preflight_projection_tightens_allow_to_warn_in_the_pdp() {
-        let cfg = config();
-        let app_id = Uuid::new_v4();
-        let effective = cfg
-            .compose_effective_for_app(&app_id, None, None)
-            .expect("default confined policy composes");
-        let projected = effective
-            .project_for_preflight()
-            .expect("fixed preflight layer composes");
-
-        assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
-        assert_eq!(projected.managed.destructive_ops, DestructiveOps::Warn);
     }
 
     #[test]
