@@ -2142,11 +2142,19 @@ mod tests {
 
     /// Compile-time: the [`EncryptedColumn`] trait's shape
     /// is pinned. Ships stub impls on both `PostgresBackend`
-    /// and `SqliteBackend` (under `sqlite`) — see
-    /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`
-    /// below for the per-backend instantiations. This unparameterised
-    /// pin checks that the trait itself compiles (associated type +
-    /// `async fn` placement + signature shape).
+    /// and `SqliteBackend` - see
+    /// `_assert_postgres_backend_impls_encrypted_column` /
+    /// `_assert_sqlite_backend_impls_encrypted_column` below for the
+    /// per-backend instantiations. This unparameterised pin checks that
+    /// the trait itself compiles (associated type + `async fn`
+    /// placement + signature shape).
+    ///
+    /// The two names above were previously written as
+    /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`,
+    /// which exist nowhere: a rename updated the sibling referrer below
+    /// and missed this one. Dropped the "(under `sqlite`)" qualifier at
+    /// the same time - this crate's only feature is `test-helpers`, so
+    /// there is no `sqlite` feature to be under.
     #[allow(dead_code)]
     fn _assert_encrypted_column<T: EncryptedColumn>() {}
 
