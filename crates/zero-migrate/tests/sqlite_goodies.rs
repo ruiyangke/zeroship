@@ -386,15 +386,31 @@ async fn fts_field_applies_cleanly_on_sqlite() {
         "the three FTS sync triggers must exist: {triggers:?}"
     );
 
-    // NOTE on queryability: actual FTS reads/writes (the tokenising INSERT through
-    // the trigger, a `MATCH` query) are the **plugin-db data plane's** job, NOT the
-    // migrate engine's — and the engine's hardened SQLite authorizer deliberately
-    // does NOT allowlist the fts5 runtime tokenizer functions (a creator/AI `up`
-    // has no business running them). So the faithful in-LAYER assertions here are
-    // (a) the vtable + triggers exist, and (b) the structure round-trips zero-drift.
-    // The end-to-end MATCH-finds-the-mirrored-row queryability is exercised against
-    // the runtime backend's own suite in a separate repository (the data-plane
-    // connection, which shares these exact FTS5 builders via `zero_migrate::schema`).
+    // WHAT THIS TEST DOES NOT COVER, and why the gap is a defect rather than a
+    // layering choice. It diffs against an EMPTY base table, so the engine's own
+    // initial-population `INSERT ... SELECT` selects zero rows, FTS5's `xUpdate` is
+    // never entered, and the three triggers above are created and never fired. The
+    // structure is asserted; nothing here proves a row can be indexed or found.
+    //
+    // That is not academic: on a NON-empty table the population is refused. FTS5
+    // issues `PRAGMA data_version` internally on first access to the index, and the
+    // authorizer's pragma arm denies it, so the statement dies with
+    // `Exec("authorization denied")`. The same denial stops any later creator write
+    // to an FTS-indexed table, through the trigger. Filed, with the reproduction.
+    //
+    // An earlier version of this note said the authorizer deliberately withholds the
+    // "fts5 runtime tokenizer functions". No tokenizer function appears in the deny
+    // path - the measured blockers are `PRAGMA data_version` and the `MATCH`
+    // operator - and the population statement is not a data-plane concern at all,
+    // since the engine authors and ships it in its own `up`. The note was describing
+    // the bug as a design.
+    //
+    // The end-to-end shape that would catch it: seed a row BEFORE applying the
+    // index, then assert a `MATCH` returns a COUNT of 1. Assert the count, never
+    // `is_ok()` - a zero-row `MATCH` against an unpopulated index is the exact
+    // silent failure in play. Whether that `MATCH` runs on the engine connection or
+    // on a reopened raw one is the open question, since the engine never issues
+    // `MATCH` in production.
 
     // A re-diff against the REAL introspected live snapshot → ZERO drift (the FTS5
     // vtable is recognised as the fts5 IndexSnapshot; its shadow tables are excluded;
