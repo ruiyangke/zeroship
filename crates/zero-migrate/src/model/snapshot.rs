@@ -49,20 +49,37 @@ pub struct ColumnSnapshot {
     /// table constraints separately; only recognized ID format CHECKs project
     /// into [`Self::value_format`].
     ///
-    /// KNOWN GAP: these bodies NAME THEIR OWN COLUMN, and the fold's
-    /// `Op::RenameColumn` arm does not rewrite them. After a rename the entry still
-    /// names the old column, and it is emitted verbatim into rebuild DDL. SQLite
-    /// resolves an unknown double-quoted identifier as a STRING LITERAL rather than
-    /// rejecting it, so the clause becomes a constant-false CHECK that the database
-    /// ACCEPTS: the rebuild's own `INSERT ... SELECT` copy then fails, mid-rebuild.
-    /// Not reachable today, and only because two unrelated things happen to block it
-    /// - the node crate never populates `LiveSchema::sqlite_schemas`, so a SQLite
-    /// rename fails closed first, and a SQLite catalog snapshot carries this field
-    /// empty. Neither is a guard anyone designed.
+    /// KNOWN GAP: these bodies NAME THEIR OWN COLUMN, and a rename does not rewrite
+    /// them, so a rebuild can emit a clause naming a column the new table does not
+    /// have. The stale copy is made at `render::declarative`'s SQLite rename rebuild,
+    /// which clones the LIVE table snapshot and rewrites only `ColumnSnapshot::name` -
+    /// not in the fold's `Op::RenameColumn` arm, which never sees this field.
     ///
-    /// The repair is to REGENERATE the clause from the renamed column and its facets,
-    /// not to substitute the name inside the stored text. These bodies come from known
-    /// generators (uuid, value format, enum, domain), so nothing has to be parsed.
+    /// That DDL is REJECTED rather than accepted, and the rejection is designed. The
+    /// SQLite actor turns off double-quoted string literals for both DDL and DML
+    /// (`SQLITE_DBCONFIG_DQS_DDL` / `_DQS_DML` in the hardened open sequence), so an
+    /// unknown quoted identifier is an error naming the column rather than a silent
+    /// string literal. Without that setting the clause would degrade to a
+    /// constant-false CHECK the database accepts. The rebuild's `CREATE TABLE` leads
+    /// its statement spec, so the failure lands before any value copy, inside the
+    /// transaction.
+    ///
+    /// Two more things keep it off every live path: a SQLite CATALOG snapshot carries
+    /// this field empty and `stored_create_sql` set, which routes the rebuild through
+    /// the arm that replays SQLite's own stored body; and the only fold-sourced
+    /// snapshot feeds a historical replay whose artifact is never applied. The first
+    /// of those is an accident of what introspection recovers, not a guard.
+    ///
+    /// Regenerating the clause from the column's facets does NOT work as a general
+    /// repair, and this is the load-bearing detail for anyone attempting it: only the
+    /// value-format writer still has its input on the snapshot. The uuid, SQLite enum
+    /// and domain writers all overwrite `data_type` / `ddl_type_override` and discard
+    /// the name of the type that produced the check, so there is nothing left to
+    /// regenerate from - only something to infer.
+    ///
+    /// [`Self::generated`] carries the same hazard through the same emitter and is
+    /// worse: a generated expression names OTHER columns by definition, so no
+    /// rename-side rewrite is even conceivable for it.
     pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
