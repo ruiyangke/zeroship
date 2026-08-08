@@ -715,13 +715,25 @@ pub struct ConstraintSnapshot {
     /// Empty for `EXCLUDE`: PG canonicalizes exclusion definitions differently from
     /// the closed IR renderer, and drift tracks those constraints by name + kind.
     ///
-    /// Populated but NOT compared for `CHECK`. PostgreSQL deparses a CHECK body from
-    /// the parsed tree rather than echoing what was written - it re-quotes only the
-    /// identifiers that need it, injects inferred casts, and expands `IN` - so the
-    /// offline renderer cannot reproduce the spelling and a byte compare reports
-    /// drift on every CHECK that exists. The text is still recorded because the
-    /// existence guard's fail-closed refusal prints it, which is the difference
-    /// between naming the installed predicate and saying `<present>`.
+    /// Populated for `CHECK`, and exempted from comparison BY THE DIFFER rather than
+    /// by this type. `apply::drift::constraint_definition_is_comparable` skips a CHECK
+    /// body because PostgreSQL deparses one from the parsed tree rather than echoing
+    /// what was written - it re-quotes only the identifiers that need it, injects
+    /// inferred casts, and expands `IN` - so the offline renderer cannot reproduce the
+    /// spelling and a byte compare reports drift on every CHECK that exists. The text
+    /// is still recorded because the existence guard's fail-closed refusal prints it,
+    /// which is the difference between naming the installed predicate and saying
+    /// `<present>`.
+    ///
+    /// `ConstraintSnapshot`'s own `PartialEq` below DOES compare this field, for every
+    /// kind including `CHECK`, and that divergence is deliberate. The exemption above
+    /// is a PostgreSQL re-deparse artifact, not a statement that a CHECK body is not
+    /// part of a constraint's identity: SQLite stores the `CREATE TABLE` text verbatim
+    /// and reads the same body back byte-identical, so a comparison on that leg needs
+    /// no exemption at all. Generalising the differ's rule into this `PartialEq` would
+    /// export a PG-shaped concession to every consumer. A consumer that wants the
+    /// differ's semantics applies them itself - `tests/fold_roundtrip_sqlite.rs` does,
+    /// and says why at its `canonicalize`.
     pub definition: String,
     /// User-authored catalog comment on this constraint.
     pub comment: Option<String>,
@@ -732,8 +744,15 @@ pub struct ConstraintSnapshot {
     /// On the live side this is PostgreSQL's `conkey` expanded to names, which is
     /// exactly the catalog's own cascade predicate: `ALTER TABLE ... DROP COLUMN`
     /// removes every constraint whose `conkey` contains the dropped attribute.
-    /// On the offline side it is collected from the closed-AST expression the
-    /// renderer emitted, descending only into the leg the target dialect selects.
+    /// On the offline side it is collected from the closed AST the renderer emitted,
+    /// by a route that differs per kind because PostgreSQL's own cascade does. For a
+    /// `CHECK` it walks the expression, descending only into the leg the target
+    /// dialect selects. For an `EXCLUDE` it takes the PLAIN COLUMN elements and walks
+    /// no expression at all: an exclusion that reaches a column through an expression
+    /// element or its `WHERE` predicate holds a normal dependency rather than an auto
+    /// one, so PostgreSQL REFUSES the drop instead of cascading, and `conkey` records
+    /// attnum `0` for that element accordingly. Collecting those columns would fold
+    /// away a constraint the database kept.
     ///
     /// `None` means the producer did not record it and the consumer must fall back
     /// to parsing the leading parenthesized group of `definition`. `Some(vec![])`
