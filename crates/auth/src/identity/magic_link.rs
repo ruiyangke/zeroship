@@ -62,7 +62,7 @@ pub struct IssuedToken {
     pub csrf_nonce: String,
 }
 
-/// Result of a successful login-purpose [`redeem`] — the row's
+/// Result of a successful login-purpose [`redeem_pending`] — the row's
 /// identifying fields.
 #[derive(Debug, Clone)]
 pub struct RedeemedLoginToken {

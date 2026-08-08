@@ -3,13 +3,13 @@
 //! Flow:
 //!
 //!   1. **start** — `?return_to=…` arrives on the auth server. We
-//!      generate PKCE+state+nonce via [`identity::oauth::google`], stash
+//!      generate PKCE+state+nonce via [`crate::identity::oauth::google`], stash
 //!      them (plus the `return_to`) in a signed cookie, and 302 to
 //!      `accounts.google.com/o/oauth2/v2/auth`.
 //!   2. **callback** — `?code=…&state=…` arrives back. We re-read the
 //!      stash, verify state, exchange the code for an ID token, verify
 //!      that against Google's JWKS, resolve / create the local user via
-//!      [`identity::linker`], create an `zeroship.idp_sessions` row, and
+//!      [`crate::identity::linker`], create an `zeroship.idp_sessions` row, and
 //!      redirect back to the native OIDC pipeline. The `IdP` session cookie is dropped on the same
 //!      response so subsequent SSO requests skip the login form.
 //!

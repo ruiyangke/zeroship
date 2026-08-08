@@ -43,7 +43,7 @@ pub const CLOUDEVENT_SOURCE: &str = "zeroship-control";
 ///     high-water + the cron's aggregate reconcile).
 ///   * `type`    — the meter's configured `eventType` (e.g. `compute_units`).
 ///   * `subject` — the meter's aggregation subject (zeroship maps this to the
-///     creator's customer handle — see [`crate::metering::provider::openmeter`]
+///     creator's customer handle — see [`crate::metering::provider::adapters::openmeter`]
 ///     for the mapping). The push is per CREATOR (the meter aggregates per
 ///     subject), so there is no single app to attribute.
 ///   * `time`    — the CONSUMPTION instant (the cron's `now`), RFC3339/UTC.

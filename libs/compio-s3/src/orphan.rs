@@ -75,7 +75,7 @@ pub fn queued_orphan_count() -> usize {
 /// `RefCell<Option<UploadId>>` reached through an `&MultipartGuard` borrow
 /// (single-threaded `?Send` world): the body calls [`MultipartGuard::set`]
 /// right after
-/// `create_multipart`, and [`MultipartGuard::clear`] on a CLEAN complete (or
+/// `create_multipart`, and [`MultipartGuard::take`] on a CLEAN complete (or
 /// the explicit, awaited error-path abort). If the upload future is instead
 /// DROP-cancelled mid-flight, the cell still holds `Some(id)` when this guard's
 /// `Drop` runs — so `Drop`:

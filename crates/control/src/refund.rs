@@ -213,7 +213,7 @@ impl<S: StripeApi> RefundProvider for StripeRefundProvider<'_, S> {
 /// or a test that doesn't exercise the wire). It mints a synthetic, deterministic
 /// `re_native_<idem>` ref so the claim-after-success bookkeeping is uniform with the
 /// Stripe path — but no cash actually moves at a provider. Mirrors
-/// [`crate::metering::provider::native::NativeProvider`]'s no-op posture.
+/// [`crate::metering::provider::adapters::lite::LiteProvider`]'s no-op posture.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeRefundProvider;
 

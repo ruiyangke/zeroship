@@ -32,7 +32,7 @@
 //! tenant-isolated on `app_id` via the `zeroship.tenant_app` GUC. The gateway
 //! connects as the non-bypass `zeroship_gateway` role, so EVERY op here must
 //! run inside a transaction that first sets that GUC to `route.app_id` (via
-//! [`crate::rls::with_tenant_app`]). `SET LOCAL` auto-reverts at COMMIT /
+//! [`crate::rls::set_tenant_app`]). `SET LOCAL` auto-reverts at COMMIT /
 //! ROLLBACK, so a pooled connection can never leak the tenant to the next
 //! checkout. An unset GUC fails CLOSED (policy predicate NULL → zero rows).
 //! This is why `read_live` / `update_rotated_family` / `delete` now take the

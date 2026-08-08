@@ -207,7 +207,7 @@ pub struct AuthConfig {
     pub google_redirect_uri: String,
 
     /// Google's authorize endpoint. Overridable so the e2e tests can point
-    /// at an in-process [`tests/common/mock_provider`] instead of the real
+    /// at an in-process `tests/common/mock_provider` instead of the real
     /// Google. Production deployments should leave the default in place.
     #[arg(
         long,

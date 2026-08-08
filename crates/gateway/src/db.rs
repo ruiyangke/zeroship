@@ -16,7 +16,7 @@
 //! housekeeper; every subsequent touch on that thread reuses it.
 //!
 //! Each per-request DB operation [`checkout`]s this thread's `Rc<Pool>`
-//! and then `.get()`s a [`PooledClient`] from it for exactly ONE
+//! and then `.get()`s a [`PooledClient`](compio_postgres::PooledClient) from it for exactly ONE
 //! operation, releasing the connection on drop — so no single shared
 //! connection serializes gateway DB work, which was the whole point of
 //! the pool migration. Hold the `PooledClient` only across the single DB

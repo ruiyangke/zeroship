@@ -15,7 +15,7 @@
 //!    a month-end reconcile, and a change whose effective period is
 //!    already finalized is attributed to the NEXT period.
 //!
-//! 2. **The read/price side** ([`build_segments`]) — invoked by `bill_creator`.
+//! 2. **The read/price side** ([`build_segments_with_prior`]) — invoked by `bill_creator`.
 //!    An app with N change events in the period splits into N+1 segments (ordered
 //!    by `effective_at`). Each segment's usage is the cumulative DELTA between
 //!    consecutive snapshots, floored at `max(0, …)`. Day-spans are a
