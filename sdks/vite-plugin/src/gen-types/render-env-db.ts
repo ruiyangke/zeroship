@@ -97,7 +97,17 @@ const ENV_DB_BANNER =
   "// The schema below is a reconstruction of `@zeroship/db` `t.*()` builder\n" +
   "// calls — NOT a hand-rolled interface — so it flows through the SAME\n" +
   "// `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference\n" +
-  "// chain a declared schema would.\n";
+  "// chain a declared schema would.\n" +
+  "//\n" +
+  "// That equivalence is about TYPES, not about DDL, and the difference is not\n" +
+  "// cosmetic: feeding this file back in as a declared schema would NOT\n" +
+  "// reproduce the columns the migrations built. `int`, `integer`, `bigInt`,\n" +
+  "// `number` and `float` all render as `t.number()`, because `@zeroship/db`\n" +
+  "// has no integer builder — so an `int` column that the migration created as\n" +
+  "// INTEGER would come back as DOUBLE PRECISION.\n" +
+  "//\n" +
+  "// Read `t.number()` here as \"some numeric column\", not as the column's\n" +
+  "// type. The schema source above remains the ground truth for DDL.\n";
 
 /**
  * Render the generated `env.db.ts` from a parsed v1 runtime descriptor.
