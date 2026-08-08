@@ -440,24 +440,59 @@ fn lower_ordered_envelopes_to_plans_inner(
                             projection_guard_verdict(&artifact, span, &base_snapshot, dialect)?
                         };
                         match verdict {
-                            ProjectionGuardVerdict::AllUnitsSatisfied
-                                if guard_skip_preserves_ownership(
-                                    &registry, &op, dialect, owner_app,
-                                ) =>
-                            {
+                            ProjectionGuardVerdict::AllUnitsSatisfied => {
                                 // Every unit's declared shape is already live, so the
                                 // projection keeps that shape and drops the op. The
                                 // executor still probes and journals it completed.
-                            }
-                            ProjectionGuardVerdict::AllUnitsSatisfied => {
-                                return Err(format!(
-                                    "failed to project pending schema after envelope {:?}: {error}; \
-                                     the existence guard is satisfied, but dropping the operation \
-                                     would change project ownership the incoming registry does not \
-                                     record - refusing rather than claiming an object this project \
-                                     does not own",
-                                    resolved.name
-                                ));
+                                //
+                                // OWNERSHIP IS NOT RE-DECIDED HERE, and the check that
+                                // used to be is gone. `enforce_ir_ownership` already ran
+                                // for this envelope, one call up, and it is the layer that
+                                // draws the distinction: a create target the registry
+                                // assigns to ANOTHER app is refused, a target the registry
+                                // does not name takes the declarer rule. A check keyed on
+                                // "would dropping this op change the registry" cannot see
+                                // that difference - `advance_ownership_registry` inserts a
+                                // `CreateTable` target unconditionally, so it read an
+                                // ABSENT entry as foreign. Absent is the DEFAULT state:
+                                // `--registry` is optional and the CLI's
+                                // `loadRegistry(undefined)` returns `{}`. It also
+                                // contradicted the adoption contract the empty-priors
+                                // branch already honours, so the same authored migration
+                                // adopted or refused according to how many priors happened
+                                // to precede it.
+                                //
+                                // MEASURED, not inferred: with the registry naming another
+                                // app, lowering never reaches this match at all - the
+                                // loader refuses first with `ownership violation`. Traced
+                                // through a file sink on this exact branch, with the
+                                // registry-names-this-app case as the positive control:
+                                // the control wrote a trace line, the foreign-owner case
+                                // wrote none. Narrowing the check to the explicit-foreign-
+                                // owner case instead of deleting it was then run as its
+                                // own mutation and moved NOTHING - it is green on every
+                                // arm, exactly as deletion is, because no input can select
+                                // it. The check also never prevented the registry mutation
+                                // it named: `advance_ownership_registry` below runs for
+                                // every projection op, dropped or kept.
+                                //
+                                // WHAT THIS GIVES UP: defence-in-depth against an
+                                // INCOMPLETE registry. A registry that omits `accounts`,
+                                // an app applying a matching guarded `createTable`
+                                // ("accounts") and then an approved
+                                // `dropColumn("accounts", "ssn")`, now adopts and drops
+                                // another app's column where the projection used to refuse
+                                // at the create. That sequence already succeeds whenever
+                                // the priors are empty, so what is removed is an accident
+                                // of migration count, not a rule - but it is removed, and
+                                // an operator relying on it loses it.
+                                //
+                                // Does NOT change any other guard verdict: divergent and
+                                // not-satisfied still refuse below, MySQL still never
+                                // reaches a satisfied verdict, and ownership on every
+                                // engine path - including SQLite apply, which never builds
+                                // a projection - stays exactly where `enforce_ir_ownership`
+                                // puts it.
                             }
                             ProjectionGuardVerdict::Divergent(divergence) => {
                                 return Err(format!(
@@ -1017,26 +1052,6 @@ fn projection_guard_verdict(
         return Ok(ProjectionGuardVerdict::AllUnitsSatisfied);
     }
     Ok(ProjectionGuardVerdict::NotSatisfied)
-}
-
-/// Whether dropping `op` from the projection leaves the ownership registry exactly
-/// as it stood.
-///
-/// [`advance_ownership_registry`] claims a `createTable` target for the lowering app
-/// UNCONDITIONALLY, with no prior-owner check. An operation dropped because its
-/// guard reports the object already present must therefore have no registry effect
-/// at all: otherwise this app would silently take over a table another app created,
-/// journal the migration completed, and leave nothing behind to re-examine it. Ops
-/// with no ownership effect trivially qualify.
-fn guard_skip_preserves_ownership(
-    registry: &BTreeMap<String, String>,
-    op: &Op,
-    dialect: SqlDialect,
-    owner_app: &str,
-) -> bool {
-    let mut projected = registry.clone();
-    advance_ownership_registry(&mut projected, std::slice::from_ref(op), dialect, owner_app);
-    projected == *registry
 }
 
 fn inflight_projection_already_reflected(

@@ -8,7 +8,7 @@
 // "table already exists" and the whole plan is refused -- pre-empting the guard
 // whose entire job is to report the object as already present.
 //
-// Eight arms, because "the projection honours the guard" and "the projection stopped
+// Ten arms, because "the projection honours the guard" and "the projection stopped
 // detecting duplicates" look identical from one:
 //   - adopt: live table matches the declaration EXACTLY and the incoming registry
 //     names this app as the owner -- MUST apply cleanly;
@@ -16,10 +16,18 @@
 //     MUST still refuse, and the refusal must name the DIVERGENCE, not the name
 //     collision, because a projection that skipped on the fold's error kind would
 //     skip on NAME presence alone and journal a completed row over a wrong shape;
-//   - unowned: the same guarded op with the table ABSENT from the incoming ownership
-//     registry -- MUST refuse. Dropping the op would also silently hand this app
-//     ownership of a table another app created, then journal it completed, after
-//     which nothing re-examines it;
+//   - branch witness: the one shape BOTH lowering paths refuse, an unguarded duplicate
+//     create, driven down each -- the refusals MUST come from different layers, or the
+//     parity arm below is comparing one path with itself;
+//   - parity: the same guarded op with the table ABSENT from the incoming registry --
+//     which is the DEFAULT state, since `--registry` is optional and `loadRegistry`
+//     returns `{}` -- MUST adopt on BOTH lowering paths. Empty priors skip the
+//     projection and adopt (the contract `existence-guard-varchar-adoption.test.ts`
+//     pins); non-empty priors must reach the same verdict, so that migration COUNT
+//     cannot decide whether an authored adoption is legal;
+//   - foreign owner: the same guarded op with the registry EXPLICITLY naming another
+//     app -- MUST refuse, and the refusal must be the loader's `ownership violation`,
+//     since that is the layer that makes the distinction the projection cannot;
 //   - unguarded control: the same createTable WITHOUT `ifNotExists` -- MUST still
 //     refuse, which isolates the guard as what changed rather than duplicate
 //     detection in general;
@@ -31,13 +39,32 @@
 //   - SQLite unguarded control: plan MUST still refuse a bare duplicate create, which
 //     isolates the guard as what the SQLite plan path honours.
 //
+// WHICH MUTATIONS THESE ARMS ACTUALLY CATCH -- measured, not claimed, against ONE
+// compiled addon with the projection's ownership check re-introduced behind an env gate
+// in four forms, plus one mutation of the loader:
+//   - refuse whenever dropping the op would CHANGE the registry (the shipped-then-
+//     reverted form): ONLY the parity arm turns red;
+//   - refuse whenever dropping the op would NOT change the registry (inverted): the two
+//     ADOPT arms turn red, PostgreSQL and SQLite, and the parity arm stays GREEN;
+//   - refuse only when the registry EXPLICITLY names another app (narrowed): NOTHING
+//     turns red -- which is the measurement that no input can select that branch;
+//   - no check at all (what ships): every arm green;
+//   - `enforce_ir_ownership` returning Ok unconditionally (the loader gate removed):
+//     ONLY the foreign-owner arm turns red.
+// So the parity arm is NOT a general detector of changes to ownership handling. It
+// catches the refuse-on-any-registry-change form and nothing else; the adopt arms carry
+// the inverted form; the foreign-owner arm pins the LOADER, which is the layer that
+// actually decides ownership. The branch witness and both unguarded controls do not move
+// under any of the five, which is what makes them controls.
+//
 // Every arm drives the REAL path: authored through the public `zero-migrate` API,
 // lowered by the native addon, applied through `zero-migrate-cli`'s `apply()` over the
-// real `pg`/`mysql2`/`sqlite` driver seams against a live database, with
-// `priorMigrations` non-empty so the folding path is the one under test, and with the
+// real `pg`/`mysql2`/`sqlite` driver seams against a live database, and with the
 // pre-existing table created OUT OF BAND. Seeding it through the engine would put it
 // in the migration HISTORY as well as the catalog and would measure a different
-// question.
+// question. Every arm carries a non-empty `priorMigrations`, so the folding path is the
+// one under test, EXCEPT the two that deliberately run both halves: the branch witness
+// and the parity arm.
 //
 // SQLite is covered by the last three arms below. It reaches the projection from a
 // DIFFERENT direction than PostgreSQL and MySQL: `apply()` routes a `sqlite` driver
@@ -47,7 +74,10 @@
 // apply AGREE, which is the property a split path can silently lose.
 //
 // Does NOT cover guarded ops other than `createTable`, and does NOT cover a partially
-// matching table whose secondary index is still absent.
+// matching table whose secondary index is still absent. The first gap grew when the
+// projection's ownership check was removed: a guarded `dropTable`/`renameTable` whose
+// guard is satisfied also used to be refused by it, for a registry change that was
+// never about foreign ownership, and no arm here drives one either way.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -81,6 +111,7 @@ if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_guard_fold_projection";
+const OTHER_APP = "app_guard_fold_other";
 const BASE_TABLE = "guard_fold_base";
 const TABLE = "notes";
 
@@ -144,6 +175,27 @@ async function applyAfterBase(
     projectSchema,
     driver,
     registry,
+    policy: [noInjectPolicy(projectSchema)],
+    approved: true,
+    appliedBy: "guard-fold-projection-e2e",
+    nameFallback: migration.name,
+  });
+}
+
+/** The other half of the parity arm: the SAME authored migration applied with NO
+ *  priors, which is the branch `verbs.rs` takes on an empty `priorMigrations` and the
+ *  branch that never reaches the pending-schema projection. */
+async function applyGuardedWithoutPriors(
+  migration: NamedMigration,
+  projectSchema: string,
+  driver: DriverConfig,
+) {
+  return apply({
+    migration,
+    ownerApp: OWNER_APP,
+    projectSchema,
+    driver,
+    registry: {},
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "guard-fold-projection-e2e",
@@ -233,6 +285,47 @@ async function withAppliedBaseAndSeededTable(
   }
 }
 
+/**
+ * The same seeding, WITHOUT the base migration: no prefix is applied, so the migration
+ * under test carries empty `priorMigrations` and takes the branch that skips the
+ * projection entirely. `varchar(255)` is fixed here because the parity arm is the only
+ * caller and it declares `t.string()`.
+ */
+async function withSeededTableOnly(
+  prefix: string,
+  body: (
+    client: import("pg").Client,
+    schema: string,
+    driver: DriverConfig,
+    metaSchema: string,
+  ) => Promise<void>,
+): Promise<void> {
+  const pg = (await import("pg")).default;
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+  const schema = uniqueNamespace(prefix);
+  const meta = `${schema}_migrations`;
+  const driver: DriverConfig = { kind: "postgres", url: PG_URL! };
+  try {
+    await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
+    await client.query(
+      `CREATE TABLE ${pgIdent(schema)}.${pgIdent(TABLE)} (
+         id integer PRIMARY KEY NOT NULL,
+         body varchar(255)
+       )`,
+    );
+    await body(client, schema, driver, meta);
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS ${pgIdent(schema)} CASCADE;
+         DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+}
+
 test("PostgreSQL: a guarded createTable over a matching live table survives the pending-schema projection", async (ctx) => {
   if (!PG_URL) {
     ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection e2e skipped");
@@ -298,31 +391,134 @@ test("PostgreSQL: the same guarded createTable still refuses a divergent live ta
   );
 });
 
-test("PostgreSQL: a guarded createTable is refused when the incoming registry does not own the table", async (ctx) => {
+/** The message of the refusal `run` produces, or a failure if it did not refuse. */
+async function refusalOf(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  assert.fail("expected a refusal, got a clean apply");
+}
+
+test("PostgreSQL: the parity arm's two halves take DIFFERENT lowering branches", async (ctx) => {
   if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection ownership e2e skipped");
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; lowering-branch witness skipped");
+    return;
+  }
+  // The witness for the arm below. A parity assertion is worth nothing if both halves
+  // happen to run the same code: `apply()` forks on `prior_envelope_json.is_empty()`
+  // alone (`verbs.rs`), and only the non-empty side builds a pending-schema projection.
+  // Rather than assert that fork in a comment, drive the ONE shape both branches refuse
+  // -- an UNGUARDED duplicate create -- down each half and require the refusals to come
+  // from different layers. Only the projection can say "failed to project pending
+  // schema"; the empty-priors half never builds one.
+  const bare = createNotes("guard_fold_witness", { guarded: false, body: () => t.string() });
+
+  let withoutPriors = "";
+  await withSeededTableOnly("guardfold_witness_nopriors_pg", async (_client, schema, driver) => {
+    withoutPriors = await refusalOf(() => applyGuardedWithoutPriors(bare, schema, driver));
+  });
+
+  let withPriors = "";
+  await withAppliedBaseAndSeededTable(
+    "guardfold_witness_priors_pg",
+    "varchar(255)",
+    async (_client, schema, driver) => {
+      withPriors = await refusalOf(() => applyAfterBase(bare, schema, driver, {}));
+    },
+  );
+
+  assert.match(
+    withPriors,
+    /failed to project pending schema/,
+    `the priors half must reach the projection (got ${JSON.stringify(withPriors)})`,
+  );
+  assert.doesNotMatch(
+    withoutPriors,
+    /failed to project pending schema/,
+    `the empty-priors half must NOT reach the projection (got ${JSON.stringify(withoutPriors)})`,
+  );
+});
+
+test("PostgreSQL: a guarded createTable over an unregistered live table adopts identically with and without priors", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection parity e2e skipped");
+    return;
+  }
+  // One authored migration, one registry (`{}` -- the default state for every user who
+  // never passes `--registry`), one live table seeded out of band, run down BOTH lowering
+  // paths. The empty-priors path is the tested contract of
+  // `existence-guard-varchar-adoption.test.ts`; this arm requires the priors path to
+  // agree with it. A refusal on either half is the defect, and asserting only one half
+  // is how the two paths drifted apart in the first place.
+  //
+  // That the two halves really are two paths is not assumed here: the arm above measures
+  // it, and it is the reason this arm is not self-satisfying.
+  const guarded = createNotes("guard_fold_parity", { guarded: true, body: () => t.string() });
+
+  await withSeededTableOnly("guardfold_parity_nopriors_pg", async (client, schema, driver) => {
+    await applyGuardedWithoutPriors(guarded, schema, driver);
+    assert.deepEqual(
+      await pgColumnType(client, schema, "body"),
+      { data_type: "character varying", character_maximum_length: 255 },
+      "empty priors: the guard proved equality, the CREATE was skipped, the table is untouched",
+    );
+  });
+
+  await withAppliedBaseAndSeededTable(
+    "guardfold_parity_priors_pg",
+    "varchar(255)",
+    async (client, schema, driver, meta) => {
+      await applyAfterBase(guarded, schema, driver, {});
+      assert.deepEqual(
+        await pgColumnType(client, schema, "body"),
+        { data_type: "character varying", character_maximum_length: 255 },
+        "non-empty priors: the same authored op reaches the same verdict on the same shape",
+      );
+      const completed = await pgCompletedVersions(client, meta);
+      assert.equal(
+        completed.length,
+        2,
+        `both migrations are journaled completed, as on the empty-priors path (got ${JSON.stringify(completed)})`,
+      );
+    },
+  );
+});
+
+test("PostgreSQL: a guarded createTable is still refused when the registry names ANOTHER app as owner", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection foreign-owner e2e skipped");
     return;
   }
   await withAppliedBaseAndSeededTable(
-    "guardfold_unowned_pg",
+    "guardfold_foreign_pg",
     "varchar(255)",
     async (client, schema, driver, meta) => {
-      // Identical to the adopting arm except that `notes` is absent from the incoming
-      // registry, i.e. some OTHER app created it. Skipping the op would drop it from
-      // the pending set AND claim ownership unconditionally, then journal completed --
-      // a loud recoverable refusal turned into a silent permanent ownership transfer.
-      const guarded = createNotes("guard_fold_unowned", { guarded: true, body: () => t.string() });
+      // Identical to the parity arm except that the registry EXPLICITLY assigns `notes`
+      // to another app. Requiring the loader's wording rather than a bare /ownership/ is
+      // the point: both the loader's refusal and the projection's carried that word, so
+      // a loose match could not tell which layer refused -- and the projection's layer
+      // is never reached, because `enforce_ir_ownership` rejects the op first. Measured:
+      // disabling that loader gate is the only one of the five mutations run against this
+      // file that turns THIS arm red.
+      const guarded = createNotes("guard_fold_foreign", { guarded: true, body: () => t.string() });
       await assert.rejects(
-        applyAfterBase(guarded, schema, driver, { [BASE_TABLE]: OWNER_APP }),
-        /ownership/,
-        "a guarded create over a table this project does not own must refuse, not adopt",
+        applyAfterBase(guarded, schema, driver, {
+          [BASE_TABLE]: OWNER_APP,
+          [TABLE]: OTHER_APP,
+        }),
+        new RegExp(
+          `ownership violation[\\s\\S]*"${TABLE}"[\\s\\S]*owned by ${OTHER_APP}[\\s\\S]*"${OWNER_APP}"`,
+        ),
+        "a guarded create over a table the registry gives to another app must refuse, not adopt",
       );
 
       const completed = await pgCompletedVersions(client, meta);
       assert.equal(
         completed.length,
         1,
-        `only the base migration is journaled; the unowned adoption left no completed row (got ${JSON.stringify(completed)})`,
+        `only the base migration is journaled; the foreign-owned adoption left no completed row (got ${JSON.stringify(completed)})`,
       );
     },
   );
