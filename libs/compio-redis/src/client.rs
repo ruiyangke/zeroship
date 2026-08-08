@@ -13,8 +13,8 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    build_cmd, encode_frame, expect_array, expect_bulk_or_null, expect_integer, expect_ok,
-    try_decode,
+    ReplyDecoder, build_cmd, encode_frame, expect_array, expect_bulk_or_null, expect_integer,
+    expect_ok,
 };
 
 const READ_CHUNK: usize = 4096;
@@ -72,6 +72,10 @@ pub struct Client {
     /// [`Client::take_read_scratch`] for why nothing may depend on it
     /// surviving a read.
     read_scratch: Vec<u8>,
+    /// Incremental decoder state for the reply currently being buffered in
+    /// `rx`. Carries the parse position across reads so an N-byte reply is
+    /// walked once, not once per read.
+    decoder: ReplyDecoder,
     cmd_timeout: Duration,
     /// "Dirty" barrier for safe pool reuse. Set SYNCHRONOUSLY at the start
     /// of `send_recv` (before the write/await) so it survives even if the
@@ -120,6 +124,7 @@ impl Client {
             stream,
             rx: BytesMut::with_capacity(READ_CHUNK),
             read_scratch: vec![0u8; READ_CHUNK],
+            decoder: ReplyDecoder::new(MAX_REPLY_SIZE),
             cmd_timeout: DEFAULT_CMD_TIMEOUT,
             dirty: false,
         };
@@ -153,6 +158,7 @@ impl Client {
             stream,
             rx: BytesMut::with_capacity(READ_CHUNK),
             read_scratch: vec![0u8; READ_CHUNK],
+            decoder: ReplyDecoder::new(MAX_REPLY_SIZE),
             cmd_timeout: DEFAULT_CMD_TIMEOUT,
             dirty: false,
         })
@@ -459,11 +465,10 @@ impl Client {
                 )));
             }
 
-            // Try to decode from what we already buffered.
-            if !self.rx.is_empty()
-                && let Some((frame, consumed)) = try_decode(&self.rx)?
-            {
-                let _ = self.rx.split_to(consumed);
+            // Try to decode from what we already buffered. The decoder keeps
+            // its parse position across reads, so this resumes where the
+            // previous read left off instead of re-parsing from byte 0.
+            if let Some(frame) = self.decoder.take_frame(&mut self.rx)? {
                 return Ok(frame);
             }
 
