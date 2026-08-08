@@ -23,9 +23,9 @@ use support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect, StructuralDrift,
+    diff_snapshots, effective_policy_from_charter_toml, fold_ops, resolve_create_table_policy,
+    snapshot_schema, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    LockMode, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect, StructuralDrift,
 };
 
 const OWNER: &str = "app_fold_roundtrip_pg";
@@ -51,6 +51,45 @@ fn cfg_for(schema: &str) -> ExecutorConfig {
         schema,
         support::no_inject(schema),
     )
+}
+
+fn lifecycle_policy(schema: &str) -> EffectivePolicy {
+    let charter_toml = format!(
+        r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "access.role"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#
+    );
+    effective_policy_from_charter_toml(&charter_toml)
+        .expect("explicit partition lifecycle test charter composes")
 }
 
 #[derive(Debug)]
@@ -313,11 +352,23 @@ async fn using_candidate_index_keeps_fold_and_live_primary_key_names_aligned() {
     .await;
 }
 
-async fn assert_lifecycle_roundtrip(label: &str, source: &str, checkpoints: &[(&str, usize)]) {
+/// `policy_for` builds the charter the case runs under, from its schema name.
+///
+/// Passed per case rather than fixed in the helper so a case that needs a wider
+/// grant does not widen it for the others. The partition cases need
+/// `schema.partition` and `access.role`, which `attachPartition` refuses without;
+/// the column, constraint, named-type and sequence cases run under the narrower
+/// `support::no_inject` they were written against.
+async fn assert_lifecycle_roundtrip(
+    label: &str,
+    source: &str,
+    checkpoints: &[(&str, usize)],
+    policy_for: fn(&str) -> EffectivePolicy,
+) {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
-    let cfg = cfg_for(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy_for(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
     let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
     session
@@ -332,7 +383,7 @@ async fn assert_lifecycle_roundtrip(label: &str, source: &str, checkpoints: &[(&
             .await
             .map_err(|error| format!("ensure migration journal: {error}"))?;
 
-        let policy = support::no_inject(&cfg.project_schema);
+        let policy = policy_for(&cfg.project_schema);
         let authored: MigrationIr =
             serde_json::from_str(source).map_err(|error| format!("parse test IR: {error}"))?;
         let resolved = resolve_create_table_policy(&authored, &policy, &cfg.project_schema)
@@ -398,7 +449,7 @@ async fn assert_lifecycle_roundtrip(label: &str, source: &str, checkpoints: &[(&
                     &applied_ops,
                     SqlDialect::Postgres,
                     &cfg.project_schema,
-                    &support::no_inject(&cfg.project_schema),
+                    &policy,
                 )
                 .map_err(|error| {
                     format!("{checkpoint}: fold the applied PostgreSQL ops: {error}")
@@ -498,6 +549,7 @@ async fn add_and_alter_columns() {
             ("drop column default", 6),
             ("set column type", 7),
         ],
+        support::no_inject,
     )
     .await;
 }
@@ -556,6 +608,7 @@ async fn standalone_constraint_lifecycle() {
             ("drop check constraint", 7),
             ("drop foreign-key constraint", 8),
         ],
+        support::no_inject,
     )
     .await;
 }
@@ -593,6 +646,7 @@ async fn named_type_lifecycle() {
             ("drop domain", 5),
             ("drop enum", 6),
         ],
+        support::no_inject,
     )
     .await;
 }
@@ -622,6 +676,79 @@ async fn sequence_lifecycle() {
             ("alter sequence", 2),
             ("drop sequence", 3),
         ],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn create_and_drop_partition() {
+    // Exercise createPartition before dropPartition removes it. This does not cover
+    // existence guards.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "create_and_drop_partition",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"create_drop_parent","columns":[
+          {"name":"bucket","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":false}
+        ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":false}},
+        {"op":"createPartition","name":"create_drop_child",
+         "of":"create_drop_parent","bounds":{"kind":"range",
+           "from":[{"kind":"int","value":0}],
+           "to":[{"kind":"int","value":100}]}},
+        {"op":"dropPartition","parent":"create_drop_parent",
+         "name":"create_drop_child"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "create and drop partition",
+        source,
+        &[
+            ("create partitioned parent", 1),
+            ("create partition", 2),
+            ("drop partition", 3),
+        ],
+        lifecycle_policy,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn attach_standalone_table_as_partition() {
+    // Exercise attachPartition after observing the standalone table. This does not
+    // cover validation of rows already stored in the table.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "attach_standalone_table_as_partition",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"attach_parent","columns":[
+          {"name":"bucket","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":false}
+        ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":false}},
+        {"op":"createTable","name":"attach_child","columns":[
+          {"name":"bucket","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":false}
+        ]},
+        {"op":"attachPartition","parent":"attach_parent","name":"attach_child",
+         "bound":{"kind":"range",
+           "from":[{"kind":"int","value":100}],
+           "to":[{"kind":"int","value":200}]}}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "attach standalone table as partition",
+        source,
+        &[
+            ("create partitioned parent", 1),
+            ("create standalone table", 2),
+            ("attach partition", 3),
+        ],
+        lifecycle_policy,
     )
     .await;
 }
