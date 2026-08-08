@@ -1689,12 +1689,18 @@ pub fn fold_ops_onto(
                 // index-cascade below can discriminate. Only UNIQUE / PRIMARY KEY
                 // constraints back an implicit same-named index that PG cascades on
                 // drop; a FOREIGN KEY has NO backing index. PG lets a FK constraint
-                // and an independent user INDEX share a name (verified live on :5440:
-                // `ADD CONSTRAINT shared FOREIGN KEY …` + `CREATE INDEX shared …`
-                // coexist, and `DROP CONSTRAINT shared` leaves the index intact), and
-                // validate.rs does not forbid the coexistence — so an unconditional
+                // and an independent user INDEX share a name, and validate.rs does not
+                // forbid the coexistence, so an unconditional
                 // `retain(|i| &i.name != name)` would WRONGLY phantom-drop the user
                 // index here, breaking `fold_ops == snapshot_schema(live)`.
+                //
+                // Re-verified on PostgreSQL 18.4: `ADD CONSTRAINT shared FOREIGN KEY
+                // (...)` then `CREATE INDEX shared` leaves one row in `pg_constraint`
+                // and one in `pg_class`, and `DROP CONSTRAINT shared` leaves the index
+                // intact (0 constraints, 1 index). The VERSION is recorded rather than
+                // the host and port the check ran against, because the version is what
+                // the behaviour depends on and the port named a fixture this repository
+                // no longer serves.
                 let dropped_kind = snap
                     .constraints
                     .iter()

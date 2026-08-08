@@ -4,7 +4,7 @@
 //! backed by the BLOCKING `postgres` crate. It lets the in-crate Rust tests drive the
 //! SHIPPED generic PG apply path — `PostgresBackend<PgDevSession>`, the `<D: SqlSession>`
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
-//! Postgres (:5440) through the SAME driver seam the production napi/Node `pg` host
+//! Postgres through the SAME driver seam the production napi/Node `pg` host
 //! rides. This is the in-crate live-DB coverage the deleted `native-pg` tests used to
 //! provide (they drove the now-deleted compio client directly).
 //!

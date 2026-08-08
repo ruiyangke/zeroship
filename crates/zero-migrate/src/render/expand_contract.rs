@@ -1248,5 +1248,6 @@ mod tests {
     // This test FAILS RED pre-fix (the old code returned `Ok`, never the refusal).
     //
     // The refusal fires BEFORE any DDL/backfill, so the connection is never used on this
-    // path — but `run_expand_pg` needs a `&Client`, so we open one (skip if :5440 is down).
+    // path, but `run_expand_pg` needs a `&Client`, so we open one and skip when the DSN in
+    // `ZERO_MIGRATE_TEST_PG_URL` is unreachable.
 }

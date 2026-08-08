@@ -20,8 +20,12 @@
 //!   * rollback (`down` runs, `rolled_back` event appends, re-apply works);
 //!   * baseline / adopt (record `completed` WITHOUT running `up`).
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL` (a DSN on :5440): every test skips cleanly
-//! when unset, so DB-free CI stays green. Each test runs in its OWN meta + project
+//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`: every test skips cleanly when unset, so a
+//! contributor without a database still gets a green run. The skip announces itself and
+//! `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns it into a failure, which is what CI sets. The
+//! DSN itself is NOT repeated here - `docker-compose.test.yml` carries the canonical
+//! value in its own header, and the port this comment used to name was a third value
+//! that no longer serves anything. Each test runs in its OWN meta + project
 //! schema (suffixed by a unique token) so the shared DB stays clean and re-runs are
 //! independent.
 
