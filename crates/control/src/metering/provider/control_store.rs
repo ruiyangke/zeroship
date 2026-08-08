@@ -247,14 +247,13 @@ impl LiteStore for ControlLiteStore {
                     "adjustment_note app {app_id} has no current plan"
                 ))
             })?;
-        if conn
+        if !conn
             .query(
                 "SELECT 1 FROM zeroship.invoice_lines WHERE correction_dedup_key = $1",
                 &[&note.idempotency_key],
             )
             .await?
-            .first()
-            .is_some()
+            .is_empty()
         {
             return Ok(InvoiceRef(Some(invoice_id)));
         }

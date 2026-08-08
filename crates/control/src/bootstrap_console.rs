@@ -126,11 +126,13 @@ struct RuntimeEnvSpec {
 /// var is SKIPPED with a warning (the console degrades for that one feature
 /// rather than failing the whole seed). Sourced from the console's server reads
 /// (`apps/zeroship-builder/src/server/internal/env.ts` + direct `process.env`):
-///   - `OPENAI_API_KEY`        — AI codegen/chat/pm/sre/wizard (credential).
-///   - `SANDBOX_TOKEN`         — sandbox controller bearer token (credential).
-///   - `SANDBOX_URL`           — sandbox/preview backend URL (non-secret config).
-///   - `ZEROSHIP_SDK_REGISTRY` — private npm registry URL for generated apps
-///                               (non-secret config; optional).
+///
+/// - `OPENAI_API_KEY` — AI codegen/chat/pm/sre/wizard (credential).
+/// - `SANDBOX_TOKEN` — sandbox controller bearer token (credential).
+/// - `SANDBOX_URL` — sandbox/preview backend URL (non-secret config).
+/// - `ZEROSHIP_SDK_REGISTRY` — private npm registry URL for generated apps
+///   (non-secret config; optional).
+///
 /// The console is a **pure creator app** (no control credential, zero control
 /// calls), so there is NO `ZEROSHIP_CONTROL_URL` to forward. The AI model is
 /// hard-coded in the console (`gpt-5.4-mini`) with no base-URL override, so there
@@ -300,12 +302,13 @@ pub fn console_plan_id() -> String {
 /// GLOBAL `metric_weights`, NOT the plan). Values (with the seeded default FX of
 /// 30000 pico-cents/CU = 0.00003 ¢/CU, and 1 CU ≈ 1 request under the seeded
 /// weights):
-///   - free:      base 0, included 100_000 CU (~100k requests free), inherit FX,
-///                spend_limit 0 (quota-capped, no card).
-///   - pro:       base $5 (500c), included 1_000_000 CU, inherit FX,
-///                spend_limit $50 (5000c) — pay-go overage into the cap.
-///   - unlimited: base 0, included 0, inherit FX, spend_limit 0 (uncapped;
-///                console is system-owned + reconciler-skipped anyway).
+/// - free: base 0, included 100_000 CU (~100k requests free), inherit FX,
+///   spend_limit 0 (quota-capped, no card).
+/// - pro: base $5 (500c), included 1_000_000 CU, inherit FX,
+///   spend_limit $50 (5000c) — pay-go overage into the cap.
+/// - unlimited: base 0, included 0, inherit FX, spend_limit 0 (uncapped;
+///   console is system-owned + reconciler-skipped anyway).
+///
 /// Returns `[free, pro, unlimited]`.
 fn builtin_plans() -> Vec<Plan> {
     use crate::pricing::PlanPrice;

@@ -27,14 +27,15 @@
 //! ### Where `StripeTaxProvider` would slot in
 //!
 //! When the platform crosses a tax nexus, a `StripeTaxProvider` (a new `TaxProviderKind`
-//! + a `build_tax_provider` arm) would implement [`TaxProvider::compute_tax`] by calling
-//! Stripe's `automatic_tax` (`POST /v1/invoices` with `automatic_tax[enabled]=true`, or
-//! the Tax `calculations` API) using the `TaxContext`'s creator/period/address to resolve
-//! the jurisdiction, and return the computed `tax_cents`. **No schema change** — the
-//! result lands in the existing `tax_cents` column through the same finalize UPDATE; only
-//! this seam's `build_tax_provider` and the new provider impl change. The refund path's
-//! proportional tax-on-refund split (`refunds.subtotal_cents`/`tax_cents`) already exists
-//! (PR-3), so a taxed invoice refunds tax correctly the day a real provider is enabled.
+//! plus a `build_tax_provider` arm) would implement [`TaxProvider::compute_tax`] by
+//! calling Stripe's `automatic_tax` (`POST /v1/invoices` with
+//! `automatic_tax[enabled]=true`, or the Tax `calculations` API) using the
+//! `TaxContext`'s creator/period/address to resolve the jurisdiction, and return the
+//! computed `tax_cents`. **No schema change** — the result lands in the existing
+//! `tax_cents` column through the same finalize UPDATE; only this seam's
+//! `build_tax_provider` and the new provider impl change. The refund path's proportional
+//! tax-on-refund split (`refunds.subtotal_cents`/`tax_cents`) already exists (PR-3), so a
+//! taxed invoice refunds tax correctly the day a real provider is enabled.
 
 use crate::metering::provider::ProviderError;
 

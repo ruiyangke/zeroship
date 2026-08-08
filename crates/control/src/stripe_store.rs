@@ -384,7 +384,7 @@ impl StripeStore {
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        let inserted = rows.first().is_some();
+        let inserted = !rows.is_empty();
         tx.commit().await.map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(inserted)
     }
@@ -437,7 +437,7 @@ impl StripeStore {
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        let inserted = rows.first().is_some();
+        let inserted = !rows.is_empty();
         tx.commit().await.map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(inserted)
     }

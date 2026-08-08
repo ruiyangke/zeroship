@@ -420,9 +420,7 @@ async fn insert_oauth_client(
             }
         })?;
 
-    rows.first()
-        .map(row_to_oauth_client)
-        .ok_or_else(|| db_error())
+    rows.first().map(row_to_oauth_client).ok_or_else(db_error)
 }
 
 fn row_to_oauth_client(row: &compio_postgres::Row) -> OauthClientRow {

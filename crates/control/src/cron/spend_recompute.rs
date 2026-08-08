@@ -214,8 +214,10 @@ pub async fn tick(
         // Still drive the evaluator: it single-flights on its OWN key, so this
         // is not a second unguarded path, and a replica that loses the
         // recompute race should not also sit out enforcement.
-        let mut cycle = SpendRecomputeCycle::default();
-        cycle.transitions = super::spend_reconcile::tick(state).await?;
+        let cycle = SpendRecomputeCycle {
+            transitions: super::spend_reconcile::tick(state).await?,
+            ..Default::default()
+        };
         return Ok(cycle);
     }
 

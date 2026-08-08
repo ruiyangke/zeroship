@@ -210,7 +210,7 @@ impl AccountStatusStore {
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(self.transition_from_rows(creator_id, &rows, "payment_failed").await?)
+        self.transition_from_rows(creator_id, &rows, "payment_failed").await
     }
 
     /// `invoice.paid` (infra invoice) / payment recovery → move the creator back
@@ -266,7 +266,7 @@ impl AccountStatusStore {
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(self.transition_from_rows(creator_id, &rows, "payment_recovered").await?)
+        self.transition_from_rows(creator_id, &rows, "payment_recovered").await
     }
 
     /// Append a history row + return the transition iff `prior != new`.

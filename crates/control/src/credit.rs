@@ -110,6 +110,19 @@ pub enum GrantOutcome {
     Conflict,
 }
 
+/// Grouped inputs for [`grant`] — kept as a struct rather than individual
+/// parameters purely to stay under clippy's `too_many_arguments` threshold;
+/// every field is still required and read exactly once.
+#[derive(Debug)]
+pub struct GrantRequest<'a> {
+    pub amount_cents: i64,
+    pub currency: &'a str,
+    pub kind: &'a str,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub note: Option<&'a str>,
+    pub idempotency_key: &'a str,
+}
+
 /// Append an operator credit grant for `creator_id`, idempotency-keyed and
 /// body-fingerprinted. `kind` is a positive grant kind (`grant`/`promo`/`goodwill`);
 /// `consumed`/`void_reversal` are reconciler-internal and rejected here. `currency`
@@ -120,13 +133,16 @@ pub enum GrantOutcome {
 pub async fn grant<C: GenericClient + Sync>(
     conn: &C,
     creator_id: &uuid::Uuid,
-    amount_cents: i64,
-    currency: &str,
-    kind: &str,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    note: Option<&str>,
-    idempotency_key: &str,
+    request: GrantRequest<'_>,
 ) -> Result<GrantOutcome, RegistryError> {
+    let GrantRequest {
+        amount_cents,
+        currency,
+        kind,
+        expires_at,
+        note,
+        idempotency_key,
+    } = request;
     // Boundary validation: positive amount, positive grant kind, USD only.
     if amount_cents <= 0 {
         return Err(RegistryError::InvalidInput(format!(

@@ -536,9 +536,11 @@ where
     let per_app_fair_limit = config.per_app_fair_limit.max(1);
     let per_app_fair_limit_usize = usize::try_from(per_app_fair_limit).unwrap_or(usize::MAX);
     reap_parked_cancel_requested_batch(scheduler_store, &state.registry, per_app_fair_limit).await?;
-    let mut scheduler_config = SchedulerConfig::default();
-    scheduler_config.max_due_per_tick = per_app_fair_limit_usize;
-    scheduler_config.max_loaded_timers = fair_limit;
+    let mut scheduler_config = SchedulerConfig {
+        max_due_per_tick: per_app_fair_limit_usize,
+        max_loaded_timers: fair_limit,
+        ..Default::default()
+    };
 
     let mut wheel = TimerWheel::new(WakeHandle::new());
     let mut claimed = 0usize;
@@ -830,7 +832,7 @@ async fn apply_workflow_advance_registration(
     registry: &Registry,
     registration: &WorkflowAdvanceRegistration,
 ) -> Result<(), RegistryError> {
-    if let Some(next_wake_at) = registration.next_wake_at.clone() {
+    if let Some(next_wake_at) = registration.next_wake_at {
         scheduler_store
             .ack_register_next(&registration.run_id, registration.app_id, next_wake_at)
             .await
@@ -908,8 +910,10 @@ pub async fn apply_step_result_without_scheduler_sync(
     owner_id: &str,
     result: StepResult,
 ) -> Result<bool, RegistryError> {
-    let mut config = WorkflowEngineConfig::default();
-    config.owner_id = owner_id.to_string();
+    let config = WorkflowEngineConfig {
+        owner_id: owner_id.to_string(),
+        ..Default::default()
+    };
     apply_step_result_without_scheduler_sync_with_config(state, config, result).await
 }
 
@@ -934,8 +938,10 @@ pub async fn apply_step_result(
     result: StepResult,
 ) -> Result<bool, RegistryError> {
     let run_id = result.run_id.clone();
-    let mut config = WorkflowEngineConfig::default();
-    config.owner_id = owner_id.to_string();
+    let config = WorkflowEngineConfig {
+        owner_id: owner_id.to_string(),
+        ..Default::default()
+    };
     let applied = apply_step_result_on_registry(&state.registry, &config, result)
         .await
         .map_err(workflow_error_to_registry)?;

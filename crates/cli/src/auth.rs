@@ -326,7 +326,7 @@ fn read_credentials() -> Result<Credentials, String> {
     let path = credentials_path()?;
     let body = std::fs::read_to_string(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            format!("not signed in; run `zeroship login`")
+            "not signed in; run `zeroship login`".to_string()
         } else {
             format!("read {}: {e}", path.display())
         }

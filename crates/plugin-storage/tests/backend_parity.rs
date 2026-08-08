@@ -659,7 +659,7 @@ async fn run_s3_part_limit_fast_fail() {
     // multipart upload) before the running total trips the cap — exercising the
     // fast-fail AND the C1 abort of an already-started upload.
     // SAFETY: single-threaded test; restored immediately after the call.
-    std::env::set_var(MAX_STREAM_OBJECT_BYTES_ENV, &(12 * 1024 * 1024).to_string());
+    std::env::set_var(MAX_STREAM_OBJECT_BYTES_ENV, (12 * 1024 * 1024).to_string());
     let backend = make_s3();
 
     // 16 MiB of data through a 12 MiB cap → trips after the first 8 MiB part.

@@ -351,8 +351,7 @@ fn finalize_boundaries(
     // neighbour that keeps its (earlier) start covers the merged delta. Fold into
     // the NEXT segment normally; if it is the LAST, fold into the PREVIOUS.
     let mut keep: Vec<usize> = Vec::with_capacity(n);
-    for k in 0..n {
-        let (s, e) = spans[k];
+    for (k, &(s, e)) in spans.iter().enumerate() {
         if e > s {
             keep.push(k);
         }
