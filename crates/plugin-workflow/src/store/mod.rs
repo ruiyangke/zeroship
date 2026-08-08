@@ -132,6 +132,7 @@ pub trait WorkflowTx {
         run_ids: &[String],
     ) -> Result<Vec<RunLockRow>, WorkflowError>;
 
+    #[allow(clippy::too_many_arguments)] // one compensation-step outcome record; a params struct would just relocate the fields
     async fn apply_compensation_outcome(
         &mut self,
         run_id: &str,
@@ -173,6 +174,7 @@ pub trait WorkflowTx {
         checkpoint: &mut StepCheckpoint,
     ) -> Result<Result<(), String>, WorkflowError>;
 
+    #[allow(clippy::too_many_arguments)] // successor run's full seed (identity + optional inline/ref input); a params struct would just relocate the fields
     async fn continue_as_new(
         &mut self,
         config: &WorkflowEngineConfig,

@@ -136,7 +136,7 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_namespace WHERE nspname = $1",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe pg_namespace", e))?
@@ -232,7 +232,7 @@ async fn create_role_if_missing(
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_roles WHERE rolname = $1",
-            &[&name],
+            &[name],
         )
         .await
         .map_err(|e| coded_sql(&format!("probe pg_roles {name}"), e))?
@@ -255,7 +255,7 @@ async fn ensure_hmac_keys_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'hmac_keys'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe hmac_keys", e))?
@@ -294,7 +294,7 @@ async fn ensure_nonces_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'session_nonces'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe session_nonces", e))?
@@ -342,7 +342,7 @@ async fn ensure_session_ctx_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'session_ctx'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe session_ctx", e))?
@@ -388,7 +388,7 @@ async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'column_keys'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe column_keys", e))?
@@ -437,7 +437,7 @@ async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'pitr_targets'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe pitr_targets", e))?
@@ -489,7 +489,7 @@ async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'mask_policies'",
-            &[&ADMIN_SCHEMA],
+            &[ADMIN_SCHEMA],
         )
         .await
         .map_err(|e| coded_sql("probe mask_policies", e))?

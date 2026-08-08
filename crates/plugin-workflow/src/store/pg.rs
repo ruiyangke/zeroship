@@ -109,7 +109,7 @@ impl WorkflowTables {
 
     #[must_use]
     pub fn regclass_literal(&self, suffix: &str) -> String {
-        format!("{}.{}", self.app_schema, format!("__zeroship_workflow_{suffix}")).replace('\'', "''")
+        format!("{}.__zeroship_workflow_{suffix}", self.app_schema).replace('\'', "''")
     }
 }
 
@@ -1185,6 +1185,7 @@ fn due_signal_frontier_for_waiting_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // internal helper threading the parent-run identity + spawn coordinates through one FOR-UPDATE step lookup; grouping into a struct would just relocate the fields
 async fn prepare_child_spawn<C>(
     conn: &C,
     tables: &WorkflowTables,
@@ -1306,6 +1307,7 @@ where
     Ok(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)] // internal helper threading the successor run's full seed (identity + optional inline/ref input); grouping into a struct would just relocate the fields
 async fn continue_as_new<C>(
     conn: &C,
     tables: &WorkflowTables,

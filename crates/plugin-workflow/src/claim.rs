@@ -20,6 +20,12 @@ use crate::store::pg::{
 };
 use crate::store::{ChildTerminalPayload, CompensationProgress, StepWriteOutcome};
 
+// Boxing `Claimed`'s `StepRequest` would shrink the enum, but
+// `WorkflowClaimOutcome::Claimed` is matched by-value in
+// crates/control/tests/workflow_engine_test.rs, which is out of scope
+// for this pass (crate boundary). The variant-size gap is a stack-copy
+// cost, not a correctness issue.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum WorkflowClaimOutcome {
     Claimed(StepRequest),

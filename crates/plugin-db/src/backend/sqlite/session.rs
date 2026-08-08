@@ -500,10 +500,10 @@ impl SqliteSession {
 
     /// Send a `Query` command and await the materialised row slice.
     ///
-    /// Consumer: `SchemaIntrospect::introspect_schema`
-    /// + `SchemaIntrospect::estimate_row_count` route through
+    /// Consumer: `SchemaIntrospect::introspect_schema` and
+    /// `SchemaIntrospect::estimate_row_count` route through
     /// this method to read PRAGMA / COUNT(*) results. Each call is one
-    /// round-trip through the actor's mpsc queue + one
+    /// round-trip through the actor's mpsc queue plus one
     /// `rusqlite::Statement` lifecycle on the worker thread.
     pub(crate) async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<Vec<Row>, DbError>>(1);

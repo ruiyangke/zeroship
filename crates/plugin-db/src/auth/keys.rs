@@ -24,7 +24,7 @@
 //!   (today there's no first-class `crates/control` cron primitive
 //!   for this), it adds a `rotate_session_keys` job at cluster
 //!   bootstrap. Until then operators invoke rotation via:
-//!     `psql -c "SELECT __zeroship_admin.rotate_session_keys();"`
+//!   `psql -c "SELECT __zeroship_admin.rotate_session_keys();"`
 //!   or — equivalently — `auth::keys::rotate_session_keys(pool)` from
 //!   the runtime.
 //! - The control-plane REST endpoint that exposes emergency rotation.

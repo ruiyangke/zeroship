@@ -88,6 +88,19 @@ use crate::error::DbError;
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
 /// signature stays for callers that don't care about mask integration.
+/// One column staged for encryption: `(col, mode, key_id, wraps,
+/// plaintext_bytes, sidechannel_str)` — collected up front (see
+/// [`encrypt_row_on_write`]'s body comment) so the borrow on the
+/// schema object can be released before the async `resolve_key` call.
+type PendingEncryption = (
+    String,
+    crate::backend::EncryptionMode,
+    String,
+    &'static str,
+    Zeroizing<Vec<u8>>,
+    Zeroizing<String>,
+);
+
 #[cfg(any(test, feature = "test-helpers"))]
 pub async fn encrypt_row_on_write<B>(
     backend: &B,
@@ -158,14 +171,7 @@ where
     // - `number` → `f64`.to_string() (the SDK has the same lossiness).
     // - `bytes`  → the JSON-wire base64 form (the same string the SDK
     //              sees on `t.bytes()` fields).
-    let mut to_encrypt: Vec<(
-        String,
-        crate::backend::EncryptionMode,
-        String,
-        &'static str,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<String>,
-    )> = Vec::new();
+    let mut to_encrypt: Vec<PendingEncryption> = Vec::new();
     for (col, def) in schema_obj.iter() {
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
             continue;
@@ -461,7 +467,7 @@ fn parse_wraps(enc_meta: &serde_json::Map<String, Value>) -> &'static str {
 /// representation.
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(DbError::internal(format!(
             "BYTEA text has odd hex length: {}",
             hex.len()

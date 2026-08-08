@@ -1,8 +1,8 @@
 //! SQLite full-text search helpers — FTS5 external-content virtual
 //! tables + AFTER-trigger mirror lifecycle.
 //!
-//! (`docs/archive/p4-search-implementation-plan.md` §4.2
-//! + §8). This module owns the SQL-shape primitives — the five
+//! (`docs/archive/p4-search-implementation-plan.md` §4.2 and §8).
+//! This module owns the SQL-shape primitives — the five
 //! idempotent DDL statements (`CREATE VIRTUAL TABLE`, initial
 //! population `INSERT … SELECT`, three AFTER triggers) and the
 //! search SQL composition (`SELECT … JOIN … MATCH … ORDER BY bm25`).

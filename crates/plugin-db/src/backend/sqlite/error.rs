@@ -47,7 +47,7 @@ const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 /// The mapping mirrors [`crate::error::DbError::from_pg`]'s SQLSTATE
 /// switch — every variant the SDK branches on has a SQLite counter-
 /// part below. The message body always includes the rusqlite display
-/// + the extended code so operators can correlate against the SQLite
+/// and the extended code so operators can correlate against the SQLite
 /// docs without losing the typed `.code` for SDK callers.
 pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
     // Capture the human-readable message once so every arm can reuse

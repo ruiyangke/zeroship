@@ -594,7 +594,7 @@ async fn decrypt_parent_value(
         };
         let bytes = hex_to_bytes(hex_str)?;
         let key = pg.resolve_key(app_id, &enc.key_id).await?;
-        return Ok(pg.decrypt(&key, enc.mode, &bytes, &aad)?);
+        return pg.decrypt(&key, enc.mode, &bytes, &aad);
     }
 
     // ---- SQLite arm ----
@@ -609,7 +609,7 @@ async fn decrypt_parent_value(
             }
         };
         let key = sq.resolve_key(app_id, &enc.key_id).await?;
-        return Ok(sq.decrypt(&key, enc.mode, bytes, &aad)?);
+        return sq.decrypt(&key, enc.mode, bytes, &aad);
     }
 
     Err(DbError::Configuration {
@@ -649,7 +649,7 @@ fn decode_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbErr
 #[allow(dead_code)]
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(DbError::internal(format!(
             "drift_check: BYTEA text has odd hex length: {}",
             hex.len()

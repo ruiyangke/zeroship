@@ -225,7 +225,7 @@ fn derive_key(root: &[u8; 32], app_id: &str) -> Result<AeadKey, DbError> {
 /// of `crate::auth::util` and avoids adding a `hex` crate dependency
 /// just for one call site.
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(format!("odd-length hex string ({} chars)", s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
@@ -270,7 +270,7 @@ async fn pg_admin_lookup_root(
     let rows = pool
         .query_text_params(
             "SELECT __zeroship_admin.get_column_key($1)",
-            &[&key_id],
+            &[key_id],
         )
         .await
         .map_err(|e| DbError::Configuration {

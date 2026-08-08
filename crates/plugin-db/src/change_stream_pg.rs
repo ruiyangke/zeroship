@@ -149,7 +149,7 @@ impl ChangeStream for PgChangeStream {
     /// the `SetupOutcome` for both the `with_start_lsn(...)` argument
     /// and the JS response envelope's `confirmed_flush_lsn` field)
     /// and continues to own the `compio::runtime::spawn(run_supervised)`
-    /// + `ConsumerRunningGuard` block. The dispatcher additionally
+    /// and `ConsumerRunningGuard` block. The dispatcher additionally
     /// calls `change_stream().spawn_consumer(app_id)` so the
     /// indirection is wired through - that call proves the trait is
     /// reachable from the consumer's `BackendHandle`-routed call
