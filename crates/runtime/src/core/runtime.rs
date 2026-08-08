@@ -881,7 +881,11 @@ pub(crate) struct RuntimeInner {
     /// reads `false` on a dispatch whose callback fired the full five times.
     /// So the dispatch cannot ask V8 whether it was heap-terminated; the
     /// callback has to leave a note.
-    heap_terminated: Arc<std::sync::atomic::AtomicBool>,
+    terminated_note: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Which limit set `terminated_note`. Only the CPU timer writes `true`
+    /// here, so an unset value with the note set means the heap callback.
+    cpu_note: Arc<std::sync::atomic::AtomicBool>,
 
     /// Cause of the most recent detected termination, set by
     /// `check_v8_terminated` so call sites report the right limit.
@@ -1168,7 +1172,8 @@ impl RuntimeInner {
             pump_notify_tx: None,
             cpu_limit,
             wall_timeout,
-            heap_terminated,
+            terminated_note: heap_terminated,
+            cpu_note: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_termination_was_heap: false,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
@@ -1821,7 +1826,10 @@ impl RuntimeInner {
             let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
             let isolate_id = std::ptr::addr_of!(self.isolate) as u64;
             let v8_handle = self.isolate.thread_safe_handle();
-            system.register(isolate_id, v8_handle);
+            // The watchdog sets BOTH notes: the generic one the dispatch path
+            // polls, and the cpu-specific one that names the cause.
+            self.cpu_note.store(false, std::sync::atomic::Ordering::Relaxed);
+            system.register(isolate_id, v8_handle, Arc::clone(&self.cpu_note));
             match crate::cpu_timer::CpuTimer::new(isolate_id) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(e) => tracing::error!(error = %e, "cpu-timer initialisation failed"),
@@ -1902,21 +1910,24 @@ impl RuntimeInner {
     }
 
     fn check_v8_terminated(&mut self) -> bool {
-        // Take the heap-limit note first. Ordering matters only in that it
-        // must be cleared either way, so a terminated dispatch does not leave
-        // the flag set and fail the NEXT request on this isolate.
+        // Take both notes unconditionally. They must be cleared either way, so
+        // a terminated dispatch does not leave a flag set and fail the NEXT
+        // request on this isolate.
         let heap_terminated = self
-            .heap_terminated
+            .terminated_note
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let cpu_terminated = self
+            .cpu_note
             .swap(false, std::sync::atomic::Ordering::Relaxed);
 
         let v8_terminating = self.isolate.is_execution_terminating();
-        if !heap_terminated && !v8_terminating {
+        if !heap_terminated && !cpu_terminated && !v8_terminating {
             return false;
         }
         // Recorded so the call sites can name the actual cause. They all used
         // to say "CPU time limit exceeded", which is now reachable by a second
         // route and would misreport a heap kill as a CPU kill.
-        self.last_termination_was_heap = heap_terminated;
+        self.last_termination_was_heap = heap_terminated && !cpu_terminated;
         if v8_terminating {
             self.isolate.cancel_terminate_execution();
         }
