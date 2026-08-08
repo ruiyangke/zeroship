@@ -19,7 +19,14 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { DEFAULT_PG_URL, PG_URL_ENV, REQUIRE_LIVE_DB_ENV, liveDbGate } from "./live-db.js";
+import {
+  DEFAULT_PG_URL,
+  PG_URL_ENV,
+  REQUIRE_LIVE_DB_ENV,
+  liveDbGate,
+  liveDbRequired,
+  pgUrlFromEnv,
+} from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(HERE, "../..");
@@ -57,17 +64,111 @@ function runGatedSuite(gateEnv: Record<string, string>): SuiteRun {
   return { status: child.status, output: `${child.stdout ?? ""}${child.stderr ?? ""}` };
 }
 
+/**
+ * Connect `dsn` with the `pg` client and return the driver's message on failure,
+ * or undefined when it connects.
+ *
+ * Deliberately does NOT go through `connectLivePg` or `liveDbGate`. This file is the
+ * independent auditor of that gate, and a gate that decided whether its own auditor
+ * runs could silence the arm that would have caught it breaking.
+ */
+async function probeConnectError(dsn: string): Promise<string | undefined> {
+  const pg = (await import("pg")).default;
+  const client = new pg.Client({ connectionString: dsn });
+  try {
+    await client.connect();
+    return undefined;
+  } catch (e) {
+    return (e as Error).message;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * `dsn` with its password replaced by one no server will accept, and everything else
+ * (host, port, user, database, query parameters) left alone, so the child reaches the
+ * same server this run reaches and fails there on authentication and nothing else.
+ *
+ * An empty username becomes `postgres`: pg would otherwise fall back to the OS user,
+ * and the server answers "role does not exist" instead of an authentication error.
+ */
+function withUnusablePassword(dsn: string): string {
+  let url: URL;
+  try {
+    url = new URL(dsn);
+  } catch {
+    throw new Error(
+      `cannot derive a wrong-password DSN from ${dsn}: ${PG_URL_ENV} must be a URL DSN ` +
+        `("postgres://user:password@host:port/database"), not libpq keyword form`,
+    );
+  }
+  if (url.hostname === "" || url.hostname.startsWith("%2F") || url.hostname.startsWith("/")) {
+    throw new Error(
+      `cannot derive a wrong-password DSN from ${dsn}: ${PG_URL_ENV} must name a TCP host, ` +
+        `and a unix socket has no password to get wrong`,
+    );
+  }
+  if (url.username === "") url.username = "postgres";
+  url.password = "definitely_wrong";
+  return url.toString();
+}
+
 // ---------------------------------------------------------------------------
 // A configured DSN that cannot connect is a FAILURE, and the driver's own message
 // travels with it. A bare `catch` that turns every connect error into a skip makes
 // a driver regression read exactly like a contributor without a database.
+//
+// The broken DSN is derived from the DSN this run actually uses, with only the
+// password changed, rather than hardcoded. A hardcoded DSN names a host and port,
+// and the port the local `docker-compose.test.yml` publishes is not the port CI
+// publishes: on CI nothing answered there, the child died on ECONNREFUSED instead of
+// on authentication, and this arm failed every run. Deriving the DSN points the child
+// at whatever server this run has, so the only thing it can fail on is the password.
+//
+// Reaching that server is the arm's precondition, so it is probed first, and the probe
+// decides the three outcomes the gate itself draws: a DSN was configured and does not
+// answer, or one was demanded, and the arm fails; otherwise there is no server to
+// authenticate against and the arm skips.
 // ---------------------------------------------------------------------------
-test("a configured DSN that cannot authenticate fails the suite and names the driver error", () => {
-  const run = runGatedSuite({
-    ZERO_MIGRATE_TEST_PG_URL: "postgres://postgres:definitely_wrong@127.0.0.1:5434/zero_migrate_test",
-  });
+test("a configured DSN that cannot authenticate fails the suite and names the driver error", async (t) => {
+  const envDsn = pgUrlFromEnv();
+  const baseDsn = envDsn ?? DEFAULT_PG_URL;
+  const probeError = await probeConnectError(baseDsn);
 
+  if (probeError !== undefined) {
+    assert.equal(
+      envDsn,
+      undefined,
+      `${PG_URL_ENV} is set to ${baseDsn} but connecting to it failed: ${probeError}`,
+    );
+    assert.equal(
+      liveDbRequired(),
+      false,
+      `${REQUIRE_LIVE_DB_ENV} demands a live database but the default ${baseDsn} is ` +
+        `unreachable: ${probeError}`,
+    );
+    t.skip(
+      `wrong-password coverage skipped: proving a configured-but-broken DSN fails the suite ` +
+        `needs a reachable PostgreSQL to reject the password, and ${PG_URL_ENV} is unset while ` +
+        `the default ${baseDsn} is unreachable: ${probeError}. Export ${PG_URL_ENV}, or set ` +
+        `${REQUIRE_LIVE_DB_ENV}=1 to turn this skip into a failure`,
+    );
+    return;
+  }
+
+  const run = runGatedSuite({ ZERO_MIGRATE_TEST_PG_URL: withUnusablePassword(baseDsn) });
+
+  // `spawnSync` reports a null status when the child was killed, including on the
+  // timeout above, and `notEqual(null, 0)` passes. A child that never ran to a verdict
+  // proves nothing about the gate, so the status has to be a real exit code.
+  assert.equal(typeof run.status, "number", "the child must exit on its own, not be killed");
   assert.notEqual(run.status, 0, "a configured-but-broken DSN must fail the suite");
+  assert.match(
+    run.output,
+    new RegExp(`${PG_URL_ENV} is set to .* but connecting to it failed`),
+    "the failure must be the gate's configured-DSN verdict, not some other child error",
+  );
   assert.match(
     run.output,
     /password authentication failed/,
