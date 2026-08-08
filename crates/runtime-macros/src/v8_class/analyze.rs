@@ -92,16 +92,16 @@ pub(super) fn analyze<'a>(
     // `analyze` lets the proc-macro driver emit a single clean
     // diagnostic with a span on the attribute, before any fn body is
     // built. Closes NS2 from the v2 code-critic.
-    if let Some(ref value) = inherit_intrinsic {
-        if value != "IteratorPrototype" && value != "Error" {
-            return Err(syn::Error::new_spanned(
-                &input.self_ty,
-                format!(
-                    "#[v8_inherit_intrinsic]: unrecognised value `{value}` (expected \"IteratorPrototype\" or \"Error\")"
-                ),
-            )
-            .to_compile_error());
-        }
+    if let Some(ref value) = inherit_intrinsic
+        && value != "IteratorPrototype" && value != "Error"
+    {
+        return Err(syn::Error::new_spanned(
+            &input.self_ty,
+            format!(
+                "#[v8_inherit_intrinsic]: unrecognised value `{value}` (expected \"IteratorPrototype\" or \"Error\")"
+            ),
+        )
+        .to_compile_error());
     }
 
     // Validate that the named method actually exists in the impl block
@@ -177,182 +177,182 @@ pub(super) fn analyze<'a>(
 fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream2> {
     let mut methods: Vec<ClassMethod> = Vec::new();
     for item in &input.items {
-        if let ImplItem::Fn(func) = item {
-            if let Some(kind) = classify(func) {
-                // Per-method extracts now share the strict
-                // MarkerAttr error path. Surface malformed-shape errors
-                // via the proc-macro's compile-error stream.
-                let js_name = extract_v8_name(&func.attrs)
-                    .map_err(|e| e.to_compile_error())?
-                    .unwrap_or_else(|| func.sig.ident.to_string());
-                let mut_recv = has_mut_self(func);
-                let cfg_attrs = func
-                    .attrs
-                    .iter()
-                    .filter(|attr| attr.path().is_ident("cfg"))
-                    .collect();
+        if let ImplItem::Fn(func) = item
+            && let Some(kind) = classify(func)
+        {
+            // Per-method extracts now share the strict
+            // MarkerAttr error path. Surface malformed-shape errors
+            // via the proc-macro's compile-error stream.
+            let js_name = extract_v8_name(&func.attrs)
+                .map_err(|e| e.to_compile_error())?
+                .unwrap_or_else(|| func.sig.ident.to_string());
+            let mut_recv = has_mut_self(func);
+            let cfg_attrs = func
+                .attrs
+                .iter()
+                .filter(|attr| attr.path().is_ident("cfg"))
+                .collect();
 
-                // Compile-time guard: `#[v8_async_method]` + `&mut self`
-                // is unsound under V8 re-entry. The future captures a
-                // `*mut Self` that's re-acquired on every poll; if a
-                // user `.await` runs JS that re-enters the same method
-                // (e.g. `await something(); this.foo()` triggered by a
-                // microtask), we'd alias `&mut self` with another
-                // borrow inside the same instance. Cell/RefCell on a
-                // `&self` method makes the runtime borrow check
-                // explicit; we require that pattern here.
-                if matches!(kind, MethodKind::AsyncMethod) && mut_recv {
-                    return Err(syn::Error::new_spanned(
-                        &func.sig.ident,
-                        "#[v8_async_method] does not support &mut self — use \
-                         &self with Cell/RefCell on state that needs to mutate \
-                         (borrow across .await is unsound under V8 re-entry)",
-                    )
-                    .to_compile_error());
-                }
-
-                // Compile-time guard: `#[v8_async_method]` requires the
-                // function to be declared `async`. Without `async`, the
-                // user's body would need to return a Future explicitly
-                // (an unergonomic shape we don't support) — and the
-                // macro's call-site emits `.await`, which would fail
-                // type-check on a non-Future return.
-                if matches!(kind, MethodKind::AsyncMethod) && func.sig.asyncness.is_none() {
-                    return Err(syn::Error::new_spanned(
-                        &func.sig.ident,
-                        "#[v8_async_method] requires the method to be declared `async`",
-                    )
-                    .to_compile_error());
-                }
-
-                let same_object_flag = matches!(kind, MethodKind::Getter)
-                    && extract_same_object(&func.attrs).map_err(|e| e.to_compile_error())?;
-
-                // Compile-time guard: static methods / getters cannot
-                // have a receiver. WebIDL §3.7.4 static operations are
-                // invoked via `Class.method()` with no `this`; the
-                // emitted callback has no internal-field 0 to recover
-                // a `Box<Self>` from, so a `&self` / `&mut self` arg
-                // would never be bound. Reject at compile time with a
-                // clear pointer rather than emit broken codegen.
-                if matches!(kind, MethodKind::StaticMethod | MethodKind::StaticGetter)
-                    && has_any_receiver(func)
-                {
-                    return Err(syn::Error::new_spanned(
-                        &func.sig.ident,
-                        "#[v8_static_method] / #[v8_static_getter] cannot have a \
-                         `self` receiver — static operations are invoked via \
-                         `Class.method()` with no `this`",
-                    )
-                    .to_compile_error());
-                }
-
-                // Compile-time guard: setters whose return type is
-                // neither `()` nor `Result<(), OpError>` are rejected.
-                // WebIDL §3.7.6 attribute-setter semantics specify that
-                // V8's accessor setter ABI discards whatever the
-                // callback writes to `rv` — so a non-unit, non-Result
-                // return would have its value silently swallowed (the
-                // §13.1 finding from
-                // runtime-macros-architecture-critique-2026-05-05).
-                // `Result<(), OpError>` IS supported because
-                // `gen_setter_callback` honours it: an `Err` arm
-                // routes through `gen_throw_op_error_arms` and surfaces
-                // as a JS exception, matching the
-                // `#[v8_method]` Result-return contract.
-                if matches!(kind, MethodKind::Setter)
-                    && !is_unit_return(&func.sig.output)
-                    && !is_result_unit_return(&func.sig.output)
-                {
-                    return Err(syn::Error::new_spanned(
-                        &func.sig.output,
-                        "#[v8_setter] must return `()` or `Result<(), OpError>` \
-                         — V8 accessor setters discard the return value, so a \
-                         non-unit, non-Result return would have its value \
-                         silently swallowed. Use `Result<(), OpError>` if you \
-                         need to surface an error from the setter logic.",
-                    )
-                    .to_compile_error());
-                }
-
-                // `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
-                // Only valid on plain Method / Getter — not async, not
-                // setter, not constructor, not same_object.
-                let fastcall_flag = matches!(kind, MethodKind::Method | MethodKind::Getter)
-                    && extract_fastcall(&func.attrs).map_err(|e| e.to_compile_error())?;
-
-                if fastcall_flag {
-                    // Compile-time guard 1: fastcall path can't take
-                    // `&mut self`. The macro emits the fast shim as a
-                    // bare `extern "C"` fn that recovers `*const Self`
-                    // from internal-field 1; there's no slot for the
-                    // re-entrancy guard the slow path emits for
-                    // `&mut self` callbacks. The user must use
-                    // `&self` + `Cell`/`RefCell` for state that mutates.
-                    if mut_recv {
-                        return Err(syn::Error::new_spanned(
-                            &func.sig.ident,
-                            "#[v8_method(fastcall)] / #[v8_getter(fastcall)] does not \
-                             support &mut self — use &self with Cell/RefCell on state \
-                             that needs to mutate (V8 fast-path callbacks have no \
-                             scope, so the slow path's per-method re-entrancy guard \
-                             cannot be emitted)",
-                        )
-                        .to_compile_error());
-                    }
-                    if same_object_flag {
-                        return Err(syn::Error::new_spanned(
-                            &func.sig.ident,
-                            "#[v8_getter(same_object, fastcall)] is not supported — \
-                             SameObject getters return a v8::Global<v8::Object> \
-                             (allocates), and the fast path forbids allocation",
-                        )
-                        .to_compile_error());
-                    }
-                    if let Err(err) = validate_fastcall_signature(func) {
-                        return Err(err.to_compile_error());
-                    }
-                }
-
-                // Variadic param validation. The macro recognises a
-                // `Vec<v8::Local<v8::Value>>` trailing parameter as
-                // "give me args[N..] as a Vec" — see
-                // `helpers::is_varargs_param` for the shape contract.
-                // Reject the disallowed combinations here so the user
-                // sees a span'd compile-error rather than a confused
-                // codegen failure downstream.
-                validate_variadic_param(func, kind, fastcall_flag)
-                    .map_err(|e| e.to_compile_error())?;
-
-                // Fold per-method attribute extracts into the
-                // ClassMethod record so emit-side helpers don't walk
-                // attrs again. Each extract uses the strict MarkerAttr
-                // error path — malformed shapes surface as compile-
-                // errors with the offending span.
-                let reject_shared_names =
-                    extract_reject_shared(&func.attrs).map_err(|e| e.to_compile_error())?;
-                let callable_no_new = matches!(kind, MethodKind::Constructor)
-                    && extract_callable_no_new(&func.attrs)
-                        .map_err(|e| e.to_compile_error())?;
-                let post_init = if matches!(kind, MethodKind::Constructor) {
-                    extract_post_init(&func.attrs).map_err(|e| e.to_compile_error())?
-                } else {
-                    None
-                };
-
-                methods.push(ClassMethod {
-                    kind,
-                    func,
-                    mut_receiver: mut_recv,
-                    js_name,
-                    cfg_attrs,
-                    same_object: same_object_flag,
-                    fastcall: fastcall_flag,
-                    reject_shared_names,
-                    callable_no_new,
-                    post_init,
-                });
+            // Compile-time guard: `#[v8_async_method]` + `&mut self`
+            // is unsound under V8 re-entry. The future captures a
+            // `*mut Self` that's re-acquired on every poll; if a
+            // user `.await` runs JS that re-enters the same method
+            // (e.g. `await something(); this.foo()` triggered by a
+            // microtask), we'd alias `&mut self` with another
+            // borrow inside the same instance. Cell/RefCell on a
+            // `&self` method makes the runtime borrow check
+            // explicit; we require that pattern here.
+            if matches!(kind, MethodKind::AsyncMethod) && mut_recv {
+                return Err(syn::Error::new_spanned(
+                    &func.sig.ident,
+                    "#[v8_async_method] does not support &mut self — use \
+                     &self with Cell/RefCell on state that needs to mutate \
+                     (borrow across .await is unsound under V8 re-entry)",
+                )
+                .to_compile_error());
             }
+
+            // Compile-time guard: `#[v8_async_method]` requires the
+            // function to be declared `async`. Without `async`, the
+            // user's body would need to return a Future explicitly
+            // (an unergonomic shape we don't support) — and the
+            // macro's call-site emits `.await`, which would fail
+            // type-check on a non-Future return.
+            if matches!(kind, MethodKind::AsyncMethod) && func.sig.asyncness.is_none() {
+                return Err(syn::Error::new_spanned(
+                    &func.sig.ident,
+                    "#[v8_async_method] requires the method to be declared `async`",
+                )
+                .to_compile_error());
+            }
+
+            let same_object_flag = matches!(kind, MethodKind::Getter)
+                && extract_same_object(&func.attrs).map_err(|e| e.to_compile_error())?;
+
+            // Compile-time guard: static methods / getters cannot
+            // have a receiver. WebIDL §3.7.4 static operations are
+            // invoked via `Class.method()` with no `this`; the
+            // emitted callback has no internal-field 0 to recover
+            // a `Box<Self>` from, so a `&self` / `&mut self` arg
+            // would never be bound. Reject at compile time with a
+            // clear pointer rather than emit broken codegen.
+            if matches!(kind, MethodKind::StaticMethod | MethodKind::StaticGetter)
+                && has_any_receiver(func)
+            {
+                return Err(syn::Error::new_spanned(
+                    &func.sig.ident,
+                    "#[v8_static_method] / #[v8_static_getter] cannot have a \
+                     `self` receiver — static operations are invoked via \
+                     `Class.method()` with no `this`",
+                )
+                .to_compile_error());
+            }
+
+            // Compile-time guard: setters whose return type is
+            // neither `()` nor `Result<(), OpError>` are rejected.
+            // WebIDL §3.7.6 attribute-setter semantics specify that
+            // V8's accessor setter ABI discards whatever the
+            // callback writes to `rv` — so a non-unit, non-Result
+            // return would have its value silently swallowed (the
+            // §13.1 finding from
+            // runtime-macros-architecture-critique-2026-05-05).
+            // `Result<(), OpError>` IS supported because
+            // `gen_setter_callback` honours it: an `Err` arm
+            // routes through `gen_throw_op_error_arms` and surfaces
+            // as a JS exception, matching the
+            // `#[v8_method]` Result-return contract.
+            if matches!(kind, MethodKind::Setter)
+                && !is_unit_return(&func.sig.output)
+                && !is_result_unit_return(&func.sig.output)
+            {
+                return Err(syn::Error::new_spanned(
+                    &func.sig.output,
+                    "#[v8_setter] must return `()` or `Result<(), OpError>` \
+                     — V8 accessor setters discard the return value, so a \
+                     non-unit, non-Result return would have its value \
+                     silently swallowed. Use `Result<(), OpError>` if you \
+                     need to surface an error from the setter logic.",
+                )
+                .to_compile_error());
+            }
+
+            // `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
+            // Only valid on plain Method / Getter — not async, not
+            // setter, not constructor, not same_object.
+            let fastcall_flag = matches!(kind, MethodKind::Method | MethodKind::Getter)
+                && extract_fastcall(&func.attrs).map_err(|e| e.to_compile_error())?;
+
+            if fastcall_flag {
+                // Compile-time guard 1: fastcall path can't take
+                // `&mut self`. The macro emits the fast shim as a
+                // bare `extern "C"` fn that recovers `*const Self`
+                // from internal-field 1; there's no slot for the
+                // re-entrancy guard the slow path emits for
+                // `&mut self` callbacks. The user must use
+                // `&self` + `Cell`/`RefCell` for state that mutates.
+                if mut_recv {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_method(fastcall)] / #[v8_getter(fastcall)] does not \
+                         support &mut self — use &self with Cell/RefCell on state \
+                         that needs to mutate (V8 fast-path callbacks have no \
+                         scope, so the slow path's per-method re-entrancy guard \
+                         cannot be emitted)",
+                    )
+                    .to_compile_error());
+                }
+                if same_object_flag {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_getter(same_object, fastcall)] is not supported — \
+                         SameObject getters return a v8::Global<v8::Object> \
+                         (allocates), and the fast path forbids allocation",
+                    )
+                    .to_compile_error());
+                }
+                if let Err(err) = validate_fastcall_signature(func) {
+                    return Err(err.to_compile_error());
+                }
+            }
+
+            // Variadic param validation. The macro recognises a
+            // `Vec<v8::Local<v8::Value>>` trailing parameter as
+            // "give me args[N..] as a Vec" — see
+            // `helpers::is_varargs_param` for the shape contract.
+            // Reject the disallowed combinations here so the user
+            // sees a span'd compile-error rather than a confused
+            // codegen failure downstream.
+            validate_variadic_param(func, kind, fastcall_flag)
+                .map_err(|e| e.to_compile_error())?;
+
+            // Fold per-method attribute extracts into the
+            // ClassMethod record so emit-side helpers don't walk
+            // attrs again. Each extract uses the strict MarkerAttr
+            // error path — malformed shapes surface as compile-
+            // errors with the offending span.
+            let reject_shared_names =
+                extract_reject_shared(&func.attrs).map_err(|e| e.to_compile_error())?;
+            let callable_no_new = matches!(kind, MethodKind::Constructor)
+                && extract_callable_no_new(&func.attrs)
+                    .map_err(|e| e.to_compile_error())?;
+            let post_init = if matches!(kind, MethodKind::Constructor) {
+                extract_post_init(&func.attrs).map_err(|e| e.to_compile_error())?
+            } else {
+                None
+            };
+
+            methods.push(ClassMethod {
+                kind,
+                func,
+                mut_receiver: mut_recv,
+                js_name,
+                cfg_attrs,
+                same_object: same_object_flag,
+                fastcall: fastcall_flag,
+                reject_shared_names,
+                callable_no_new,
+                post_init,
+            });
         }
     }
     Ok(methods)

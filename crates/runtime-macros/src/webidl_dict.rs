@@ -15,15 +15,11 @@
 //!   2. Otherwise `V` MUST be an Object (Boolean / Number / String /
 //!      Symbol → TypeError).
 //!   3. For each declared dictionary member, in declaration order:
-//!      a. Read the property by its WebIDL name. Default = the Rust
-//!         field name; override with `#[webidl_name = "..."]`.
-//!      b. If the property is missing or `undefined`, the spec falls
-//!         back to "absent" (or to the default if specified). We map:
-//!           - `Option<T>` field → `None` on absent.
-//!           - `T` field with `#[derive(Default)]` available → use
-//!             `T::default()`. Required for non-Option fields.
-//!      c. Otherwise convert via `T::from_v8(scope, prop_value)`. Errors
-//!         propagate as TypeError.
+//!      a. Read the property by its WebIDL name. Default = the Rust field name; override with `#[webidl_name = "..."]`.
+//!      b. If the property is missing or `undefined`, the spec falls back to "absent" (or to the default if specified). We map:
+//!         - `Option<T>` field → `None` on absent.
+//!         - `T` field with `#[derive(Default)]` available → use `T::default()`. Required for non-Option fields.
+//!           c. Otherwise convert via `T::from_v8(scope, prop_value)`. Errors propagate as TypeError.
 //!
 //! # User types as dictionary members
 //!
@@ -380,14 +376,13 @@ fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {
         if !attr.path().is_ident("webidl_name") {
             continue;
         }
-        if let syn::Meta::NameValue(nv) = &attr.meta {
-            if let syn::Expr::Lit(syn::ExprLit {
+        if let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(syn::ExprLit {
                 lit: syn::Lit::Str(s),
                 ..
             }) = &nv.value
-            {
-                return Some(s.value());
-            }
+        {
+            return Some(s.value());
         }
     }
     None

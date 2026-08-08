@@ -36,10 +36,7 @@ pub(super) enum SupportedTy {
 }
 
 pub(super) fn classify_ty(ty: &syn::Type) -> Option<SupportedTy> {
-    let ident = match crate::type_ident(ty) {
-        Some(s) => s,
-        None => return None,
-    };
+    let ident = crate::type_ident(ty)?;
     match ident.as_str() {
         "ByteString" => Some(SupportedTy::ByteStr),
         "String" | "USVString" => Some(SupportedTy::Utf8),

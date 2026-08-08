@@ -103,13 +103,9 @@
 //! This module used to be a single 1,368-LOC file. It is now split
 //! to mirror `v8_class/`'s parse/emit/shared layout:
 //!
-//!   - `parse.rs`         — `IterableAttr`, `ValuePairsSig`,
-//!                          `IterMode`, `extract_iterable`,
-//!                          `inspect_value_pairs`.
+//!   - `parse.rs`         — `IterableAttr`, `ValuePairsSig`, `IterMode`, `extract_iterable`, `inspect_value_pairs`.
 //!   - `value_marshal.rs` — `SupportedTy`, `classify_ty`, `gen_to_v8`.
-//!   - `emit_factory.rs`  — companion `<Class>Iterator` struct +
-//!                          install + factory callbacks + install
-//!                          bridge (`__zs_install_iterable_methods`).
+//!   - `emit_factory.rs`  — companion `<Class>Iterator` struct + install + factory callbacks + install bridge (`__zs_install_iterable_methods`).
 //!   - `emit_iterator.rs` — forEach + next callbacks + reentry guard.
 //!   - `mod.rs`           — orchestrator + the `EmitCtx` shared state.
 

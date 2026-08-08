@@ -352,14 +352,13 @@ fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {
         if !attr.path().is_ident("webidl_name") {
             continue;
         }
-        if let syn::Meta::NameValue(nv) = &attr.meta {
-            if let syn::Expr::Lit(syn::ExprLit {
+        if let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(syn::ExprLit {
                 lit: syn::Lit::Str(s),
                 ..
             }) = &nv.value
-            {
-                return Some(s.value());
-            }
+        {
+            return Some(s.value());
         }
     }
     None
