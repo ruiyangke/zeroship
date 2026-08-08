@@ -72,14 +72,14 @@ pub trait GenericClient: private::Sealed {
         params: &[(&(dyn ToSql + Sync), Type)],
     ) -> Result<Vec<Row>, Error>;
 
-    /// Like [`Client::query_one_typed`].
+    /// Like [`Client::query_typed_one`].
     async fn query_typed_one(
         &self,
         statement: &str,
         params: &[(&(dyn ToSql + Sync), Type)],
     ) -> Result<Row, Error>;
 
-    /// Like [`Client::query_opt_typed`].
+    /// Like [`Client::query_typed_opt`].
     async fn query_typed_opt(
         &self,
         statement: &str,
@@ -199,7 +199,7 @@ impl GenericClient for Client {
         self.query_typed_one(statement, params).await
     }
 
-    /// Like [`Client::query_opt_typed`].
+    /// Like [`Client::query_typed_opt`].
     async fn query_typed_opt(
         &self,
         statement: &str,
@@ -322,7 +322,7 @@ impl GenericClient for Transaction<'_> {
         self.query_typed_one(statement, params).await
     }
 
-    /// Like [`Client::query_opt_typed`].
+    /// Like [`Client::query_typed_opt`].
     async fn query_typed_opt(
         &self,
         statement: &str,
