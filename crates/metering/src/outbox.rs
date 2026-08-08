@@ -767,8 +767,20 @@ mod tests {
     /// layer replays and says nothing about whether a restart reaches the same
     /// file - its passing is why this went unnoticed.
     ///
-    /// WHEN THE WAL IS MADE TO SURVIVE A RESTART, THIS TEST MUST GO RED AND BE
-    /// INVERTED. Its failure is the intended reminder, not a regression.
+    /// WHAT IT CATCHES, stated narrowly because the first version of this
+    /// comment claimed more than the test delivers. Verified by mutation:
+    /// collapsing `default_wal_path` to a constant turns it red.
+    ///
+    /// WHAT IT DOES NOT CATCH, and this is the likelier fix: the per-boot UUID
+    /// is minted in `crates/worker/src/main.rs` and `crates/gateway/src/main.rs`,
+    /// NOT here. Stop appending it there and the restart defect is fixed while
+    /// this test stays green, because it hands `default_wal_path` two different
+    /// source strings by hand and only ever observes the derivation. This crate
+    /// cannot see those binaries, so nothing here can assert on the source they
+    /// mint - a test that covers it belongs beside them.
+    ///
+    /// So: a red here means the DERIVATION changed. It is not, on its own, a
+    /// signal that the restart defect is fixed or unfixed.
     #[test]
     fn restart_with_a_new_boot_source_gets_a_different_wal() {
         // What crates/worker/src/main.rs builds: `{hostname}-{uuid-per-boot}`.
