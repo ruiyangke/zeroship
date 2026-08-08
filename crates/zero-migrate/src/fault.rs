@@ -172,25 +172,9 @@ pub mod points {
     /// In the online expand: BETWEEN the E1+E2 apply and the E3 backfill (a crash
     /// here leaves E1/E2 journaled but E3 not — resume re-runs the backfill).
     pub const EXPAND_BETWEEN_E2_AND_BACKFILL: &str = "expand.between_e2_and_backfill";
-    /// In the control IR deploy loop: a same-deploy later-file failure has
-    /// been detected and the deploy's recovery markers are durably written, but the
-    /// process dies BEFORE the in-process abort runs. A crash here leaves the
-    /// just-opened obligation OUTSTANDING + its recovery marker net-`in_progress` — exactly the
-    /// state the NEXT same-app deploy's crash-recovery leg must converge from (abort
-    /// the half-renamed table, mark the marker reconciled). Tripped by the
-    /// deploy-recovery crash-fuzz test only.
-    pub const DEPLOY_BEFORE_INPROCESS_ABORT: &str = "deploy.before_inprocess_abort";
-    /// In the control IR deploy loop SUCCESS arm: the `committed` recovery-marker
-    /// promotion FAILS (DB unreachable the instant the go-live reaches its success arm).
-    /// Because the marker was BORN `in_progress` atomically with the obligation
-    /// (engine-stamped), a promotion failure leaves it net-`in_progress`: the
-    /// *recoverable* (fail-safe) state. The deploy surfaces a HARD error, but the NEXT
-    /// same-app deploy's crash-recovery leg AUTO-ABORTS the half-rename (safe — a
-    /// pending contract has not cut over to the shadow column, so no data is lost), then
-    /// the app re-runs the rename cleanly. This is the INVERSE of the earlier phase-1
-    /// stamp-failure residual: there a failure left the marker `open` (protected) and a
-    /// later deploy silently reverted a committed contract; here a failure leaves it
-    /// recoverable and the later deploy safely auto-aborts. Tripped by the
-    /// no-false-abort / fail-safe-auto-recovery characterization test only.
-    pub const DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS: &str = "deploy.success_committed_stamp_fails";
+    // Two deploy-scoped points were declared here and never wired: nothing tripped
+    // them and no test ever armed them, while their docs claimed a crash-fuzz test
+    // did. They described a deploy-recovery loop this crate does not drive - see
+    // the marker-log design in `crate::apply::journal`, which now says so and keeps
+    // the state-machine rationale a driver would need.
 }

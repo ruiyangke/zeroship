@@ -609,42 +609,60 @@ pub async fn ensure_journal<D: SqlSession>(
     // read-only pre-validation cannot predict. Pre- that left file A's table
     // half-renamed behind the creator's 4xx, owing a pending contract.
     //
-    // This log makes the WHOLE deploy a RECOVERABLE unit. Each same-deploy EXPAND
-    // writes an `in_progress` row keyed on a per-deploy `deploy_id` (a UUIDv7
-    // generated once at the start of the IR loop) + the EXPAND's `pending_version`
-    // — and that row is committed in the SAME transaction as the obligation row,
-    // so every outstanding
-    // obligation ALWAYS has a marker. If a later same-deploy file fails, the
-    // control loop drives the SHARED abort (`build_abort_steps`) over exactly THIS
-    // deploy's net-`in_progress` rows under the still-held project lock, discharging
-    // each obligation `aborted` and marking the recovery row `reconciled` — so the
-    // refused bundle leaves NO half-renamed table. On a process CRASH between the
-    // EXPAND+marker commit and the in-process abort, the `in_progress` row SURVIVES;
-    // the NEXT same-app deploy (serialized by the project lock) reconciles it FIRST,
-    // before applying the new bundle. On deploy SUCCESS the loop promotes its rows to
-    // `committed` (the EXPANDs legitimately remain pending as the cross-deploy
-    // partition — NOT a half-state).
+    // THIS CRATE SHIPS THE DURABLE PRIMITIVES AND NO DRIVER. The table, the
+    // scoped write, the promotion, the reconcile append and the resume query all
+    // exist below and on the backend trait, but nothing in this workspace calls
+    // them: `DeployRecoveryScope` is never constructed, no `deploy_id` is ever
+    // generated, and the only entry point that could pass a scope hardcodes
+    // `None` (see `engine.rs`, which states the same thing where it declines to
+    // roll obligations back). So no marker is written today and none can be
+    // promoted or recovered. Treat everything below as the design a driver would
+    // have to implement, not as behaviour you can observe. `docs/review-log.md`
+    // carries it as an open decision, with the options for where the driver
+    // should live.
     //
-    // **Strictly same-deploy-scoped.** Both legs operate only over rows whose
-    // `deploy_id` is THIS deploy's (in-process) or a net-`in_progress` prior-deploy
-    // row whose obligation is still `outstanding` (crash leg).
+    // The design: a deploy would make itself a RECOVERABLE unit by having each
+    // same-deploy EXPAND write an `in_progress` row keyed on a per-deploy
+    // `deploy_id` + the EXPAND's `pending_version`, committed in the SAME
+    // transaction as the obligation row, so every outstanding obligation always
+    // has a marker. A later same-deploy failure would abort exactly this deploy's
+    // net-`in_progress` rows under the still-held project lock, discharging each
+    // obligation `aborted` and marking the recovery row `reconciled`, leaving no
+    // half-renamed table. A process CRASH between the EXPAND+marker commit and
+    // that abort leaves the `in_progress` row behind for the next same-app deploy
+    // to reconcile before applying anything new. On success the rows would be
+    // promoted to `committed`, the EXPANDs legitimately remaining pending as the
+    // cross-deploy partition rather than a half-state.
     //
-    // **The crash-vs-legit discriminator.** The marker is
+    // **Strictly same-deploy-scoped.** Both legs would operate only over rows
+    // whose `deploy_id` is this deploy's, or a net-`in_progress` prior-deploy row
+    // whose obligation is still `outstanding` (the crash leg).
+    //
+    // **The crash-vs-legit discriminator, which is the part worth keeping.**
+    // A driver must not invert this, and the inverse has been built here before
+    // and reverted. The marker is
     // born `in_progress` (with the obligation, atomically), and `in_progress` itself
-    // IS the "this deploy has not durably reached a terminal outcome" signal. The
-    // success arm PROMOTES it to `committed` in one atomic batch; the crash leg's
-    // resume query (`outstanding_deploy_recoveries`) recovers ONLY net-`in_progress`
-    // markers. A net-`committed` marker is a fully-reached go-live ⇒ EXCLUDED, never
-    // aborted. Crucially, if the `committed` promotion FAILS (DB unreachable the
-    // instant the go-live reaches its success arm) the marker stays net-`in_progress`
-    // — the *recoverable* (fail-safe) state — so the next deploy AUTO-ABORTS the
-    // half-rename rather than silently mistaking a no-longer-protected marker for a
-    // committed one. A *pending* contract has not cut over reads/writes to the shadow
-    // column (the dual-write trigger keeps both in sync, and the drop-old-column
-    // contract has not run), so aborting it loses no data. This is the inverse of the
-    // the earlier `open`+later-stamp design, whose stamp-failure direction *protected*
-    // the marker and let a later deploy silently revert a live contract it could not
-    // distinguish from a crash.
+    // is the "this deploy has not durably reached a terminal outcome" signal. The
+    // success arm promotes it to `committed` in one atomic batch, and the crash
+    // leg's resume query (`outstanding_deploy_recoveries`) recovers ONLY
+    // net-`in_progress` markers, so a net-`committed` marker is a fully-reached
+    // go-live and is excluded, never aborted.
+    //
+    // The polarity is what matters. If the `committed` promotion FAILS - the
+    // database goes unreachable the instant the go-live reaches its success arm -
+    // the marker stays net-`in_progress`, which is the RECOVERABLE state, so the
+    // next deploy auto-aborts the half-rename. Aborting costs nothing there: a
+    // *pending* contract has not cut over reads or writes to the shadow column,
+    // the dual-write trigger keeps both in sync, and the drop-old-column contract
+    // has not run.
+    //
+    // The tempting inverse - born `open`, stamped `reached_success`, recover
+    // anything unstamped - was implemented here and torn out, because its
+    // stamp-failure direction leaves the marker PROTECTED, and a later deploy then
+    // silently reverts a live contract it cannot distinguish from a crash. Anyone
+    // building the driver should read that as settled rather than rediscovering it:
+    // the failure mode is a committed contract disappearing, and it is not visible
+    // in the happy path.
     //
     // **Append-only + immutable + admin-only** (same posture as
     // `schema_pending_contracts`): `state` transitions
