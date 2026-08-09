@@ -277,6 +277,12 @@ impl VendorCapabilities {
     /// `None` is intentionally least-privilege so future public callers cannot
     /// accidentally enable vendor ops by omitting a capability. Wider scopes must
     /// come from an explicitly authored policy on guarded paths.
+    ///
+    /// This is the VALIDATE-layer gate only. It is not authority: `Allowlist` and
+    /// `Unconfined` both map to the full operator set, so a charter granting only
+    /// `schema.cross_schema` would read as granting every capability. The lower gate
+    /// asks the charter directly - see
+    /// [`policy_grants_capability`](crate::policy_capability::policy_grants_capability).
     #[must_use]
     pub fn from_scope(scope: Option<&SchemaScope>) -> Self {
         match scope {

@@ -247,7 +247,10 @@ fn raw_view(sql: &str, materialized: Option<bool>) -> Op {
 }
 
 fn lower_up(dialect: SqlDialect, op: Op) -> Result<String, Box<IrLowerError>> {
-    let author = IrAuthor::new(SCHEMA, "app_a", dialect, &support::no_inject("app"))
+    // The operator charter grants the vendor capabilities a materialized view / raw
+    // view body needs; the widened scope stays because the view body's table
+    // references are confined against it.
+    let author = IrAuthor::new(SCHEMA, "app_a", dialect, &support::operator_charter("app"))
         .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
@@ -463,11 +466,13 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&operator)).unwrap();
+    // The `sql.raw_view_body` GRANT is what admits this at lower - the same charter
+    // the guard above would compose, not the widened scope beside it.
     IrAuthor::new(
         SCHEMA,
         "app_a",
         SqlDialect::Postgres,
-        &support::no_inject("app"),
+        &support::operator_charter("app"),
     )
     .with_schema_scope(operator)
     .lower(&raw, &LiveSchema::default())

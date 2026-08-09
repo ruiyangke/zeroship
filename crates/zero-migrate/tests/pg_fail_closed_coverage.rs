@@ -453,11 +453,13 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             |err| panic!("{kind} must validate on PG under platform scope: {err:?}"),
         );
 
+        // The operator charter GRANTS the vendor capability each sample needs; the
+        // platform scope beside it only says which schemas are in bounds.
         let migrations = IrAuthor::new(
             "app",
             "app_test",
             SqlDialect::Postgres,
-            &support::no_inject("app"),
+            &support::operator_charter("app"),
         )
         .with_schema_scope(platform_scope.clone())
         .lower(&ir, &LiveSchema::default())

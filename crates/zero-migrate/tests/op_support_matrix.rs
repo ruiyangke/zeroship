@@ -176,11 +176,14 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
 
 fn lower_current(op: &Op, dialect: Dialect) -> bool {
     let default_schema = op.schema().unwrap_or("app");
+    // The matrix asks whether an op RENDERS, so the corpus runs under a charter that
+    // grants every vendor capability. Authority at lower is that grant; the unconfined
+    // scope only lets the corpus name any schema.
     let author = IrAuthor::new(
         default_schema,
         "app_corpus",
         sql_dialect(dialect),
-        &support::no_inject("app"),
+        &support::operator_charter("app"),
     )
     .with_schema_scope(SchemaScope::Unconfined);
     author

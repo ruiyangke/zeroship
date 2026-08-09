@@ -83,17 +83,34 @@ impl ApprovalLevel {
 /// matcher exactly (an un-normalizable name fails closed to the `default_schema`
 /// object).
 fn object_for_op(op: &Op, default_schema: &str) -> ObjectName {
-    let fallback = || {
+    concrete_object_for_op(op, default_schema).unwrap_or_else(|| {
         normalize_pg_identifier(default_schema)
             .unwrap_or_else(|| ObjectName::schema(default_schema.as_bytes().to_vec()))
-    };
+    })
+}
+
+/// The concrete object `op` targets, or `None` when the name it carries does not
+/// normalize - the shared construction behind both object-scoped policy queries on the
+/// IR path: `object_for_op` for the approval obligation (module-private, so not a
+/// linkable doc target), and the capability resolution in [`crate::policy_capability`].
+///
+/// Callers pick their own answer to an un-normalizable name: the approval query falls
+/// back to the `default_schema` object, while a capability grant fails closed, because
+/// a target that cannot be named is not provably inside any narrower scope.
+///
+/// A table op resolves to `default_schema.table` (or its own schema qualifier when
+/// present); an op with no table resolves to the schema it names, else the migration's
+/// `default_schema`. Identifiers are PG-folded via [`normalize_pg_identifier`] so the
+/// resolution matches the composer's scope matcher exactly.
+#[must_use]
+pub fn concrete_object_for_op(op: &Op, default_schema: &str) -> Option<ObjectName> {
     let schema = op.schema().unwrap_or(default_schema);
     if let Some(table) = op.touched_table() {
-        return normalize_pg_identifier(&format!("{schema}.{table}")).unwrap_or_else(fallback);
+        return normalize_pg_identifier(&format!("{schema}.{table}"));
     }
     // A schema/role/db-level op (DropSchema, roles, grants, raw islands): resolve to
     // the schema it names when it carries one, else the migration's default schema.
-    normalize_pg_identifier(schema).unwrap_or_else(fallback)
+    normalize_pg_identifier(schema)
 }
 
 /// Resolve the effective `safety.require_approval` level at `object`: the LOOSEST

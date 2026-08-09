@@ -421,7 +421,7 @@ fn require_rls_rejects_standalone_disable_and_no_force() {
 #[test]
 fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
     let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
-    let author = platform_author(&cfg);
+    let author = platform_author();
     let op = Op::PgRaw {
         sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".into(),
         reason: "require_rls raw table creation regression".into(),
@@ -446,17 +446,23 @@ fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
     }
 }
 
-fn platform_author(guard_cfg: &GuardConfig) -> crate::render::lower::IrAuthor {
-    let scope = guard_cfg
-        .schema_scope()
-        .expect("Platform guard carries an allowlist scope");
+/// A vendor op's authority is the charter's capability grant, so the author composes
+/// the SAME operator charter the Platform guard does. The data-security knobs the
+/// guard varies (`require_rls`, `destructive_ops`) carry no vendor capability, so the
+/// author holds them at their guard-neutral values. The guarded lower derives its
+/// confinement scope from the guard config, so nothing widens the author by hand.
+fn platform_author() -> crate::render::lower::IrAuthor {
     crate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
         SqlDialect::Postgres,
-        &crate::test_fixtures::no_inject("app"),
+        &crate::test_fixtures::operator_with_data_security(
+            &["zero_migrate", "public"],
+            &["citext", "uuid-ossp"],
+            false,
+            DestructiveOps::Allow,
+        ),
     )
-    .with_schema_scope(scope)
 }
 
 fn is_denied(g: &SqlGuard, sql: &str) -> bool {
@@ -1014,7 +1020,7 @@ fn superuser_role_in_if_not_exists_do_wrap_denied_even_under_platform() {
 #[test]
 fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
     let guard_cfg = platform_guard_config();
-    let author = platform_author(&guard_cfg);
+    let author = platform_author();
     let op = zero_migrate_ir::ir::Op::CreateRole {
         name: "evil".into(),
         login: Some(true),
@@ -1087,7 +1093,7 @@ fn host_escape_role_grant_denied_even_under_platform() {
 #[test]
 fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
     let guard_cfg = platform_guard_config();
-    let author = platform_author(&guard_cfg);
+    let author = platform_author();
     let op = zero_migrate_ir::ir::Op::CreateFunction {
         name: "audit_events_rce".into(),
         schema: Some("zero_migrate".into()),
@@ -1127,7 +1133,7 @@ fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
 #[test]
 fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
     let guard_cfg = platform_guard_config();
-    let author = platform_author(&guard_cfg);
+    let author = platform_author();
     let op = zero_migrate_ir::ir::Op::CreateFunction {
         name: "audit_events_note".into(),
         schema: Some("zero_migrate".into()),
@@ -1158,7 +1164,7 @@ fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
 #[test]
 fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
     let guard_cfg = platform_guard_config();
-    let author = platform_author(&guard_cfg);
+    let author = platform_author();
     let op = zero_migrate_ir::ir::Op::PgRaw {
         sql: "COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'".into(),
         reason: "raw COPY PROGRAM denial regression".into(),
@@ -1335,18 +1341,16 @@ fn trusted_guard_config() -> GuardConfig {
     )
 }
 
+/// The Trusted peer of [`platform_author`]: the author composes the same unconfined
+/// operator charter `trusted_guard_config` does, because the charter is what grants a
+/// vendor capability.
 fn trusted_author() -> crate::render::lower::IrAuthor {
-    let cfg = trusted_guard_config();
-    let scope = cfg
-        .schema_scope()
-        .expect("Trusted guard carries the explicit unconfined operator scope");
     crate::render::lower::IrAuthor::new(
         "public",
         "app_corpus",
         SqlDialect::Postgres,
-        &crate::test_fixtures::no_inject("public"),
+        &crate::test_fixtures::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
     )
-    .with_schema_scope(scope)
 }
 
 /// The Trusted early-return SKIPS the deny-list ENTIRELY: SQL the Confined

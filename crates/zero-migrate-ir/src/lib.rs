@@ -37,6 +37,7 @@ pub mod load;
 pub mod migration;
 pub mod policy;
 pub mod policy_approval;
+pub mod policy_capability;
 pub mod policy_registry;
 pub mod precondition;
 pub mod probe;

@@ -110,6 +110,99 @@ scope = "all"
         .expect("explicit no-inject test charter composes")
 }
 
+/// [`no_inject`] plus every vendor capability grant, for tests that assert a
+/// privileged op RENDERS.
+///
+/// A vendor op's authority at lower is the charter's capability grant, so a test that
+/// expects `createSchema` or a raw view body to lower has to author the grant - a
+/// widened `SchemaScope` answers which schemas the migration may touch, not which
+/// privileged primitives it may emit. The extension allowlist covers the names the
+/// vendor fixtures create.
+#[must_use]
+pub fn operator_charter(schema: &str) -> EffectivePolicy {
+    let charter_toml = format!(
+        r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = {{ include = [{schema:?}] }}
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[grant]]
+key = "access.role"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.grant"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.rls"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.policy"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.materialized_view"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.extension"
+value = ["citext", "pgcrypto"]
+scope = "all"
+
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw_view_body"
+value = true
+scope = "all"
+"#
+    );
+    effective_policy_from_charter_toml(&charter_toml)
+        .expect("explicit operator test charter composes")
+}
+
 #[must_use]
 pub fn no_inject_with_extensions(schema: &str, extensions: &[&str]) -> EffectivePolicy {
     let extensions = extensions

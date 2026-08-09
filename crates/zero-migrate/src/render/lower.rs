@@ -1280,15 +1280,17 @@ pub struct IrAuthor {
     /// [`default_schema`](Self::default_schema). So a `default_schema` pointing at a
     /// FOREIGN schema would slip the gate and render every guard-less op into that
     /// foreign schema. To close that hole fail-closed, `lower_one_op` asserts the
-    /// EFFECTIVE schema against THIS scope whenever the resolved schema came from the
+    /// EFFECTIVE schema against a scope whenever the resolved schema came from the
     /// connection default (the op's own qualifier is already gated upstream).
     ///
-    /// Defaults to the Confined posture — `Single(project_schema)` — so the
-    /// safe-by-default path (every creator entry) refuses a foreign default_schema
-    /// even if the bare `lower()` is called without an upstream load gate. A
-    /// Platform/Trusted CLI widens it explicitly via
-    /// [`with_schema_scope`](Self::with_schema_scope) when it sets a multi-schema or
-    /// search-path-driven default.
+    /// This field is the scope for a bare/direct [`lower`](Self::lower), and it is
+    /// always the Confined `Single(project_schema)` the constructor pins, so that path
+    /// refuses a foreign `default_schema` even without an upstream load gate.
+    /// [`lower_guarded`](Self::lower_guarded) does NOT confine against this field: it
+    /// confines against the POLICY-derived
+    /// [`GuardConfig::schema_scope`](crate::guard::GuardConfig::schema_scope), which is
+    /// the same scope the load gate validated the op's own qualifier against, so the
+    /// two gates cannot disagree about which schemas are in bounds.
     scope: crate::model::policy::SchemaScope,
 }
 
@@ -1390,21 +1392,22 @@ pub enum IrLowerError {
     /// connection default; so a foreign `default_schema` would otherwise render every
     /// guard-less op (one that omits its own qualifier) into the foreign schema while
     /// the validate gate stays silent. Lowering FAILS CLOSED here: a `default_schema`
-    /// outside the active scope is refused, not rendered. The default scope is the
-    /// Confined `Single(project_schema)`, so a creator-path author refuses a foreign
-    /// default even without the upstream load gate; a Platform/Trusted CLI widens it
-    /// via [`IrAuthor::with_schema_scope`]. Carries the offending schema.
+    /// outside the active scope is refused, not rendered. A bare [`IrAuthor::lower`]
+    /// confines against the Confined `Single(project_schema)`, so a creator-path author
+    /// refuses a foreign default even without the upstream load gate;
+    /// [`IrAuthor::lower_guarded`] confines against the charter's `schema.cross_schema`
+    /// grant. Carries the offending schema.
     #[error(
         "IrAuthor::lower resolved a connection default_schema to {0:?}, which the \
          author's schema-confinement scope does not permit — the op-level cross-schema \
          gate never inspects the connection default, so a foreign default is refused \
          fail-closed here rather than rendered into {0:?}. Bind a default within scope, \
-         or widen the scope via IrAuthor::with_schema_scope (Platform/Trusted only)."
+         or grant schema.cross_schema on {0:?} and route through the guarded lower."
     )]
     DefaultSchemaOutOfScope(String),
     /// an op carrying an
-    /// EXPLICIT `schema()` qualifier that the author's confinement
-    /// [`scope`](IrAuthor::with_schema_scope) does NOT permit. The friendly op-level cross-schema
+    /// EXPLICIT `schema()` qualifier that the active confinement
+    /// scope does NOT permit. The friendly op-level cross-schema
     /// VALIDATE gate ([`crate::model::validate::validate_ir_scoped`]) already refuses this
     /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
     /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
@@ -1423,8 +1426,8 @@ pub enum IrLowerError {
          author's schema-confinement scope does not permit — the public lower entries \
          do not re-run the cross-schema VALIDATE gate, so an out-of-scope explicit \
          qualifier is refused fail-closed here rather than rendered into {0:?}. Route \
-         through the load gate (which validates), or widen the scope via \
-         IrAuthor::with_schema_scope (Platform/Trusted only)."
+         through the load gate (which validates), or grant schema.cross_schema on \
+         {0:?} in the charter the guarded lower composes."
     )]
     LowerCrossSchema(String),
     /// a SQLite `renameColumn` whose table's full live structure is not
@@ -2612,9 +2615,10 @@ impl IrAuthor {
         let project_schema = project_schema.into();
         Self {
             decl: DeclarativeAuthor::new_for_dialect(project_schema.clone(), owner_app, dialect),
-            // Confined-by-default scope: a `default_schema` set later is admitted
-            // ONLY if it case-folds to the project schema unless a Platform/Trusted
-            // CLI explicitly widens via `with_schema_scope`.
+            // Confined-by-default scope: on a bare `lower`, a `default_schema` set
+            // later is admitted ONLY if it case-folds to the project schema. The
+            // guarded lower confines against the charter's `schema.cross_schema`
+            // grant instead of this pin.
             scope: crate::model::policy::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect,
@@ -2633,30 +2637,31 @@ impl IrAuthor {
     /// general/Trusted CLI sets this from a `--schema`/search-path flag; the
     /// Confined platform path leaves it `None` (lowering pins `project_schema`).
     ///
-    /// **Confinement.** A `default_schema` is NOT trusted blindly: it
-    /// is validated against this author's `scope` at lower time
-    /// (`lower_one_op`). The default scope is the Confined
-    /// `Single(project_schema)`, so a foreign `default_schema` is REFUSED fail-closed
-    /// unless a Platform/Trusted CLI first widened the scope via
-    /// [`with_schema_scope`](Self::with_schema_scope). This is what stops a foreign
-    /// connection default from rendering every guard-less op into a foreign schema —
-    /// the friendly cross-schema VALIDATE gate only inspects the op's own qualifier,
-    /// never this default.
+    /// **Confinement.** A `default_schema` is NOT trusted blindly: it is validated
+    /// against the active confinement scope at lower time (`lower_one_op`). A bare
+    /// [`lower`](Self::lower) confines against the Confined `Single(project_schema)`,
+    /// so a foreign `default_schema` is REFUSED fail-closed;
+    /// [`lower_guarded`](Self::lower_guarded) confines against the charter's
+    /// `schema.cross_schema` grant. This is what stops a foreign connection default
+    /// from rendering every guard-less op into a foreign schema - the friendly
+    /// cross-schema VALIDATE gate only inspects the op's own qualifier, never this
+    /// default.
     #[must_use]
     pub fn with_default_schema(mut self, schema: Option<String>) -> Self {
         self.default_schema = schema;
         self
     }
 
-    /// widen the schema-confinement `scope`
-    /// the connection [`default_schema`](Self::with_default_schema) is validated against.
-    /// The default scope is the Confined `Single(project_schema)`; a
-    /// Platform/Trusted CLI that sets a multi-schema or foreign-search-path default
-    /// calls this with the matching [`crate::model::policy::SchemaScope`] (typically
-    /// [`crate::guard::GuardConfig::schema_scope`]) so the default it then binds is
-    /// admitted by the same scope the op-level cross-schema gate uses. Leaving the
-    /// scope at its Confined default and binding a foreign `default_schema` is
-    /// refused fail-closed at lower.
+    /// widen the schema-confinement scope a BARE [`lower`](Self::lower) validates the
+    /// connection [`default_schema`](Self::with_default_schema) and explicit op
+    /// qualifiers against. The default is the Confined `Single(project_schema)`.
+    ///
+    /// This widens CONFINEMENT only - which schemas an op may name. It grants no
+    /// vendor capability: `setRls`, `pgRaw` and their peers are authorized by the
+    /// charter's own capability grant, read at the object the op targets. No
+    /// production caller sets this; [`lower_guarded`](Self::lower_guarded) takes its
+    /// confinement scope from [`crate::guard::GuardConfig::schema_scope`], the same
+    /// scope the load gate used, and ignores this field.
     #[must_use]
     pub fn with_schema_scope(mut self, scope: crate::model::policy::SchemaScope) -> Self {
         self.scope = scope;
@@ -3912,6 +3917,10 @@ impl IrAuthor {
             partition_state,
             live,
             named_types,
+            // The bare/direct lower has no policy-derived scope to confine against;
+            // the constructor-pinned `Single(project_schema)` is the fail-closed
+            // default.
+            None,
         )? {
             LoweredOp::Ddl(units) => {
                 out.extend(
@@ -3966,7 +3975,15 @@ impl IrAuthor {
         partition_state: &mut PartitionLowerState,
         live_schema: &mut LiveSchema,
         named_types: &mut NamedTypeRegistry,
+        confinement_scope: Option<&crate::model::policy::SchemaScope>,
     ) -> Result<LoweredOp, IrLowerError> {
+        // The guarded path supplies the POLICY-derived scope
+        // (`GuardConfig::schema_scope`) - the same one the load gate validated the op's
+        // own qualifier against, so the two gates stop disagreeing about which schemas
+        // are in bounds. A bare/direct `lower` supplies none and falls back to the
+        // constructor-pinned `Single(project_schema)`, which stays the fail-closed
+        // default.
+        let confinement = confinement_scope.unwrap_or(&self.scope);
         let live_unique_indexes = live_schema.unique_indexes.clone();
         // The DDL arms advance / read the working table set under the short name
         // `live` (the name the fragment logic already uses).
@@ -3989,7 +4006,7 @@ impl IrAuthor {
         // even without the upstream load gate.
         if op.schema().is_none()
             && self.default_schema.is_some()
-            && !self.scope.permits(&eff_schema)
+            && !confinement.permits(&eff_schema)
         {
             return Err(IrLowerError::DefaultSchemaOutOfScope(eff_schema));
         }
@@ -4003,11 +4020,12 @@ impl IrAuthor {
         // the check ABOVE only covers the `default_schema` (op.schema().is_none())
         // case. Make `lower()` self-defending regardless of whether validate ran:
         // refuse an explicit out-of-scope qualifier here, matching the fail-closed
-        // posture of the SQLite/`default_schema` checks. Under Confined the scope is
+        // posture of the SQLite/`default_schema` checks. On the bare path the scope is
         // `Single(project_schema)`, so a same-or-case-variant qualifier is permitted
         // (canonicalized by `effective_schema`) and only a TRULY foreign qualifier is
-        // refused; Platform/Trusted widen the scope so their explicit qualifiers pass.
-        if op.schema().is_some() && !self.scope.permits(&eff_schema) {
+        // refused; on the guarded path the charter's `schema.cross_schema` grant
+        // decides, and it already admitted this qualifier at the load gate.
+        if op.schema().is_some() && !confinement.permits(&eff_schema) {
             return Err(IrLowerError::LowerCrossSchema(eff_schema));
         }
         // fail-closed on a NON-`main` schema on the SQLite leg.
@@ -5185,11 +5203,11 @@ impl IrAuthor {
             // capability; raw bodies and materialized views are gated at validate
             // and lower before this renderer runs.
             Op::CreateView { .. } => {
-                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
-                self.lower_view_op(op, &eff_schema, &decl)?
+                enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
+                self.lower_view_op(op, &eff_schema, &decl, confinement)?
             }
             Op::DropView { name, .. } => {
-                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
+                enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::View {
                         schema: eff_schema.clone(),
@@ -5197,7 +5215,7 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
-                self.lower_view_op(op, &eff_schema, &decl)?
+                self.lower_view_op(op, &eff_schema, &decl, confinement)?
             }
             // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
             // capability; unsupported pieces are refused per dialect/action/facet.
@@ -5233,7 +5251,7 @@ impl IrAuthor {
                 if !self.dialect.supports(Capability::PostgresVendorPrimitives) {
                     return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
                 }
-                enforce_vendor_capability_at_lower(op, Some(&self.scope))?;
+                enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 let stmts = crate::render::vendor::render_vendor_op(op, &eff_schema)?;
                 stmts
                     .into_iter()
@@ -5512,8 +5530,9 @@ impl IrAuthor {
         op: &Op,
         eff_schema: &str,
         decl: &DeclarativeAuthor,
+        confinement: &crate::model::policy::SchemaScope,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        let stmt = render_view_op(op, eff_schema, self.dialect, Some(&self.scope))?;
+        let stmt = render_view_op(op, eff_schema, self.dialect, Some(confinement))?;
         Ok(vec![
             decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)
         ])
@@ -6187,7 +6206,7 @@ impl IrAuthor {
         *plan_index += 1;
         let step_start = steps.len();
         let op_kind = op_kind_tag(op);
-        enforce_vendor_capability_at_lower(op, guard_scope)?;
+        enforce_vendor_capability_at_lower(op, &self.effective, self.effective_schema(op))?;
         // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
         // lower failure aborts before any guarding — nothing applied. Each unit
         // carries its STRUCTURAL per-statement list (the exact statements the
@@ -6199,6 +6218,7 @@ impl IrAuthor {
             partition_state,
             live,
             named_types,
+            guard_scope,
         )? {
             LoweredOp::Ddl(units) => units,
             LoweredOp::CreateTable { table, lowered } => {
@@ -8640,17 +8660,31 @@ fn restamp_ir_migration(
     }
 }
 
+/// Refuse an op whose privileged primitive the composed charter does not grant.
+///
+/// Authority is the POLICY. The author's schema-confinement scope answers a different
+/// question - which schemas a migration may touch - and deriving the capability set
+/// from it let a `schema.cross_schema` grant authorize `access.rls`, which no charter
+/// authored. Each required capability is read at the knob
+/// [`capability_knob_key`](zero_migrate_ir::policy_registry::capability_knob_key)
+/// names, resolved at the concrete object the op targets; an op whose object cannot be
+/// named needs a whole-universe grant.
 fn enforce_vendor_capability_at_lower(
     op: &Op,
-    scope: Option<&crate::model::policy::SchemaScope>,
+    effective: &EffectivePolicy,
+    eff_schema: &str,
 ) -> Result<(), IrLowerError> {
     let capabilities = crate::model::op_support::vendor_capabilities(op);
     if capabilities.is_empty() {
         return Ok(());
     }
-    let caps = crate::model::capability::VendorCapabilities::from_scope(scope);
+    let object = zero_migrate_ir::policy_capability::capability_object_for_op(op, eff_schema);
     for capability in capabilities {
-        if !caps.grants(capability) {
+        if !zero_migrate_ir::policy_capability::policy_grants_capability(
+            effective,
+            capability,
+            object.as_ref(),
+        ) {
             return Err(IrLowerError::VendorCapabilityDenied {
                 op: op_kind_tag(op),
                 capability,
@@ -10505,23 +10539,28 @@ mod tests {
         );
     }
 
-    fn platform_guard() -> GuardConfig {
-        GuardConfig::from_policy(
-            crate::test_fixtures::operator_with_data_security(
-                &["zero_migrate", "public"],
-                &[],
-                false,
-                crate::model::policy::DestructiveOps::Allow,
-            ),
-            SqlDialect::Postgres,
+    fn platform_policy() -> EffectivePolicy {
+        crate::test_fixtures::operator_with_data_security(
+            &["zero_migrate", "public"],
+            &[],
+            false,
+            crate::model::policy::DestructiveOps::Allow,
         )
     }
 
-    fn platform_author(owner: &str, guard: &GuardConfig) -> IrAuthor {
-        test_ir_author("zero_migrate", owner, SqlDialect::Postgres).with_schema_scope(
-            guard
-                .schema_scope()
-                .expect("platform guard has a schema scope"),
+    fn platform_guard() -> GuardConfig {
+        GuardConfig::from_policy(platform_policy(), SqlDialect::Postgres)
+    }
+
+    /// The author composes the SAME charter the Platform guard does: a vendor op's
+    /// authority is the charter's capability grant, and the guarded lower derives its
+    /// confinement scope from the guard config on its own.
+    fn platform_author(owner: &str) -> IrAuthor {
+        IrAuthor::new(
+            "zero_migrate",
+            owner,
+            SqlDialect::Postgres,
+            &platform_policy(),
         )
     }
 
@@ -13719,7 +13758,7 @@ columns = [
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]}"#;
         let guard = platform_guard();
-        let out = platform_author("platform", &guard)
+        let out = platform_author("platform")
             .load_and_lower_guarded(
                 bytes,
                 "platform",
@@ -13770,7 +13809,7 @@ columns = [
             ],"primaryKey":null,"constraints":[],"indexes":[]}
         ]}"#;
         let guard = platform_guard();
-        let out = platform_author("platform", &guard)
+        let out = platform_author("platform")
             .load_and_lower_guarded(
                 bytes,
                 "platform",
@@ -13813,7 +13852,7 @@ columns = [
         ]}"#;
         let guard = platform_guard();
         let mut owners = registry(&[]);
-        let first = platform_author("platform", &guard)
+        let first = platform_author("platform")
             .load_and_lower_guarded(create, "platform", &owners, &LiveSchema::default(), &guard)
             .expect("first file creates the platform table");
         assert_eq!(first.created_tables, vec!["platform_registry".to_string()]);
@@ -13823,7 +13862,7 @@ columns = [
                 .or_insert_with(|| "platform".to_string());
         }
 
-        platform_author("platform", &guard)
+        platform_author("platform")
             .load_and_lower_guarded(attach, "platform", &owners, &LiveSchema::default(), &guard)
             .expect("later-file structural attach passes after registry update");
     }
