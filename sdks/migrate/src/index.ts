@@ -209,7 +209,6 @@ export type {
   ColumnReference,
   CursorStability,
   Expr,
-  IrBatch,
   IrJsonValue,
   IrScalar,
   ViewQuery,

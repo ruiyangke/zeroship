@@ -429,13 +429,6 @@ export interface IrOnConflict {
   doUpdate?: { [column: string]: IrValue } | null;
 }
 
-/** A batched-backfill knob. SDK-LOCAL ergonomics — the engine schema has no
- *  matching `$defs` entry; the wire shape is the `backfill` op itself. */
-export interface IrBatch {
-  cursorColumn: string;
-  batchSize: number;
-}
-
 /** The invariant that keeps a resumable backfill's ordered cursor tuple immutable
  *  for the full operation, INCLUDING the time between an interrupted apply and its
  *  resume. Internally tagged on `mode`. */
