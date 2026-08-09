@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
-use crate::apply::backend::BackfillProgressEntry;
+use crate::apply::backend::{BackfillProgressEntry, ProjectLockAcquisition, ProjectLockHolder};
 use crate::apply::executor::{order_pending, ApplyError};
 use crate::apply::journal::{
     self, AppliedEntry, HistoryEvent, JournalError, Phase, RolledBackEntry,
@@ -461,6 +461,57 @@ pub struct BlockedPlan {
     pub pending_version: String,
 }
 
+/// What a status read produced: a reconciled verdict, or the report that a peer's
+/// deploy holds the project lock.
+///
+/// Contention is an outcome rather than a [`StatusError`] because the callers that
+/// see it decide exit codes: a strict CI gate must be able to tell "a deploy is
+/// running" apart from "this migration set is dirty", and an error collapses the
+/// two.
+///
+/// [`ProjectLockBusy`](Self::ProjectLockBusy) means NO catalog or journal read ran.
+/// Reading without the lock is not an option: the reads are composite (catalog,
+/// then journal, then contracts) with no transaction bracketing them, and a
+/// non-transactional apply genuinely commits its inflight marker before the DDL
+/// and its completed row after, so a reader that skipped the lock would report a
+/// deploy's own halfway state as drift. The lock is also what tells a running
+/// deploy apart from a marker an interrupted one left behind.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum StatusSnapshot<S> {
+    /// The lock was taken, the reads ran, and this is the reconciled verdict.
+    Ready(S),
+    /// A peer holds the project lock; these are the sessions reported holding it.
+    ProjectLockBusy(Vec<ProjectLockHolder>),
+}
+
+impl<S> StatusSnapshot<S> {
+    /// The reconciled verdict, or `None` when a peer held the project lock.
+    pub fn ready(self) -> Option<S> {
+        match self {
+            Self::Ready(status) => Some(status),
+            Self::ProjectLockBusy(_) => None,
+        }
+    }
+
+    /// The reconciled verdict, panicking with `message` when a peer held the lock.
+    ///
+    /// For callers that have arranged for there to be no peer -- tests and
+    /// single-writer embedders -- so an unexpected contention is loud instead of
+    /// silently reconciling against nothing.
+    ///
+    /// # Panics
+    /// Panics when the snapshot is [`ProjectLockBusy`](Self::ProjectLockBusy).
+    #[must_use]
+    pub fn expect_ready(self, message: &str) -> S {
+        match self {
+            Self::Ready(status) => status,
+            Self::ProjectLockBusy(holders) => {
+                panic!("{message}: the project lock is held by {holders:?}")
+            }
+        }
+    }
+}
+
 /// Error from the status/history read API.
 #[derive(Debug, thiserror::Error)]
 pub enum StatusError {
@@ -866,7 +917,7 @@ pub async fn status_plans_via_backend<B: crate::apply::backend::MigrationBackend
     backend: &B,
     cfg: &ExecutorConfig,
     manifests: &[PlanStatusManifest],
-) -> Result<AppliedPlanStatus, StatusError> {
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
     status_plans_via_backend_inner(backend, cfg, manifests, true).await
 }
 
@@ -883,7 +934,7 @@ pub async fn status_plans_via_backend_read_only<B: crate::apply::backend::Migrat
     backend: &B,
     cfg: &ExecutorConfig,
     manifests: &[PlanStatusManifest],
-) -> Result<AppliedPlanStatus, StatusError> {
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
     status_plans_via_backend_inner(backend, cfg, manifests, false).await
 }
 
@@ -892,20 +943,27 @@ async fn status_plans_via_backend_inner<B: crate::apply::backend::MigrationBacke
     cfg: &ExecutorConfig,
     manifests: &[PlanStatusManifest],
     bootstrap: bool,
-) -> Result<AppliedPlanStatus, StatusError> {
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
     if bootstrap {
         backend.ensure_journal(cfg).await?;
     }
-    backend
-        .acquire_project_lock(cfg)
+    match backend
+        .try_acquire_project_lock(cfg)
         .await
-        .map_err(StatusError::ProjectLock)?;
+        .map_err(StatusError::ProjectLock)?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => {
+            return Ok(StatusSnapshot::ProjectLockBusy(holders))
+        }
+    }
 
     let snapshot = status_plans_via_backend_locked_inner(backend, cfg, manifests, !bootstrap).await;
 
     let release = backend.release_project_lock(cfg).await;
     match (snapshot, release) {
-        (Ok(status), Ok(())) => Ok(status),
+        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
         (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(release_error)) => {
@@ -1247,7 +1305,7 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
-) -> Result<MigrationStatus, StatusError> {
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
     status_via_backend_inner(backend, cfg, migrations, true).await
 }
 
@@ -1262,7 +1320,7 @@ pub async fn status_via_backend_read_only<B: crate::apply::backend::MigrationBac
     backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
-) -> Result<MigrationStatus, StatusError> {
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
     status_via_backend_inner(backend, cfg, migrations, false).await
 }
 
@@ -1271,19 +1329,26 @@ async fn status_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     bootstrap: bool,
-) -> Result<MigrationStatus, StatusError> {
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
     if bootstrap {
         backend.ensure_journal(cfg).await?;
     }
-    backend
-        .acquire_project_lock(cfg)
+    match backend
+        .try_acquire_project_lock(cfg)
         .await
-        .map_err(StatusError::ProjectLock)?;
+        .map_err(StatusError::ProjectLock)?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => {
+            return Ok(StatusSnapshot::ProjectLockBusy(holders))
+        }
+    }
 
     let snapshot = status_via_backend_locked_inner(backend, cfg, migrations, !bootstrap).await;
     let release = backend.release_project_lock(cfg).await;
     match (snapshot, release) {
-        (Ok(status), Ok(())) => Ok(status),
+        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
         (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(release_error)) => {

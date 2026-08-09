@@ -230,6 +230,35 @@ pub trait CrossDeployObligations {
     ) -> JournalFuture<'a, Vec<journal::DeployRecovery>>;
 }
 
+/// One session reported holding the project lock when an acquisition found it
+/// taken.
+///
+/// Carries no duration on purpose. `pg_locks` records no acquisition timestamp,
+/// and every timestamp `pg_stat_activity` offers ages the holder's session or its
+/// current statement, neither of which is the age of the lock -- reporting one as
+/// "held for" would be a fabricated number an operator would act on.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ProjectLockHolder {
+    /// Backend process id of the holding session.
+    pub pid: i64,
+    /// The holder's `application_name`, when it set one.
+    pub application_name: Option<String>,
+    /// The holder's activity state (`active`, `idle in transaction`, ...).
+    pub state: Option<String>,
+    /// The holder's current statement. Absent unless the reading role may see
+    /// other sessions' statement text.
+    pub query: Option<String>,
+}
+
+/// What a non-blocking project-lock acquisition found.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ProjectLockAcquisition {
+    /// The lock is held by this session and must be released as usual.
+    Acquired,
+    /// A peer holds the lock. Nothing was locked, so there is nothing to release.
+    Busy(Vec<ProjectLockHolder>),
+}
+
 /// The dialect seam over execution I/O, journal I/O, parse-time non-txn
 /// validation, and drift introspection.
 ///
@@ -315,6 +344,33 @@ pub trait MigrationBackend {
     /// Release the project apply-serialization lock (PG `pg_advisory_unlock`;
     /// MySQL `RELEASE_LOCK`).
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError>;
+
+    /// Take the project lock without waiting out a peer's deploy, reporting who
+    /// holds it when it cannot be taken.
+    ///
+    /// Read-only callers use this instead of
+    /// [`acquire_project_lock`](Self::acquire_project_lock): a deploy holds the
+    /// lock for its whole run, so a reader that waits inherits that wall clock with
+    /// no timeout to end it. Contention is an OUTCOME here, not an error, because
+    /// the callers that need it decide exit codes and must not read "a peer is
+    /// deploying" as "this migration set is dirty".
+    ///
+    /// The default delegates to the blocking acquisition, which is the right
+    /// behaviour for the backends whose acquisition is already finite: MySQL bounds
+    /// `GET_LOCK` at ten seconds and SQLite bounds its try-lock spin at the
+    /// configured lock timeout, and both surface a timeout as an error. PostgreSQL
+    /// overrides it because `pg_advisory_lock` waits forever.
+    ///
+    /// # Errors
+    /// Whatever the backend's acquisition reports; contention itself is not one.
+    async fn try_acquire_project_lock(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<ProjectLockAcquisition, ApplyError> {
+        self.acquire_project_lock(cfg)
+            .await
+            .map(|()| ProjectLockAcquisition::Acquired)
+    }
 
     /// Snapshot the session settings the apply will override, for restore on exit.
     ///

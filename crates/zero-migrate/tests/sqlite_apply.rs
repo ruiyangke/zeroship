@@ -641,7 +641,8 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
         std::slice::from_ref(&manifest),
     )
     .await
-    .expect("read-only status on a fresh backend");
+    .expect("read-only status on a fresh backend")
+    .expect_ready("an uncontended SQLite backend has no peer holding the project lock");
     assert_eq!(fresh.pending, vec![manifest.version.clone()]);
     assert!(fresh.applied.is_empty());
     assert_eq!(fresh.plans[0].state, ReconciledPlanState::Pending);
@@ -670,7 +671,8 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
         std::slice::from_ref(&manifest),
     )
     .await
-    .expect("read-only status after apply");
+    .expect("read-only status after apply")
+    .expect_ready("an uncontended SQLite backend has no peer holding the project lock");
     assert_eq!(applied.applied, vec![manifest.version.clone()]);
     assert!(applied.pending.is_empty());
     assert_eq!(applied.plans[0].state, ReconciledPlanState::Applied);

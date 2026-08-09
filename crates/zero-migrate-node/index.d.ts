@@ -579,6 +579,26 @@ export interface PreviewSqlSource {
   charterLayers: Array<string>
 }
 
+/**
+ * One session reported holding the project lock in a busy status reply.
+ *
+ * Carries no duration: `pg_locks` records no acquisition time, so any duration
+ * here would age the holder's session or statement rather than the lock.
+ */
+export interface ProjectLockHolderDto {
+  /** Backend process id of the holding session. */
+  pid: number
+  /** The holder's `application_name`, when it set one. */
+  applicationName?: string
+  /** The holder's activity state (`active`, `idle in transaction`, ...). */
+  state?: string
+  /**
+   * The holder's current statement. Absent unless the reading role may see
+   * other sessions' statement text.
+   */
+  query?: string
+}
+
 /** Complete or abort one outstanding PostgreSQL online column rename. */
 export declare function resolvePending(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: ResolvePendingRequest): Promise<ApplyReply>
 
@@ -702,6 +722,15 @@ export interface StatusReply {
    * present (including as an empty array) on `statusIr`.
    */
   plans?: Array<PlanStatusDto>
+  /**
+   * True when a peer's deploy held the project lock, so this reply carries NO
+   * reconciled state: every other field is empty because no catalog or journal
+   * read ran. Always present, so a CI that wants contention to fail can opt in
+   * by branching on it instead of parsing a message.
+   */
+  busy: boolean
+  /** Sessions reported holding the project lock. Empty unless `busy`. */
+  lockHolders: Array<ProjectLockHolderDto>
 }
 
 /** The typed request for the `status` verb. */

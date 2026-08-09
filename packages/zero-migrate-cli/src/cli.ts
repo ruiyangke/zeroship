@@ -894,6 +894,13 @@ async function runLivePlan(args: Args): Promise<number> {
     envelopes,
     readOnly: true,
   });
+  // The pending set is what `plan` renders, and a busy reply has none because it
+  // read none. Rendering the empty set would print "would apply 0 migrations" for
+  // a database nobody looked at.
+  if (reply.busy) {
+    process.stderr.write(formatStatusBusy(reply, "plan"));
+    return 0;
+  }
   const pending = pendingMigrationsForPlan(reply, envelopes);
   const rendered = previewSql({
     envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
@@ -960,6 +967,47 @@ async function runApply(args: Args): Promise<number> {
   return 0;
 }
 
+/** How much of a lock holder's current statement the operator line shows. */
+const HOLDER_QUERY_LIMIT = 200;
+
+/**
+ * The operator line for a status or plan that found the project lock held.
+ *
+ * Names the holding session so the reader knows who to go ask, and says plainly
+ * that nothing was read -- a caller must not mistake the empty reply for a clean
+ * database. It reports no duration: `pg_locks` records no acquisition time, so
+ * every timestamp available would age the holder's session or statement rather
+ * than the lock.
+ *
+ * Kept pure and separate from the exit-code rule so both stay host-testable.
+ */
+export function formatStatusBusy(reply: StatusReply, verb: string): string {
+  const lines = [
+    `zero-migrate: another deploy holds the project lock; ${verb} read nothing and did not wait for it`,
+  ];
+  for (const holder of reply.lockHolders) {
+    const attributes = [holder.applicationName, holder.state]
+      .filter((value) => value !== undefined && value !== null && value !== "")
+      .join(", ");
+    const suffix = attributes === "" ? "" : ` (${attributes})`;
+    const query = holder.query ?? "";
+    const shown =
+      query.length > HOLDER_QUERY_LIMIT
+        ? `${query.slice(0, HOLDER_QUERY_LIMIT)}...`
+        : query;
+    lines.push(
+      `zero-migrate:   held by pid ${holder.pid}${suffix}` +
+        (shown === "" ? "" : `: ${redactUrlTokens(shown)}`),
+    );
+  }
+  if (reply.lockHolders.length === 0) {
+    lines.push(
+      "zero-migrate:   the holding session could not be identified; it may have finished",
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 /** True when strict status should fail. */
 export function statusIsDirty(reply: StatusReply): boolean {
   return (
@@ -974,7 +1022,13 @@ export function statusIsDirty(reply: StatusReply): boolean {
   );
 }
 
-/** Status exit code policy, kept pure so CI semantics are host-testable. */
+/**
+ * Status exit code policy, kept pure so CI semantics are host-testable.
+ *
+ * Callers must branch on `reply.busy` BEFORE reaching here: a busy reply carries
+ * no reconciled state, so asking it whether the migration set is dirty is asking
+ * a question it did not answer.
+ */
 export function statusExitCode(reply: StatusReply, strict: boolean): number {
   return strict && statusIsDirty(reply) ? 1 : 0;
 }
@@ -984,8 +1038,13 @@ export function formatStatusJson(reply: StatusReply): string {
   return `${JSON.stringify(reply, null, 2)}\n`;
 }
 
-/** Human status with stable count, drift, and checksum-mismatch lines. */
+/** Human status with stable count, drift, and checksum-mismatch lines.
+ *
+ * A busy reply renders as the contention notice rather than as counts: every
+ * count in it is zero because nothing was read, and printing
+ * "0 applied, 0 pending" for a database nobody looked at would be a lie. */
 export function formatStatusHuman(reply: StatusReply): string {
+  if (reply.busy) return formatStatusBusy(reply, "status");
   const lines = [
     `status: ${reply.applied.length} applied, ${reply.pending.length} pending`,
   ];
@@ -1041,6 +1100,15 @@ async function runStatus(args: Args): Promise<number> {
     envelopes,
     readOnly: false,
   });
+  // Contention is not a dirty migration set. A strict gate that exited 1 here
+  // would fail every pipeline that happens to overlap a deploy, so the verdict is
+  // "no answer", not "bad answer" -- and the machine-readable `busy` flag in the
+  // JSON reply is how a CI that WANTS to fail on contention opts in.
+  if (reply.busy) {
+    process.stderr.write(formatStatusBusy(reply, "status"));
+    if (args.json) process.stdout.write(formatStatusJson(reply));
+    return 0;
+  }
   if (args.json) {
     process.stdout.write(formatStatusJson(reply));
   } else {
@@ -1126,6 +1194,14 @@ async function runResolve(args: Args): Promise<number> {
     policy: charterLayers,
     envelopes: authored.map(({ envelope }) => envelope),
   });
+  // `resolve` writes, so it cannot proceed on a reply that read nothing. Without
+  // this the empty pending set would surface as "unknown migration", blaming the
+  // operator's argument for a peer's deploy.
+  if (reply.busy) {
+    throw new CliError(
+      formatStatusBusy(reply, "resolve").trim().replace(/^zero-migrate: /, ""),
+    );
+  }
   const pendingVersion = resolvePendingVersion(reply, migrationName);
   const outcome = await resolvePending({
     ownerApp: args.ownerApp,

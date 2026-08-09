@@ -16,7 +16,10 @@ mod primary_key_sql;
 pub(crate) mod session;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
-use super::{CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot};
+use super::{
+    CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
+    ProjectLockAcquisition,
+};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
@@ -28,6 +31,16 @@ use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
 use crate::render::step::BindValue;
 use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
 use crate::schema::query::SqlDialect;
+
+/// How many `pg_try_advisory_lock` attempts a non-blocking acquisition makes
+/// before it reports the lock busy.
+#[cfg(pg_seam)]
+const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
+
+/// How long a non-blocking acquisition pauses between those attempts. Sized to
+/// cover the gap between two of a deploy's statements, not the deploy.
+#[cfg(pg_seam)]
+const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
@@ -91,6 +104,31 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
         session::release_project_lock(self.conn, &cfg.project_id).await
+    }
+
+    /// One `pg_try_advisory_lock` per attempt, with a small fixed number of
+    /// attempts so a reader that arrives during the brief gap between two of a
+    /// deploy's statements still gets a real answer instead of reporting
+    /// contention that has already cleared. The attempt count is FIXED and small:
+    /// retrying until the lock is free is the unbounded wait this method exists to
+    /// avoid, only spelled with more round trips.
+    async fn try_acquire_project_lock(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<ProjectLockAcquisition, ApplyError> {
+        for attempt in 1..=PROJECT_LOCK_TRY_ATTEMPTS {
+            if session::try_acquire_project_lock(self.conn, &cfg.project_id).await? {
+                return Ok(ProjectLockAcquisition::Acquired);
+            }
+            if attempt < PROJECT_LOCK_TRY_ATTEMPTS {
+                // The seam is one verb at a time over one pinned session, driven on
+                // a thread that has nothing else to run, so parking it is the whole
+                // cost of the pause.
+                std::thread::sleep(PROJECT_LOCK_TRY_BACKOFF);
+            }
+        }
+        let holders = session::project_lock_holders(self.conn, &cfg.project_id).await?;
+        Ok(ProjectLockAcquisition::Busy(holders))
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {

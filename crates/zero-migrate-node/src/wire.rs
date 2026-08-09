@@ -351,6 +351,31 @@ pub struct StatusReply {
     /// Plan-aware detail. Absent on the legacy migration-only `status` verb;
     /// present (including as an empty array) on `statusIr`.
     pub plans: Option<Vec<PlanStatusDto>>,
+    /// True when a peer's deploy held the project lock, so this reply carries NO
+    /// reconciled state: every other field is empty because no catalog or journal
+    /// read ran. Always present, so a CI that wants contention to fail can opt in
+    /// by branching on it instead of parsing a message.
+    pub busy: bool,
+    /// Sessions reported holding the project lock. Empty unless `busy`.
+    pub lock_holders: Vec<ProjectLockHolderDto>,
+}
+
+/// One session reported holding the project lock in a busy status reply.
+///
+/// Carries no duration: `pg_locks` records no acquisition time, so any duration
+/// here would age the holder's session or statement rather than the lock.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct ProjectLockHolderDto {
+    /// Backend process id of the holding session.
+    pub pid: i64,
+    /// The holder's `application_name`, when it set one.
+    pub application_name: Option<String>,
+    /// The holder's activity state (`active`, `idle in transaction`, ...).
+    pub state: Option<String>,
+    /// The holder's current statement. Absent unless the reading role may see
+    /// other sessions' statement text.
+    pub query: Option<String>,
 }
 
 /// One outstanding online-contract obligation in a status reply.

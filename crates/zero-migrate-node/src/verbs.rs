@@ -8,7 +8,7 @@
 //! `napi` feature off. That is the configuration the workspace gate builds, so
 //! this logic is covered by tests that execute rather than only type-check.
 
-use zero_migrate::apply::backend::MigrationBackend;
+use zero_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
 use zero_migrate::apply::executor::{ApplyOutcome, LockMode};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
@@ -18,7 +18,7 @@ use zero_migrate::{LiveSchema, MigrationEngine, SqlDialect};
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
-    PlanStatusStepDto, StatusReply, UnexpectedJournalEntryDto,
+    PlanStatusStepDto, ProjectLockHolderDto, StatusReply, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -100,6 +100,38 @@ pub fn apply_reply(
     }
 }
 
+/// The reply a status verb returns when a peer's deploy holds the project lock.
+///
+/// Every reconciled field is empty because NO catalog or journal read ran: the
+/// reads are composite and unbracketed, and a non-transactional apply commits its
+/// inflight marker before the DDL and its completed row after, so a reader that
+/// went ahead without the lock would report a live deploy's halfway state as drift
+/// and fail a strict gate that has nothing wrong with it. `busy` is what callers
+/// branch on; the holders are what the operator message names.
+fn project_lock_busy_reply(holders: &[ProjectLockHolder]) -> StatusReply {
+    StatusReply {
+        current_version: None,
+        applied: Vec::new(),
+        pending: Vec::new(),
+        aborted: Vec::new(),
+        rolled_back: Vec::new(),
+        pending_contracts: Vec::new(),
+        blocked: Vec::new(),
+        unexpected_journal: Vec::new(),
+        plans: None,
+        busy: true,
+        lock_holders: holders
+            .iter()
+            .map(|holder| ProjectLockHolderDto {
+                pid: holder.pid,
+                application_name: holder.application_name.clone(),
+                state: holder.state.clone(),
+                query: holder.query.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Project a [`MigrationStatus`] into the typed [`StatusReply`] (the load-bearing
 /// fields: current version + applied/pending/rolled-back version ids).
 pub fn status_reply(s: &MigrationStatus) -> StatusReply {
@@ -129,6 +161,8 @@ pub fn status_reply(s: &MigrationStatus) -> StatusReply {
             .collect(),
         unexpected_journal: Vec::new(),
         plans: None,
+        busy: false,
+        lock_holders: Vec::new(),
     }
 }
 
@@ -213,6 +247,8 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
             })
             .collect(),
         plans: Some(plans),
+        busy: false,
+        lock_holders: Vec::new(),
     }
 }
 
@@ -356,6 +392,12 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
 
 /// Lower and reconcile authored plans while holding the same project lock across
 /// the live-catalog and journal reads.
+///
+/// The lock is taken WITHOUT waiting. `status` is the documented CI gate and
+/// `plan` is the read-only preview, and a deploy holds this lock for its whole
+/// run, so waiting would put both behind an unbounded stall every time a peer
+/// deploys. A contended acquisition returns the busy reply instead, having read
+/// nothing.
 pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -374,10 +416,15 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
             .await
             .map_err(|error| error.to_string())?;
     }
-    backend
-        .acquire_project_lock(cfg)
+    match backend
+        .try_acquire_project_lock(cfg)
         .await
-        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => return Ok(project_lock_busy_reply(&holders)),
+    }
 
     let result = async {
         let snapshot = backend
@@ -455,7 +502,9 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
 }
 
 /// Read migration-only status through the selected dialect backend while holding
-/// one project lock across the journal buckets. The core legacy status carrier
+/// one project lock across the journal buckets. The lock is taken without waiting,
+/// for the same reason as the plan-aware verb: a reader must not inherit the wall
+/// clock of a peer's deploy. The core legacy status carrier
 /// retains detailed PostgreSQL rollback rows, while the neutral backend trait
 /// exposes rollback version ids; the Node reply needs only those ids, so project
 /// them directly without sending PostgreSQL-only SQL to MySQL.
@@ -468,10 +517,15 @@ pub async fn legacy_status_with_locked_backend<B: MigrationBackend>(
         .ensure_journal(cfg)
         .await
         .map_err(|error| error.to_string())?;
-    backend
-        .acquire_project_lock(cfg)
+    match backend
+        .try_acquire_project_lock(cfg)
         .await
-        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => return Ok(project_lock_busy_reply(&holders)),
+    }
 
     let result = async {
         let status = zero_migrate::ops::status::status_via_backend_locked(backend, cfg, migrations)

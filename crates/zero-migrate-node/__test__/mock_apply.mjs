@@ -36,9 +36,14 @@ const recorded = [];
 // napi delivers the (request, done) tuple as a SINGLE array arg.
 function hostDriver([request, done]) {
   recorded.push(`${request.kind}: ${request.sql}`);
+  // The non-waiting project-lock acquisition asks for a row back; everything else
+  // this canned driver answers is satisfied by an empty result.
+  const rows = request.sql.includes('pg_try_advisory_lock')
+    ? [{ columns: ['got'], cells: [{ kind: 'bool', bool: true }] }]
+    : [];
   // A real event-loop turn so the wakeup is genuinely cross-thread + deferred
   // (mirrors the B.5 spike's setTimeout(…,0) ordering variant).
-  setTimeout(() => done(null, { rows: [], rowCount: 1 }), 0);
+  setTimeout(() => done(null, { rows, rowCount: 1 }), 0);
 }
 
 const watchdog = setTimeout(() => {

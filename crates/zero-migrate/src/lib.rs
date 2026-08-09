@@ -237,8 +237,11 @@ pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     AppliedPlanStatus, BlockedPlan, MigrationStatus, PendingContractStatus, PlanStatusManifest,
     PlanStatusManifestStep, PlanStatusStep, PlanStatusStepKind, PlanStatusStepState,
-    ReconciledPlan, ReconciledPlanState, ResolvedPendingContract, StatusError,
+    ReconciledPlan, ReconciledPlanState, ResolvedPendingContract, StatusError, StatusSnapshot,
 };
+// The non-blocking project-lock acquisition a read-only verb reports contention
+// with, and the holder detail its operator message names.
+pub use apply::backend::{ProjectLockAcquisition, ProjectLockHolder};
 pub use plan::pending::{
     ActionPayload, DependencyPendingContract, OrphanedPendingContract, PendingContractRefusal,
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,

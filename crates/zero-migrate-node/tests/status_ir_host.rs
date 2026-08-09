@@ -15,8 +15,14 @@
 //!    contracts with their orphan diagnosis, unexpected journal identities and
 //!    their applied/inflight state) survives the projection into `StatusReply`;
 //! 2. the project lock is acquired BEFORE the live catalog and journal reads and
-//!    released after them, so one coherent snapshot backs the reconcile;
-//! 3. the journal net-state read decodes `event_seq`, so a host reply that omits
+//!    released after them, so one coherent snapshot backs the reconcile, and the
+//!    acquisition is the NON-WAITING `pg_try_advisory_lock` rather than the
+//!    unbounded `pg_advisory_lock` a deploy takes, so a reader never sits behind a
+//!    peer's deploy;
+//! 3. a contended acquisition reads NOTHING -- no catalog, no journal, no
+//!    contracts -- and returns the busy reply, because those reads are composite
+//!    and unbracketed and a live deploy's own halfway state would read as drift;
+//! 4. the journal net-state read decodes `event_seq`, so a host reply that omits
 //!    the column is rejected instead of silently reconciling on partial rows.
 
 mod support;
@@ -46,17 +52,47 @@ struct MockPgDispatch {
     /// When false the journal net-state rows omit `event_seq`, standing in for a
     /// host reply built against an older projection.
     journal_carries_event_seq: bool,
+    /// When false every `pg_try_advisory_lock` answers false, standing in for a
+    /// peer's deploy holding the project lock for the length of its run.
+    grants_project_lock: bool,
 }
+
+/// Process id the canned holder probe reports, so the busy reply can be checked
+/// for the holder detail an operator message names.
+const HOLDER_PID: i64 = 4242;
 
 impl MockPgDispatch {
     const fn new(journal_carries_event_seq: bool) -> Self {
         Self {
             log: RefCell::new(Vec::new()),
             journal_carries_event_seq,
+            grants_project_lock: true,
+        }
+    }
+
+    const fn contended() -> Self {
+        Self {
+            log: RefCell::new(Vec::new()),
+            journal_carries_event_seq: true,
+            grants_project_lock: false,
         }
     }
 
     fn rows_for(&self, sql: &str) -> Vec<JsRow> {
+        if sql.contains("pg_try_advisory_lock") {
+            return vec![row(&["got"], vec![bool_cell(self.grants_project_lock)])];
+        }
+        if sql.contains("pg_stat_activity") {
+            return vec![row(
+                &["pid", "application_name", "state", "query"],
+                vec![
+                    int_cell(HOLDER_PID),
+                    text_cell("zero-migrate"),
+                    text_cell("active"),
+                    text_cell("CREATE INDEX CONCURRENTLY ix_widgets_name ON widgets (name)"),
+                ],
+            )];
+        }
         if sql.contains("c.relname = 'schema_backfills'") {
             return vec![row(
                 &["table_exists", "checksum_exists"],
@@ -297,8 +333,17 @@ fn status_ir_projects_every_operator_detail_over_the_host_bridge() {
     assert!(reply.pending.is_empty());
 }
 
+/// The bracket contract, pinned to the NON-WAITING acquisition.
+///
+/// The needle moved from `pg_advisory_lock` to `pg_try_advisory_lock` because the
+/// acquisition itself changed, not because the old assertion was inconvenient: the
+/// three orderings it pinned (lock before catalog, lock before journal, journal
+/// before unlock) are all still asserted, over the same log, on the same reads.
+/// The needles are anchored rather than loosened -- `pg_advisory_lock` is asserted
+/// ABSENT, so a regression back to the blocking acquisition fails here instead of
+/// passing on a substring that matches both spellings.
 #[test]
-fn status_ir_brackets_the_reads_inside_one_project_lock() {
+fn status_ir_brackets_the_reads_inside_one_non_blocking_project_lock() {
     let (reply, log) = run_status(true);
     reply.expect("plan-aware status succeeds over the canned host driver");
 
@@ -307,7 +352,7 @@ fn status_ir_brackets_the_reads_inside_one_project_lock() {
             .position(|sql| sql.contains(needle))
             .unwrap_or_else(|| panic!("verb log is missing {needle:?}: {log:#?}"))
     };
-    let lock = idx("pg_advisory_lock");
+    let lock = idx("pg_try_advisory_lock");
     let catalog_read = idx("FROM pg_class child");
     let journal_read = idx("union_all");
     let unlock = idx("pg_advisory_unlock");
@@ -323,6 +368,87 @@ fn status_ir_brackets_the_reads_inside_one_project_lock() {
     assert!(
         journal_read < unlock,
         "the lock is released after the journal read: journal@{journal_read} unlock@{unlock}"
+    );
+    assert!(
+        !log.iter()
+            .any(|sql| sql.contains("SELECT pg_advisory_lock")),
+        "a status read must never take the unbounded acquisition a deploy takes: {log:#?}"
+    );
+    assert!(
+        !log.iter().any(|sql| sql.contains("pg_stat_activity")),
+        "an uncontended acquisition has no holder to probe for: {log:#?}"
+    );
+}
+
+/// A contended acquisition ends the verb before any read.
+///
+/// This is the half the ordering assertions above cannot reach: they prove the
+/// reads sit inside the bracket, not that a FAILED acquisition skips them. Without
+/// it, a verb that reported busy and then read anyway would still pass every
+/// ordering arm.
+#[test]
+fn status_ir_reads_nothing_when_a_peer_holds_the_project_lock() {
+    let (reply, log) = futures::executor::block_on(async {
+        let session = NapiHostSession::new(MockPgDispatch::contended());
+        let cfg = ExecutorConfig::new(
+            PROJECT_SCHEMA,
+            PROJECT_SCHEMA,
+            support::no_inject(PROJECT_SCHEMA),
+        );
+        let backend = PostgresBackend::new_generic(&session);
+        let charter_layers = vec![support::no_inject_charter_toml(PROJECT_SCHEMA)];
+        let reply = status_ir_with_locked_backend(
+            &backend,
+            &cfg,
+            &[],
+            OWNER_APP,
+            PROJECT_SCHEMA,
+            "postgres",
+            "{}",
+            &charter_layers,
+            true,
+        )
+        .await;
+        let log = session.into_dispatch().log.into_inner();
+        (reply, log)
+    });
+
+    let reply = reply.expect("contention is an outcome, not a verb error");
+    assert!(reply.busy, "a contended read must say so: {reply:#?}");
+    assert_eq!(
+        reply.lock_holders.iter().map(|h| h.pid).collect::<Vec<_>>(),
+        vec![HOLDER_PID],
+        "the busy reply names the holder the probe found"
+    );
+    assert_eq!(
+        reply.lock_holders[0].query.as_deref(),
+        Some("CREATE INDEX CONCURRENTLY ix_widgets_name ON widgets (name)")
+    );
+    assert!(reply.applied.is_empty() && reply.pending.is_empty());
+    assert!(
+        reply.plans.is_none(),
+        "a busy reply reconciles nothing, so it carries no plan list: {:?}",
+        reply.plans
+    );
+
+    for forbidden in [
+        "FROM pg_class child",
+        "union_all",
+        "schema_pending_contracts",
+        "schema_backfills",
+        "pg_advisory_unlock",
+    ] {
+        assert!(
+            !log.iter().any(|sql| sql.contains(forbidden)),
+            "a contended status must not run {forbidden:?}: {log:#?}"
+        );
+    }
+    assert_eq!(
+        log.iter()
+            .filter(|sql| sql.contains("pg_try_advisory_lock"))
+            .count(),
+        3,
+        "the retry is bounded at three attempts, never a loop until acquired: {log:#?}"
     );
 }
 

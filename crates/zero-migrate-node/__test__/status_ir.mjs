@@ -45,7 +45,9 @@ function hostDriver([request, done]) {
   recorded.push(request.sql);
   let rows = [];
 
-  if (request.sql.includes("c.relname = 'schema_backfills'")) {
+  if (request.sql.includes('pg_try_advisory_lock')) {
+    rows = [row(['got'], [bool(true)])];
+  } else if (request.sql.includes("c.relname = 'schema_backfills'")) {
     rows = [row(['table_exists', 'checksum_exists'], [bool(false), bool(false)])];
   } else if (request.sql.includes('union_all')) {
     rows = [
@@ -176,7 +178,11 @@ assert(orderedStatus.plans.length === 2,
 assert(orderedStatus.plans.every((plan) => plan.state === 'pending'),
   `fresh ordered envelope plans should be pending: ${JSON.stringify(orderedStatus.plans)}`);
 
-const lock = recorded.findIndex((sql) => sql.includes('pg_advisory_lock'));
+// The acquisition is the NON-WAITING pg_try_advisory_lock: a status read must not
+// sit behind a deploy that holds the lock for its whole run. The three orderings
+// are unchanged; only the spelling of the acquisition moved, and the blocking
+// spelling is asserted absent so a regression cannot pass on a shared substring.
+const lock = recorded.findIndex((sql) => sql.includes('pg_try_advisory_lock'));
 const catalogRead = recorded.findIndex((sql) => sql.includes('FROM pg_class child'));
 const snapshotRead = recorded.findIndex((sql) => sql.includes('union_all'));
 const unlock = recorded.findIndex((sql) => sql.includes('pg_advisory_unlock'));
@@ -184,5 +190,50 @@ assert(catalogRead >= 0, 'live catalog snapshot was not read');
 assert(lock >= 0 && lock < catalogRead, 'project lock must precede live catalog reads');
 assert(lock >= 0 && lock < snapshotRead, 'project lock must precede snapshot reads');
 assert(unlock > snapshotRead, 'project unlock must follow snapshot reads');
+assert(
+  !recorded.some((sql) => sql.includes('SELECT pg_advisory_lock')),
+  'a status read must never take the unbounded acquisition a deploy takes',
+);
+
+// A contended acquisition reads NOTHING and comes back as a first-class busy
+// reply, not an error: the reads are composite and unbracketed, so a reader that
+// went ahead without the lock would see a live deploy's halfway state as drift.
+const contended = [];
+function contendedDriver([request, done]) {
+  contended.push(request.sql);
+  let rows = [];
+  if (request.sql.includes('pg_try_advisory_lock')) {
+    rows = [row(['got'], [bool(false)])];
+  } else if (request.sql.includes('pg_stat_activity')) {
+    rows = [
+      row(
+        ['pid', 'application_name', 'state', 'query'],
+        [int(4242), text('zero-migrate'), text('active'), text('CREATE INDEX CONCURRENTLY ix')],
+      ),
+    ];
+  }
+  setTimeout(() => done(null, { rows, rowCount: rows.length }), 0);
+}
+
+const busy = await addon.statusIr(contendedDriver, {
+  ownerApp: 'app_status_busy',
+  projectSchema: 'app_status_busy',
+  dialect: 'postgres',
+  registry: {},
+  envelopes: [],
+  charterLayers: [NO_INJECT_CHARTER_TOML],
+  readOnly: true,
+});
+assert(busy.busy === true, `a contended status must report busy: ${JSON.stringify(busy)}`);
+assert(busy.lockHolders.length === 1 && busy.lockHolders[0].pid === 4242,
+  `the busy reply must name the holder: ${JSON.stringify(busy.lockHolders)}`);
+assert(busy.pending.length === 0 && busy.applied.length === 0,
+  'a busy reply reconciles nothing');
+for (const forbidden of ['FROM pg_class child', 'union_all', 'pg_advisory_unlock']) {
+  assert(!contended.some((sql) => sql.includes(forbidden)),
+    `a contended status must not run ${forbidden}: ${JSON.stringify(contended)}`);
+}
+assert(contended.filter((sql) => sql.includes('pg_try_advisory_lock')).length === 3,
+  `the retry is bounded at three attempts, never a loop: ${JSON.stringify(contended)}`);
 
 console.log('PASS: statusIr preserves plan-aware details and brackets one coherent snapshot');

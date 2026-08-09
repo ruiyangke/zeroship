@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use pg_query::protobuf::node::Node as NodeEnum;
 
-use crate::apply::backend::PgSessionSnapshot;
+use crate::apply::backend::{PgSessionSnapshot, ProjectLockHolder};
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
 use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
@@ -66,6 +66,77 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
     )
     .await?;
     Ok(())
+}
+
+/// Take the project lock if it is free right now, without waiting.
+///
+/// `pg_try_advisory_lock` is the non-waiting peer of the `pg_advisory_lock` above
+/// and takes the identical `hashtext(project_id)` key, so a reader and a deploy
+/// contend on exactly the same lock.
+///
+/// # Errors
+/// [`ApplyError::Db`] on a driver failure, [`ApplyError::Backend`] if the boolean
+/// result cannot be decoded.
+#[cfg(pg_seam)]
+pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<bool, ApplyError> {
+    let row = conn
+        .query_one(
+            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            &[project_id.into()],
+        )
+        .await?;
+    row.try_get::<_, bool>("got").map_err(|e| {
+        ApplyError::Backend(format!(
+            "pg_try_advisory_lock returned an undecodable result: {e}"
+        ))
+    })
+}
+
+/// Report the sessions holding this project's advisory lock, for an operator
+/// message naming who a reader is waiting behind.
+///
+/// Scoped to the project's own key rather than every advisory lock in the cluster:
+/// a single-argument `pg_advisory_lock(int8)` is recorded as `objsubid = 1` with
+/// the key split across `classid` (high 32 bits) and `objid` (low 32 bits), so
+/// reassembling them reconstructs the exact `hashtext(project_id)` value. The
+/// reassembly is signed-correct because `hashtext` is an `int4` that sign-extends
+/// to a negative `int8` for roughly half of all project ids, and PostgreSQL's
+/// `int8` shift wraps rather than erroring, which is what puts the sign bits back.
+///
+/// `query` is NULL unless the reading role may see other sessions' statement text
+/// (superuser or `pg_read_all_stats`), so it is reported as optional rather than
+/// demanded.
+///
+/// # Errors
+/// [`ApplyError::Db`] on a driver failure.
+#[cfg(pg_seam)]
+pub(crate) async fn project_lock_holders<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<Vec<ProjectLockHolder>, ApplyError> {
+    let rows = conn
+        .query(
+            "SELECT a.pid::int8 AS pid, a.application_name, a.state, a.query \
+               FROM pg_locks l JOIN pg_stat_activity a USING (pid) \
+              WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
+                AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtext($1)::bigint \
+              ORDER BY a.pid",
+            &[project_id.into()],
+        )
+        .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(ProjectLockHolder {
+                pid: row.try_get("pid")?,
+                application_name: row.try_get("application_name")?,
+                state: row.try_get("state")?,
+                query: row.try_get("query")?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(pg_seam)]

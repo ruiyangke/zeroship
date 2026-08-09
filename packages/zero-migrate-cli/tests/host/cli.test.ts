@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { StatusReply } from "../../src/addon.js";
 import {
   driverFor,
+  formatStatusBusy,
   formatStatusJson,
   formatStatusHuman,
   hasInlinePassword,
@@ -22,6 +23,7 @@ import {
   resolveCliConfig,
 } from "../../src/config.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
+import { noInjectPolicy } from "./policy.js";
 import {
   currentIrVersion,
   previewSql,
@@ -56,14 +58,18 @@ function cleanEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv 
   return { ...env, ...overrides };
 }
 
+// `timeout` is the anti-hang guard for the arms that assert a verb ANSWERS: a run
+// that blocks forever has to come back as a killed process the assertion can name,
+// not as a test runner that never finishes.
 function spawnCli(
   args: readonly string[],
-  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
+  options: { env?: NodeJS.ProcessEnv; cwd?: string; timeout?: number } = {},
 ) {
   return spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
     encoding: "utf8",
     cwd: options.cwd,
     env: cleanEnvironment(options.env),
+    timeout: options.timeout,
   });
 }
 
@@ -119,6 +125,8 @@ function makeStatus(overrides: Partial<StatusReply> = {}): StatusReply {
     blocked: [],
     unexpectedJournal: [],
     plans: [],
+    busy: false,
+    lockHolders: [],
     ...overrides,
   };
 }
@@ -1265,4 +1273,179 @@ test("live plan connect failures are clean, warned, and redacted", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A peer's deploy holds the project advisory lock for the whole length of its run.
+// `status --strict` is the documented CI gate and `plan` is the read-only preview,
+// so neither may sit behind that lock: waiting turns one slow deploy into a stalled
+// pipeline, and there is no timeout to end the wait.
+//
+// The lock is held from a SECOND LIVE SESSION for the duration of both runs, which
+// is the only way to reproduce what a peer's deploy does to a reader: a mock that
+// merely reports contention proves the plumbing, not that the acquisition itself
+// stopped waiting. Both verbs must answer WHILE the lock is still held.
+//
+// Exit 0 is deliberate: contention is not a dirty migration set, and a strict gate
+// that failed on it would fail every pipeline that overlaps a deploy. A CI that
+// wants to fail on contention opts in through the machine-readable `busy` flag in
+// the `--json` reply, which is why that flag is asserted here too.
+test("CLI status and plan answer while a peer holds the project lock", async (t) => {
+  const holder = await connectLivePg(t);
+  if (holder === null) return;
+  const cwd = temporaryDirectory(".cli-lock-busy-");
+  const schema = `zm_lock_busy_${Date.now().toString(36)}`;
+  let held = false;
+  try {
+    writeSimpleMigration(cwd);
+    // The migration renders into the per-test schema, so the charter has to own
+    // that schema; the bare policy other arms use owns none and the guard would
+    // deny the CREATE TABLE before the lock ever mattered.
+    const policyPath = join(cwd, "policy.toml");
+    writeFileSync(policyPath, noInjectPolicy(schema));
+
+    // The project lock key is `hashtext(project_id)` and the CLI's project_id is the
+    // project schema, so this is the same key the reader will try to take.
+    await holder.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [schema]);
+    held = true;
+    const holderPid = (await holder.query("SELECT pg_backend_pid() AS pid")).rows[0]
+      .pid as number;
+
+    const common = [
+      `--dir=${cwd}`,
+      `--policy=${policyPath}`,
+      `--database-url=${pgUrl()}`,
+      `--schema=${schema}`,
+    ];
+    const options = { env: { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH }, timeout: 60_000 };
+
+    const status = spawnCli(["status", "--strict", ...common], options);
+    assert.equal(
+      status.signal,
+      null,
+      `status blocked on the peer's project lock instead of reporting it: ${status.stderr}`,
+    );
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stderr, /project lock/i);
+    assert.match(status.stderr, new RegExp(`\\b${holderPid}\\b`));
+
+    const plan = spawnCli(["plan", ...common], options);
+    assert.equal(
+      plan.signal,
+      null,
+      `plan blocked on the peer's project lock instead of reporting it: ${plan.stderr}`,
+    );
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stderr, /project lock/i);
+    assert.doesNotMatch(plan.stdout, /would apply|CREATE TABLE/i);
+
+    const json = spawnCli(["status", "--strict", "--json", ...common], options);
+    assert.equal(json.signal, null, json.stderr);
+    assert.equal(json.status, 0, json.stderr);
+    const reply = JSON.parse(json.stdout) as StatusReply;
+    assert.equal(reply.busy, true);
+    assert.deepEqual(
+      reply.lockHolders.map((entry) => entry.pid),
+      [holderPid],
+    );
+
+    // `resolve` reads through the same status verb but WRITES, so it cannot carry
+    // on with a reply that read nothing. It fails loudly and names the contention
+    // rather than blaming the operator's migration argument for a peer's deploy.
+    const resolve = spawnCli(
+      ["resolve", "create_widgets", "--commit", "--approve", ...common],
+      options,
+    );
+    assert.equal(resolve.signal, null, resolve.stderr);
+    assert.equal(resolve.status, 1, resolve.stderr);
+    assert.match(resolve.stderr, /another deploy holds the project lock/);
+    assert.doesNotMatch(resolve.stderr, /unknown migration/);
+
+    // Positive control: the same command against the same database, with the lock
+    // free, still takes the lock, still reads, and still returns its real verdict --
+    // exit 1 for the pending migration this directory carries. Without it, the arms
+    // above would also pass if the verbs had simply stopped doing any work.
+    await holder.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema]);
+    held = false;
+
+    const uncontended = spawnCli(["status", "--strict", ...common], options);
+    assert.equal(uncontended.signal, null, uncontended.stderr);
+    assert.equal(uncontended.status, 1, uncontended.stderr);
+    assert.match(uncontended.stdout, /status: 0 applied, 1 pending/);
+    assert.doesNotMatch(uncontended.stderr, /project lock/i);
+
+    const uncontendedPlan = spawnCli(["plan", ...common], options);
+    assert.equal(uncontendedPlan.status, 0, uncontendedPlan.stderr);
+    assert.match(uncontendedPlan.stdout, /would apply 1 migration/);
+    assert.match(uncontendedPlan.stdout, /CREATE TABLE/i);
+  } finally {
+    if (held) {
+      await holder
+        .query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema])
+        .catch(() => {});
+    }
+    await holder
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${schema}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await holder.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The busy reply's presentation, kept away from a database so every branch is
+// covered: with a holder, with the holder's statement hidden (the reading role may
+// not see other sessions' query text), and with no holder at all.
+//
+// `statusIsDirty`/`statusExitCode` stay pure over a real reply, so the arm that
+// matters is that they are never the thing deciding a busy run: the reply carries
+// no reconciled state, so "not dirty" is not a verdict, it is the absence of one.
+test("a busy status reply reports the holder and never renders counts", () => {
+  const busy = makeStatus({
+    busy: true,
+    lockHolders: [
+      {
+        pid: 4242,
+        applicationName: "zero-migrate",
+        state: "active",
+        query: "CREATE INDEX CONCURRENTLY ix_widgets_name ON widgets (name)",
+      },
+    ],
+  });
+
+  const message = formatStatusBusy(busy, "status");
+  assert.match(message, /another deploy holds the project lock/);
+  assert.match(message, /status read nothing and did not wait for it/);
+  assert.match(message, /held by pid 4242 \(zero-migrate, active\)/);
+  assert.match(message, /CREATE INDEX CONCURRENTLY ix_widgets_name/);
+  // No duration: pg_locks records no acquisition time, so any age reported here
+  // would be the holder's session or statement, not the lock's.
+  assert.doesNotMatch(message, /held for|\d+\s*(ms|s|seconds|minutes)\b/);
+  assert.equal(formatStatusBusy(busy, "plan").includes("plan read nothing"), true);
+
+  // Never the counts: "0 applied, 0 pending" for a database nobody read is the
+  // exact confusion this reply exists to prevent.
+  assert.equal(formatStatusHuman(busy), message);
+  assert.doesNotMatch(formatStatusHuman(busy), /0 applied, 0 pending/);
+
+  // The JSON reply stays the machine-readable contract a CI opts into.
+  const json = JSON.parse(formatStatusJson(busy)) as StatusReply;
+  assert.equal(json.busy, true);
+  assert.equal(json.lockHolders[0].pid, 4242);
+
+  const anonymous = makeStatus({ busy: true, lockHolders: [{ pid: 77 }] });
+  assert.match(formatStatusBusy(anonymous, "status"), /held by pid 77\n/);
+
+  const unknown = makeStatus({ busy: true });
+  assert.match(
+    formatStatusBusy(unknown, "status"),
+    /the holding session could not be identified/,
+  );
+
+  // Contention is not dirt: a clean reply and a busy reply agree here, which is
+  // why the busy branch has to run BEFORE the exit-code rule rather than lean on
+  // it.
+  assert.equal(statusIsDirty(busy), false);
+  assert.equal(statusExitCode(busy, true), 0);
 });

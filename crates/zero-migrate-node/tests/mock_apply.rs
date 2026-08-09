@@ -297,7 +297,8 @@ fn mysql_journal_only_status_uses_only_mysql_sql() {
 
         let status = zero_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
             .await
-            .expect("empty MySQL journal status succeeds through the host bridge");
+            .expect("empty MySQL journal status succeeds through the host bridge")
+            .expect_ready("the canned MySQL host driver grants the project lock");
         let log = session.into_dispatch().log.into_inner();
         (status, log)
     });
