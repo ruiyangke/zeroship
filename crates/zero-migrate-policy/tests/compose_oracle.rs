@@ -979,7 +979,7 @@ mandatory = true
 columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 [[validate]]
 scope = { include = ["app_*"] }
-predicate = { kind = "has_primary_key" }
+predicate = { kind = "forbidden_columns", names = ["ssn"] }
 [[grant]]
 key = "schema.create_table"
 value = true

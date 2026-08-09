@@ -31,7 +31,9 @@ pub enum RuleKind {
     /// Content rule: columns/indexes/PK to add to matching `createTable` ops.
     /// Composes UP (obligation polarity) — a charter injection is un-droppable.
     Inject { spec: InjectSpec },
-    /// Content rule: a structural predicate a matching table/op must satisfy.
+    /// Content rule: a declared structural predicate. Nothing evaluates one against a
+    /// table - see [`ValidatePredicate`] for what the class does and does not do.
+    /// Composes UP (a layer can add a predicate, never drop one).
     Validate { pred: ValidatePredicate },
 }
 
@@ -102,8 +104,18 @@ pub enum AuthorPkPolicy {
     Forbid,
 }
 
-/// The FIXED set of structural predicates a matching table/op must satisfy
-/// post-injection (II.4.2). No open expression language — a blunt security surface.
+/// The FIXED set of structural predicates a `[[validate]]` rule can name (II.4.2). No
+/// open expression language - a blunt security surface.
+///
+/// NONE of these is checked against a table. [`ForbiddenColumns`](Self::ForbiddenColumns)
+/// is the only variant a document may still declare, and what it constrains is the
+/// POLICY rather than a schema: it rejects an `[[inject]]` that contributes a name it
+/// forbids. The other five are declared, composed and sealed and then read by nothing,
+/// so the loader refuses them (`LoadError::ValidatePredicateNotEnforced`) instead of
+/// sealing a control the engine does not apply. They stay declared here because the
+/// seal encoding and the composer's union-up are defined over the whole set, and
+/// because enforcing a predicate against a live table is a separate piece of work with
+/// a seam decision owed per variant.
 ///
 /// ONE rule governs every name below: a name-comparison is decided over the II.2.7
 /// fold of BOTH sides, never over the stored bytes. WHERE the fold happens differs by
@@ -127,7 +139,17 @@ pub enum ValidatePredicate {
         require: Vec<NameGlob>,
         forbid: Vec<NameGlob>,
     },
-    /// These column names must NOT appear. Stored as authored, matched folded.
+    /// The one predicate with a consumer, and it is a consistency constraint on the
+    /// POLICY. It rejects a contradicting inject: a document that both injects one of
+    /// these names and forbids it on an overlapping scope fails to load
+    /// (`LoadError::SelfContradictoryInjectValidate`), and so does a composition where
+    /// the collision is across layers (`CharterInjectValidateContradiction`,
+    /// `DraftValidateContradictsCharterInject`).
+    ///
+    /// It is NEVER checked against a table being created or altered. A migration that
+    /// adds one of these columns is not refused by this rule.
+    ///
+    /// Stored as authored, matched folded.
     ForbiddenColumns { names: Vec<String> },
     /// A named column's type / nullability constraint.
     TypeNullability {

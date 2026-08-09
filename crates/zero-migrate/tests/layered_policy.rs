@@ -70,7 +70,7 @@ const ADD_VALIDATE: &str = r#"policy_version = 1
 
 [[validate]]
 scope = { include = ["app"] }
-predicate = { kind = "has_primary_key" }
+predicate = { kind = "forbidden_columns", names = ["ssn"] }
 "#;
 
 fn app_table() -> ObjectName {
@@ -226,7 +226,7 @@ fn obligations_union_and_do_not_depend_on_narrowing_layer_order() {
     );
     assert_eq!(
         validate_set(&org_then_app),
-        BTreeSet::from(["HasPrimaryKey".to_string()])
+        BTreeSet::from([r#"ForbiddenColumns { names: ["ssn"] }"#.to_string()])
     );
 }
 

@@ -143,6 +143,17 @@ pub enum LoadError {
     /// `author_primary_key = "forbid"`. `author_primary_key = "allow"` without a pin
     /// stays legal: it states the reading an unpinned rule already has.
     InjectForbidsAuthorPrimaryKeyWithoutPin,
+    /// A `[[validate]]` rule declares a predicate that nothing evaluates against a
+    /// table, so the document states a structural control the engine never applies
+    /// (II.4.2). `has_primary_key`, `require_index`, `table_name_forbidden`,
+    /// `column_name_pattern` and `type_nullability` are parsed, composed, sealed into
+    /// the canonical bytes and exposed by `EffectivePolicy::validates_for`, and no seam
+    /// ever asks whether a table satisfies one - the paths that consume policy content
+    /// read injects and knobs only. A rule nothing reads is not a guardrail, so the
+    /// declaration is refused rather than sealed as a promise the engine does not keep.
+    /// `forbidden_columns` is not refused: it is consulted, as a document-consistency
+    /// constraint that rejects a contradicting `[[inject]]`.
+    ValidatePredicateNotEnforced { kind: String },
     /// A `mandatory = true` inject rule on a non-root layer (II.4.2).
     MandatoryInjectOnNonRootLayer,
     /// A single document both injects a column X and forbids X (or forbids the
@@ -842,8 +853,42 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
     })
 }
 
+/// The wire `kind` of a predicate no seam evaluates, or `None` for the one predicate
+/// that has a consumer. Exhaustive on purpose: a predicate added later has to state
+/// which side it is on rather than inherit silence.
+///
+/// `ForbiddenColumns` is the exception because it is genuinely read - by
+/// `check_self_contradiction` below, and by the two composition gates in `compose`
+/// (`CharterInjectValidateContradiction`, `DraftValidateContradictsCharterInject`). It
+/// constrains the document, not a table, but it constrains something.
+fn unenforced_predicate_kind(wp: &WirePredicate) -> Option<&'static str> {
+    match wp {
+        WirePredicate::ForbiddenColumns { .. } => None,
+        WirePredicate::HasPrimaryKey => Some("has_primary_key"),
+        WirePredicate::ColumnNamePattern { .. } => Some("column_name_pattern"),
+        WirePredicate::TypeNullability { .. } => Some("type_nullability"),
+        WirePredicate::RequireIndex { .. } => Some("require_index"),
+        WirePredicate::TableNameForbidden { .. } => Some("table_name_forbidden"),
+    }
+}
+
 /// Resolve a wire predicate, folding its name-glob literals per II.2.7.
 fn resolve_predicate(wp: WirePredicate) -> Result<ValidatePredicate, LoadError> {
+    // Five of the six predicates are parsed, composed, sealed and queryable, and no
+    // seam ever evaluates one: `EffectivePolicy::validates_for` has no caller outside
+    // tests, and the paths that consume policy content read injects and knobs. An
+    // operator who writes one gets a rule that reads as a structural control and
+    // applies nothing, so refuse the declaration rather than seal the claim.
+    //
+    // Enforcement is the other remedy and a larger one. Each predicate needs its own
+    // seam: a created table's shape is knowable at table-shape resolution once the
+    // injection has run, but an alter, a rename into scope, and a table that already
+    // exists are not covered there. Shipping the create-only half would leave a
+    // guardrail with a hole, which is worse than a documented absence - operators would
+    // author rules believing they were covered. That is a feature, not a load rule.
+    if let Some(kind) = unenforced_predicate_kind(&wp) {
+        return Err(LoadError::ValidatePredicateNotEnforced { kind: kind.into() });
+    }
     Ok(match wp {
         WirePredicate::HasPrimaryKey => ValidatePredicate::HasPrimaryKey,
         WirePredicate::ColumnNamePattern { require, forbid } => {

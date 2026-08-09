@@ -106,7 +106,7 @@ scope = { include = ["app_*"] }
 columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 [[validate]]
 scope = { include = ["app_*"] }
-predicate = { kind = "has_primary_key" }
+predicate = { kind = "forbidden_columns", names = ["ssn"] }
 "#;
 
 /// Compose the reference policy: the root charter against an empty draft (all charter

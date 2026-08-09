@@ -578,6 +578,88 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     assert_eq!(author_pk_of(&doc), AuthorPkPolicy::Allow);
 }
 
+// -- gate: a validate predicate nothing evaluates -------------------------------
+
+/// Load a charter carrying exactly one `[[validate]]` rule with `predicate`.
+fn load_validate(predicate: &str) -> Result<PolicyDoc, LoadError> {
+    load_root(&format!(
+        r#"policy_version = 1
+[[validate]]
+scope = {{ include = ["app_*"] }}
+predicate = {predicate}
+"#
+    ))
+}
+
+#[test]
+fn validate_predicates_no_seam_evaluates_reject() {
+    // Every predicate whose only consumers are the loader, the composer's union-up and
+    // the seal encoder. None is ever checked against a table, so each states a control
+    // the engine does not apply, and a charter asserting one is refused rather than
+    // sealed. The wire `kind` the author wrote comes back in the error - that is the
+    // line they have to change.
+    for (predicate, kind) in [
+        (r#"{ kind = "has_primary_key" }"#, "has_primary_key"),
+        (
+            r#"{ kind = "require_index", columns = ["created_at"] }"#,
+            "require_index",
+        ),
+        (
+            r#"{ kind = "table_name_forbidden", patterns = ["*.journal"] }"#,
+            "table_name_forbidden",
+        ),
+        (
+            r#"{ kind = "column_name_pattern", forbid = ["tmp_*"] }"#,
+            "column_name_pattern",
+        ),
+        (
+            r#"{ kind = "type_nullability", column = "created_at", nullable = false }"#,
+            "type_nullability",
+        ),
+    ] {
+        let e = load_validate(predicate).unwrap_err();
+        assert_eq!(
+            e,
+            LoadError::ValidatePredicateNotEnforced { kind: kind.into() },
+            "predicate {predicate} must be refused at load"
+        );
+    }
+}
+
+#[test]
+fn forbidden_columns_validate_still_loads_and_still_catches_a_contradiction() {
+    // The control for the refusal above, and the mistake it guards against: the class
+    // is NOT uniformly inert, so refusing all of `[[validate]]` would delete a working
+    // check. `forbidden_columns` has a consumer - it is the one predicate the
+    // contradiction gate reads - so it keeps loading, and it keeps rejecting an inject
+    // that contributes a column an overlapping validate forbids. A refusal that took
+    // this with it would pass the rejection test above and still be wrong.
+    let doc = load_validate(r#"{ kind = "forbidden_columns", names = ["secret"] }"#)
+        .expect("a forbidden_columns validate rule is consulted, so it must still load");
+    assert!(doc.rules.iter().any(|r| matches!(
+        &r.kind,
+        RuleKind::Validate {
+            pred: ValidatePredicate::ForbiddenColumns { names },
+        } if names == &["secret".to_string()]
+    )));
+
+    let e = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "secret", type = "text", nullable = false } ]
+[[validate]]
+scope = { include = ["app_*"] }
+predicate = { kind = "forbidden_columns", names = ["secret"] }
+"#,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        e,
+        LoadError::SelfContradictoryInjectValidate { .. }
+    ));
+}
+
 // ── gate: self-contradictory inject + validate ───────────────────────────────────
 
 #[test]
@@ -836,11 +918,11 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 
 [[validate]]
 scope     = { include = ["app_*"] }
-predicate = { kind = "table_name_forbidden", patterns = ["*.journal", "*.schema_migrations"] }
+predicate = { kind = "forbidden_columns", names = ["ssn"] }
 
 [[validate]]
-scope     = { include = ["app_*"] }
-predicate = { kind = "has_primary_key" }
+scope     = { include = ["tenant_*"] }
+predicate = { kind = "forbidden_columns", names = ["card_number"] }
 "#;
 
     let doc = load_root(example).unwrap();
@@ -868,12 +950,12 @@ predicate = { kind = "has_primary_key" }
     assert_eq!(raw.scope, Scope::Nothing);
     assert!(!doc.warnings.is_empty());
 
-    // The has_primary_key validate is present.
+    // The forbidden_columns validate is present.
     assert!(doc.rules.iter().any(|r| matches!(
         &r.kind,
         RuleKind::Validate {
-            pred: ValidatePredicate::HasPrimaryKey
-        }
+            pred: ValidatePredicate::ForbiddenColumns { names },
+        } if names == &["ssn".to_string()]
     )));
 }
 
@@ -885,7 +967,7 @@ fn json_front_end_loads() {
         "policy_version": 1,
         "default_scope": { "include": ["app_*"] },
         "grant": [ { "key": "sql.raw", "value": true, "scope": { "include": ["app_main"] } } ],
-        "validate": [ { "scope": { "include": ["app_*"] }, "predicate": { "kind": "has_primary_key" } } ]
+        "validate": [ { "scope": { "include": ["app_*"] }, "predicate": { "kind": "forbidden_columns", "names": ["ssn"] } } ]
     }"#;
     let doc = PolicyDoc::parse_json(json, &registry(), LoadContext::RootCharter).unwrap();
     assert_eq!(doc.rules.len(), 2);
