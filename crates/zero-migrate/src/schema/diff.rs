@@ -752,13 +752,23 @@ SELECT c.relname AS table_name,
                 match crate::schema::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
-                        // A malformed encryption sentinel is treated like a
-                        // malformed mask sentinel: warn loudly and treat the
-                        // column as unencrypted rather than failing the whole
-                        // introspection. The data plane then fails closed at the
-                        // codec boundary (plaintext expected on a column the
-                        // schema declared encrypted) rather than silently
-                        // decrypting with a guessed mode.
+                        // A malformed encryption sentinel leaves the column
+                        // looking unencrypted rather than failing the whole
+                        // introspection.
+                        //
+                        // The warn below is not the compensation it reads as.
+                        // No tracing subscriber is installed anywhere in this
+                        // workspace, so it reaches nobody, and `read_live_schema`
+                        // sits behind the never-declared `introspect` feature
+                        // (see build.rs), so nothing here compiles it at all --
+                        // the string is absent from the built rlib.
+                        //
+                        // The fail-closed backstop this arm leans on -- a codec
+                        // refusing plaintext on a column the schema declared
+                        // encrypted -- lives in the out-of-repo data plane that
+                        // consumes this module. This repository neither enforces
+                        // nor tests it, so it is that consumer's contract, not a
+                        // property proven here.
                         tracing::warn!(
                             table = %table,
                             column = %column,
@@ -805,13 +815,19 @@ SELECT c.relname AS table_name,
         {
             Ok(p) => p,
             Err(e) => {
-                // Surface a malformed sentinel as a tracing::warn —
-                // the diff will then treat the parent as
-                // `mask: None` and a re-deploy would re-emit the
-                // sentinel via the AddColumn / CreateTable path.
-                // We don't propagate as an Err because a transient
-                // hand-edit shouldn't take the entire deploy down;
-                // operators get a loud warn instead.
+                // A malformed sentinel leaves the parent as `mask: None`, and a
+                // re-deploy would re-emit the sentinel via the AddColumn /
+                // CreateTable path. The error is not propagated because a
+                // transient hand-edit should not take the whole deploy down.
+                //
+                // "Operators get a loud warn instead" was never true: no tracing
+                // subscriber is installed anywhere in this workspace, and this
+                // arm sits inside `read_live_schema`, behind the never-declared
+                // `introspect` feature (see build.rs), so the line is not
+                // compiled and the string is absent from the built rlib.
+                //
+                // Unlike the encryption arm above there is no out-of-repo
+                // backstop to name either. The parent simply reads as unmasked.
                 tracing::warn!(
                     table = %table,
                     sibling = %sibling,
