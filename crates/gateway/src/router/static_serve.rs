@@ -520,9 +520,19 @@ fn build_buffered_response(
 ) -> HttpResponse {
     // Range handling — resolve before building the response so we set
     // the right status (200 vs 206 vs 416) and Content-Range header.
-    let range = parse_range(req.headers().get("range"), chosen.size);
+    //
+    // Resolve against the bytes actually held, NOT `chosen.size`. That
+    // field is copied verbatim out of the creator's manifest and is
+    // checked by nothing: `Manifest::validate` never reads it, and deploy
+    // ingest verifies blob hashes and presence rather than declared
+    // lengths. A manifest that over-declares a size would otherwise clamp
+    // the range to a length the blob does not have, and the slice below
+    // would panic inside the handler on any anonymous `Range` request.
+    // Here the real length is in hand, so it is the only honest bound.
+    let served_size = bytes.len() as u64;
+    let range = parse_range(req.headers().get("range"), served_size);
     match range {
-        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(chosen.size, etag),
+        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(served_size, etag),
         Some(RangeSpec::Single(start, end)) => {
             let slice = bytes.slice(start as usize..=end as usize);
             let mut resp = HttpResponse::PartialContent();
@@ -531,7 +541,7 @@ fn build_buffered_response(
             resp.header("cache-control", cache_control_header(&hit.cache));
             resp.header(
                 "content-range",
-                format!("bytes {start}-{end}/{}", chosen.size),
+                format!("bytes {start}-{end}/{served_size}"),
             );
             resp.header("accept-ranges", "bytes");
             apply_variant_headers(&mut resp, chosen);
@@ -921,6 +931,51 @@ mod tests {
             mutable: false,
             variants: HashMap::new(),
         }
+    }
+
+    /// REGRESSION (remote panic on a hostile manifest): `AssetEntry.size` is
+    /// copied verbatim out of the creator's manifest
+    /// (`lookup_static_hit`, `size: entry.size`) and is validated NOWHERE —
+    /// not by `Manifest::validate`, not by deploy ingest. `parse_range`
+    /// clamps the requested range to that DECLARED size, and
+    /// `build_buffered_response` then slices the REAL blob bytes with those
+    /// indices. Declare a size larger than the blob and any `Range` request
+    /// panics inside the ntex handler ("range end out of bounds"). One
+    /// creator, one line of JSON, a panic any anonymous client can trigger on
+    /// the shared edge. The slice must be clamped to the bytes actually held.
+    ///
+    /// What this does NOT catch: the same declared-size lie on the STREAMING
+    /// path (`SizedStream::new(chosen.size, …)` promises a Content-Length the
+    /// drain never delivers), or the per-variant `size` field.
+    #[test]
+    fn range_request_on_an_oversized_declared_size_does_not_panic() {
+        let hit = static_hit(&hex_hash(0x42), 1_000_000);
+        let chosen = super::super::variants::pick_variant(&hit, None);
+        assert_eq!(
+            chosen.size, 1_000_000,
+            "precondition: the declared size flows through to the range math"
+        );
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=500-800")
+            .to_http_request();
+        // The real blob is 10 bytes; the manifest claims 1 MB.
+        let bytes = bytes::Bytes::from_static(b"0123456789");
+        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_buffered_response(
+                &req,
+                &hit,
+                &chosen,
+                "\"etag\"",
+                &bytes,
+                std::time::Instant::now(),
+            );
+        }));
+        assert!(
+            served.is_ok(),
+            "a Range request against an asset whose manifest over-declares its \
+             size panicked the serve path; the byte range must be clamped to the \
+             bytes actually fetched, not to the creator-supplied size",
+        );
     }
 
     /// Bare HttpRequest — no headers — for tests that don't care about
