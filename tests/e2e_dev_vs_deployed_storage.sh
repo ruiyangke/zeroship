@@ -108,25 +108,16 @@ echo "  deployed backend: $DEPLOYED_STORAGE   mutation: $MUTATE"
 # operation "diverged" with `r.entries.map is not a function`. That reads
 # exactly like an S3 backend defect and is not one.
 #
-# mtime is a weak proxy for provenance, so this warns loudly rather than
-# failing: on a fresh clone every source file is newer than nothing, and the
-# question it answers ("did you rebuild after touching these crates?") is worth
-# a line of output even when the answer is fine.
-# `src` only, and one `find -printf | sort` rather than `xargs ls -t`: the
-# runtime crate carries a 1.1GB gitignored WPT checkout under tests/, and a
-# multi-batch xargs would report the newest file of the LAST batch.
-newest_src=$(find "$ROOT/crates/plugin-storage/src" "$ROOT/crates/runtime/src" \
-  "$ROOT/crates/worker/src" "$ROOT/crates/gateway/src" "$ROOT/crates/control/src" \
-  "$ROOT/libs/compio-s3/src" "$ROOT/sdks/storage/src" \
-  \( -name '*.rs' -o -name '*.ts' \) -printf '%T@ %p\n' 2>/dev/null \
-  | sort -nr | head -1 | cut -d' ' -f2-)
-for b in zeroship zeroship-worker zeroship-gate zeroship-control dev-provision; do
-  [ -x "$BIN/$b" ] || { fail "missing $BIN/$b -- see the prereqs in this file's header"; exit 2; }
-  if [ -n "$newest_src" ] && [ "$newest_src" -nt "$BIN/$b" ]; then
-    echo "  WARN $b is OLDER than $(basename "$newest_src") -- rebuild, or the diff below may be"
-    echo "       reporting a version skew between the two sides rather than a real divergence."
-  fi
-done
+# Shared with the other dev-vs-deployed harnesses, which have the same blind
+# spot. `dev` runs vite, which spawns `zeroship serve` (sdks/vite-plugin/src/
+# dev-server.ts), so the CLI binary is genuinely part of the dev side and
+# belongs in the list beside the server binaries.
+# shellcheck source=lib/binary_freshness.sh
+source "$ROOT/tests/lib/binary_freshness.sh"
+zs_check_binary_freshness "$ROOT" "$BIN" \
+  "crates/plugin-storage/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src libs/compio-s3/src sdks/storage/src" \
+  "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
+  || { [ "$?" -eq 2 ] && exit 2; }
 
 # --- the probe: one deterministic sequence, printed as RESULTS -------------
 #
