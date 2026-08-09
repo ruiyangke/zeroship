@@ -320,6 +320,14 @@ async fn forward_to_worker_path(
     // yet. The write may succeed into the kernel buffer; the failure only
     // surfaces on read as "connection closed before headers complete".
     // Retrying on a fresh connection handles that race.
+    //
+    // The retry is gated on ZERO RESPONSE BYTES HAVING BEEN READ
+    // ([`ReadFailure::consumed`]). Once the worker has sent us so much as a
+    // partial status line it has parsed the request and run the handler —
+    // any writes that handler made are committed. Re-sending the request to
+    // a fresh worker would execute a non-idempotent mutation twice, and the
+    // gateway's idempotency layer cannot catch it: that layer sits above
+    // this function with its in-flight lock already held.
     let (mut stream, mut from_pool) = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
         Some(s) => (s, true),
         None => {
@@ -346,7 +354,10 @@ async fn forward_to_worker_path(
 
     let parsed = match compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream)).await {
         Ok(Ok(p)) => p,
-        Ok(Err(e)) if from_pool => {
+        // Retry ONLY when nothing came back on the wire. A failure that
+        // already consumed response bytes proves the worker ran the handler;
+        // replaying it would double-execute the mutation, so it propagates.
+        Ok(Err(e)) if from_pool && !e.consumed => {
             let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
                 .await
                 .map_err(|_| format!("reconnect timeout (after: {e})"))?
@@ -580,18 +591,52 @@ struct ParsedHeaders {
     trailing: Vec<u8>,
 }
 
+/// A failure reading a worker response's headers, carrying the one fact a
+/// caller needs to decide whether the request may be re-sent.
+///
+/// `consumed` is true once ANY response byte has been read off the socket.
+/// The header read is a loop — it accumulates 4 KiB chunks until `httparse`
+/// reports `Complete` — so a failure can arrive on the second or tenth
+/// iteration, long after the worker proved it had received and processed the
+/// request. Collapsing that into a bare error string is what let a partial
+/// response be mistaken for a never-delivered one.
+struct ReadFailure {
+    message: String,
+    /// True once at least one byte of the response has been read. A
+    /// `consumed` failure is NOT safe to retry: the request reached a
+    /// handler, so re-sending it re-runs the handler's side effects.
+    consumed: bool,
+}
+
+impl std::fmt::Display for ReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Read HTTP response headers from the stream. Returns parsed header info
 /// and any trailing bytes that were read past the header boundary.
-async fn read_http_headers(stream: &mut Stream) -> Result<ParsedHeaders, String> {
+async fn read_http_headers(stream: &mut Stream) -> Result<ParsedHeaders, ReadFailure> {
     let mut buf = Vec::with_capacity(4096);
+    // Flipped the instant the first read extends `buf`, and never cleared.
+    let mut consumed = false;
 
     loop {
         let read_buf = vec![0u8; 4096];
         let BufResult(r, returned) = stream.read(read_buf).await;
-        let n = r.map_err(|e| e.to_string())?;
+        let n = match r {
+            Ok(n) => n,
+            Err(e) => {
+                return Err(ReadFailure { message: e.to_string(), consumed });
+            }
+        };
         if n == 0 {
-            return Err("connection closed before headers complete".to_string());
+            return Err(ReadFailure {
+                message: "connection closed before headers complete".to_string(),
+                consumed,
+            });
         }
+        consumed = true;
         buf.extend_from_slice(&returned[..n]);
 
         let mut parsed_headers = [httparse::EMPTY_HEADER; 32];
@@ -628,7 +673,9 @@ async fn read_http_headers(stream: &mut Stream) -> Result<ParsedHeaders, String>
                 });
             }
             Ok(httparse::Status::Partial) => continue,
-            Err(e) => return Err(format!("parse: {e}")),
+            Err(e) => {
+                return Err(ReadFailure { message: format!("parse: {e}"), consumed });
+            }
         }
     }
 }
@@ -1069,6 +1116,238 @@ mod app_response_cookie_tests {
         assert_eq!(
             set_cookies(&out),
             vec!["theme=dark; Path=/; Secure; SameSite=Strict".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod pooled_retry_tests {
+    //! Retry-on-pooled-connection-failure safety.
+    //!
+    //! `forward_to_worker_path` retries a request when the read of the
+    //! response headers fails on a connection that came out of the keep-alive
+    //! pool. That retry is correct for the half-open race (the peer had
+    //! already closed; the request never reached a handler) and WRONG once
+    //! the worker has sent us any response bytes — those bytes prove the
+    //! worker parsed the request and ran the handler, so re-sending a
+    //! non-idempotent POST executes the mutation a second time.
+    //!
+    //! These tests drive the real socket path: a live `compio` TCP listener
+    //! plays the worker, and the assertion is on HOW MANY TIMES THE WORKER
+    //! RECEIVED THE REQUEST — not on any internal flag of the read helper.
+
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    /// What the mock worker does with a request once it has read one.
+    #[derive(Clone, Copy)]
+    enum MockBehavior {
+        /// Send a status line + one header and then close, WITHOUT the
+        /// terminating blank line. `httparse` therefore reports
+        /// `Status::Partial`, the loop iterates, and the next read returns 0.
+        /// Bytes have been consumed by the time the error is produced.
+        PartialThenClose,
+        /// Read the request off the wire and close WITHOUT writing a single
+        /// response byte and WITHOUT counting it as received — the half-open
+        /// keep-alive race, where the pooled socket's peer was already gone
+        /// and the bytes we wrote were discarded, never reaching a handler.
+        ///
+        /// Draining the request rather than closing on accept is a
+        /// determinism device: closing first would race the client's write
+        /// (an RST could fail `write_all` and send the code down the
+        /// pre-read reconnect at the top of `forward_to_worker_path`
+        /// instead of the read-failure arm this test is about). Draining
+        /// guarantees the client's write succeeds and the failure surfaces
+        /// on the read, with zero bytes consumed.
+        DrainThenClose,
+        /// A complete, well-formed response.
+        FullResponse,
+    }
+
+    /// True once `buf` holds a complete HTTP request (headers + the body
+    /// length its `Content-Length` declares).
+    fn request_complete(buf: &[u8]) -> bool {
+        let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&buf[..pos]);
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        buf.len() >= pos + 4 + content_length
+    }
+
+    async fn serve_one(
+        mut stream: compio::net::TcpStream,
+        behavior: MockBehavior,
+        counter: Arc<AtomicUsize>,
+    ) {
+        let mut acc: Vec<u8> = Vec::new();
+        while !request_complete(&acc) {
+            let buf = vec![0u8; 4096];
+            let BufResult(r, buf) = compio::io::AsyncRead::read(&mut stream, buf).await;
+            match r {
+                Ok(0) | Err(_) => return,
+                Ok(n) => acc.extend_from_slice(&buf[..n]),
+            }
+        }
+
+        if matches!(behavior, MockBehavior::DrainThenClose) {
+            // Bytes discarded, no handler ran, nothing written back.
+            return;
+        }
+
+        // Count only AFTER a full request has arrived: this is the moment a
+        // real worker would have parsed it and run the handler (committing
+        // whatever writes it makes).
+        counter.fetch_add(1, Ordering::SeqCst);
+
+        let response: Vec<u8> = match behavior {
+            MockBehavior::PartialThenClose => {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n".to_vec()
+            }
+            MockBehavior::FullResponse => {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()
+            }
+            MockBehavior::DrainThenClose => unreachable!(),
+        };
+        let _ = compio::io::AsyncWriteExt::write_all(&mut stream, response).await;
+        // Drop -> FIN. The client's follow-up read returns 0.
+    }
+
+    /// Start a mock worker. `behaviors[i]` governs the i-th accepted
+    /// connection; connections past the end of the slice reuse the last
+    /// entry. Returns (worker_url, request_counter).
+    async fn start_mock_worker(behaviors: Vec<MockBehavior>) -> (String, Arc<AtomicUsize>) {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock worker");
+        let addr = listener.local_addr().expect("mock worker local addr");
+        let worker_url = format!("http://{addr}");
+        let counter = Arc::new(AtomicUsize::new(0));
+        let accept_counter = Arc::clone(&counter);
+
+        compio::runtime::spawn(async move {
+            let mut conn_idx = 0usize;
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let behavior = behaviors[conn_idx.min(behaviors.len() - 1)];
+                conn_idx += 1;
+                let c = Arc::clone(&accept_counter);
+                compio::runtime::spawn(serve_one(stream, behavior, c)).detach();
+            }
+        })
+        .detach();
+
+        (worker_url, counter)
+    }
+
+    /// Put a live connection to `worker_url` into the thread-local keep-alive
+    /// pool, exactly as a completed prior request would have. The next
+    /// `forward_to_worker_path` for that URL takes it, so `from_pool` is true.
+    async fn seed_pool(worker_url: &str) {
+        let (stream, _, _) = connect(worker_url).await.expect("seed pool connect");
+        CONN_POOL.with(|p| p.borrow_mut().put(pool_key(worker_url), stream));
+    }
+
+    async fn dispatch(worker_url: &str) -> Result<HttpResponse, String> {
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        forward_to_worker_path(
+            worker_url,
+            "/dispatch/test",
+            &app_id,
+            "plan_test",
+            &request_id,
+            br#"{"op":"charge"}"#,
+            None,
+            "",
+        )
+        .await
+    }
+
+    #[compio::test]
+    async fn partial_response_on_pooled_connection_is_not_replayed() {
+        // The worker received the POST, ran the handler (any DB writes are
+        // already committed), emitted part of the status line, then died.
+        // The gateway must NOT re-send that POST to a fresh worker: the
+        // mutation would execute twice.
+        //
+        // Connection 0 is the seeded pooled one and answers partially; every
+        // later connection would be a REPLAY, so it answers fully to make the
+        // replay visibly "succeed" rather than error out for its own reasons.
+        let (worker_url, counter) = start_mock_worker(vec![
+            MockBehavior::PartialThenClose,
+            MockBehavior::FullResponse,
+        ])
+        .await;
+        seed_pool(&worker_url).await;
+
+        let _ = dispatch(&worker_url).await;
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "the worker must receive the non-idempotent request EXACTLY ONCE; \
+             it received it {} times, so the mutation ran twice",
+            counter.load(Ordering::SeqCst)
+        );
+    }
+
+    #[compio::test]
+    async fn partial_response_on_pooled_connection_surfaces_an_error() {
+        // Companion to the count assertion: with the replay suppressed the
+        // call must fail rather than silently return a bogus response.
+        let (worker_url, _counter) = start_mock_worker(vec![
+            MockBehavior::PartialThenClose,
+            MockBehavior::FullResponse,
+        ])
+        .await;
+        seed_pool(&worker_url).await;
+
+        let result = dispatch(&worker_url).await;
+
+        assert!(
+            result.is_err(),
+            "a truncated worker response must surface as an error, not a response"
+        );
+    }
+
+    #[compio::test]
+    async fn half_open_pooled_connection_is_still_retried() {
+        // Guard on the OTHER side of the predicate: when zero response bytes
+        // were read, the request never reached a handler and the retry is
+        // exactly right. That behaviour must survive the fix — a fix that
+        // simply deleted the retry would pass the test above and fail here.
+        //
+        // Connection 0 (the pooled one) discards the request and closes;
+        // connection 1 is the retry and answers fully.
+        let (worker_url, counter) = start_mock_worker(vec![
+            MockBehavior::DrainThenClose,
+            MockBehavior::FullResponse,
+        ])
+        .await;
+        seed_pool(&worker_url).await;
+
+        let result = dispatch(&worker_url).await;
+
+        assert!(
+            result.is_ok(),
+            "a half-open pooled connection must be retried transparently: {result:?}",
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "exactly one worker should have actually received the request"
         );
     }
 }
