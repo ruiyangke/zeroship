@@ -91,6 +91,14 @@ struct Fixture {
     deploy_tmp_dir: PathBuf,
     scheduler_store: WorkflowSchedulerStore,
     _db: TestDatabase,
+    /// Milliseconds spent cloning this test's database from the template.
+    ///
+    /// Carried so a failing wait can report it. `CREATE DATABASE ... WITH
+    /// TEMPLATE` serialises across sessions, so under a full suite this phase
+    /// can dominate a test's wall clock while contributing nothing to the
+    /// behaviour under test - and a panic that reports only a final state
+    /// cannot distinguish "the engine stalled" from "setup ate the budget".
+    setup_ms: u128,
 }
 
 #[derive(Clone)]
@@ -248,6 +256,7 @@ async fn build_isolated_fixture_with_gateway(
     let admin_url = dsn_for_db(base_url, "postgres");
     let isolated_url = dsn_for_db(base_url, &db_name);
 
+    let clone_started = std::time::Instant::now();
     {
         let _clone_gate = DB_CLONE_GATE
             .lock()
@@ -276,7 +285,9 @@ async fn build_isolated_fixture_with_gateway(
         admin_url,
         name: db_name,
     };
-    let fx = build_fixture_with_gateway(&isolated_url, label, gateway_url, test_db).await;
+    let clone_ms = clone_started.elapsed().as_millis();
+    let mut fx = build_fixture_with_gateway(&isolated_url, label, gateway_url, test_db).await;
+    fx.setup_ms = clone_ms;
     scrub_cloned_fixture_data(&fx.pg).await;
     fx
 }
@@ -476,6 +487,10 @@ async fn build_fixture_with_gateway(
         deploy_tmp_dir,
         scheduler_store,
         _db: test_db,
+        // Overwritten by `build_isolated_fixture_with_gateway`, which is the
+        // caller that actually clones the database. Fixtures built directly
+        // against an existing database do no cloning, so zero is accurate.
+        setup_ms: 0,
     }
 }
 
@@ -1471,7 +1486,25 @@ async fn wait_for_gated_requests(dispatcher: &GatedCheckpointDispatcher, n: usiz
     );
 }
 
+/// Waits for every run to reach `completed` AND for the scheduler to drop its
+/// inflight marker.
+///
+/// The panic below reports DURATIONS as well as the final state, because the
+/// state alone cannot distinguish the two failures that look identical here:
+/// a budget too small for a healthy-but-slow engine, and an engine that never
+/// resumed at all. An earlier version named only the state, and that sent a
+/// four-vehicle investigation down the wrong path - see #168. Read it as:
+///
+///   waited ~1-2s   -> 100 iterations really is about a second, and this bound
+///                     wants to be a wall-clock deadline (there are eleven
+///                     `compio::time::timeout` sites in this file already)
+///   waited >>10s   -> the run stalled; a larger budget would not have helped
+///                     and the defect is elsewhere
+///   setup_ms large -> the per-test database clone dominated the test's wall
+///                     clock, which happens under a full suite because
+///                     `CREATE DATABASE ... WITH TEMPLATE` serialises
 async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
+    let wait_started = std::time::Instant::now();
     for _ in 0..100 {
         let rows = fx
             .pg
@@ -1516,7 +1549,12 @@ async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
         .into_iter()
         .map(|r| (r.get("id"), r.get("state"), r.get("claimed_by")))
         .collect();
-    panic!("blocked dispatches did not complete after release: {states:?}");
+    panic!(
+        "blocked dispatches did not complete after release \
+         (waited {}ms across 100 polls; fixture db clone took {}ms): {states:?}",
+        wait_started.elapsed().as_millis(),
+        fx.setup_ms,
+    );
 }
 
 async fn pg_json_size(fx: &Fixture, value: &serde_json::Value) -> i64 {
