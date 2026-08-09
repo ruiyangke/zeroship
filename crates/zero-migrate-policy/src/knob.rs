@@ -166,7 +166,7 @@ pub enum Enforcement {
     /// does — so it MAY be sealed at a non-default value, even though the engine's own
     /// guard/apply ignores it (II.6, M-2). Distinct from `DeclaredOnly`: the II.6
     /// "can't set non-default on an enforced path" restriction applies to
-    /// `DeclaredOnly` ONLY, never to `HostEnforced`. `sec.require_approval` is the
+    /// `DeclaredOnly` ONLY, never to `HostEnforced`. `safety.require_approval` is the
     /// canonical `HostEnforced` knob — the host reads it via the sealed decision
     /// query; the engine's guard/apply never gates on it.
     HostEnforced,
@@ -400,7 +400,7 @@ mod tests {
 
         // HostEnforced has a distinct canonical encoding → a distinct registry digest.
         let base = KnobDef {
-            key: KnobKey::parse("sec.require_approval").unwrap(),
+            key: KnobKey::parse("safety.require_approval").unwrap(),
             kind: KnobKind::OrderedEnum {
                 variants: vec!["never".into(), "always".into()],
             },

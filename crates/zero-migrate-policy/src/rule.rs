@@ -104,8 +104,20 @@ pub enum AuthorPkPolicy {
 
 /// The FIXED set of structural predicates a matching table/op must satisfy
 /// post-injection (II.4.2). No open expression language — a blunt security surface.
-/// All name-comparisons evaluate over NORMALIZED names (II.2.7); the loader folds
-/// the literals here at parse time.
+///
+/// ONE rule governs every name below: a name-comparison is decided over the II.2.7
+/// fold of BOTH sides, never over the stored bytes. WHERE the fold happens differs by
+/// variant. `ColumnNamePattern`'s globs are folded by the loader and stored folded - a
+/// [`NameGlob`] is match machinery, it has no author-facing text to preserve. Every
+/// other name literal here (`ForbiddenColumns::names`, `TypeNullability::column`,
+/// `RequireIndex::columns`) is stored VERBATIM as authored and folded at comparison
+/// time by `compose::names_match`. Folding those at load instead would rewrite the
+/// sealed predicate encoding, which is a policy-identity question and not a matching
+/// one.
+///
+/// So a comparison written as `stored == catalog_name` is a bug: it puts an unfolded
+/// literal against a folded catalog name and silently misses on any case or quoting
+/// difference. Compare through `names_match`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ValidatePredicate {
     /// The table must carry a primary key (satisfiable by an injected PK).
@@ -115,7 +127,7 @@ pub enum ValidatePredicate {
         require: Vec<NameGlob>,
         forbid: Vec<NameGlob>,
     },
-    /// These (normalized) column names must NOT appear.
+    /// These column names must NOT appear. Stored as authored, matched folded.
     ForbiddenColumns { names: Vec<String> },
     /// A named column's type / nullability constraint.
     TypeNullability {

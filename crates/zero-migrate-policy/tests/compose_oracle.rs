@@ -1019,12 +1019,12 @@ scope = { include = ["staging"] }
     assert!(!vals.is_empty(), "charter validate dropped");
 }
 
-/// An `OrderedEnum` `Require` obligation modelled on `sec.require_approval`
+/// An `OrderedEnum` `Require` obligation modelled on `safety.require_approval`
 /// (`never ⊑ on_destructive ⊑ always`), for the union-up composition test.
 fn registry_with_require_approval() -> PolicyRegistry {
     registry()
         .with([def(
-            "sec.require_approval",
+            "safety.require_approval",
             KnobKind::OrderedEnum {
                 variants: vec!["never".into(), "on_destructive".into(), "always".into()],
             },
@@ -1040,7 +1040,7 @@ fn require_approval_composes_union_up_operator_always_beats_creator_never() {
     let root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[require]]
-key = "sec.require_approval"
+key = "safety.require_approval"
 value = "always"
 scope = { include = ["app_*"] }
 "#,
@@ -1050,7 +1050,7 @@ scope = { include = ["app_*"] }
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[require]]
-key = "sec.require_approval"
+key = "safety.require_approval"
 value = "never"
 scope = { include = ["app_*"] }
 "#,
@@ -1065,13 +1065,13 @@ scope = { include = ["app_*"] }
 
     assert!(
         obs.iter()
-            .any(|(k, v)| k.as_str() == "sec.require_approval"
+            .any(|(k, v)| k.as_str() == "safety.require_approval"
                 && *v == KnobValue::Str("always".into())),
         "operator `always` obligation dropped by creator draft: {obs:?}"
     );
     let loosest = obs
         .iter()
-        .filter(|(k, _)| k.as_str() == "sec.require_approval")
+        .filter(|(k, _)| k.as_str() == "safety.require_approval")
         .filter_map(|(_, v)| match v {
             KnobValue::Str(s) => Some(s.clone()),
             _ => None,

@@ -3828,12 +3828,12 @@ impl Op {
     }
 
     /// Is this op DESTRUCTIVE / data-lossy — the SAME notion the guard's
-    /// `data_security_class` classifies (`sec.destructive_ops` consumes) at the SQL
+    /// `data_security_class` classifies (`safety.destructive_ops` consumes) at the SQL
     /// level, mapped onto the closed [`Op`] vocabulary.
     ///
     /// The guard is the authoritative classifier over rendered SQL; this is its
     /// Op-level mirror for callers that must decide destructiveness BEFORE lowering
-    /// (the host's `sec.require_approval` `on_destructive` query). It is EXHAUSTIVE
+    /// (the host's `safety.require_approval` `on_destructive` query). It is EXHAUSTIVE
     /// over the closed [`Op`] set — a new variant is a compile error until it
     /// declares its data-security class, so the two classifiers cannot silently
     /// drift.

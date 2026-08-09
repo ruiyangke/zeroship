@@ -902,9 +902,9 @@ fn name_globs(lits: &[String]) -> Result<Vec<NameGlob>, LoadError> {
 /// no table name) on a scope overlapping S, is internally inconsistent → error.
 ///
 /// Overlap is decided by the scope lattice meet (`S ⊓ T != Nothing`). Column-name
-/// comparison is by folded byte equality (II.2.7) — the validate literals are
-/// already folded; the inject column names are folded through the same identifier
-/// normalizer for the comparison.
+/// comparison is by folded byte equality (II.2.7): a `ForbiddenColumns` name is stored
+/// as the author wrote it, so BOTH sides go through `fold_name` here, not just the
+/// inject side.
 fn check_self_contradiction(rules: &[Rule]) -> Result<(), LoadError> {
     for inj in rules {
         let RuleKind::Inject { spec } = &inj.kind else {

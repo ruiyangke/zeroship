@@ -18,7 +18,7 @@
 //! - `never` → never requires approval;
 //! - `always` → always requires approval;
 //! - `on_destructive` → requires approval iff the op is [`Op::is_destructive`] (the
-//!   same destructive notion the guard's `sec.destructive_ops` classifier uses).
+//!   same destructive notion the guard's `safety.destructive_ops` classifier uses).
 
 use zero_migrate_policy::{
     normalize_pg_identifier, EffectivePolicy, KnobKey, KnobValue, ObjectName,
