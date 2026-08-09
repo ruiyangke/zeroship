@@ -404,10 +404,18 @@ interface WorkflowRun<Output = unknown> {
 }
 ```
 
-`pause()` stops dispatching until `resume()`. `cancel()` defaults to
-`{ mode: "abort" }`, which does not run compensators. `cancel({ mode:
-"compensate" })` runs rollback for completed compensable steps, then ends as
-`cancelled`.
+`pause()` stops dispatching until `resume()`. `cancel()` aborts the run
+without running compensators, and ends it as `cancelled`.
+
+> **`mode` is not implemented on either backend.** `cancel()` accepts the
+> options object and ignores it, so `{ mode: "compensate" }` aborts exactly
+> like `{ mode: "abort" }` and no rollback runs. This is not a gap at one call
+> site: the backend contract is
+> `transition(run_id, op: &'static str)`, so there is nowhere for a
+> runtime-chosen mode to travel. Implementing it means changing that contract,
+> not forwarding an argument. Until then, do not read a `compensate` cancel as
+> a rollback: to roll back completed steps, let the run FAIL, which is the
+> path that does run compensators.
 
 `restart(opts?)` requeues the same run ID:
 
@@ -685,8 +693,10 @@ Only completed `step.run` steps with a compensator are rolled back. Sleeps,
 signals, child waits, incomplete steps, and steps whose errors were caught and
 handled are not compensated.
 
-`run.cancel({ mode: "compensate" })` uses the same reverse-order rollback and
-then ends as `cancelled`. Plain `run.cancel()` is a hard abort and does not run
+`run.cancel()` is a hard abort and does not run compensators. Nor does
+`run.cancel({ mode: "compensate" })`: the `mode` option is accepted and
+ignored on both backends, so cancelling is never a rollback today. See the
+note on `cancel()` above. A failing run is currently the only path that runs
 compensators.
 
 `NondeterministicError` and `StalledError` fail closed and do not enter
