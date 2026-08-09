@@ -2887,7 +2887,7 @@
           ]
         },
         "references": {
-          "description": "A typed single-column foreign-key reference. The local column's storage\ntype remains fully specified by [`Self::ty`]; this facet adds only the\ntarget identity and referential actions. In particular, it never infers\nor replaces the local type from a live catalog.",
+          "description": "A typed single-column foreign-key reference. The local column's storage\ntype remains fully specified by [`Self::ty`]; this facet adds only the\ntarget identity and referential actions. In particular, it never infers\nor replaces the local type from a live catalog.\n\nNOT the only construct in this IR spelled `references`, and the two are not\ninterchangeable. This one is a COLUMN FACET, a sibling of `name` and `type`,\ncarrying a target TABLE AND COLUMN plus `ON DELETE` / `ON UPDATE`. The other\nis the column TYPE variant [`ColType::Ref`], which carries a target table\nname and nothing else. A reader searching this IR for `references` finds\nwhichever comes first; they are cross-linked so neither can be mistaken for\nthe whole story.",
           "anyOf": [
             {
               "$ref": "#/$defs/ColumnReference"
@@ -3084,7 +3084,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Foreign-key reference to another table (the referenced table name).",
+          "description": "Foreign-key reference to another table (the referenced table name).\n\nThe WEAKER of this IR's two constructs spelled `references`, and the two are\nnot interchangeable. This one is a column TYPE and names a table only. The\nother is the column FACET [`IrColumn::references`], a sibling of `name` and\n`type`, which names a target table AND column and carries `ON DELETE` /\n`ON UPDATE`. Transcribing this variant alone loses the target column and the\nreferential actions, so a consumer that emits it where the facet was meant\nsilently narrows the declaration.",
           "type": "object",
           "properties": {
             "ref": {
@@ -4516,7 +4516,7 @@
       ]
     },
     "ColumnReference": {
-      "description": "Target and behavior for a typed single-column foreign-key reference.\n\nComposite foreign keys deliberately do not use this shape; they remain\ntable-level constraints with ordered local and referenced column lists.",
+      "description": "Target and behavior for a typed single-column foreign-key reference.\n\nComposite foreign keys deliberately do not use this shape; they remain\ntable-level constraints with ordered local and referenced column lists.\n\nReached through the column facet [`IrColumn::references`], and NOT to be\nconfused with the column type variant [`ColType::Ref`], which is also spelled\n`references` and carries a table name alone. `table` and `column` are both\nrequired here; that pair, plus the referential actions, is exactly what the\ntype variant cannot express.",
       "type": "object",
       "properties": {
         "table": {

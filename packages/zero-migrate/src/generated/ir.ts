@@ -120,6 +120,10 @@ export type ColType =
   | "bytes"
   | "geoPoint"
   | { char: { length: number } }
+  // The WEAKER of the two constructs in this file spelled `references`: a column
+  // TYPE naming a table only. The other is the column FACET `IrColumn.references`
+  // below, which names a table AND column and carries onDelete/onUpdate. Emitting
+  // this one where the facet was meant silently drops the target column.
   | { ref: { references: string } }
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }
@@ -282,7 +286,12 @@ export interface IrColumn {
    *  text while this facet carries the exact persisted format. Default-absent. */
   valueFormat?: ValueFormat | null;
   /** Typed single-column foreign-key reference. The local `type` remains
-   *  explicit and is never selected from the referenced target or catalog. */
+   *  explicit and is never selected from the referenced target or catalog.
+   *
+   *  The STRONGER of the two constructs spelled `references`: a column facet
+   *  carrying a target table AND column plus onDelete/onUpdate. The other is the
+   *  `ColType` variant `{ ref: { references } }`, which names a table only.
+   *  A transcription that stops at whichever it meets first loses the difference. */
   references?: ColumnReference | null;
   /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix, retained
    *  for old internal descriptors. It is not TypeID or public authoring.

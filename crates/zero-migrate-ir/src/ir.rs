@@ -585,6 +585,14 @@ pub enum ColType {
         length: u32,
     },
     /// Foreign-key reference to another table (the referenced table name).
+    ///
+    /// The WEAKER of this IR's two constructs spelled `references`, and the two are
+    /// not interchangeable. This one is a column TYPE and names a table only. The
+    /// other is the column FACET [`IrColumn::references`], a sibling of `name` and
+    /// `type`, which names a target table AND column and carries `ON DELETE` /
+    /// `ON UPDATE`. Transcribing this variant alone loses the target column and the
+    /// referential actions, so a consumer that emits it where the facet was meant
+    /// silently narrows the declaration.
     Ref {
         /// The referenced table.
         references: String,
@@ -1282,6 +1290,14 @@ pub struct IrColumn {
     /// type remains fully specified by [`Self::ty`]; this facet adds only the
     /// target identity and referential actions. In particular, it never infers
     /// or replaces the local type from a live catalog.
+    ///
+    /// NOT the only construct in this IR spelled `references`, and the two are not
+    /// interchangeable. This one is a COLUMN FACET, a sibling of `name` and `type`,
+    /// carrying a target TABLE AND COLUMN plus `ON DELETE` / `ON UPDATE`. The other
+    /// is the column TYPE variant [`ColType::Ref`], which carries a target table
+    /// name and nothing else. A reader searching this IR for `references` finds
+    /// whichever comes first; they are cross-linked so neither can be mistaken for
+    /// the whole story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<ColumnReference>,
     /// Legacy internal platform-ID prefix for the
@@ -1401,6 +1417,12 @@ impl RefAction {
 ///
 /// Composite foreign keys deliberately do not use this shape; they remain
 /// table-level constraints with ordered local and referenced column lists.
+///
+/// Reached through the column facet [`IrColumn::references`], and NOT to be
+/// confused with the column type variant [`ColType::Ref`], which is also spelled
+/// `references` and carries a table name alone. `table` and `column` are both
+/// required here; that pair, plus the referential actions, is exactly what the
+/// type variant cannot express.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ColumnReference {
