@@ -377,6 +377,78 @@ test("legacy guardable Op variants do not carry the removed native ifExists fiel
   }
 });
 
+// ── Export-name ↔ $defs coverage (orphan / omitted structural-type gate). ──
+//
+// The checks above pin FIELD-level detail for a hand-picked set of NAMED
+// types (`TS_OP_FIELDS`, `TS_FLAGS_OVERRIDE`, the enum-token lists). None of
+// them catch a type that has no business being in this file at all: an
+// exported interface whose name (and claimed shape) has no counterpart
+// anywhere in the schema. That is exactly how `IrBatch` — a
+// `{ cursorColumn: string; batchSize: number }` the runtime REJECTS at
+// `ops.ts` ('backfill({ cursorColumn }) is not a field of the backfill op;
+// use cursorColumns: ["column"]') — survived here: it even carried its own
+// doc comment asserting "SDK-LOCAL ergonomics ... the engine schema has no
+// matching $defs entry", a claim nothing enforced and that was itself false
+// (nothing constructed or consumed it; the real, validated field is the
+// PLURAL `cursorColumns` already on the `backfill` `Op` variant above).
+//
+// This check is a NAME correspondence, not a structural one: for every
+// `export interface X` / `export type X` declared directly in `ir.ts`, the
+// (possibly renamed) name must be a key of the schema's `$defs` — or, for the
+// one name that IS legitimately the document root rather than a `$defs`
+// entry (`MigrationIr`), match the schema's `title`.
+//
+// WHAT THIS DOES NOT CATCH (read before trusting a green run here):
+//  - Field-shape drift on a type that keeps a VALID name. A type whose name
+//    matches a `$defs` key but whose fields silently diverge from it is NOT
+//    caught here unless it is also one of the hand-picked sets checked above
+//    (`TS_OP_FIELDS` for `Op` variants, `TS_FLAGS_OVERRIDE` for
+//    `IrFlagsOverride`, the enum-token lists). Most exported interfaces in
+//    this file (`IrIndex`, `IrColumn`, `TableRuntimeOptions`, …) have NO
+//    field-level check anywhere in this file.
+//  - Nested/inline shapes used only inside another type (e.g. the `perRow`
+//    arm of `BackfillSetValue`) beyond the outer name's existence.
+//  - The closed string-enum `$defs` (`BinaryOp`, `RefAction`, …): those are
+//    `import type`-ed from `./enums.js`, not declared with `export
+//    interface`/`export type` in THIS file, so the regex extraction below
+//    does not see them. They are not silently unchecked, though — the
+//    "closed string-enum tokens match the schema" test above already pins
+//    every one of those, by name, individually.
+//  - The `RENAMED_TO_SCHEMA` map is a manually maintained, INTENTIONAL
+//    allowlist of the two cases where the TS name legitimately differs from
+//    the schema `$defs` key. It is not a general escape hatch: a future
+//    orphan type must NOT be "fixed" by adding it to this map — it has no
+//    schema counterpart to rename to.
+const RENAMED_TO_SCHEMA: Record<string, string> = {
+  MaskKind: "IrMaskKind",
+  Classification: "IrClassification",
+};
+const ROOT_TYPE = "MigrationIr"; // document root: checked against schema.title, not $defs.
+
+test("every exported interface/type ir.ts declares has a schema counterpart (no orphan types like IrBatch)", () => {
+  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+  const exported = [...irTs.matchAll(/^export (?:interface|type) (\w+)/gm)].map((m) => m[1]);
+  // Sanity floor so a regex/extraction regression (e.g. the export style
+  // changes and the pattern stops matching) reads as a fast, loud failure
+  // here rather than a silent "0 orphans found because nothing was scanned".
+  assert.ok(exported.length > 40, `sanity: expected dozens of exported ir.ts types, got ${exported.length}: ${exported.join(", ")}`);
+  assert.equal(schema.title, ROOT_TYPE, "schema root title changed — update ROOT_TYPE below");
+
+  const defs = schema.$defs;
+  const orphans: string[] = [];
+  for (const name of exported) {
+    if (name === ROOT_TYPE) continue;
+    const schemaName = RENAMED_TO_SCHEMA[name] ?? name;
+    if (!Object.prototype.hasOwnProperty.call(defs, schemaName)) orphans.push(name);
+  }
+  assert.deepEqual(
+    orphans,
+    [],
+    `ir.ts exports type(s) with no schema $defs counterpart — an orphan SDK-local type asserting a shape ` +
+      `nothing in the engine schema backs (this is how IrBatch shipped): ${orphans.join(", ")}`,
+  );
+});
+
 // **PR10 review F4** — the "regenerate + diff" freshness gate. Re-run the codegen
 // (`gen-ir-types.mjs`) into a temp file and assert byte-equality with the committed
 // `src/generated/enums.ts`. A schema change that alters a generated enum (e.g. a new
