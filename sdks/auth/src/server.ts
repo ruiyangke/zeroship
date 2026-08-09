@@ -55,11 +55,23 @@ export const auth = {
 
   /**
    * Returns the authenticated user, or throws an "Authentication required"
-   * error carrying `status: 401` (+ `code: "unauthenticated"`). The kernel
+   * error carrying `status: 401` and `code: "UNAUTHENTICATED"`. The kernel
    * primitive throws the same status-bearing shape; the gateway/worker
    * dispatch path reads `.status` and surfaces a clean 401 (a 4xx, so the
    * 5xx body-sanitizer does NOT mask the message). A status-less throw would
    * default to 500 and be masked as "internal error" (ISS-67).
+   *
+   * `code` is the canonical RPC wire token, not a private label. The client
+   * (`@zeroship/rpc`) lifts the body's `code` VERBATIM in
+   * `parseErrorResponse` (falling back to the status-derived
+   * "UNAUTHENTICATED" only when the body carries none) and its
+   * `onAuthExpired` hook branches on exactly `"UNAUTHENTICATED"`. A private
+   * spelling here would therefore not merely fail to match; it would
+   * OVERRIDE the otherwise-correct status-derived code. Deployed that is
+   * invisible (the gateway's 401 answers before the worker runs), so the
+   * damage lands only in dev, where this throw is the 401 source: an app that
+   * re-authenticates from `onAuthExpired` would silently stop doing so.
+   * Seam coverage: `tests/auth-expired-seam.test.ts`.
    */
   requireUser(): User {
     const ea = envAuth();
@@ -68,7 +80,7 @@ export const auth = {
     }
     throw Object.assign(new Error("Authentication required"), {
       status: 401,
-      code: "unauthenticated",
+      code: "UNAUTHENTICATED",
     });
   },
 

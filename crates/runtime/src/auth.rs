@@ -19,6 +19,7 @@
 //! invocation frame. Explicit runtime bindings remain as host-turn fallbacks.
 
 use crate::plugin::{NativePlugin, NativeRegistrar};
+use crate::rpc::error::ZsErrorCode;
 use crate::state::SharedState;
 
 /// The auth plugin — registers `env.auth.getUser()` / `env.auth.requireUser()`.
@@ -150,15 +151,28 @@ pub fn require_user_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    // The thrown error carries an explicit `status: 401` (+ a stable
-    // `code`) as own properties. The kernel dispatch error rail
-    // (`core/dispatch.rs::v8_exception_to_*` → `build_error_body`)
-    // reads `.status`/`.code` off the exception and renders the
-    // envelope: a 4xx so the 5xx body-sanitizer leaves the message
-    // intact (ISS-67). Without `.status`, a bare `Error` defaults to 500
-    // and the anon case gets masked as "internal error" — a misleading
-    // 500 for what is plainly an authentication failure. Mirrors the
-    // `rpc::build_capability_violation` shape.
+    // The thrown error carries an explicit `status: 401` and the canonical
+    // `code: "UNAUTHENTICATED"` as own properties. The kernel dispatch error
+    // rail (`core/dispatch.rs::v8_exception_to_*` -> `build_error_body`) reads
+    // `.status`/`.code` off the exception and renders the envelope: a 4xx so
+    // the 5xx body-sanitizer leaves the message intact (ISS-67). Without
+    // `.status`, a bare `Error` defaults to 500 and the anon case gets masked
+    // as "internal error", a misleading 500 for what is plainly an
+    // authentication failure. Mirrors the `rpc::build_capability_violation`
+    // shape.
+    //
+    // The `code` is taken from [`ZsErrorCode`], not spelled out here, because
+    // it is a WIRE token, not a private label. `@zeroship/rpc`'s
+    // `parseErrorResponse` lifts the body's `code` VERBATIM (falling back to
+    // the status-derived "UNAUTHENTICATED" only when the body carries none),
+    // and the client's `onAuthExpired` hook branches on exactly
+    // `"UNAUTHENTICATED"`. A private spelling here would therefore not merely
+    // fail to match: it would OVERRIDE the otherwise-correct status-derived
+    // code, so an app that re-authenticates from `onAuthExpired` would work
+    // deployed (where the gateway's `unauthenticated_response` answers before
+    // the worker runs) and silently not in dev, where this throw is the 401
+    // source. Seam coverage: `require_user_anonymous_code_is_canonical_*`
+    // below, and `sdks/auth/tests/auth-expired-seam.test.ts` on the JS side.
     let throw_auth_required = |scope: &mut v8::PinScope| {
         let msg = v8::String::new(scope, "Authentication required").unwrap();
         let exc = v8::Exception::error(scope, msg);
@@ -168,7 +182,8 @@ pub fn require_user_callback(
             obj.set(scope, status_key.into(), status_val.into());
 
             let code_key = v8::String::new(scope, "code").unwrap();
-            let code_val = v8::String::new(scope, "unauthenticated").unwrap();
+            let code_val =
+                v8::String::new(scope, ZsErrorCode::Unauthenticated.as_wire_str()).unwrap();
             obj.set(scope, code_key.into(), code_val.into());
         }
         scope.throw_exception(exc);
