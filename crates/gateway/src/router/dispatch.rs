@@ -1305,18 +1305,35 @@ async fn execute_resource_tree(
     //     site.
     //     Fail-closed: an unknown spend state maps to Block (see `check_spend`).
     //
-    //     DEGRADE DOES NOT COVER EVERY ACTION CLASS, unlike Block above. The
-    //     degraded registries are consulted only by `check_rate_limit` /
-    //     `acquire_concurrency`, and those run inside `handle_dispatch` and
-    //     `handle_subscription_dispatch` — the worker arms. The `Static` and
-    //     `Redirect` arms return without reaching either, so a Degraded app
-    //     serving an SPA is throttled by nothing, on the same egress `Block`
-    //     refuses and the platform meters as `gateway_egress_bytes`. Making
-    //     Degrade uniform means hoisting both guards here, beside the two
-    //     gates above, and dropping them from the two handlers.
     if let Err(resp) = enforce::check_spend(compiled_route.entry.spend_state) {
         return resp;
     }
+
+    // 1c. Global per-app rate limit + concurrency ceiling. Hoisted to sit with
+    //     the two gates above, and for the same reason: so they bind every
+    //     action class rather than only the worker arms. These two are the
+    //     ONLY readers of the degraded registries, so while they lived inside
+    //     `handle_dispatch` / `handle_subscription_dispatch`, `Degrade` was a
+    //     no-op for `Static` and `Redirect` — the arms that serve an SPA, and
+    //     the same egress `Block` refuses above and step 8b meters as
+    //     `gateway_egress_bytes`. Billing it, refusing it when Blocked, and
+    //     never throttling it when Degraded was not a coherent set.
+    //
+    //     A Degraded app pays `DEGRADE_FACTOR` tokens per request against the
+    //     same bucket and gets `limit / DEGRADE_FACTOR` concurrency, so this
+    //     throttles rather than refuses: at the shipped ceilings that is ~125
+    //     rps and 12 in flight, which slows an SPA without taking it down.
+    //
+    //     The guard binds for the rest of this function, so it covers building
+    //     the response as well as producing it — wider than the handler-local
+    //     scope it replaces.
+    if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
+        return resp;
+    }
+    let _concurrency_guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
+        Ok(guard) => guard,
+        Err(resp) => return resp,
+    };
 
     // Capture origin once for downstream CORS injection.
     let origin_value = req
@@ -2007,23 +2024,16 @@ async fn handle_subscription_dispatch(
     _tail: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    // The `Block` 402 is enforced by `execute_resource_tree`
-    // (hoisted to the top, before the action match), so a Blocked subscription
-    // never reaches this stub. Degrade is throttled by the degraded registries
-    // below; Warn passes (no body header on the 501 stub path).
-
-    // Rate limit + concurrency: subscriptions count against the same
-    // accounting as unary dispatch. A subscription that's been open
-    // for hours holds one slot; that's intentional — the operator
-    // can size `max_concurrent` to the steady-state subscription
-    // count plus a margin for unary traffic.
-    if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
-        return resp;
-    }
-    let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
-        Ok(guard) => guard,
-        Err(resp) => return resp,
-    };
+    // `Block`, the rate limit and the concurrency ceiling are all enforced by
+    // `execute_resource_tree`, hoisted above the action match so they bind
+    // every action class, so a Blocked or throttled subscription never reaches
+    // this stub. Warn passes (no body header on the 501 stub path).
+    //
+    // Subscriptions therefore count against the same accounting as unary
+    // dispatch, and one open for hours holds its concurrency slot for that
+    // whole time — intentional, so the operator can size the ceiling to the
+    // steady-state subscription count plus a margin for unary traffic. The
+    // guard now lives in the caller, so the slot is held for exactly as long.
 
     // Affinity selection — exercised even when the proxy itself
     // returns 501, so tests against this path can verify that the
@@ -2140,19 +2150,10 @@ async fn handle_dispatch(
     // it covers worker forward / redirect / rewrite / static uniformly — a
     // Blocked app never reaches this worker-forwarding path. Here we only read
     // the `Warn` flag to stamp the advisory `x-zs-spend-warn: 1` response
-    // header; Degrade is throttled by the degraded registries below.
+    // header. Degrade is throttled by the rate limit and concurrency ceiling,
+    // which now live beside that 402 in `execute_resource_tree` so they cover
+    // every action class rather than only this one.
     let spend_warn = route.spend_state == zeroship_core::types::SpendState::Warn;
-
-    // Rate limit
-    if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
-        return resp;
-    }
-
-    // Concurrency guard (RAII — released on drop)
-    let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
-        Ok(guard) => guard,
-        Err(resp) => return resp,
-    };
 
     // Reconstruct the URL the JS handler will see. The query string MUST be
     // preserved: the `@zeroship/rpc` transport sends `query()` calls as
@@ -2771,6 +2772,19 @@ mod tests {
     }
 
     fn build_test_state_with_workers(worker_urls: Vec<String>) -> Arc<GateState> {
+        // `burst: 1` gives a 1000-token bucket, and ANY request costs the whole
+        // thing, so this fixture cannot tell a Degraded request from a normal
+        // one. Tests that need that distinction call
+        // `build_test_state_with_limits` with a burst above `DEGRADE_FACTOR`.
+        build_test_state_with_limits(worker_urls, 1, 1, 1)
+    }
+
+    fn build_test_state_with_limits(
+        worker_urls: Vec<String>,
+        rate: u32,
+        burst: u32,
+        concurrency: u32,
+    ) -> Arc<GateState> {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -2788,9 +2802,9 @@ mod tests {
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(worker_urls, 1),
-            rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
+            rate_limiters: crate::enforce::RateLimitRegistry::new(rate, burst),
             per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
-            concurrency: crate::enforce::ConcurrencyRegistry::new(1),
+            concurrency: crate::enforce::ConcurrencyRegistry::new(concurrency),
             blob_store: Arc::new(StubBlobStore),
             blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
             disk_cache: disk,
@@ -4844,6 +4858,99 @@ mod tests {
         let body = collect_body(resp.take_body()).await;
         let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
         assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    /// Degrade must throttle a STATIC resource, exactly as Block refuses one.
+    ///
+    /// `check_rate_limit` and `acquire_concurrency` are the only readers of the
+    /// degraded registries, and they ran only inside `handle_dispatch` /
+    /// `handle_subscription_dispatch`. The `Static` and `Redirect` arms return
+    /// from the action match without reaching either, so a Degraded app served
+    /// unthrottled static egress — the same egress `Block` refuses one gate
+    /// earlier and step 8b meters as `gateway_egress_bytes`.
+    ///
+    /// `burst: 8` is what makes this discriminate. A bucket holds
+    /// `burst * 1000` tokens; a Degraded request costs `DEGRADE_FACTOR * 1000`
+    /// clamped to capacity, so one Degraded request drains an 8-burst bucket
+    /// while a normal request costs an eighth of it. The default fixture's
+    /// `burst: 1` cannot tell the two apart — both cost the whole bucket.
+    ///
+    /// What this does NOT catch: the concurrency half (requests here are
+    /// sequential, so the gauge never exceeds one), or the `Redirect` arm.
+    #[compio::test]
+    async fn degraded_app_is_throttled_on_a_static_resource() {
+        use zeroship_core::types::SpendState;
+        let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Degrade));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let fire = || async {
+            let req = ntex::web::test::TestRequest::default()
+                .uri("/about")
+                .header("host", "static-spend-app.zeroship.localhost")
+                .to_http_request();
+            handle_request(
+                req,
+                web_state(state.clone()).await,
+                "static-spend-app.zeroship.localhost",
+                "/about",
+                Bytes::new(),
+            )
+            .await
+            .status()
+        };
+
+        let first = fire().await;
+        let second = fire().await;
+        assert_eq!(
+            second,
+            ntex::http::StatusCode::TOO_MANY_REQUESTS,
+            "a Degraded app must be throttled on STATIC egress too, not only on \
+             worker dispatch (first request answered {first}, second {second})",
+        );
+    }
+
+    /// The counter-example: an app that is NOT degraded must keep serving the
+    /// same static route across several requests. Without this, the test above
+    /// could be satisfied by throttling every static request regardless of
+    /// spend state, which would be a worse bug than the one being fixed.
+    #[compio::test]
+    async fn a_non_degraded_app_is_not_throttled_on_static() {
+        use zeroship_core::types::SpendState;
+        let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        for i in 0..4 {
+            let req = ntex::web::test::TestRequest::default()
+                .uri("/about")
+                .header("host", "static-spend-app.zeroship.localhost")
+                .to_http_request();
+            let status = handle_request(
+                req,
+                web_state(state.clone()).await,
+                "static-spend-app.zeroship.localhost",
+                "/about",
+                Bytes::new(),
+            )
+            .await
+            .status();
+            assert_ne!(
+                status,
+                ntex::http::StatusCode::TOO_MANY_REQUESTS,
+                "request {i} against an Allow app was throttled; only Degrade may throttle",
+            );
+        }
     }
 
     /// #3 (RED→GREEN): a Blocked app serving a STATIC resource must 402 BEFORE
