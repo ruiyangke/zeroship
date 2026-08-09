@@ -661,7 +661,10 @@ impl IndexSnapshot {
     ///
     /// This is exactly the body of [`PartialEq`] with the name term removed, and
     /// `PartialEq` is written in terms of it, so the two can never drift into
-    /// disagreeing about what makes an index the same index.
+    /// disagreeing about what makes an index the same index. The facets themselves
+    /// are listed once, in
+    /// [`definition_differences_except_name`](Self::definition_differences_except_name),
+    /// which this delegates to.
     ///
     /// It is a COMPARABLE shape check, not physical proof that two indexes are
     /// interchangeable. `opclass`, `nulls_not_distinct` and `expr_cascade_columns`
@@ -672,18 +675,65 @@ impl IndexSnapshot {
     /// canonical predicate, INCLUDE, storage params, ONLY and comment - and nothing
     /// more.
     pub(crate) fn same_definition_except_name(&self, other: &Self) -> bool {
-        self.unique == other.unique
-            && self.columns == other.columns
-            && index_elements_canonically_eq(&self.elements, &other.elements)
-            && self.access_method == other.access_method
-            && index_predicates_canonically_eq(
-                self.predicate.as_deref(),
-                other.predicate.as_deref(),
-            )
-            && self.include == other.include
-            && self.with == other.with
-            && self.only == other.only
-            && self.comment == other.comment
+        self.definition_differences_except_name(other).is_empty()
+    }
+
+    /// The comparable attributes of `self` (the LIVE side, printed first) and
+    /// `other` (the DECLARED side) that DISAGREE, one rendered
+    /// `<facet> <live> -> <declared>` entry each. Empty exactly when
+    /// [`same_definition_except_name`](Self::same_definition_except_name) holds,
+    /// which is defined as this being empty, so the answer and the explanation
+    /// read one list of facets and can never name different sets.
+    ///
+    /// Two equal indexes push nothing, so the empty `Vec` never allocates and the
+    /// equality path pays only the comparisons it already paid.
+    ///
+    /// The bound on what this can see is
+    /// `same_definition_except_name`'s: `opclass`, `nulls_not_distinct` and
+    /// `expr_cascade_columns` are emission-only, excluded from equality, and
+    /// invisible here too.
+    pub(crate) fn definition_differences_except_name(&self, other: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.unique != other.unique {
+            out.push(format!("uniqueness {} -> {}", self.unique, other.unique));
+        }
+        if self.columns != other.columns {
+            out.push(format!("columns {:?} -> {:?}", self.columns, other.columns));
+        }
+        if !index_elements_canonically_eq(&self.elements, &other.elements) {
+            out.push(format!(
+                "key elements {:?} -> {:?}",
+                self.elements, other.elements
+            ));
+        }
+        if self.access_method != other.access_method {
+            out.push(format!(
+                "access method {} -> {}",
+                self.access_method, other.access_method
+            ));
+        }
+        if !index_predicates_canonically_eq(self.predicate.as_deref(), other.predicate.as_deref()) {
+            out.push(format!(
+                "predicate {:?} -> {:?}",
+                self.predicate, other.predicate
+            ));
+        }
+        if self.include != other.include {
+            out.push(format!("include {:?} -> {:?}", self.include, other.include));
+        }
+        if self.with != other.with {
+            out.push(format!(
+                "storage parameters {:?} -> {:?}",
+                self.with, other.with
+            ));
+        }
+        if self.only != other.only {
+            out.push(format!("only {} -> {}", self.only, other.only));
+        }
+        if self.comment != other.comment {
+            out.push(format!("comment {:?} -> {:?}", self.comment, other.comment));
+        }
+        out
     }
 }
 

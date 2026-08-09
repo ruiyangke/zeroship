@@ -3462,7 +3462,7 @@ fn build_table_snapshot_impl(
         // the data plane caps at 60, so the two agree only below 61 bytes.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
-                indexes.push(spec);
+                indexes.push(fold_ann_index_for_dialect(spec, dialect));
             }
         }
         // - a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
@@ -3474,7 +3474,7 @@ fn build_table_snapshot_impl(
         // `non_unique_index_name`.
         if f.ty == "geoPoint" {
             if let Some(spec) = geo_index_snapshot(&d.name, f) {
-                indexes.push(spec);
+                indexes.push(fold_ann_index_for_dialect(spec, dialect));
             }
         }
         // A reference facet declares a FOREIGN KEY constraint independently of
@@ -4281,6 +4281,32 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
     })
 }
 
+/// Model a vector / geoPoint index as the object the TARGET dialect's emitter
+/// actually creates.
+///
+/// [`vector_index_snapshot`] and [`geo_index_snapshot`] describe the PostgreSQL
+/// objects the data plane builds - `USING ivfflat` with an operator class, `USING
+/// gist`. Neither the SQLite nor the MySQL `create_index` has a `USING` clause at
+/// all: both emit a plain index over the same column, and both introspect it back
+/// as `btree`. Carrying the PostgreSQL method into a non-PostgreSQL desired
+/// snapshot therefore describes an index no emitter creates, and the exact-name
+/// index pairing compares the access method, so the label re-diffs as an in-place
+/// redefinition of an index that is already exactly what the dialect can build.
+/// Emitted SQL is unchanged either way. `MysqlEmitter::create_index` reads neither
+/// field. `SqliteEmitter::create_index` DOES read `access_method`, but only to
+/// route the `fts5` sentinel to a virtual-table CREATE, and this fold is called at
+/// the vector and geoPoint sites alone - the FTS snapshot never reaches it, so the
+/// sentinel cannot be folded away. This is the rule the `.fts()` fold below already
+/// follows, applied to the two facets that had not learned it.
+fn fold_ann_index_for_dialect(mut idx: IndexSnapshot, dialect: SqlDialect) -> IndexSnapshot {
+    if dialect == SqlDialect::Postgres {
+        return idx;
+    }
+    idx.access_method = "btree".to_string();
+    idx.opclass = None;
+    idx
+}
+
 /// The fixed name of the composite full-text tsvector column + its GIN index,
 /// matching plugin-db's runtime contract (`__fts` column read by `fts_search`,
 /// `<coll>__fts_idx` GIN index).
@@ -4601,9 +4627,11 @@ pub enum DeclarativeError {
     #[error("invalid descriptor: {0}")]
     Invalid(String),
     /// The diff requires an op the differ does not generate: an in-place INDEX or
-    /// FOREIGN KEY redefinition (a flipped `unique` flag, a changed column set, a
-    /// re-pointed FK target - each one a DROP+CREATE, which the differ does not
-    /// synthesize because the DROP is destructive and wants an author's decision).
+    /// FOREIGN KEY redefinition (any same-name index whose observable shape moved -
+    /// uniqueness, columns, key elements, access method, predicate, INCLUDE, storage
+    /// parameters, ONLY or comment - or a re-pointed FK target; each one a
+    /// DROP+CREATE, which the differ does not synthesize because the DROP is
+    /// destructive and wants an author's decision).
     /// Surfaced explicitly - never silently skipped. (Type/nullability changes are
     /// handled as gated/ungated ALTERs; destructive DROPs are gated
     /// migrations - neither uses this error.)
@@ -5701,25 +5729,41 @@ impl DeclarativeAuthor {
                 match pairing.matched.get(idx.name.as_str()) {
                     None => out.push(self.render_create_index(table, idx, Vec::new())),
                     Some(li) => {
-                        // Paired index on both sides: a flipped `unique` flag or
-                        // a changed column set is an in-place redefinition
-                        // (DROP+CREATE), which the differ does not synthesize. Surface it
-                        // EXPLICITLY (5-idx) — never silently skip (the old loop
-                        // only checked name presence, so a uniqueness flip emitted
-                        // 0 migrations and left the wrong index in place).
-                        // Only an EXACT-name pair can reach either check: an alias
-                        // pair is granted only when `same_definition_except_name`
-                        // holds, and that already compares `unique` and `columns`.
-                        if li.unique != idx.unique {
+                        // Paired index on both sides: any shape difference is an
+                        // in-place redefinition (DROP+CREATE), which the differ does
+                        // not synthesize. Surface it EXPLICITLY (5-idx) - never
+                        // silently skip (the old loop only checked name presence, so a
+                        // uniqueness flip emitted 0 migrations and left the wrong index
+                        // in place).
+                        //
+                        // Ask `same_definition_except_name`, the SAME question the
+                        // alias arm asks, so one pairing has one answer for what makes
+                        // an index the same index. Hand-picking `unique` and `columns`
+                        // here let an access-method flip, a changed predicate, a changed
+                        // INCLUDE payload, changed storage parameters, ONLY and a
+                        // changed comment through: an exact-name pair returned a clean
+                        // plan while the live index was a different index.
+                        //
+                        // Refuse rather than emit the rebuild. `render_drop_index`
+                        // classifies a DROP as destructive + approval-requiring only
+                        // when the index is unique, so synthesizing DROP+CREATE would
+                        // take an unreviewed DROP of a non-unique vector or geo index
+                        // plus a non-concurrent rebuild that locks writes for as long
+                        // as the build takes. The author decides that, in an explicit
+                        // migration.
+                        //
+                        // What this compares is what the live snapshot observes.
+                        // `opclass`, `nulls_not_distinct` and `expr_cascade_columns` are
+                        // emission-only, excluded from `IndexSnapshot` equality, and
+                        // invisible here too: passing is agreement on the observable
+                        // facets, not proof that two indexes are interchangeable.
+                        let differences = li.definition_differences_except_name(idx);
+                        if !differences.is_empty() {
                             return Err(DeclarativeError::UnsupportedInV1(format!(
-                                "index {}.{} uniqueness change {} → {}",
-                                table, idx.name, li.unique, idx.unique
-                            )));
-                        }
-                        if li.columns != idx.columns {
-                            return Err(DeclarativeError::UnsupportedInV1(format!(
-                                "index {}.{} column change {:?} → {:?}",
-                                table, idx.name, li.columns, idx.columns
+                                "index {}.{} definition change: {}",
+                                table,
+                                idx.name,
+                                differences.join("; ")
                             )));
                         }
                     }
