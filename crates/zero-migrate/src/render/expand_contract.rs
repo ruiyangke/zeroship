@@ -608,6 +608,20 @@ impl ExpandContractAuthor {
         // covers the rows that predate it. So the destructive drop is gated on the
         // backfill's journaled completion (the backfill step records
         // completion in the journal → the gate reads one timeline).
+        // Deliberately NO CASCADE. A column another object depends on - a generated
+        // column reading it, a view, an EXCLUDE constraint - makes PostgreSQL refuse
+        // this drop, and the refusal names the dependent:
+        //
+        //   ERROR:  cannot drop column qty of table t because other objects depend on it
+        //   DETAIL:  column total of table t depends on column qty of table t
+        //
+        // Measured on PostgreSQL 18.4, along with what the hint would cost: `DROP
+        // COLUMN qty CASCADE` reports `drop cascades to column total` and leaves the
+        // table without it. Taking the hint would turn a stop into the silent loss of
+        // a column nobody asked to drop, inside a step that already carries
+        // `destructive: true` for the ONE column the operator did name. So a rename
+        // whose old column is read by a generated column stops here rather than
+        // completing, and that is the better of the two failures.
         let c2_up = format!("ALTER TABLE {tbl_q} DROP COLUMN {from_q}");
         let c2 = self.make(
             &format!("contract_drop_column_{table}_{from}"),
