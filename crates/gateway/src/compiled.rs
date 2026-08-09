@@ -707,11 +707,23 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
     let mut segments = Vec::with_capacity(total);
     for (i, seg) in raw_segs.iter().enumerate() {
         if seg.starts_with("[...") && seg.ends_with(']') {
-            assert!(
-                i + 1 == total,
-                "glob catch-all [...name] must be the last segment in `{pattern}`",
-            );
-            segments.push(GlobSegment::CatchAll);
+            if i + 1 == total {
+                segments.push(GlobSegment::CatchAll);
+            } else {
+                // A catch-all before the end is meaningless — it claims the
+                // rest of the path, then more path follows. `Manifest::validate`
+                // rejects the shape so a deploy is told why, and this arm is the
+                // second layer for a manifest that arrives without that
+                // screening. It must not panic: compile runs on the detached
+                // route-sync task, where a panic is swallowed and takes route
+                // sync down for every app on this gateway.
+                //
+                // Degrade to a literal rather than a catch-all. A literal
+                // segment matches only a request path that spells the brackets
+                // out, so the broken route stays inert instead of swallowing
+                // traffic meant for its siblings.
+                segments.push(GlobSegment::Literal((*seg).to_string()));
+            }
         } else if seg.starts_with('[') && seg.ends_with(']') {
             segments.push(GlobSegment::SingleCapture);
         } else if *seg == "*" {
@@ -1346,6 +1358,48 @@ mod tests {
         let c = CompiledManifest::compile(&m);
         let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert!(p.required_scopes.is_empty());
+    }
+
+    /// `compile` must not panic on ANY manifest, however it got here.
+    ///
+    /// `compile_glob` used to `assert!` that a `[...name]` catch-all was the
+    /// last segment. `CompiledManifest::compile` runs inside
+    /// `RouteCache::update` on the detached route-sync task, and compio wraps
+    /// that future in `catch_unwind` before the handle is dropped — so the
+    /// panic surfaced nowhere, route sync stopped for the process lifetime,
+    /// and every app on that gateway served its last-known route table
+    /// forever: new deploys never landing, deleted apps still answering,
+    /// spend state frozen. A malformed key must cost that key, not the
+    /// gateway.
+    ///
+    /// `Manifest::validate` now rejects this shape too, and that is where a
+    /// creator gets told why (pinned in `zeroship-bundle`). This test is the
+    /// second layer deliberately: it constructs the manifest directly rather
+    /// than validating first, because the whole point is that compile must
+    /// hold even for input validation did not screen.
+    ///
+    /// What this does NOT catch: what the degraded segment then MATCHES —
+    /// only that compiling terminates. Nor does it cover the other
+    /// `assert!`/`unwrap` sites in this module.
+    #[test]
+    fn compile_never_panics_on_a_mid_path_catch_all() {
+        let mut resources = HashMap::new();
+        resources.insert("/[...rest]/foo".to_string(), ResourceEntry::default());
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CompiledManifest::compile(&m);
+        }));
+        assert!(
+            compiled.is_ok(),
+            "compiling a manifest with a mid-path catch-all panicked; compile runs \
+             on the detached route-sync task where a panic is swallowed, so this \
+             is a creator-triggered denial of service against every app on the \
+             gateway",
+        );
     }
 
     #[test]
