@@ -439,11 +439,20 @@ impl BlobStore for S3BlobStore {
         }
         let key = Self::blob_key(hash);
 
-        // Idempotent dedup: HEAD first. Presence is enough to dedup for the
-        // remote store — content-addressing guarantees the stored bytes ARE
-        // the bytes for this hash (the original writer verified the
-        // whole-object hash before completing). Drain the reader so the
-        // caller's stream cursor advances past the entry.
+        // Idempotent dedup: HEAD first. A hit proves the STORE holds the
+        // right bytes for this hash, since the original writer verified the
+        // whole-object hash before completing. That is not the question the
+        // deploy path asks, which is whether THIS CALLER has those bytes:
+        // `unpack` records a hash as satisfied on any `Ok` from here, so
+        // crediting a caller who shipped something else would let a deploy
+        // claim a blob it never possessed and then point an `anon` asset at
+        // another tenant's content. So hash the stream while draining it
+        // (the drain is needed anyway, to advance the caller's cursor past
+        // the entry) and refuse a mismatch.
+        //
+        // Knowing the hash is not evidence of holding the content: the
+        // gateway returns it as the ETag on every 200/206/304, and blobs
+        // are never deleted, so it outlives the grant that revealed it.
         if self
             .client
             .head_object(&key)
@@ -451,7 +460,13 @@ impl BlobStore for S3BlobStore {
             .map_err(|e| map_s3(hash, e))?
             .is_some()
         {
-            std::io::copy(reader, &mut std::io::sink()).map_err(BlobError::Io)?;
+            let supplied = crate::blob::hash_reader_to_end(reader)?;
+            if supplied != hash {
+                return Err(BlobError::HashMismatch {
+                    expected: hash.to_string(),
+                    got: supplied,
+                });
+            }
             return Ok(PutOutcome::Deduped);
         }
 
