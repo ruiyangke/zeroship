@@ -458,7 +458,14 @@ fn compensation_progress_error(
     error
 }
 
-fn should_enter_compensation_for_error(error: &Value) -> bool {
+/// Whether a terminal failure carrying `error` enters the compensating phase.
+///
+/// `crate::dev` reads this too: the dev engine cannot compensate, and its
+/// not-attempted report must fire on exactly the errors that WOULD have been
+/// rolled back deployed. Duplicating the predicate there would let the two
+/// drift, and the drift would show up as dev claiming a rollback gap on an
+/// error deployed also refuses to roll back.
+pub(crate) fn should_enter_compensation_for_error(error: &Value) -> bool {
     !matches!(
         error.get("type").and_then(Value::as_str),
         Some("NondeterministicError" | "StalledError")

@@ -359,17 +359,52 @@ printf '%s' "$(line_for deployed child)" \
   || fail "deployed child did not complete -- $(line_for deployed child | head -c 300)"
 
 # Known divergence 2 -- compensation. The dev engine has no compensating phase:
-# its RunUpdate enum stops at Failed/Stalled/Cancelled (dev.rs:208-217) and
-# nothing ever writes state='compensating', so a compensable step that fails is
-# simply left un-rolled-back, with no error and no warning. Deployed, the
-# compensator runs and the error envelope carries a rollback summary. The trail
-# is the observable: `do:reserve` alone means the undo never happened.
+# its RunUpdate enum stops at Failed/Stalled/Cancelled (dev.rs) and nothing ever
+# writes state='compensating' -- `claim_one_due` cannot even SELECT that state.
+# So a compensable step that fails is left un-rolled-back locally, while deployed
+# the compensator runs. That behavioural half of the divergence is real and still
+# pinned below: the trail is the observable, and `do:reserve` alone means the undo
+# never happened.
+#
+# What changed, and why this block is no longer symmetric. Dev used to fail
+# SILENTLY: the run ended `failed` carrying only the creator's own error, which
+# is indistinguishable from a saga with nothing to roll back -- so a creator who
+# tested a saga under `pnpm dev` and watched it fail concluded their rollback
+# worked. Dev now annotates the failure with an explicit, named
+# WorkflowUnsupportedError in the SAME `error.compensation` slot the deployed
+# engine fills with its rollback summary (dev.rs
+# annotate_dev_compensation_unsupported / apply.rs compensation_progress_error).
+# The two sides therefore both answer `error.compensation`, and they answer
+# differently -- `outcome:"not-attempted"` vs `outcome:"completed"` -- which is
+# exactly the fact a creator needs. Both answers are pinned. This pin is deleted,
+# not edited, only when the dev tier actually grows compensation.
 printf '%s' "$(line_for dev compensate)" | grep -q '"state":"failed"' \
   && pass "dev: compensable run reached state=failed" \
   || fail "dev compensate state CHANGED -- $(line_for dev compensate | head -c 300)"
 printf '%s' "$(line_for dev trail)" | grep -q '"trail":"do:reserve"' \
   && pass "known divergence: dev ran NO compensator (trail=do:reserve)" \
   || fail "dev compensation behaviour CHANGED -- $(line_for dev trail | head -c 300)"
+# THE HONEST-FAILURE ASSERTION. Silence here is the defect this pin exists to
+# prevent from coming back, so all three fields are checked: the named error
+# type, the not-attempted outcome, and the step that was left un-rolled-back. A
+# report that named no step would be a warning a creator cannot act on.
+dev_comp="$(line_for dev compensate)"
+printf '%s' "$dev_comp" | grep -q '"type":"WorkflowUnsupportedError"' \
+  && pass "dev: failure NAMES the missing rollback (WorkflowUnsupportedError)" \
+  || fail "dev failed SILENTLY on an un-rolled-back saga -- $(printf '%s' "$dev_comp" | head -c 400)"
+printf '%s' "$dev_comp" | grep -q '"outcome":"not-attempted"' \
+  && pass "dev: compensation outcome=not-attempted" \
+  || fail "dev compensation outcome missing/changed -- $(printf '%s' "$dev_comp" | head -c 400)"
+printf '%s' "$dev_comp" | grep -q '"steps":\["reserve"\]' \
+  && pass "dev: report names the un-rolled-back step (reserve)" \
+  || fail "dev compensation report does not name the step -- $(printf '%s' "$dev_comp" | head -c 400)"
+# The creator's own failure must SURVIVE the annotation. Replacing it would trade
+# one misleading error for another: the run failed because `boom` threw, not
+# because dev cannot compensate.
+printf '%s' "$dev_comp" | grep -q 'probe-intentional-failure' \
+  && pass "dev: the original failure survives the annotation" \
+  || fail "dev annotation SWALLOWED the creator's error -- $(printf '%s' "$dev_comp" | head -c 400)"
+# Deployed side: unchanged, and still asserted, so this stays a comparison.
 printf '%s' "$(line_for deployed trail)" | grep -q '"trail":"do:reserve,undo:reserve"' \
   && pass "deployed: compensator ran (trail=do:reserve,undo:reserve)" \
   || fail "deployed compensator did NOT run -- $(line_for deployed trail | head -c 300)"
@@ -377,6 +412,11 @@ printf '%s' "$(line_for deployed compensate)" \
   | grep -q '"outcome":"completed"' \
   && pass "deployed: error envelope reports compensation outcome=completed" \
   || fail "deployed compensation summary missing -- $(line_for deployed compensate | head -c 300)"
+# And the two must not converge by accident: if dev ever reported
+# outcome=completed it would be claiming a rollback it did not perform.
+printf '%s' "$dev_comp" | grep -q '"outcome":"completed"' \
+  && fail "dev claims compensation COMPLETED but ran no compensator -- $(printf '%s' "$dev_comp" | head -c 400)" \
+  || pass "dev does not claim a rollback it did not perform"
 
 echo ""
 echo "  --- dev results ---"; cat "$WORK/dev.txt"

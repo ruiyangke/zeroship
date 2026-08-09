@@ -451,8 +451,17 @@ Intentional local divergences:
   routes and topic ingress are deployed-only features.
 - SQLite lifetime is local to the dev process and configured file path. Deleting
   the file deletes the local workflow journal.
-- Schedules, child workflow joins, compensation replay, and large workflow blobs
-  are deployed-engine parity items unless explicitly listed as local support.
+- **Compensators do not run locally.** A failed run ends `failed` without rolling
+  anything back. The local engine records which completed steps declared
+  `compensate` and reports them instead of running them: the failure error
+  carries a `compensation` object with `supported: false`, `outcome:
+  "not-attempted"`, `type: "WorkflowUnsupportedError"`, and the `steps` that were
+  left un-rolled-back. Deployed, that same `compensation` slot carries the real
+  rollback summary (`outcome: "completed"` or `"partial"`). Rollback logic is
+  therefore written locally but verified on a deploy.
+- `step.call` (child workflows) fails locally with `WorkflowUnsupportedError`.
+- Schedules and large workflow blobs are deployed-engine parity items unless
+  explicitly listed as local support.
 
 ## Schedules
 
@@ -683,6 +692,11 @@ compensators.
 `NondeterministicError` and `StalledError` fail closed and do not enter
 rollback. They indicate the engine cannot trust replay enough to safely rebuild
 the compensator registry.
+
+Compensators do not run under `zeroship serve` / `pnpm dev`. A local run that
+fails reports the compensators it did not run, in the same `error.compensation`
+field the deployed engine uses for its rollback summary — see
+[Local Development](#local-development). Deploy the app to exercise rollback.
 
 ## Errors
 

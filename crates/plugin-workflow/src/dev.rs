@@ -70,7 +70,9 @@ struct CandidateRun {
     workflow_name: String,
     deploy_id: String,
     deploy_hash: String,
-    state: String,
+    // No `state` field. It existed only to feed a `phase: "compensating"` branch
+    // in `claim_one_due` that its own SELECT made unreachable; see the comment
+    // there. Reintroducing it means dev has grown a compensating phase.
     input: Option<Value>,
     started_at: i64,
     waiting_step_key: Option<String>,
@@ -707,7 +709,7 @@ impl DevWorkflowEngine {
         rearm_waiting_runs_with_pending_signals(&conn, now)?;
         let candidate = conn
             .query_row(
-                "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, r.state, \
+                "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
                         r.input, r.started_at, r.waiting_step_key \
                    FROM workflow_runs r \
                    JOIN app_deploys d ON d.id = r.deploy_id AND d.app_id = r.app_id \
@@ -725,11 +727,10 @@ impl DevWorkflowEngine {
                         workflow_name: row.get(2)?,
                         deploy_id: row.get(3)?,
                         deploy_hash: row.get(4)?,
-                        state: row.get(5)?,
-                        input: parse_json_opt(row.get::<_, Option<String>>(6)?)
+                        input: parse_json_opt(row.get::<_, Option<String>>(5)?)
                             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}")))))?,
-                        started_at: row.get(7)?,
-                        waiting_step_key: row.get(8)?,
+                        started_at: row.get(6)?,
+                        waiting_step_key: row.get(7)?,
                     })
                 },
             )
@@ -772,11 +773,17 @@ impl DevWorkflowEngine {
                 deploy_hash: candidate.deploy_hash,
                 dispatch_nonce: dispatch_nonce.clone(),
                 nonce: dispatch_nonce,
-                phase: if candidate.state == "compensating" {
-                    "compensating".to_string()
-                } else {
-                    "running".to_string()
-                },
+                // Always forward. There is no `compensating` arm because the
+                // dev engine has no compensating phase to be in: the SELECT
+                // above admits only ('queued','running','sleeping','waiting'),
+                // and no dev code path writes state='compensating'. A branch on
+                // `candidate.state == "compensating"` used to sit here, and it
+                // was dead by construction 60 lines below its own filter -- it
+                // read as compensation support to anyone scanning this file,
+                // which is precisely what kept the gap invisible. Dev instead
+                // reports the gap at failure time; see
+                // `annotate_dev_compensation_unsupported`.
+                phase: "running".to_string(),
                 input: candidate.input.clone(),
                 trigger: json!({
                     "input": candidate.input,
@@ -887,6 +894,29 @@ impl DevWorkflowEngine {
         if zero_progress && next_stuck_strikes >= STUCK_STRIKE_LIMIT {
             result.run_update = RunUpdate::Stalled {
                 error: stalled_error(next_stuck_strikes),
+            };
+        }
+
+        // Say out loud that no compensator ran. The dev engine RECORDS which
+        // completed steps declared one (`insert_resolved_step` writes
+        // `compensation_state = 'pending'`) and never RUNS one, so a failed saga
+        // ends here looking exactly like a saga that had nothing to roll back.
+        // Deployed, the same failure enters the compensating phase and undoes
+        // those steps (crates/plugin-workflow/src/apply.rs:233-243). Runs AFTER
+        // the stalled override above so a StalledError is never annotated --
+        // deployed does not compensate that error either.
+        let unsupported = match &result.run_update {
+            RunUpdate::Failed { error }
+                if crate::apply::should_enter_compensation_for_error(error) =>
+            {
+                let pending = pending_compensator_steps(&conn, &result.run_id)?;
+                (!pending.is_empty()).then(|| (error.clone(), pending))
+            }
+            _ => None,
+        };
+        if let Some((error, pending)) = unsupported {
+            result.run_update = RunUpdate::Failed {
+                error: annotate_dev_compensation_unsupported(error, &pending),
             };
         }
 
@@ -1642,6 +1672,79 @@ fn reject_child_checkpoints_for_dev(result: &mut StepResult) {
     }
 }
 
+/// Completed `step.run` steps that declared a compensator and have not been
+/// rolled back, newest first -- the order the deployed engine would walk them in
+/// ("reverse journal order", docs/reference/workflows.md).
+///
+/// Reads the journal rather than the current batch: the compensable step usually
+/// completed in an EARLIER dispatch than the one that fails, and a batch-only
+/// check would report the gap for single-batch sagas only.
+fn pending_compensator_steps(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<String>, WorkflowRpcError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM workflow_steps \
+              WHERE run_id = ?1 AND kind = 'run' AND state = 'completed' \
+                AND compensation_state = 'pending' \
+              ORDER BY ordinal DESC",
+        )
+        .map_err(db_error)?;
+    let names = stmt
+        .query_map(params![run_id], |row| row.get::<_, String>(0))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(db_error)?;
+    Ok(names)
+}
+
+/// The dev tier's honest report for a rollback it will not perform.
+///
+/// Named `WorkflowUnsupportedError` deliberately: that is the same greppable
+/// name `dev_child_unsupported_error` uses for the other dev-tier gap, so one
+/// search finds every deployed feature the local engine declines. Unlike that
+/// one it does not refuse the step -- refusing would take away the creator's
+/// ability to iterate on a saga locally at all -- it annotates the failure the
+/// creator already got.
+///
+/// It rides in the error's `compensation` slot rather than replacing the error,
+/// for two reasons. The creator's own failure is still why the run failed and
+/// must stay at the top level. And the deployed engine fills that same slot with
+/// its rollback summary (`compensation_progress_error`,
+/// crates/plugin-workflow/src/apply.rs:447-457), so an app that reads
+/// `error.compensation` gets an answer from BOTH backends -- and the answers
+/// differ in `outcome`, which is the fact worth surfacing.
+fn annotate_dev_compensation_unsupported(error: Value, pending: &[String]) -> Value {
+    let mut error = match error {
+        Value::Object(map) => Value::Object(map),
+        other => json!({
+            "type": "Error",
+            "message": "workflow failed",
+            "cause": other,
+        }),
+    };
+    let names = pending.join(", ");
+    let report = json!({
+        "supported": false,
+        "outcome": "not-attempted",
+        "type": "WorkflowUnsupportedError",
+        "message": format!(
+            "the local dev workflow engine does not run compensators: {count} completed \
+             step(s) declaring `compensate` were NOT rolled back ({names}). Deployed, these \
+             compensators run in reverse journal order after a terminal failure. Deploy the \
+             app to exercise rollback.",
+            count = pending.len(),
+        ),
+        "pending": pending.len(),
+        "steps": pending,
+    });
+    if let Some(obj) = error.as_object_mut() {
+        obj.insert("compensation".to_string(), report);
+    }
+    error
+}
+
 
 fn default_step_kind() -> String {
     "run".to_string()
@@ -1913,3 +2016,308 @@ impl std::fmt::Display for SimpleError {
 }
 
 impl std::error::Error for SimpleError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_APP: &str = "app_devtest";
+
+    /// A dev engine over a scratch sqlite file. No modules and no plugins: every
+    /// test here drives `apply_step_result` directly with a synthesised
+    /// `StepResult`, which is exactly what `tick_due` would hand it after a V8
+    /// dispatch. Nothing in this module boots V8.
+    fn engine(dir: &tempfile::TempDir) -> Arc<DevWorkflowEngine> {
+        DevWorkflowEngine::open(
+            dir.path().join("workflows.sqlite"),
+            Vec::new(),
+            HashMap::new(),
+            Vec::new(),
+        )
+        .expect("open dev engine")
+    }
+
+    /// Insert a run and put it in the exact state `claim_one_due` leaves behind,
+    /// so `apply_step_result`'s claim guard (dev.rs, `claimed_by`/`dispatch_nonce`
+    /// /`state = 'running'`) admits the result.
+    fn claimed_run(engine: &DevWorkflowEngine, run_id: &str, nonce: &str) {
+        let now = now_ms();
+        let conn = engine.lock_conn().expect("lock");
+        ensure_dev_deploy(&conn, TEST_APP).expect("deploy");
+        conn.execute(
+            "INSERT INTO workflow_runs \
+             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, wake_at, \
+              started_at, created_at, claimed_by, lease_expires, dispatch_nonce) \
+             VALUES (?1, 'CompensateCase', ?2, ?3, 'running', '{}', 2, ?4, ?4, ?4, ?5, ?6, ?7)",
+            params![run_id, TEST_APP, DEV_DEPLOY_ID, now, DEV_OWNER_ID, now + 120_000, nonce],
+        )
+        .expect("insert run");
+    }
+
+    fn run_row(engine: &DevWorkflowEngine, run_id: &str) -> (String, Option<Value>) {
+        let conn = engine.lock_conn().expect("lock");
+        conn.query_row(
+            "SELECT state, error FROM workflow_runs WHERE id = ?1",
+            params![run_id],
+            |row| {
+                let state: String = row.get(0)?;
+                let error: Option<String> = row.get(1)?;
+                Ok((state, error))
+            },
+        )
+        .map(|(state, error)| {
+            (
+                state,
+                error.map(|e| serde_json::from_str::<Value>(&e).expect("error json")),
+            )
+        })
+        .expect("run row")
+    }
+
+    fn compensable_completed(ordinal: i32, name: &str) -> StepCheckpoint {
+        StepCheckpoint {
+            ordinal,
+            name: name.to_string(),
+            name_occurrence: 0,
+            kind: "run".to_string(),
+            state: "completed".to_string(),
+            output: Some(json!({ "reserved": "probe" })),
+            error: None,
+            wake_at: None,
+            signal_type: None,
+            max_signal_age_ms: None,
+            consumed_signal_id: None,
+            topic: None,
+            child_run_id: None,
+            // What `crates/plugin-workflow/src/engine.rs:847-848` writes for a
+            // `step.run` that declared `config.compensate`.
+            compensation_state: Some("pending".to_string()),
+            compensation_max_attempts: 1,
+        }
+    }
+
+    fn failed_step(ordinal: i32, name: &str) -> StepCheckpoint {
+        StepCheckpoint {
+            ordinal,
+            name: name.to_string(),
+            name_occurrence: 0,
+            kind: "run".to_string(),
+            state: "failed".to_string(),
+            output: None,
+            error: Some(json!({
+                "type": "PermanentError",
+                "message": "probe-intentional-failure",
+            })),
+            wake_at: None,
+            signal_type: None,
+            max_signal_age_ms: None,
+            consumed_signal_id: None,
+            topic: None,
+            child_run_id: None,
+            compensation_state: None,
+            compensation_max_attempts: 1,
+        }
+    }
+
+    fn permanent_failure() -> Value {
+        json!({
+            "type": "PermanentError",
+            "message": "probe-intentional-failure",
+            "retryable": false,
+        })
+    }
+
+    /// The defect this module exists for. A creator writes a saga, a later step
+    /// fails, and the dev tier ends the run `failed` having run no compensator --
+    /// which is indistinguishable, from the app's side, from a saga with nothing
+    /// to roll back. The failure must SAY the rollback was not attempted.
+    #[test]
+    fn dev_failure_reports_that_compensators_were_not_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_compensable", "disp_1");
+
+        engine
+            .apply_step_result(StepResult {
+                run_id: "run_compensable".to_string(),
+                dispatch_nonce: "disp_1".to_string(),
+                checkpoints: vec![
+                    compensable_completed(0, "reserve"),
+                    failed_step(1, "boom"),
+                ],
+                run_update: RunUpdate::Failed { error: permanent_failure() },
+            })
+            .expect("apply");
+
+        let (state, error) = run_row(&engine, "run_compensable");
+        assert_eq!(state, "failed", "the run must still fail; rollback is not a rescue");
+        let error = error.expect("failed run must carry an error");
+
+        // The original business failure is preserved -- the dev tier annotates
+        // the failure, it does not replace it. Deployed does the same
+        // (crates/plugin-workflow/src/apply.rs:435-457 keeps `base` and inserts
+        // its rollback summary under the same `compensation` key).
+        assert_eq!(error["type"], "PermanentError");
+        assert_eq!(error["message"], "probe-intentional-failure");
+
+        let comp = &error["compensation"];
+        assert!(
+            !comp.is_null(),
+            "dev failure carried no compensation report at all: {error}"
+        );
+        assert_eq!(comp["supported"], json!(false), "must say dev cannot compensate");
+        assert_eq!(comp["outcome"], json!("not-attempted"));
+        assert_eq!(
+            comp["type"], "WorkflowUnsupportedError",
+            "must be the same named, greppable error the dev tier uses for its other \
+             unsupported feature (dev_child_unsupported_error)"
+        );
+        assert_eq!(comp["pending"], json!(1));
+        assert_eq!(comp["steps"], json!(["reserve"]));
+        let message = comp["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("dev"),
+            "the message must name the dev tier as the reason: {message}"
+        );
+    }
+
+    /// The compensable step usually completes in an EARLIER dispatch than the one
+    /// that fails (a sleep, a signal wait, or just a second `step.run` batch). The
+    /// report must be driven by the journal, not by what happens to be in the
+    /// current batch -- otherwise the honest error appears only for single-batch
+    /// sagas, which is the shape least likely to be written by hand.
+    #[test]
+    fn pending_compensator_from_an_earlier_batch_is_still_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_two_batch", "disp_a");
+
+        engine
+            .apply_step_result(StepResult {
+                run_id: "run_two_batch".to_string(),
+                dispatch_nonce: "disp_a".to_string(),
+                checkpoints: vec![compensable_completed(0, "reserve")],
+                run_update: RunUpdate::Queued,
+            })
+            .expect("apply batch 1");
+
+        // Re-claim for the second dispatch, as `claim_one_due` would.
+        {
+            let conn = engine.lock_conn().expect("lock");
+            conn.execute(
+                "UPDATE workflow_runs SET state = 'running', claimed_by = ?2, dispatch_nonce = ?3 \
+                  WHERE id = ?1",
+                params!["run_two_batch", DEV_OWNER_ID, "disp_b"],
+            )
+            .expect("reclaim");
+        }
+
+        engine
+            .apply_step_result(StepResult {
+                run_id: "run_two_batch".to_string(),
+                dispatch_nonce: "disp_b".to_string(),
+                checkpoints: vec![failed_step(1, "boom")],
+                run_update: RunUpdate::Failed { error: permanent_failure() },
+            })
+            .expect("apply batch 2");
+
+        let (state, error) = run_row(&engine, "run_two_batch");
+        assert_eq!(state, "failed");
+        let comp = &error.expect("error")["compensation"];
+        assert_eq!(comp["supported"], json!(false));
+        assert_eq!(comp["steps"], json!(["reserve"]));
+    }
+
+    /// A run with no compensable step must not grow a compensation report. If it
+    /// did, every ordinary dev failure would claim a rollback gap it does not
+    /// have, and the report would stop meaning anything.
+    #[test]
+    fn plain_failure_gets_no_compensation_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_plain", "disp_p");
+
+        engine
+            .apply_step_result(StepResult {
+                run_id: "run_plain".to_string(),
+                dispatch_nonce: "disp_p".to_string(),
+                checkpoints: vec![failed_step(0, "boom")],
+                run_update: RunUpdate::Failed { error: permanent_failure() },
+            })
+            .expect("apply");
+
+        let (state, error) = run_row(&engine, "run_plain");
+        assert_eq!(state, "failed");
+        assert!(
+            error.expect("error").get("compensation").is_none(),
+            "a run with no compensator must not report one"
+        );
+    }
+
+    /// Deployed skips compensation for `NondeterministicError` and `StalledError`
+    /// (`should_enter_compensation_for_error`, crates/plugin-workflow/src/apply.rs
+    /// :461-466). Dev must skip the REPORT on the same errors, or it would claim
+    /// deployed would have rolled back when deployed would not.
+    #[test]
+    fn nondeterministic_failure_gets_no_compensation_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_nondet", "disp_n");
+
+        engine
+            .apply_step_result(StepResult {
+                run_id: "run_nondet".to_string(),
+                dispatch_nonce: "disp_n".to_string(),
+                checkpoints: vec![compensable_completed(0, "reserve")],
+                run_update: RunUpdate::Failed {
+                    error: json!({
+                        "type": "NondeterministicError",
+                        "message": "journal diverged from replay",
+                    }),
+                },
+            })
+            .expect("apply");
+
+        let (state, error) = run_row(&engine, "run_nondet");
+        assert_eq!(state, "failed");
+        assert!(
+            error.expect("error").get("compensation").is_none(),
+            "a NondeterministicError is not compensated deployed either"
+        );
+    }
+
+    /// What these tests do NOT catch: they do not prove the dev engine's V8
+    /// dispatch ever emits `compensable: true` for a real `step.run`, and they do
+    /// not compare against a live deployed run. Those two are the job of
+    /// `tests/e2e_dev_vs_deployed_workflows.sh`, which drives both backends.
+    ///
+    /// This one is the tripwire under the report itself: the report is honest
+    /// only because dev genuinely never compensates. A run parked in
+    /// `compensating` is invisible to `claim_one_due`, so it can never be
+    /// dispatched and its compensators can never run. That is also why the
+    /// `phase: "compensating"` branch that used to sit in `claim_one_due` was
+    /// dead. If dev ever grows a compensating phase this fails, and
+    /// `dev_compensation_unsupported` must go with it.
+    #[test]
+    fn dev_never_claims_a_compensating_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_comp_state", "disp_c");
+        {
+            let conn = engine.lock_conn().expect("lock");
+            conn.execute(
+                "UPDATE workflow_runs \
+                    SET state = 'compensating', claimed_by = NULL, dispatch_nonce = NULL, wake_at = ?2 \
+                  WHERE id = ?1",
+                params!["run_comp_state", now_ms() - 1_000],
+            )
+            .expect("park compensating");
+        }
+
+        assert!(
+            engine.claim_one_due().expect("claim").is_none(),
+            "dev claimed a compensating run -- it now has a compensating phase, so the \
+             not-attempted report is no longer true"
+        );
+    }
+}
