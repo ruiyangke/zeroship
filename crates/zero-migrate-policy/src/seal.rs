@@ -31,8 +31,13 @@
 //! - **`charter_version`** is the operator's monotonic charter revision.
 //!
 //! [`verify`](SealedPolicy::verify) recomputes the MAC from a freshly-composed
-//! [`EffectivePolicy`] + the expected registry digest + dialect + matcher version +
-//! charter version, and returns `Ok(())` only on an exact constant-time match.
+//! [`EffectivePolicy`] + dialect + matcher version + charter version, and returns
+//! `Ok(())` only on an exact constant-time match. The registry digest it MACs is
+//! DERIVED from that policy's own registry, exactly as [`seal`] derives it when
+//! minting; `verify`'s `expected_registry_digest` argument is an out-of-band pin on
+//! the registry identity the VERIFIER trusts, checked alongside and never MAC'd. A
+//! digest supplied by the caller and then MAC'd would bind nothing: the presented
+//! policy would never be compared against the registry it was composed under.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -77,6 +82,16 @@ pub enum SealError {
     /// The presented registry digest differs from the sealed one (a seal minted under
     /// registry A replayed against registry B where the same key means something else).
     RegistryDigestMismatch,
+    /// The `policy` handed to [`SealedPolicy::verify`] was composed under a DIFFERENT
+    /// registry than the one this seal was minted under.
+    ///
+    /// Distinct from [`SealError::RegistryDigestMismatch`], which compares the seal
+    /// against the CALLER's out-of-band pin and never looks at the policy. This one is
+    /// derived from the policy's own registry, so it fires on the swap a matching pin
+    /// cannot see: two registries that differ only in a field the loader ignores
+    /// (`requires_db_privilege`) accept the same document and compose byte-identical
+    /// rule sets, and the digest is the only thing that separates them.
+    PolicyComposedUnderOtherRegistry,
     /// The presented dialect differs from the sealed one (identifier fold differs).
     DialectMismatch,
     /// The presented matcher_version differs from the sealed one (glob/normalization
@@ -109,10 +124,23 @@ impl SealedPolicy {
     }
 
     /// Verify this seal against a freshly composed `policy` and the EXPECTED binding.
-    /// HARD-FAILS on any mismatch: registry digest, dialect, matcher_version,
-    /// charter_version — checked BEFORE the MAC so a mismatch gets a precise error —
-    /// then the MAC tag itself (constant-time). Returns `Ok(())` only when every
-    /// binding matches AND the recomputed tag equals the sealed tag.
+    ///
+    /// The registry digest the MAC covers is DERIVED from `policy`, never taken from
+    /// the caller, so a policy composed under a different registry cannot verify
+    /// against this seal even when its canonical rule bytes are byte-identical
+    /// ([`SealError::PolicyComposedUnderOtherRegistry`]).
+    ///
+    /// `expected_registry_digest` is a separate, OUT-OF-BAND pin, and it is the one
+    /// check here that rejects something the MAC alone accepts: a self-consistent
+    /// seal-A-over-policy-A bundle MACs correctly forever, and only a verifier that
+    /// pins registry identity B refuses it
+    /// ([`SealError::RegistryDigestMismatch`]). The other four checks - the derived
+    /// registry digest, dialect, matcher_version, charter_version - all feed the MAC,
+    /// so each narrows a failure the MAC would report as [`SealError::TagMismatch`]
+    /// to a precise cause rather than adding a rejection of its own.
+    ///
+    /// Returns `Ok(())` only when every binding matches AND the recomputed tag equals
+    /// the sealed tag.
     pub fn verify(
         &self,
         mac_key: &[u8],
@@ -122,9 +150,19 @@ impl SealedPolicy {
         matcher_version: u32,
         charter_version: u64,
     ) -> Result<(), SealError> {
-        // Binding checks first (precise diagnostics; the MAC would fail anyway).
+        // The digest of the registry the PRESENTED policy was actually composed under.
+        // This, not the caller's parameter, is what the MAC covers below - otherwise
+        // verification would MAC a value the caller chose and never look at the policy's
+        // own registry at all.
+        let policy_digest = policy.registry().digest();
+
+        // The caller's out-of-band pin: the registry identity this verifier trusts.
         if &self.registry_digest != expected_registry_digest {
             return Err(SealError::RegistryDigestMismatch);
+        }
+        // The policy's own registry must be the one the seal was minted under.
+        if policy_digest != self.registry_digest {
+            return Err(SealError::PolicyComposedUnderOtherRegistry);
         }
         if self.dialect != dialect {
             return Err(SealError::DialectMismatch);
@@ -135,22 +173,24 @@ impl SealedPolicy {
         if self.charter_version != charter_version {
             return Err(SealError::CharterVersionMismatch);
         }
-        // Recompute the MAC over the presented policy + the sealed binding + nonce.
-        let expected = mac_tag(
+        // Recompute the MAC over the presented policy + the sealed binding + nonce, and
+        // compare through the HMAC verify path, which is `subtle::ct_eq` underneath.
+        // This comment has always named that path; the code under it finalized the MAC
+        // and compared two `[u8; 32]`s with `==`, an ordinary array compare the compiler
+        // is free to lower to a short-circuiting memcmp - a byte-at-a-time timing oracle
+        // over a MAC tag, which is the one comparison in this crate that must not leak
+        // where it stopped.
+        seal_mac(
             mac_key,
             policy,
-            expected_registry_digest,
+            &policy_digest,
             dialect,
             matcher_version,
             charter_version,
             &self.nonce,
-        );
-        // Constant-time compare via the HMAC verify path.
-        if expected == self.tag {
-            Ok(())
-        } else {
-            Err(SealError::TagMismatch)
-        }
+        )
+        .verify_slice(&self.tag)
+        .map_err(|_| SealError::TagMismatch)
     }
 }
 
@@ -158,7 +198,8 @@ impl SealedPolicy {
 /// rule set (in the sealed inject total order) ‖ registry digest ‖
 /// `(dialect, matcher_version)` ‖ `charter_version`, mixing in `nonce`. The
 /// `registry_digest` is taken from the policy's own registry so the seal is
-/// self-consistent; a verifier presents the digest it expects.
+/// self-consistent; [`SealedPolicy::verify`] re-derives it the same way from the
+/// policy it is handed, and separately checks the digest a verifier pins out of band.
 #[must_use]
 pub fn seal(
     policy: &EffectivePolicy,
@@ -188,7 +229,9 @@ pub fn seal(
     }
 }
 
-/// Compute the raw MAC tag over the full canonical payload.
+/// Compute the raw MAC tag over the full canonical payload. Minting only; verification
+/// goes through [`seal_mac`] + `Mac::verify_slice` so the tag comparison stays constant
+/// time.
 #[allow(clippy::too_many_arguments)]
 fn mac_tag(
     mac_key: &[u8],
@@ -199,6 +242,37 @@ fn mac_tag(
     charter_version: u64,
     nonce: &[u8; 16],
 ) -> [u8; 32] {
+    seal_mac(
+        mac_key,
+        policy,
+        registry_digest,
+        dialect,
+        matcher_version,
+        charter_version,
+        nonce,
+    )
+    .finalize()
+    .into_bytes()
+    .into()
+}
+
+/// The HMAC state with the full canonical payload absorbed, returned UNFINALIZED.
+///
+/// Verification needs the unfinalized state because `Mac::verify_slice` is what makes
+/// the tag comparison constant time (it is `subtle::ct_eq` on the finalized output);
+/// finalizing here and letting each caller compare the resulting `[u8; 32]` with `==`
+/// gives back the short-circuiting compare this exists to avoid. [`seal`] finalizes it
+/// via [`mac_tag`].
+#[allow(clippy::too_many_arguments)]
+fn seal_mac(
+    mac_key: &[u8],
+    policy: &EffectivePolicy,
+    registry_digest: &[u8; 32],
+    dialect: &str,
+    matcher_version: u32,
+    charter_version: u64,
+    nonce: &[u8; 16],
+) -> HmacSha256 {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(mac_key).expect("HMAC accepts a key of any length");
     mac.update(SEAL_DOMAIN);
@@ -222,7 +296,7 @@ fn mac_tag(
     // nonce (freshness) — mixed so a nonce swap invalidates the tag.
     mac.update(nonce);
 
-    mac.finalize().into_bytes().into()
+    mac
 }
 
 /// The CANONICAL byte encoding of the resolved rule set WITH ITS LAYER BOUNDARIES

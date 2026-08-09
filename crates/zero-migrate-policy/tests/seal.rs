@@ -343,6 +343,47 @@ fn wrong_registry_digest_fails() {
     assert_ne!(reg.digest(), flipped.digest());
 }
 
+/// A seal minted under registry A must not verify a policy composed under registry B,
+/// even when the caller pins the SEAL'S OWN digest - the tautological call a verifier
+/// makes when it reads the pin off the seal it was handed.
+///
+/// The pin arm (`wrong_registry_digest_fails`) cannot cover this: it compares the seal
+/// against the caller's value and never touches the policy. The two registries here
+/// differ only in `requires_db_privilege`, which enters `KnobDef::canonical_encoding`
+/// and nothing else - the same document loads, composes and canonicalizes to
+/// BYTE-IDENTICAL sealed rule bytes under either - so the registry digest is the only
+/// thing separating them, and `verify` has to derive it from the policy rather than
+/// echo the caller's parameter back into the MAC.
+#[test]
+fn policy_composed_under_another_registry_fails() {
+    let reg = registry();
+    let flipped = registry_flipped_privilege();
+    assert_ne!(reg.digest(), flipped.digest(), "premise: digests differ");
+
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [10u8; 16],
+        DIALECT,
+        MATCHER,
+        CHARTER_VER,
+    );
+
+    // The same document composed under B: identical rules, different registry.
+    let policy_b = reference_policy(&flipped);
+    assert_eq!(
+        sealed.verify(
+            MAC_KEY,
+            &policy_b,
+            &sealed.registry_digest(),
+            DIALECT,
+            MATCHER,
+            CHARTER_VER
+        ),
+        Err(SealError::PolicyComposedUnderOtherRegistry)
+    );
+}
+
 #[test]
 fn wrong_dialect_fails() {
     let reg = registry();
