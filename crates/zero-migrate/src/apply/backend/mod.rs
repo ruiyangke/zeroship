@@ -230,23 +230,44 @@ pub trait CrossDeployObligations {
     ) -> JournalFuture<'a, Vec<journal::DeployRecovery>>;
 }
 
+/// How many non-blocking project-lock attempts an acquisition makes before it
+/// reports the lock busy.
+///
+/// FIXED and small on purpose: retrying until the lock is free is the unbounded
+/// wait the non-blocking acquisition exists to avoid, only spelled with more round
+/// trips.
+#[cfg(pg_seam)]
+pub(crate) const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
+
+/// How long a non-blocking acquisition pauses between those attempts. Sized to
+/// cover the gap between two of a deploy's statements, not the deploy.
+#[cfg(pg_seam)]
+pub(crate) const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 /// One session reported holding the project lock when an acquisition found it
 /// taken.
 ///
-/// Carries no duration on purpose. `pg_locks` records no acquisition timestamp,
-/// and every timestamp `pg_stat_activity` offers ages the holder's session or its
+/// Carries no duration on purpose. Neither `pg_locks` nor
+/// `performance_schema.metadata_locks` records an acquisition timestamp, and every
+/// timestamp the surrounding session views offer ages the holder's session or its
 /// current statement, neither of which is the age of the lock -- reporting one as
 /// "held for" would be a fabricated number an operator would act on.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct ProjectLockHolder {
-    /// Backend process id of the holding session.
+    /// The holding session's id: a PostgreSQL backend pid, a MySQL connection id
+    /// (what `KILL` takes). Either way, the handle an operator acts on.
     pub pid: i64,
-    /// The holder's `application_name`, when it set one.
+    /// Who the holding session is. PostgreSQL reports its `application_name`, when
+    /// it set one; MySQL has no such setting, so it reports the holder's account as
+    /// `user@host`.
     pub application_name: Option<String>,
-    /// The holder's activity state (`active`, `idle in transaction`, ...).
+    /// The holder's activity state: PostgreSQL's `active` / `idle in transaction`,
+    /// or MySQL's command and state (`Query: executing`, `Sleep`).
     pub state: Option<String>,
-    /// The holder's current statement. Absent unless the reading role may see
-    /// other sessions' statement text.
+    /// The holder's current statement. Absent when it is running none, and on
+    /// PostgreSQL also when the reading role may not see other sessions' statement
+    /// text.
     pub query: Option<String>,
 }
 
@@ -355,11 +376,12 @@ pub trait MigrationBackend {
     /// the callers that need it decide exit codes and must not read "a peer is
     /// deploying" as "this migration set is dirty".
     ///
-    /// The default delegates to the blocking acquisition, which is the right
-    /// behaviour for the backends whose acquisition is already finite: MySQL bounds
-    /// `GET_LOCK` at ten seconds and SQLite bounds its try-lock spin at the
-    /// configured lock timeout, and both surface a timeout as an error. PostgreSQL
-    /// overrides it because `pg_advisory_lock` waits forever.
+    /// PostgreSQL and MySQL both override it: `pg_advisory_lock` waits forever, and
+    /// `GET_LOCK` waits out a ten second budget and then reports the contention as
+    /// an error, which every caller turns into a failing exit code. The default
+    /// delegates to the blocking acquisition, which is what SQLite wants -- its
+    /// try-lock spin is already bounded by the configured lock timeout, and a
+    /// single-file database has no peer session to name.
     ///
     /// # Errors
     /// Whatever the backend's acquisition reports; contention itself is not one.

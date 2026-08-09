@@ -41,7 +41,10 @@ pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
-use super::{CrossDeployObligations, MigrationBackend, PlaceholderStyle};
+use super::{
+    CrossDeployObligations, MigrationBackend, PlaceholderStyle, ProjectLockAcquisition,
+    PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
+};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
@@ -660,6 +663,37 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         session::release_project_lock(self.conn, &cfg.project_id).await
     }
 
+    /// One `GET_LOCK(name, 0)` per attempt, with a small fixed number of attempts
+    /// so a reader that arrives during the brief gap between two of a deploy's
+    /// statements still gets a real answer instead of reporting contention that has
+    /// already cleared.
+    ///
+    /// The holder probe is best-effort. `performance_schema` needs a `SELECT` grant
+    /// that a least-privilege migrator account is routinely not given, and failing
+    /// the read over an unnamed holder would exit 1 on a contended run -- the exact
+    /// false CI failure this method exists to remove. An unidentified holder is
+    /// reported as no holder, and the caller says the session could not be named.
+    async fn try_acquire_project_lock(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<ProjectLockAcquisition, ApplyError> {
+        for attempt in 1..=PROJECT_LOCK_TRY_ATTEMPTS {
+            if session::try_acquire_project_lock(self.conn, &cfg.project_id).await? {
+                return Ok(ProjectLockAcquisition::Acquired);
+            }
+            if attempt < PROJECT_LOCK_TRY_ATTEMPTS {
+                // The seam is one verb at a time over one pinned session, driven on
+                // a thread that has nothing else to run, so parking it is the whole
+                // cost of the pause.
+                std::thread::sleep(PROJECT_LOCK_TRY_BACKOFF);
+            }
+        }
+        let holders = session::project_lock_holders(self.conn, &cfg.project_id)
+            .await
+            .unwrap_or_default();
+        Ok(ProjectLockAcquisition::Busy(holders))
+    }
+
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
         session::snapshot_session(self.conn).await
     }
@@ -1032,6 +1066,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+    use crate::apply::backend::ProjectLockHolder;
     use crate::apply::drift::diff_snapshots;
     use crate::driver::{Bind, DbError, Row, Value};
     use crate::model::expr::Expr;
@@ -1043,6 +1078,11 @@ mod render_tests {
     use crate::model::snapshot::IdDefaultSnapshot;
     use serde_json::json;
     use std::cell::RefCell;
+
+    /// The MySQL connection id the canned holder probe reports. Distinct from the
+    /// `performance_schema` thread id the lock rows carry, because the reply must
+    /// name the id `KILL` accepts.
+    const HOLDER_CONNECTION_ID: i64 = 113_110;
 
     /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of
     /// every verb and returns canned rows for the reads the MySQL apply path issues:
@@ -1077,6 +1117,11 @@ mod render_tests {
         session_in_transaction: i64,
         zero_affected_contains: RefCell<Option<String>>,
         fail_once_contains: RefCell<Option<String>>,
+        /// When false the NON-WAITING `GET_LOCK(?, 0)` answers 0, standing in for a
+        /// peer's deploy holding the project lock for the length of its run. The
+        /// blocking `GET_LOCK(?, ?)` still answers 1, because that is the one the
+        /// journal bootstrap takes and it is a different lock name.
+        grants_project_lock: bool,
     }
 
     impl RecordingSession {
@@ -1107,7 +1152,16 @@ mod render_tests {
                 session_in_transaction: 0,
                 zero_affected_contains: RefCell::new(None),
                 fail_once_contains: RefCell::new(None),
+                grants_project_lock: true,
             }
+        }
+
+        /// A session whose non-waiting project-lock acquisition always finds the
+        /// lock taken.
+        fn with_contended_project_lock() -> Self {
+            let mut session = Self::new();
+            session.grants_project_lock = false;
+            session
         }
 
         fn with_table_engine(engine: &str) -> Self {
@@ -1246,8 +1300,28 @@ mod render_tests {
         /// net-state reads) returns empty — enough to drive the whole apply/journal
         /// sweep end-to-end without a live server.
         fn rows_for(&self, sql: &str) -> Vec<Row> {
-            if sql.contains("GET_LOCK") {
+            if sql.contains("GET_LOCK(?, 0)") {
+                vec![Row::new(
+                    vec!["got".to_string()],
+                    vec![Value::Int(i64::from(self.grants_project_lock))],
+                )]
+            } else if sql.contains("GET_LOCK") {
                 vec![Row::new(vec!["got".to_string()], vec![Value::Int(1)])]
+            } else if sql.contains("performance_schema.metadata_locks") {
+                vec![Row::new(
+                    vec![
+                        "pid".into(),
+                        "account".into(),
+                        "state".into(),
+                        "stmt".into(),
+                    ],
+                    vec![
+                        Value::Int(HOLDER_CONNECTION_ID),
+                        Value::Text("deployer@10.0.0.7".to_string()),
+                        Value::Text("Query: altering table".to_string()),
+                        Value::Text("ALTER TABLE widgets ADD COLUMN name VARCHAR(64)".to_string()),
+                    ],
+                )]
             } else if sql.contains("VERSION() AS server_version") {
                 vec![Row::new(
                     vec![
@@ -3977,6 +4051,118 @@ mod render_tests {
                 .any(|v| matches!(v, Bind::Text(t) if t == "zero_migrate:prj_x"))),
             "the project lock name is bound, not interpolated: {:?}",
             rec.binds.borrow()
+        );
+    }
+
+    /// The read-only acquisition never waits: `GET_LOCK(?, 0)` fails immediately
+    /// instead of spending the ten second budget `acquire_project_lock` waits out.
+    ///
+    /// The bounded form is asserted ABSENT rather than merely outranked, so a
+    /// regression back to the waiting acquisition fails here instead of passing on
+    /// the `GET_LOCK` substring both spellings share. An uncontended run also
+    /// probes for no holder, because there is none to name.
+    #[compio::test]
+    async fn try_project_lock_uses_a_zero_timeout_get_lock_and_probes_no_holder() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+
+        let outcome = backend
+            .try_acquire_project_lock(&cfg)
+            .await
+            .expect("contention is an outcome, not an error");
+        assert_eq!(outcome, ProjectLockAcquisition::Acquired);
+
+        let log = rec.log.borrow();
+        assert!(
+            log.iter().any(|s| s.contains("GET_LOCK(?, 0)")),
+            "a read-only acquisition takes the lock with a zero timeout: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|s| s.contains("GET_LOCK(?, ?)")),
+            "a read must never spend the deploy lock's ten second budget: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|s| s.contains("performance_schema")),
+            "an uncontended acquisition has no holder to probe for: {log:?}"
+        );
+    }
+
+    /// A contended acquisition reports the holder and stops, in a bounded number of
+    /// attempts.
+    ///
+    /// The attempt count is asserted exactly: retrying until the lock frees is the
+    /// unbounded wait this path exists to remove, only spelled with more round
+    /// trips.
+    #[compio::test]
+    async fn try_project_lock_reports_the_holder_when_a_peer_holds_it() {
+        let rec = RecordingSession::with_contended_project_lock();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+
+        let outcome = backend
+            .try_acquire_project_lock(&cfg)
+            .await
+            .expect("contention is an outcome, not an error");
+        let ProjectLockAcquisition::Busy(holders) = outcome else {
+            panic!("a held lock must report busy, not acquired");
+        };
+        assert_eq!(
+            holders,
+            vec![ProjectLockHolder {
+                pid: HOLDER_CONNECTION_ID,
+                application_name: Some("deployer@10.0.0.7".to_string()),
+                state: Some("Query: altering table".to_string()),
+                query: Some("ALTER TABLE widgets ADD COLUMN name VARCHAR(64)".to_string()),
+            }],
+            "the busy outcome names the connection id KILL takes, not the internal \
+             performance-schema thread id"
+        );
+
+        let log = rec.log.borrow();
+        assert_eq!(
+            log.iter().filter(|s| s.contains("GET_LOCK(?, 0)")).count(),
+            3,
+            "the retry is bounded at three attempts, never a loop until acquired: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|s| s.contains("RELEASE_LOCK")),
+            "nothing was locked, so there is nothing to release: {log:?}"
+        );
+        // The lock name reaches the holder probe as a bind too: the probe matches
+        // `metadata_locks.OBJECT_NAME` against this project's own lock rather than
+        // reporting whoever holds any user-level lock on the server.
+        assert!(
+            rec.binds.borrow().iter().any(|b| b
+                .iter()
+                .any(|v| matches!(v, Bind::Text(t) if t == "zero_migrate:prj_x"))),
+            "the holder probe is scoped to this project's lock name: {:?}",
+            rec.binds.borrow()
+        );
+    }
+
+    /// A holder probe the migrator account is not granted must not fail the read.
+    ///
+    /// `performance_schema` needs a `SELECT` grant a least-privilege migrator
+    /// routinely lacks, and turning that denial into an error would exit 1 on a
+    /// contended run -- the exact false CI failure the non-waiting acquisition
+    /// exists to remove. The contention is still reported; only the holder's name
+    /// is lost.
+    #[compio::test]
+    async fn a_denied_holder_probe_still_reports_contention() {
+        let rec = RecordingSession::with_contended_project_lock();
+        *rec.fail_once_contains.borrow_mut() = Some("performance_schema".to_string());
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+
+        let outcome = backend
+            .try_acquire_project_lock(&cfg)
+            .await
+            .expect("a denied holder probe is not a failed acquisition");
+        assert_eq!(
+            outcome,
+            ProjectLockAcquisition::Busy(Vec::new()),
+            "an unidentified holder is reported as no holder, never as an error"
         );
     }
 

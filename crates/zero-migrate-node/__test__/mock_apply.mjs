@@ -86,7 +86,9 @@ function mysqlHostDriver([request, done]) {
       ['transaction_tracking_enabled', 'in_transaction'],
       [int(1), int(0)],
     )];
-  } else if (request.sql.includes('GET_LOCK(?, ?)')) {
+  } else if (request.sql.includes('GET_LOCK')) {
+    // Both MySQL named-lock acquisitions: the journal bootstrap's bounded
+    // `GET_LOCK(?, ?)` and the read-only path's non-waiting `GET_LOCK(?, 0)`.
     rows = [row(['got'], [int(1)])];
   } else if (
     request.sql.includes('COLLATION_NAME AS collation_name') &&
@@ -123,6 +125,13 @@ check(
   'MySQL status did not use the MySQL journal bootstrap',
 );
 check(mysqlSql.includes('GET_LOCK(?, ?)'), 'MySQL status did not use MySQL lock SQL');
+// The project lock a read takes is the NON-WAITING one. The bounded form above is
+// the journal bootstrap's, on a different lock name, so the needle has to name the
+// timeout rather than the function.
+check(
+  mysqlSql.includes('GET_LOCK(?, 0)'),
+  'MySQL status waited for the project lock instead of trying it',
+);
 check(mysqlSql.includes('COLLATE utf8mb4_bin'), 'MySQL status did not use MySQL journal SQL');
 check(
   !/BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY|pg_advisory|pg_catalog|CREATE SCHEMA IF NOT EXISTS|\$1/.test(mysqlSql),

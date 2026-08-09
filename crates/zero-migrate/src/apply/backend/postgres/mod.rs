@@ -18,7 +18,7 @@ pub(crate) mod session;
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use super::{
     CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
-    ProjectLockAcquisition,
+    ProjectLockAcquisition, PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
@@ -31,16 +31,6 @@ use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
 use crate::render::step::BindValue;
 use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
 use crate::schema::query::SqlDialect;
-
-/// How many `pg_try_advisory_lock` attempts a non-blocking acquisition makes
-/// before it reports the lock busy.
-#[cfg(pg_seam)]
-const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
-
-/// How long a non-blocking acquisition pauses between those attempts. Sized to
-/// cover the gap between two of a deploy's statements, not the deploy.
-#[cfg(pg_seam)]
-const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///

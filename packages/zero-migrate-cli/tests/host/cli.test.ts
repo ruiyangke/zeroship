@@ -22,7 +22,7 @@ import {
   loadZeroMigrateConfig,
   resolveCliConfig,
 } from "../../src/config.js";
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { connectLivePg, liveDbRequired, pgUrl, REQUIRE_LIVE_DB_ENV } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 import {
   currentIrVersion,
@@ -38,6 +38,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 const NO_INJECT_POLICY = "policy_version = 1\n";
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
 const CONFIG_ENV_KEYS = [
   "DATABASE_URL",
@@ -1387,6 +1388,139 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
       .query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
          DROP SCHEMA IF EXISTS "${schema}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await holder.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The same defect on MySQL, where it is slower to arrive rather than absent.
+// `GET_LOCK(name, 10)` bounds the wait, so a reader never hung -- it spent ten
+// seconds and then reported the timeout as an ERROR, and every runtime error exits
+// 1. `status --strict` therefore still failed a healthy build while a peer
+// deployed, which is the same false red on the same documented CI gate.
+//
+// The lock is held from a SECOND LIVE MySQL session for the duration of both runs.
+// A mock that returns contention would prove the plumbing already shipped for
+// PostgreSQL; only a real `GET_LOCK` holder proves that the MySQL acquisition
+// itself stopped waiting and stopped erroring.
+//
+// `resolve` has no arm here: it refuses any non-PostgreSQL driver before it reads,
+// so there is no MySQL busy path to assert.
+test("MySQL: CLI status and plan answer while a peer holds the project lock", async (t) => {
+  if (!MYSQL_URL) {
+    if (liveDbRequired()) {
+      throw new Error(
+        `${REQUIRE_LIVE_DB_ENV} demands a live database but ZERO_MIGRATE_MYSQL_URL is unset, ` +
+          "so this run has no live MySQL project-lock coverage to offer",
+      );
+    }
+    t.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL project-lock contention arm skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const holder = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
+  const cwd = temporaryDirectory(".cli-lock-busy-mysql-");
+  // MySQL identifiers cap at 64 characters and the journal database appends
+  // `_migrations`, so the generated name has to stay well inside the cap.
+  const schema = `zm_lock_busy_${Date.now().toString(36)}`;
+  // The MySQL project lock is a NAMED user-level lock, not a hashed key: the name
+  // is `zero_migrate:<project id>` and the CLI's project id is the project schema,
+  // so this is the exact name the reader will try to take.
+  const lockName = `zero_migrate:${schema}`;
+  let held = false;
+  try {
+    await holder.query(`CREATE DATABASE \`${schema}\``);
+    writeSimpleMigration(cwd);
+    const policyPath = join(cwd, "policy.toml");
+    writeFileSync(policyPath, noInjectPolicy(schema));
+
+    const [lockRows] = await holder.query("SELECT GET_LOCK(?, 0) AS got", [lockName]);
+    assert.equal(
+      Number((lockRows as Array<Record<string, unknown>>)[0].got),
+      1,
+      "the peer session must actually hold the project lock",
+    );
+    held = true;
+    const [idRows] = await holder.query("SELECT CONNECTION_ID() AS id");
+    const holderId = Number((idRows as Array<Record<string, unknown>>)[0].id);
+
+    const common = [
+      `--dir=${cwd}`,
+      `--policy=${policyPath}`,
+      `--database-url=${MYSQL_URL}`,
+      `--schema=${schema}`,
+    ];
+    const options = { env: { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH }, timeout: 60_000 };
+
+    const status = spawnCli(["status", "--strict", ...common], options);
+    assert.equal(
+      status.signal,
+      null,
+      `status blocked on the peer's project lock instead of reporting it: ${status.stderr}`,
+    );
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stderr, /project lock/i);
+    assert.match(status.stderr, new RegExp(`\\b${holderId}\\b`));
+    // The bounded ten-second GET_LOCK is what used to turn contention into an
+    // error, so its message must be gone rather than merely outranked.
+    assert.doesNotMatch(status.stderr, /timed out after/);
+
+    const plan = spawnCli(["plan", ...common], options);
+    assert.equal(
+      plan.signal,
+      null,
+      `plan blocked on the peer's project lock instead of reporting it: ${plan.stderr}`,
+    );
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stderr, /project lock/i);
+    assert.doesNotMatch(plan.stdout, /would apply|CREATE TABLE/i);
+
+    const json = spawnCli(["status", "--strict", "--json", ...common], options);
+    assert.equal(json.signal, null, json.stderr);
+    assert.equal(json.status, 0, json.stderr);
+    const reply = JSON.parse(json.stdout) as StatusReply;
+    assert.equal(reply.busy, true);
+    assert.deepEqual(
+      reply.lockHolders.map((entry) => entry.pid),
+      [holderId],
+    );
+    // The holder is a connection that took the lock and went quiet, which is what
+    // an operator sees while a peer's deploy waits on a long DDL: MySQL reports
+    // PROCESSLIST_INFO as NULL for it. The reply says so through the command
+    // (`Sleep`) instead of carrying an empty statement the message would print as
+    // a bare trailing colon.
+    assert.equal(reply.lockHolders[0].query ?? null, null);
+    assert.match(reply.lockHolders[0].state ?? "", /Sleep/);
+    assert.doesNotMatch(status.stderr, /\)\s*:\s*$/m);
+
+    // Positive control: the same commands against the same database with the lock
+    // free still take the lock, still read, and still return their real verdict --
+    // exit 1 for the pending migration this directory carries. Without it the arms
+    // above would also pass if the verbs had simply stopped doing any work.
+    await holder.query("SELECT RELEASE_LOCK(?)", [lockName]);
+    held = false;
+
+    const uncontended = spawnCli(["status", "--strict", ...common], options);
+    assert.equal(uncontended.signal, null, uncontended.stderr);
+    assert.equal(uncontended.status, 1, uncontended.stderr);
+    assert.match(uncontended.stdout, /status: 0 applied, 1 pending/);
+    assert.doesNotMatch(uncontended.stderr, /project lock/i);
+
+    const uncontendedPlan = spawnCli(["plan", ...common], options);
+    assert.equal(uncontendedPlan.status, 0, uncontendedPlan.stderr);
+    assert.match(uncontendedPlan.stdout, /would apply 1 migration/);
+    assert.match(uncontendedPlan.stdout, /CREATE TABLE/i);
+  } finally {
+    if (held) {
+      await holder.query("SELECT RELEASE_LOCK(?)", [lockName]).catch(() => {});
+    }
+    await holder
+      .query(
+        `DROP DATABASE IF EXISTS \`${schema}\`;
+         DROP DATABASE IF EXISTS \`${schema}_migrations\``,
       )
       .catch(() => {});
     await holder.end().catch(() => {});

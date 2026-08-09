@@ -10,6 +10,9 @@
 //! - **project lock** — `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
 //! named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
 //! is derived from the project id (bounded to MySQL's 64-char lock-name limit).
+//! A read-only caller takes the same lock with a zero timeout instead, so it
+//! never spends any of a peer deploy's wall clock, and names the holder from
+//! `performance_schema` when the lock is taken.
 //! - **session setup** — `SET SESSION max_execution_time` +
 //! `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
 //! `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
@@ -36,6 +39,7 @@
 use std::time::Instant;
 
 use crate::apply::backend::mysql::journal_sql;
+use crate::apply::backend::ProjectLockHolder;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, CompletedRecord};
 use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
@@ -245,6 +249,95 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
             "mysql GET_LOCK('{name}') returned NULL (lock error)"
         ))),
     }
+}
+
+/// Take the project lock if it is free right now, without waiting.
+///
+/// The zero timeout is the whole point: `GET_LOCK(name, 0)` fails immediately
+/// instead of spending the ten second budget the blocking acquisition above waits
+/// out, so a reader never inherits any part of a peer's deploy. It contends on the
+/// identical lock name, so a reader and a deploy still serialize against each
+/// other.
+///
+/// A NULL result stays an error. It means the acquisition itself failed (the
+/// session was killed, or the name was rejected), which is not the same fact as
+/// "a peer holds it" and must not be reported as contention.
+///
+/// # Errors
+/// [`ApplyError::Db`] on a driver failure; [`ApplyError::Backend`] if `GET_LOCK`
+/// returns NULL or a result that cannot be decoded.
+pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<bool, ApplyError> {
+    let name = project_lock_name(project_id);
+    let row = conn
+        .query_one("SELECT GET_LOCK(?, 0) AS got", &[name.as_str().into()])
+        .await?;
+    let got: Option<i64> = row.try_get("got").map_err(|e| {
+        ApplyError::Backend(format!(
+            "mysql GET_LOCK returned an undecodable result: {e}"
+        ))
+    })?;
+    match got {
+        Some(1) => Ok(true),
+        Some(0) => Ok(false),
+        _ => Err(ApplyError::Backend(format!(
+            "mysql GET_LOCK('{name}') returned NULL (lock error)"
+        ))),
+    }
+}
+
+/// Report the sessions holding this project's named lock, for an operator message
+/// naming who a reader is waiting behind.
+///
+/// A `GET_LOCK` lock is a USER LEVEL LOCK rather than a table MDL, but the server
+/// still publishes it in `performance_schema.metadata_locks` under that
+/// `OBJECT_TYPE` with the lock name verbatim in `OBJECT_NAME`, so the probe is
+/// scoped to this project's own lock rather than every lock on the server.
+/// `OWNER_THREAD_ID` joins to `performance_schema.threads`, which is what turns an
+/// internal thread id into the connection id `KILL` takes.
+///
+/// MySQL has no `application_name`, so the holder is identified by its account.
+/// `PROCESSLIST_INFO` is NULL whenever the holder is running no statement -- the
+/// common case, since a deploy that took the lock and is waiting on a long DDL
+/// shows as `Sleep` between statements -- so the statement is reported as optional
+/// and the command carries the fact instead of an empty string pretending to be a
+/// query.
+///
+/// # Errors
+/// [`ApplyError::Db`] on a driver failure, including the `SELECT` on
+/// `performance_schema` that a least-privilege migrator account is not granted.
+pub(crate) async fn project_lock_holders<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<Vec<ProjectLockHolder>, ApplyError> {
+    let name = project_lock_name(project_id);
+    let rows = conn
+        .query(
+            "SELECT CAST(t.PROCESSLIST_ID AS SIGNED) AS pid, \
+                    NULLIF(CONCAT_WS('@', t.PROCESSLIST_USER, t.PROCESSLIST_HOST), '') AS account, \
+                    NULLIF(CONCAT_WS(': ', t.PROCESSLIST_COMMAND, \
+                                     NULLIF(t.PROCESSLIST_STATE, '')), '') AS state, \
+                    t.PROCESSLIST_INFO AS stmt \
+               FROM performance_schema.metadata_locks l \
+               JOIN performance_schema.threads t ON t.THREAD_ID = l.OWNER_THREAD_ID \
+              WHERE l.OBJECT_TYPE = 'USER LEVEL LOCK' AND l.LOCK_STATUS = 'GRANTED' \
+                AND l.OBJECT_NAME = ? AND t.PROCESSLIST_ID IS NOT NULL \
+              ORDER BY t.PROCESSLIST_ID",
+            &[name.as_str().into()],
+        )
+        .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(ProjectLockHolder {
+                pid: row.try_get("pid")?,
+                application_name: row.try_get("account")?,
+                state: row.try_get("state")?,
+                query: row.try_get("stmt")?,
+            })
+        })
+        .collect()
 }
 
 /// Release the project apply-serialization lock via MySQL `RELEASE_LOCK` (the

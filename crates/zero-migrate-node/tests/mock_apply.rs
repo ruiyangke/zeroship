@@ -76,7 +76,9 @@ impl MockDispatch {
                 cells: vec![int_cell(1), int_cell(0)],
             }];
         }
-        if sql.contains("GET_LOCK(?, ?)") {
+        // Both MySQL named-lock acquisitions: the journal bootstrap's bounded
+        // `GET_LOCK(?, ?)` and the read-only path's non-waiting `GET_LOCK(?, 0)`.
+        if sql.contains("GET_LOCK") {
             return vec![JsRow {
                 columns: vec!["got".into()],
                 cells: vec![int_cell(1)],
@@ -313,6 +315,13 @@ fn mysql_journal_only_status_uses_only_mysql_sql() {
     assert!(
         log.iter().any(|entry| entry.contains("GET_LOCK(?, ?)")),
         "MySQL status must use MySQL named locks: {log:#?}"
+    );
+    // The project lock a read takes is the NON-WAITING one. The bounded form above
+    // is the journal bootstrap's, on a different lock name, so the needle has to
+    // name the timeout rather than the function.
+    assert!(
+        log.iter().any(|entry| entry.contains("GET_LOCK(?, 0)")),
+        "a MySQL status must take the project lock without waiting: {log:#?}"
     );
     assert!(
         log.iter()
