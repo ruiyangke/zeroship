@@ -15,6 +15,11 @@
 
 use serde_json::Value;
 
+// Every DERIVED identifier in this module goes through this one function. See
+// `crate::ident` for why capping (rather than refusing) is right for derived
+// names, and why a second copy of the cap is the failure mode to avoid.
+use crate::ident::cap_ident_name;
+
 /// Errors from query building.
 #[derive(Debug)]
 pub enum QueryError {
@@ -1558,17 +1563,7 @@ pub fn build_drop_foreign_key(
 /// auto-generated FK names). The second argument is reserved for future
 /// composite-FK use and is currently unused.
 pub fn fk_constraint_name(field: &str, _reserved: &str) -> String {
-    let full = format!("{field}_fkey");
-    if full.len() <= 60 {
-        return full;
-    }
-    let hash = short_hash_base32(&full);
-    let prefix_budget = 60usize.saturating_sub(9);
-    let mut prefix: String = full.chars().take(prefix_budget).collect();
-    if prefix.ends_with('_') {
-        prefix.pop();
-    }
-    format!("{prefix}_{hash}")
+    cap_ident_name(&format!("{field}_fkey"))
 }
 
 /// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES …` clause
@@ -2024,7 +2019,7 @@ pub fn build_create_indexes(
         // value, multiple rows can share the same masked output).
         if wants_index || wants_unique {
             if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
-                let idx_name = format!("{collection}__{sibling_col}_idx");
+                let idx_name = cap_ident_name(&format!("{collection}__{sibling_col}_idx"));
                 let sql = format!(
                     "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
                     quote_ident(&idx_name),
@@ -2048,7 +2043,7 @@ pub fn build_create_indexes(
     // `sql` field stays empty because the impl builds its own DDL.
     if !fts_cols.is_empty() {
         let language = fts_language.unwrap_or_else(|| "english".to_string());
-        let name = format!("{collection}__fts_idx");
+        let name = fts_index_name(collection);
         out.push(IndexSpec {
             name,
             columns: fts_cols,
@@ -2162,20 +2157,39 @@ pub fn build_named_indexes(
 ///
 /// Uses a double-underscore separator (`<collection>__<name>`) to avoid
 /// collision with the single-underscore auto-named per-field indexes
-/// produced by `index_name`. NAMEDATALEN-safe via the same sha256 base32
-/// fingerprint tail used by `index_name`.
+/// produced by `index_name`. NAMEDATALEN-safe via [`cap_ident_name`], the
+/// crate's single identifier cap.
 pub fn named_index_name(collection: &str, name: &str) -> String {
-    let full = format!("{collection}__{name}");
-    if full.len() <= 60 {
-        return full;
-    }
-    let hash = short_hash_base32(&full);
-    let prefix_budget = 60usize.saturating_sub(9);
-    let mut prefix: String = full.chars().take(prefix_budget).collect();
-    if prefix.ends_with('_') {
-        prefix.pop();
-    }
-    format!("{prefix}_{hash}")
+    cap_ident_name(&format!("{collection}__{name}"))
+}
+
+/// The Postgres GIN index over a collection's `__fts` tsvector column.
+///
+/// Shared with plugin-db's Postgres backend, which executes the
+/// `CREATE INDEX CONCURRENTLY IF NOT EXISTS` this name goes into: the planner
+/// side (`build_create_indexes`) and the executor side must derive the SAME
+/// name or the executor builds an index the planner never asked for.
+///
+/// Capping matters more here than anywhere else: for a collection at the
+/// 63-byte ceiling the natural `<coll>__fts_idx` truncates to exactly the
+/// collection name, and Postgres indexes share the `pg_class` namespace with
+/// tables — so `IF NOT EXISTS` would find the TABLE and skip, leaving the app
+/// with no full-text index and no error.
+#[must_use]
+pub fn fts_index_name(collection: &str) -> String {
+    cap_ident_name(&format!("{collection}__fts_idx"))
+}
+
+/// The Postgres `BEFORE INSERT OR UPDATE` trigger that maintains a collection's
+/// `__fts` tsvector column.
+///
+/// Trigger names are scoped per-table in Postgres, so an over-long name cannot
+/// collide across collections the way an index name can. It is capped anyway:
+/// `DROP TRIGGER IF EXISTS` and any catalog lookup have to spell the name the
+/// same way the server stored it, and a server-truncated name does not.
+#[must_use]
+pub fn fts_trigger_name(collection: &str) -> String {
+    cap_ident_name(&format!("{collection}__fts_trg"))
 }
 
 /// Build a deterministic Postgres index name from a table name and columns.
@@ -2183,66 +2197,17 @@ pub fn named_index_name(collection: &str, name: &str) -> String {
 /// Strategy:
 ///   1. Construct `<table>_<col1>_<col2>…_<suffix>` where suffix is
 ///      `key` for unique indexes and `idx` otherwise.
-///   2. Postgres `NAMEDATALEN` defaults to 64 bytes (limit 63 chars). If the
-///      generated name exceeds 60 bytes, replace the tail with an 8-char
-///      base32 hash of the full name. This is Atlas's strategy
-///      (`migrate/sqltool/index_name.go`). The 60-byte threshold leaves
-///      headroom for the suffix without ever crossing NAMEDATALEN.
-///   3. The hash is sha256(full_name) → first 5 bytes → base32 (8 chars).
-///      sha256 is in `crates/runtime` and `crates/core` already; pulling
-///      blake3 would add a new transitive dep for an 8-char fingerprint
-///      where collision resistance is not actually load-bearing (we only
-///      need stable + roughly-uniform). sha256 is the cheaper choice.
+///   2. Cap the result to Postgres' `NAMEDATALEN` budget via
+///      [`cap_ident_name`] — the crate's single identifier cap, which keeps
+///      a readable prefix and appends a hash of the FULL natural name so two
+///      long names cannot collapse onto one identifier.
 ///
 /// Naming is content-addressed (same input → same name), so re-running
 /// `registerModel` with `IF NOT EXISTS` is idempotent.
 pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
     let suffix = if unique { "key" } else { "idx" };
     let joined_cols = columns.join("_");
-    let full = format!("{table}_{joined_cols}_{suffix}");
-    if full.len() <= 60 {
-        return full;
-    }
-    // Truncated form: keep the table prefix readable, then append the hash.
-    let hash = short_hash_base32(&full);
-    // Reserve `_<hash>` (1 + 8 = 9 bytes) on the tail. Allocate the rest
-    // to a prefix of the original name (which already starts with the
-    // table). Cap the prefix at 54 bytes so the total is ≤ 63 bytes.
-    let prefix_budget = 60usize.saturating_sub(9);
-    let mut prefix: String = full.chars().take(prefix_budget).collect();
-    // Drop a trailing underscore (cosmetic — keep `<a>_<hash>` rather than
-    // `<a>__<hash>`).
-    if prefix.ends_with('_') {
-        prefix.pop();
-    }
-    format!("{prefix}_{hash}")
-}
-
-/// 8-char base32 fingerprint over sha256 of the input.
-///
-/// Crockford-style alphabet without padding — Postgres identifiers are
-/// case-folded but our names already go through `quote_ident`, so we can
-/// keep lowercase letters for readability.
-fn short_hash_base32(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-
-    let digest = Sha256::digest(input.as_bytes());
-    let bytes = &digest[..5]; // 5 bytes = 40 bits → 8 base32 chars
-
-    let mut out = [0u8; 8];
-    // 5 bytes packed into 8 × 5-bit groups, MSB-first.
-    let mut acc: u64 = 0;
-    for b in bytes {
-        acc = (acc << 8) | u64::from(*b);
-    }
-    for i in 0..8 {
-        let shift = (7 - i) * 5;
-        let idx = ((acc >> shift) & 0x1f) as usize;
-        out[i] = ALPHABET[idx];
-    }
-    // Safety: ALPHABET is ASCII so out is valid UTF-8.
-    String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
+    cap_ident_name(&format!("{table}_{joined_cols}_{suffix}"))
 }
 
 /// Return the sibling column name `<field>_masked` IFF
@@ -2620,19 +2585,9 @@ fn sanitize_for_identifier(s: &str) -> String {
 }
 
 /// Build the constraint name for a union-variant CHECK. NAMEDATALEN-safe
-/// (≤ 63 bytes) via the same hash-truncation strategy as index names.
+/// (≤ 63 bytes) via [`cap_ident_name`], the crate's single identifier cap.
 fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) -> String {
-    let full = format!("{collection}_{disc}_{value_tag}_chk");
-    if full.len() <= 60 {
-        return full;
-    }
-    let hash = short_hash_base32(&full);
-    let prefix_budget = 60usize.saturating_sub(9);
-    let mut prefix: String = full.chars().take(prefix_budget).collect();
-    if prefix.ends_with('_') {
-        prefix.pop();
-    }
-    format!("{prefix}_{hash}")
+    cap_ident_name(&format!("{collection}_{disc}_{value_tag}_chk"))
 }
 
 /// Map schema type to PostgreSQL type.
@@ -8268,26 +8223,137 @@ mod tests {
 
     #[test]
     fn test_index_name_just_under_threshold_not_hashed() {
-        // 60-byte threshold (inclusive). Build a name whose unhashed length
-        // is exactly 60.
-        //   "t_" (2) + col (53) + "_idx" (4) = 59  → unhashed
-        //   "t_" (2) + col (54) + "_idx" (4) = 60  → unhashed
-        //   "t_" (2) + col (55) + "_idx" (4) = 61  → hashed
-        let col = "c".repeat(54);
+        // 63-byte threshold (inclusive) — the real NAMEDATALEN ceiling.
+        //   "t_" (2) + col (57) + "_idx" (4) = 63  → unhashed
+        //   "t_" (2) + col (58) + "_idx" (4) = 64  → hashed
+        let col = "c".repeat(57);
         let name = index_name("t", &[col.as_str()], false);
-        assert_eq!(name.len(), 60, "name: {}", name);
+        assert_eq!(name.len(), crate::ident::PG_MAX_IDENT_BYTES, "name: {}", name);
         assert!(name.ends_with("_idx"), "should keep readable suffix: {}", name);
     }
 
     #[test]
     fn test_index_name_just_over_threshold_is_hashed() {
-        let col = "c".repeat(55);
+        let col = "c".repeat(58);
         let name = index_name("t", &[col.as_str()], false);
-        assert!(name.len() <= 63);
+        assert!(name.len() <= crate::ident::PG_MAX_IDENT_BYTES);
         assert!(
             !name.ends_with("_idx"),
             "over-threshold name should end with the hash, not _idx: {}",
             name
+        );
+    }
+
+    /// A collection name at the 63-byte ceiling PASSES `validate_collection`,
+    /// but nothing bounds the names DERIVED from it. `build_create_indexes`
+    /// builds the masked-sibling index as `<coll>__<col>_masked_idx`, which is
+    /// guaranteed to overflow NAMEDATALEN for such a collection. Postgres does
+    /// not error on that — it truncates to 63 bytes and emits a NOTICE — so two
+    /// masked siblings on the same collection collapse to ONE identifier and
+    /// the second `CREATE INDEX ... IF NOT EXISTS` is a SILENT no-op.
+    ///
+    /// The two natural names here diverge only at byte 65 (`__alpha` vs
+    /// `__beta`), i.e. strictly AFTER the truncation point — a shorter
+    /// collection would leave the truncated forms distinct and the test would
+    /// pass for the wrong reason.
+    ///
+    /// What this does NOT catch: it asserts distinctness of the emitted
+    /// identifiers only. It does not prove the emitted DDL is accepted by a
+    /// live Postgres, and it does not cover the UNIQUE variants (see
+    /// `derived_unique_index_names_stay_distinct_at_the_63_byte_ceiling`).
+    #[test]
+    fn derived_masked_index_names_stay_distinct_at_the_63_byte_ceiling() {
+        let coll = "c".repeat(63);
+        assert!(validate_collection(&coll).is_ok(), "63 bytes must pass validation");
+
+        let schema = serde_json::json!({
+            "alpha": { "type": "string", "index": true, "mask": { "kind": "partial" } },
+            "beta":  { "type": "string", "index": true, "mask": { "kind": "partial" } },
+        });
+        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
+
+        let masked: Vec<&IndexSpec> = specs
+            .iter()
+            .filter(|s| s.columns.iter().any(|c| c.ends_with("_masked")))
+            .collect();
+        assert_eq!(masked.len(), 2, "expected one sibling index per masked field: {masked:?}");
+
+        for spec in &masked {
+            assert!(
+                spec.name.len() <= 63,
+                "derived name {} is {} bytes — Postgres will truncate it silently",
+                spec.name,
+                spec.name.len()
+            );
+        }
+
+        // What Postgres actually stores: the first 63 bytes.
+        let truncate = |n: &String| n.as_bytes()[..n.len().min(63)].to_vec();
+        assert_ne!(
+            truncate(&masked[0].name),
+            truncate(&masked[1].name),
+            "distinct masked siblings collapsed to one identifier after \
+             NAMEDATALEN truncation: {} / {}",
+            masked[0].name,
+            masked[1].name
+        );
+    }
+
+    /// The serious half of the same defect: a silently-skipped UNIQUE index
+    /// means the uniqueness the schema declares does not exist in the database.
+    ///
+    /// What this does NOT catch: same limits as the masked-sibling test above —
+    /// identifier distinctness only, no live-database assertion.
+    #[test]
+    fn derived_unique_index_names_stay_distinct_at_the_63_byte_ceiling() {
+        let coll = "u".repeat(63);
+        let schema = serde_json::json!({
+            "alpha": { "type": "string", "unique": true },
+            "beta":  { "type": "string", "unique": true },
+        });
+        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
+        let uniq: Vec<&IndexSpec> = specs.iter().filter(|s| s.unique).collect();
+        assert_eq!(uniq.len(), 2, "expected two unique indexes: {uniq:?}");
+        for spec in &uniq {
+            assert!(spec.name.len() <= 63, "derived name {} is {} bytes", spec.name, spec.name.len());
+        }
+        let truncate = |n: &String| n.as_bytes()[..n.len().min(63)].to_vec();
+        assert_ne!(
+            truncate(&uniq[0].name),
+            truncate(&uniq[1].name),
+            "two UNIQUE indexes collapsed to one identifier: {} / {}",
+            uniq[0].name,
+            uniq[1].name
+        );
+    }
+
+    /// The FTS GIN index name `<coll>__fts_idx` truncates, for a 63-byte
+    /// collection, to exactly the collection name — and in Postgres indexes
+    /// share the `pg_class` namespace with tables, so the emitted
+    /// `CREATE INDEX ... IF NOT EXISTS` finds the TABLE under that name and
+    /// skips. The GIN index is then never created, silently.
+    ///
+    /// What this does NOT catch: it asserts the derived name is bounded and
+    /// distinct from the table name; it does not exercise the plugin-db
+    /// backend that executes the DDL.
+    #[test]
+    fn derived_fts_index_name_does_not_collapse_onto_the_table_name() {
+        let coll = "f".repeat(63);
+        let schema = serde_json::json!({
+            "body": { "type": "string", "fts": true },
+        });
+        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
+        let fts = specs
+            .iter()
+            .find(|s| matches!(s.kind, IndexKind::Fts { .. }))
+            .expect("an fts spec");
+        assert!(fts.name.len() <= 63, "derived name {} is {} bytes", fts.name, fts.name.len());
+        let truncate = |n: &str| n.as_bytes()[..n.len().min(63)].to_vec();
+        assert_ne!(
+            truncate(&fts.name),
+            truncate(&coll),
+            "fts index name truncated onto the table name: {}",
+            fts.name
         );
     }
 
@@ -8586,11 +8652,18 @@ mod tests {
         assert_eq!(fk_constraint_name("authorId", ""), "authorId_fkey");
     }
 
+    /// The budget is Postgres' real `NAMEDATALEN` ceiling, not the crate-local
+    /// 60 this assertion used to encode — see
+    /// [`crate::ident::PG_MAX_IDENT_BYTES`].
     #[test]
     fn b2_fk_constraint_name_truncated() {
         let long = "a".repeat(80);
         let name = fk_constraint_name(&long, "");
-        assert!(name.len() <= 60, "got {} bytes: {name}", name.len());
+        assert!(
+            name.len() <= crate::ident::PG_MAX_IDENT_BYTES,
+            "got {} bytes: {name}",
+            name.len()
+        );
     }
 
     #[test]
@@ -9914,27 +9987,30 @@ mod tests {
     }
 
     /// The system-field index names go through the existing
-    /// [`index_name`] helper, so an overlong collection name gets the
-    /// sha2 hash truncation at 60 bytes. Regression fence for the
-    /// NAMEDATALEN-safety contract.
+    /// [`index_name`] helper, so an overlong collection name gets the sha2 hash
+    /// truncation. Regression fence for the NAMEDATALEN-safety contract.
+    ///
+    /// The budget and the hash encoding are now
+    /// [`crate::ident::cap_ident_name`]'s (63 bytes, 10 hex chars), not the
+    /// crate-local 60-byte / 8-char-base32 pair this test used to encode.
     #[test]
-    fn index_name_truncates_with_sha2_suffix_at_60_bytes() {
+    fn index_name_truncates_with_sha2_suffix_at_the_namedatalen_ceiling() {
         // 63-byte collection name (the Postgres NAMEDATALEN ceiling).
-        // The naive `<table>_deleted_at_idx` would be far over 60 bytes,
+        // The naive `<table>_deleted_at_idx` is far over 63 bytes,
         // triggering the hash-truncation path.
         let long = "a".repeat(63);
         let idx = index_name(&long, &["deleted_at"], false);
         assert!(
-            idx.len() <= 60,
+            idx.len() <= crate::ident::PG_MAX_IDENT_BYTES,
             "truncated index name must fit NAMEDATALEN ({} bytes): {idx}",
             idx.len()
         );
-        // The 8-char base32 suffix is the hash tail.
-        let tail = &idx[idx.len() - 8..];
+        // The 10-char hex suffix is the hash tail.
+        let tail = &idx[idx.len() - 10..];
         for b in tail.bytes() {
             assert!(
-                b.is_ascii_lowercase() || b.is_ascii_digit(),
-                "hash suffix must be base32-lowercase + digits: {tail}"
+                b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
+                "hash suffix must be lowercase hex: {tail}"
             );
         }
     }
