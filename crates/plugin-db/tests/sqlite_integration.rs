@@ -2343,10 +2343,10 @@ fn session_not_configured() {
     // the auth subsystem on PG uses pgcrypto.gen_random_bytes for
     // its HMAC key and reads `ZEROSHIP_HMAC_*` instead.
     if std::env::var("ZEROSHIP_SESSION_SECRET").is_ok() {
-        eprintln!(
+        zeroship_test_support::skip(
             "session_not_configured: skipping — ZEROSHIP_SESSION_SECRET is set in \
              this test process; the lazy-failure path is unreachable. To exercise \
-             this test, unset the env var and re-run."
+             this test, unset the env var and re-run.",
         );
         return;
     }

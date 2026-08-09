@@ -99,9 +99,9 @@ impl Fixture {
         let (control_pg_client, control_pg_conn) = match connect(&db_url, NoTls).await {
             Ok(pg) => pg,
             Err(err) => {
-                eprintln!(
+                zeroship_test_support::skip(&format!(
                     "[authz_guard_supabase_test] test DB unreachable ({err}) - skipping"
-                );
+                ));
                 return None;
             }
         };
@@ -113,9 +113,9 @@ impl Fixture {
         let registry = match Registry::new(&db_url).await {
             Ok(registry) => registry,
             Err(err) => {
-                eprintln!(
+                zeroship_test_support::skip(&format!(
                     "[authz_guard_supabase_test] registry DB connect failed ({err}) - skipping"
-                );
+                ));
                 return None;
             }
         };

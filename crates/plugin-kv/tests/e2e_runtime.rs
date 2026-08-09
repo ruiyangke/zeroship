@@ -828,7 +828,7 @@ fn e2e_scenarios() {
 #[test]
 fn e2e_dragonfly() {
     let Ok(url) = std::env::var("ZEROSHIP_KV_URL") else {
-        eprintln!(
+        zeroship_test_support::skip(
             "e2e_dragonfly: ZEROSHIP_KV_URL unset — skipping live-backend test. \
              Set e.g. ZEROSHIP_KV_URL=redis://127.0.0.1:6399 to run it."
         );
@@ -856,7 +856,7 @@ fn e2e_dragonfly() {
 #[test]
 fn e2e_dragonfly_cluster() {
     let Ok(seeds) = std::env::var("DRAGONFLY_CLUSTER_SEEDS") else {
-        eprintln!(
+        zeroship_test_support::skip(
             "e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS unset — skipping live-cluster \
              test. Set e.g. DRAGONFLY_CLUSTER_SEEDS=\
              redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002 to run it."

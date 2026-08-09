@@ -42,6 +42,9 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
+# Counts the tests that announced they did nothing, so a green tally cannot hide
+# them; `tests/lib_skip_census_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/skip_census.sh"
 
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
@@ -146,16 +149,16 @@ done
 echo "------------------------------------------------------------------"
 # The point of the whole script: a test that skipped is not a test that passed.
 #
-# The search is for a token, not a word. `zeroship_test_support::skip` (and its
-# verbatim copy in the standalone libs/ crates) prefixes every announcement with
-# SKIP_MARKER, and nothing else in a run log is spelled that way. The word
-# "skip" cannot do this job and that is measured: of the 98 lines containing it
-# in one full run, 13 were real announcements, 5 were the harness's own
-# "test <name> ... ok" for tests whose names contain "skips"/"skipped", and ~80
-# were driver debug output echoing an INSERT that names a skip_consent column.
-# The marker's hyphens are not legal in a Rust identifier, so no test name can
-# forge it.
-SKIP_MARKER="ZEROSHIP-TEST-SKIPPED"
+# The counting itself now lives in tests/lib/skip_census.sh, which this script
+# sources at the top, so the same census runs here, in run_billing_suite.sh, and
+# over the blanket `cargo test --workspace` in CI. It used to be open-coded here
+# and nowhere else, which is why every crate outside the auth suite could
+# announce a skip into a log no gate ever read. Moving it did not weaken this
+# gate: the allowlist and the failure below are unchanged, and the library adds
+# `grep -a`, without which a log carrying a single NUL byte reports its skips as
+# one nameless "binary file matches" line instead of naming the backend.
+#
+# tests/lib_skip_census_selftest.sh covers the library in both directions.
 
 # Skips this gate reports but does not fail on. Each entry names a backend this
 # script does not provision, and the decision to leave it unprovisioned:
@@ -173,16 +176,10 @@ SKIP_MARKER="ZEROSHIP-TEST-SKIPPED"
 #     blind the gate to the rest of the file.
 SKIP_ALLOWLIST='GATEWAY_ANCHORS_DB_URL|AUTH_TEST_SMTP_SINK'
 
-skips="$(grep -F "$SKIP_MARKER" "$LOG" | grep -cvE "$SKIP_ALLOWLIST" || true)"
-tolerated="$(grep -F "$SKIP_MARKER" "$LOG" | grep -cE "$SKIP_ALLOWLIST" || true)"
-if [ "$tolerated" -ne 0 ]; then
-  echo "NOTE: ${tolerated} allowlisted skip(s) - reported, not failed:"
-  grep -F "$SKIP_MARKER" "$LOG" | grep -E "$SKIP_ALLOWLIST" | sort -u | head -20
-fi
-if [ "$skips" -ne 0 ]; then
-  echo "FAIL: ${skips} test(s) skipped despite a provisioned database." >&2
+if ! zs_skip_census "$LOG" "$SKIP_ALLOWLIST"; then
+  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
   echo "A skipped auth test is a silent pass. Offending lines:" >&2
-  grep -F "$SKIP_MARKER" "$LOG" | grep -vE "$SKIP_ALLOWLIST" | sort -u | head -20 >&2
+  zs_skip_lines "$LOG" "$SKIP_ALLOWLIST" | sort -u | head -20 >&2
   status=1
 fi
 

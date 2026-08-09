@@ -7058,6 +7058,7 @@ dependencies = [
  "zero-migrate-ir",
  "zero-migrate-policy",
  "zeroship-runtime",
+ "zeroship-test-support",
 ]
 
 [[package]]
