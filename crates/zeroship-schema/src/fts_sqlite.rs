@@ -28,6 +28,24 @@
 //!   (`INSERT INTO <fts>(<fts>, rowid, cols) VALUES ('delete', OLD.rowid, …)`),
 //!   because a plain `DELETE FROM` is not allowed on an external-content vtable.
 //!
+//! ## Why these names are NOT run through [`crate::ident::cap_ident_name`]
+//!
+//! Every DERIVED *Postgres* identifier in this crate is capped, because Postgres
+//! truncates at `NAMEDATALEN` and silently collapses two long names onto one.
+//! The names here are deliberately exempt, for two independent reasons:
+//!
+//! 1. **SQLite has no identifier length limit.** There is no truncation, so
+//!    there is no collision to prevent. Capping would buy nothing.
+//! 2. **These names are a cross-repo byte-identical contract.** The vendored
+//!    migration engine carries its own copy of these builders
+//!    (`zero_migrate::schema::fts_sqlite`) and its SQLite drift introspector
+//!    recognises an FTS5 vtable by the literal `__fts` suffix
+//!    (`apply/backend/sqlite/drift_sql.rs`). A cap applied on this side only
+//!    would make an engine-created vtable and a runtime-created one disagree,
+//!    and would break suffix-based recognition outright.
+//!
+//! Do not "fix" these to match the Postgres index names.
+//!
 //! **Unqualified body table** (SQLite engine rule): the table referenced inside a
 //! trigger BODY cannot be database-qualified — SQLite resolves it within the same
 //! attached database as the trigger. So the body always references `"<coll>__fts"`

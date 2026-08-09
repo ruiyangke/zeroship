@@ -608,8 +608,12 @@ impl FullTextIndex for PostgresBackend {
         let qschema = self.quote_ident(app_id);
         let qcoll = self.quote_ident(collection);
         let qtable = format!("{qschema}.{qcoll}");
-        let idx_name = format!("{collection}__fts_idx");
-        let trg_name = format!("{collection}__fts_trg");
+        // Derived, so NAMEDATALEN-capped — and derived by the SAME functions
+        // `zeroship_schema::query::build_create_indexes` uses, so the name this
+        // executor creates is the name the planner emitted. A local `format!`
+        // here is exactly how the two would drift apart.
+        let idx_name = zeroship_schema::query::fts_index_name(collection);
+        let trg_name = zeroship_schema::query::fts_trigger_name(collection);
         let qidx = self.quote_ident(&idx_name);
         let qtrg = self.quote_ident(&trg_name);
         let qfts_col = self.quote_ident("__fts");

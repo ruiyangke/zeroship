@@ -22,9 +22,9 @@ zeroship-core = { workspace = true }
 # pure logging facade: no v8, no runtime, no crypto, no metering — it does
 # not touch the trust domain the leaf-purity constraint protects.
 tracing = { workspace = true }
-# `sha2` produces the deterministic 8-char base32 fingerprint the DDL
-# builder appends when a generated index name exceeds the 60-byte
-# NAMEDATALEN headroom (`query::index_name`). This is a NAME-hashing use
+# `sha2` produces the deterministic 10-char hex fingerprint the identifier
+# cap appends when a DERIVED name exceeds the 63-byte NAMEDATALEN limit
+# (`ident::cap_ident_name`, the crate's only such site). This is a NAME-hashing use
 # (stable + roughly-uniform), NOT key/AEAD crypto — it touches no key
 # material and does not implicate the trust domain the leaf-purity
 # constraint protects. The migration engine already depends on `sha2`.
