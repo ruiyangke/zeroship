@@ -823,9 +823,13 @@ export function subscribeCall<TOut = unknown>(
   // ── Connect ────────────────────────────────────────────────────────
   async function connect(): Promise<void> {
     if (unsubscribed) return;
-    let authToken: string | null | undefined;
+    // The resolved value is deliberately discarded: a subscription
+    // authenticates by cookie (see the protocol list below). The call
+    // stays because a resolver that throws -- an expired token it cannot
+    // refresh, say -- must surface as UNAUTHENTICATED before a socket is
+    // opened, rather than as an opaque close code afterwards.
     try {
-      authToken = await cfg.authResolver();
+      await cfg.authResolver();
     } catch (e) {
       fireError(
         new RpcError({
@@ -842,19 +846,23 @@ export function subscribeCall<TOut = unknown>(
       helloPayload = { json: body };
     }
 
-    // The auth header on a WebSocket upgrade isn't reachable from
-    // the browser `WebSocket` constructor — only protocols + URL +
-    // cookies. We pass the bearer token via a `auth.zsbearer.<token>`
-    // sub-protocol token when present (the gateway adapts), and rely
-    // on cookie auth otherwise. Same-origin deployments use cookie
-    // auth by default; cross-origin deployments inject the JWT into
-    // the protocol list so the gateway can lift it without a custom
-    // header. (Servers MAY ignore the bearer subprotocol and still
-    // authenticate via cookie.)
+    // A WebSocket upgrade cannot carry an `Authorization` header: the
+    // browser `WebSocket` constructor exposes only the URL, the protocol
+    // list, and cookies. This used to smuggle the bearer token through as
+    // an `auth.zsbearer.<token>` subprotocol, on the rationale that the
+    // gateway would lift it. Nothing does. The gateway resolves identity
+    // from `Authorization: Bearer`, the session cookie, then the IP, and
+    // the subscription path runs that same gate, so the token was read by
+    // no one while riding in `Sec-WebSocket-Protocol` -- a request header
+    // proxies and CDNs log by default, unlike `Authorization`, which is
+    // commonly redacted.
+    //
+    // Subscriptions therefore authenticate by cookie. That is fine
+    // same-origin and is a real gap cross-origin, where a caller cannot
+    // count on the cookie being sent. Closing it needs a server-side
+    // mechanism; dropping the credential here only stops publishing it to
+    // every intermediary on the path.
     const protocols: string[] = ["zs.v1"];
-    if (authToken) {
-      protocols.push(`auth.zsbearer.${encodeURIComponent(authToken)}`);
-    }
 
     let socket: WebSocket;
     try {
