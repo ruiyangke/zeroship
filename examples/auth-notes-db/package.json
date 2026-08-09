@@ -1,0 +1,28 @@
+{
+  "name": "auth-notes-db",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Per-user notes: env.auth + env.db + RPC together, with server-side ownership scoping.",
+  "scripts": {
+    "dev": "vite",
+    "gen-types": "vite build --mode development",
+    "build": "vite build",
+    "smoke": "bash scripts/smoke.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zeroship/auth": "workspace:*",
+    "@zeroship/db": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@zeroship/migrate": "workspace:*",
+    "@zeroship/types": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}
