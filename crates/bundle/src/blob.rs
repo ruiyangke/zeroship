@@ -259,16 +259,37 @@ impl BlobStore for LocalDiskBlobStore {
         }
         let path = self.blob_path(hash);
 
-        // Idempotent: pre-existing blob → drain the reader (so the
-        // caller's stream cursor is advanced past the entry) and
-        // report dedup. Metadata presence is NOT proof of bytes:
-        // size+hash-verify the on-disk file before trusting the dedup
-        // (a truncated/corrupt local file must not silently dedup).
+        // Idempotent: pre-existing blob → consume the reader (so the
+        // caller's stream cursor is advanced past the entry) and report
+        // dedup. Two separate checks are needed, because they answer two
+        // different questions.
+        //
+        // `verify_local_blob` asks whether the STORE holds the right bytes
+        // for this hash; a truncated or corrupt local file must not
+        // silently dedup.
+        //
+        // Hashing the supplied stream asks whether THIS CALLER has those
+        // bytes, and that is the one the deploy path depends on: `unpack`
+        // records a hash as satisfied on any `Ok` from here, so crediting a
+        // caller who shipped something else would let a deploy claim a
+        // blob it never possessed and then point an `anon` asset at
+        // another tenant's content. The gateway keys its caches on the
+        // bare hash with no app partition, which is sound only while this
+        // check holds.
+        //
+        // The hash is not a secret that could stand in for the bytes: it
+        // is returned as the ETag on every 200/206/304, so any reader who
+        // was ever authorized keeps it, and blobs are never deleted.
         if let Ok(meta) = compio::fs::metadata(&path).await {
             if meta.is_file() {
                 verify_local_blob(&path, hash).await?;
-                std::io::copy(reader, &mut std::io::sink())
-                    .map_err(BlobError::Io)?;
+                let supplied = hash_reader_to_end(reader)?;
+                if supplied != hash {
+                    return Err(BlobError::HashMismatch {
+                        expected: hash.to_string(),
+                        got: supplied,
+                    });
+                }
                 return Ok(PutOutcome::Deduped);
             }
         }
@@ -513,6 +534,23 @@ impl BlobStore for LocalDiskBlobStore {
 /// Size/hash-verify a local blob file before trusting a dedup hit. Returns
 /// `HashMismatch` (or a backend error) on any divergence so a truncated or
 /// tampered local file never silently dedups.
+/// Read `reader` to EOF and return the hex SHA-256 of everything it
+/// yielded. Streams in fixed chunks so a caller-supplied length can never
+/// drive the allocation.
+fn hash_reader_to_end(reader: &mut dyn std::io::Read) -> Result<String, BlobError> {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    let mut scratch = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut scratch).map_err(BlobError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&scratch[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 async fn verify_local_blob(path: &std::path::Path, hash: &str) -> Result<(), BlobError> {
     let data = match compio::fs::read(path).await {
         Ok(v) => v,

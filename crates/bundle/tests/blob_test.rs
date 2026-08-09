@@ -250,6 +250,59 @@ async fn local_disk_put_blob_stream_idempotent_returns_deduped() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The dedup arm must verify the SUPPLIED bytes, not just the stored ones.
+///
+/// `verify_local_blob` proves the store holds the right content for this
+/// hash. That is a different claim from "this uploader has that content",
+/// and the second is the one ingest depends on: `unpack` records a hash as
+/// satisfied on any `Ok` from here, so a deploy that ships a junk byte
+/// under `blobs/<hash>` would have its manifest accepted and could then
+/// point an `anon` asset at another tenant's blob. The gateway's caches
+/// are keyed on the bare hash with no app partition, so it would serve
+/// those bytes.
+///
+/// Hashes are not secret enough to lean on: the gateway returns the raw
+/// content hash as the ETag on every 200/206/304, so any reader who was
+/// ever authorized — and every proxy, CDN, and log along the way — keeps
+/// it. Blobs are never deleted, so possession of the hash outlives the
+/// grant that revealed it.
+///
+/// What this does NOT catch: the same hole in the S3 backend, whose HEAD
+/// dedup drains the reader unread for the same stated reason.
+#[compio::test]
+async fn local_disk_put_blob_stream_dedup_rejects_content_it_was_not_given() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+
+    // A blob already in the store, as if put there by another tenant.
+    let victim = b"another tenant's private asset bytes";
+    let hash = sha256_hex(victim);
+    let mut c1 = std::io::Cursor::new(&victim[..]);
+    assert_eq!(
+        store
+            .put_blob_stream(&hash, victim.len() as u64, &mut c1)
+            .await
+            .expect("seed the victim blob"),
+        PutOutcome::Wrote
+    );
+
+    // A second deploy claims that hash while shipping junk.
+    let junk = b"x";
+    let mut c2 = std::io::Cursor::new(&junk[..]);
+    let outcome = store
+        .put_blob_stream(&hash, victim.len() as u64, &mut c2)
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a deploy that did not ship the bytes for {hash} was credited with \
+         them (got {outcome:?}); ingest treats that as the blob being \
+         present, so the manifest is accepted and the asset resolves to \
+         another tenant's content",
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[compio::test]
 async fn local_disk_put_blob_stream_rejects_hash_mismatch() {
     let root = tmpdir();
