@@ -95,7 +95,7 @@ cleanup() {
 trap cleanup EXIT
 
 # node helper: read a JSON field from stdin
-jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
+jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
 echo "============================================"
 echo "  zeroship E2E — app primitives over the edge (ISS-54/G1)"
