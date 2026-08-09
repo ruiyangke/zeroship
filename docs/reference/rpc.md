@@ -251,11 +251,19 @@ INVALID_ARGUMENT` and `details.reason:
 Authenticated procedures accept any key string up to 255 characters, so a
 natural key such as an order id is fine there.
 
-**Server errors are the exception — a `5xx` is never stored.** A
-`5xx` means no outcome was reported (the app threw, or the platform could not
-reach it), so the key stays open and a retry re-runs the call. Rejections you
-want remembered must be `4xx`: return `400`/`409`/`422` and the retry gets that
-same answer back without re-executing.
+**Only a response your handler produced is stored.** When the platform answers
+on its own behalf instead of running your call — it could not reach your app, or
+the request needs a sign-in round trip first — the key stays open and the retry
+runs the call for real. That is why a redirect into the login flow is never
+remembered: it says nothing about your mutation, and its one-time sign-in state
+would be stale by the time anyone replayed it. A redirect *your handler*
+returns is a genuine outcome and is stored and replayed like any other.
+
+**Server errors are the second exception — a `5xx` is never stored**, even one
+your handler returned. A `5xx` means no outcome was reported (the app threw, or
+the platform could not reach it), so the key stays open and a retry re-runs the
+call. Rejections you want remembered must be `4xx`: return `400`/`409`/`422` and
+the retry gets that same answer back without re-executing.
 
 ## Streams
 

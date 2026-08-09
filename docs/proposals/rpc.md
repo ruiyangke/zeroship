@@ -1573,6 +1573,18 @@ The `(app_id, wireId, idempotency_key)` tuple has three possible states:
 
 `ALREADY_EXISTS` and `ABORTED` are existing entries in §6's error code table.
 
+### What is storable
+
+An entry means "this logical **app** operation reached a definitive outcome; replay it". Two independent conditions can falsify that, so both are checked, and a response is stored only if it clears both.
+
+1. **The worker must have authored the response.** The gateway synthesises responses of its own inside the dispatch path — `502` when it cannot reach a worker, and, on a worker `401` that looks like an HTML navigation, either a `302` into the OP or a `503 client_not_provisioned`. None of them reports whether the app operation happened; they describe the gateway's reach or the visitor's session. The `302` is the sharpest case: it carries a freshly minted per-request PKCE stash in a `Set-Cookie`, so a stored copy would hand every retry within the TTL a verifier bound to an already-spent `code_challenge`/`state` pair.
+
+   This is a rule about **authorship, not status**. An app may legitimately answer `302` (post-redirect-get) or `401` itself, and those are outcomes that must keep deduping. The gateway therefore tags each response with its origin where it is produced rather than guessing from the status code at the capture point; a status blacklist would either freeze out those app responses or need a new entry for every future gateway-synthesised status.
+
+2. **The status must be below `5xx`, even from the worker.** Not implied by (1): a worker `500` is worker-authored yet still reports no outcome, and at the capture point "worker committed a write then threw" is indistinguishable from "worker never received it". Unknown resolves to retryable. `4xx` **is** stored, so a deterministic rejection (`400`/`409`/`422`) stays cheap and stable under retry.
+
+In both cases the in-flight lock is released rather than held, so the next request with the same key retries.
+
 ### Storage cap (round-01 Low-5)
 
 - Hard cap per app: 1 M live keys (configurable via `defineApp.kv.idempotencyCap`).
