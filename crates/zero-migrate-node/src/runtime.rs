@@ -15,8 +15,89 @@
 //! `JsDeferred` so the JS side gets a `Promise` resolved cross-thread when
 //! `block_on` completes (fire-and-resolve — the JS thread is NEVER blocked on a
 //! `join()`, which would deadlock libuv/Bun).
+//!
+//! That worker thread is also where the engine's diagnostics are collected. The
+//! engine emits `tracing` events for the secondary failures its reply cannot carry
+//! (a release that failed, a `RESET ROLE` that failed), and a `tracing` event with
+//! no subscriber installed reaches nobody. [`with_diagnostics`] installs one for
+//! the length of the verb, on the thread that runs it, when the operator opts in
+//! through `ZERO_MIGRATE_LOG`.
 
+use std::io::IsTerminal;
 use std::thread;
+
+use tracing::{Level, Subscriber};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+
+/// The opt-in switch for engine diagnostics, named for the `ZERO_MIGRATE_*` family
+/// every other knob in this tree belongs to. `RUST_LOG` is deliberately not read:
+/// it is a Rust-ecosystem name reaching an operator who runs a Node CLI, and it is
+/// set incidentally in environments that have nothing to do with migrations.
+const LOG_ENV: &str = "ZERO_MIGRATE_LOG";
+
+/// The one target the switch turns on. Every event the engine emits is a `warn`
+/// (each one is a secondary failure the reply cannot carry), so the switch itself
+/// is the real control and this only keeps a future dependency's events out.
+const LOG_TARGET: &str = "zero_migrate";
+
+/// Whether this run asked for engine diagnostics.
+///
+/// Same asymmetry the live-database gate uses: anything but unset, empty, `0`,
+/// `false` or `no` is a yes, so `ZERO_MIGRATE_LOG=0` reads as off rather than as a
+/// non-empty value that happens to spell a falsehood.
+fn diagnostics_requested() -> bool {
+    diagnostics_requested_from(std::env::var(LOG_ENV).ok().as_deref())
+}
+
+/// The decision alone, split from the read so it is testable without mutating
+/// process-wide environment state from a parallel test binary.
+fn diagnostics_requested_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| {
+        let flag = value.trim().to_ascii_lowercase();
+        !matches!(flag.as_str(), "" | "0" | "false" | "no")
+    })
+}
+
+/// The diagnostics subscriber, or `None` when this run did not ask for one.
+///
+/// STDERR, pinned explicitly: `tracing_subscriber::fmt()` defaults to STDOUT, and
+/// `lint`/`plan`/`status`/`history` each write ONE JSON document to stdout that
+/// callers parse. A diagnostic on that stream is a corrupted reply, not a noisy one.
+///
+/// ANSI only when stderr is a terminal: the crate is built with the `ansi` feature,
+/// and escape codes in a piped CI log are their own corruption.
+///
+/// [`Targets`] rather than an `EnvFilter`: the filter is fixed, so there is no
+/// directive string to parse and no reason to link a regex engine into a `.node`
+/// that ships to every install.
+fn diagnostics_subscriber() -> Option<impl Subscriber + Send + Sync + 'static> {
+    diagnostics_requested().then(|| {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr as fn() -> std::io::Stderr)
+            .with_ansi(std::io::stderr().is_terminal());
+        tracing_subscriber::registry()
+            .with(layer)
+            .with(Targets::new().with_target(LOG_TARGET, Level::WARN))
+    })
+}
+
+/// Run `body` with the diagnostics subscriber installed as this THREAD's default,
+/// or run it unchanged when diagnostics are off.
+///
+/// Thread-scoped, not global. `tracing_core` says a library should not call
+/// `set_global_default`, and this crate is a library first: the published package
+/// carries both `exports` and `bin`, so a global install would mutate process-wide
+/// logging state for anyone who merely imports it. `with_default` does not
+/// propagate into threads spawned inside it, and upstream's own answer to that is
+/// to call it FROM the new thread -- which is what this does, on the worker that
+/// runs the verb and emits every one of these events.
+fn with_diagnostics<T>(body: impl FnOnce() -> T) -> T {
+    match diagnostics_subscriber() {
+        Some(subscriber) => tracing::subscriber::with_default(subscriber, body),
+        None => body(),
+    }
+}
 
 /// Run `make_future()`'s future to completion on a dedicated worker thread via a
 /// reactor-less `futures::executor::block_on`, then hand the result to `on_done`.
@@ -45,7 +126,7 @@ where
             // a channel receiver woken out-of-thread by the host `done` callback
             // — audited strictly-sequential (no join!/select!/spawn) in the
             // core apply path.
-            let out = futures::executor::block_on(make_future());
+            let out = with_diagnostics(|| futures::executor::block_on(make_future()));
             on_done(out);
         })
         .expect("spawn zero-migrate engine worker thread");
@@ -83,5 +164,19 @@ mod tests {
             got, 42,
             "cross-thread oneshot woke the reactor-less block_on"
         );
+    }
+
+    #[test]
+    fn diagnostics_are_off_until_the_operator_asks_for_them() {
+        // Default off is the guard rail: four host arms assert a byte-empty stderr,
+        // and a dozen of the engine's messages name the project lock that another
+        // arm asserts is absent from an uncontended run.
+        assert!(!diagnostics_requested_from(None), "unset is off");
+        for off in ["", "   ", "0", "false", "FALSE", "no", " No "] {
+            assert!(!diagnostics_requested_from(Some(off)), "{off:?} is off");
+        }
+        for on in ["1", "true", "yes", "warn", "on"] {
+            assert!(diagnostics_requested_from(Some(on)), "{on:?} is on");
+        }
     }
 }

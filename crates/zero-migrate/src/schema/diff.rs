@@ -757,11 +757,11 @@ SELECT c.relname AS table_name,
                         // introspection.
                         //
                         // The warn below is not the compensation it reads as.
-                        // No tracing subscriber is installed anywhere in this
-                        // workspace, so it reaches nobody, and `read_live_schema`
-                        // sits behind the never-declared `introspect` feature
-                        // (see build.rs), so nothing here compiles it at all --
-                        // the string is absent from the built rlib.
+                        // `read_live_schema` sits behind the never-declared
+                        // `introspect` feature (see build.rs), so nothing here
+                        // compiles it at all -- the string is absent from the
+                        // built rlib, and the host's opt-in diagnostics collector
+                        // has no event here to collect.
                         //
                         // The fail-closed backstop this arm leans on -- a codec
                         // refusing plaintext on a column the schema declared
@@ -820,11 +820,12 @@ SELECT c.relname AS table_name,
                 // CreateTable path. The error is not propagated because a
                 // transient hand-edit should not take the whole deploy down.
                 //
-                // "Operators get a loud warn instead" was never true: no tracing
-                // subscriber is installed anywhere in this workspace, and this
-                // arm sits inside `read_live_schema`, behind the never-declared
+                // "Operators get a loud warn instead" was never true: this arm
+                // sits inside `read_live_schema`, behind the never-declared
                 // `introspect` feature (see build.rs), so the line is not
-                // compiled and the string is absent from the built rlib.
+                // compiled and the string is absent from the built rlib. The
+                // host's opt-in diagnostics collector has no event here to
+                // collect.
                 //
                 // Unlike the encryption arm above there is no out-of-repo
                 // backstop to name either. The parent simply reads as unmasked.

@@ -2255,14 +2255,14 @@ pub(super) async fn run_backfill<D: SqlSession>(
         return Err(ApplyError::ApprovalRequired);
     }
     validate_spec(spec)?;
-    if let CursorStability::ExternalInvariant { name } = &spec.cursor_stability {
-        tracing::warn!(
-            invariant = %name,
-            table = %format!("{}.{}", spec.schema, spec.table),
-            cursor_columns = ?spec.cursor_columns,
-            "zero-migrate: operator-approved external cursor immutability invariant is active for the full resumable backfill"
-        );
-    }
+    // An `externalInvariant` cursor is not a warning: it is the approved shape of
+    // the spec, restated on every single backfill invocation. The plan status
+    // manifest already carries it as `cursorStabilityMode` +
+    // `cursorStabilityInvariant`, machine-readable, BEFORE the operator approves --
+    // which is where the decision is actually made. The MySQL backend states the
+    // same spec and warns about nothing. Every other event in this tree is a
+    // secondary failure the reply could not carry; this one is expected state that
+    // the reply already carries.
 
     ensure_progress(conn, cfg).await?;
     let cursor = inspect_cursor(conn, spec).await?;

@@ -63,6 +63,16 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Engine diagnostics, collected at the HOST boundary and nowhere else. The core is
+# a library and only emits through the `tracing` facade; the addon is the process
+# edge, so it is the one place that may decide where those events go. `tracing` is
+# here for `subscriber::with_default` (the thread-scoped install in `runtime.rs`),
+# `tracing-subscriber` for the `fmt` collector + the fixed `Targets` filter. Both
+# workspace-pinned; `tracing-subscriber` was declared at the root and consumed by
+# nobody until now.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
 [build-dependencies]
 # `napi_build::setup()` only emits cdylib link args (allow-undefined for the Node
 # ABI symbols, resolved at `.node` load time) — it needs NO Node headers at build

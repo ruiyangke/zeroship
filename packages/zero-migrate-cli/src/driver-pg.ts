@@ -293,6 +293,16 @@ export async function openPgSession(
   });
   await client.connect();
 
+  // `pg` emits `error` on the Client when the backend goes away (an administrator
+  // terminate, a failover, a server restart) and Node turns an unhandled `error`
+  // event into an uncaught exception. Without this listener the CLI dies with a raw
+  // Node stack trace the instant a connection drops, before the engine's own
+  // cleanup and error reporting get to run. Nothing is swallowed: `pg` rejects the
+  // in-flight query with the same error, and every query issued afterwards fails
+  // with "Client has encountered a connection error and is not queryable", so the
+  // engine still sees, reports and cleans up after the loss.
+  client.on("error", () => {});
+
   const hostDriver: HostDriver = ([request, done]) => {
     runVerb(client, request).then(
       (reply) => done(null, reply),

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { Client } from "pg";
 import type { StatusReply } from "../../src/addon.js";
 import {
   driverFor,
@@ -50,6 +51,10 @@ const CONFIG_ENV_KEYS = [
   "ZERO_MIGRATE_POLICY",
   "ZERO_MIGRATE_CONFIG",
   "ZERO_MIGRATE_ENV",
+  // Cleared so the arms that assert an empty stderr stay hermetic: an operator who
+  // exports the diagnostics switch in their own shell must not turn it on for a
+  // suite that asserts what an unconfigured run prints.
+  "ZERO_MIGRATE_LOG",
 ] as const;
 
 function cleanEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -80,6 +85,59 @@ function runCli(...args: string[]) {
 
 function runCliWithEnv(env: NodeJS.ProcessEnv, ...args: string[]) {
   return spawnCli(args, { env });
+}
+
+// The async peer of `spawnCli`, for the arms that have to act ON the CLI while it
+// is still running (terminating the database backend it is blocked against). A
+// `spawnSync` run cannot be reached from the test that started it.
+function spawnCliAsync(
+  args: readonly string[],
+  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
+    cwd: options.cwd,
+    env: cleanEnvironment(options.env),
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise((settle) => {
+    child.on("close", (status) => settle({ status, stdout, stderr }));
+  });
+}
+
+// Wait for a backend to park on the project advisory lock, then terminate it.
+//
+// Polling `pg_stat_activity` is what makes the kill deterministic instead of a
+// race against a sleep: the deploy is only killable once it is actually waiting on
+// the lock, and that is the state this waits for. Terminating a session that has
+// been granted nothing and is waiting for the grant is exactly the shape
+// `drop_grant_from_failed_acquire` compensates for.
+async function killAdvisoryLockWaiter(probe: Client): Promise<number> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const { rows } = await probe.query<{ pid: number }>(
+      `SELECT pid FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid()
+          AND wait_event_type = 'Lock'
+          AND wait_event = 'advisory'
+          AND query LIKE '%pg_advisory_lock%'`,
+    );
+    if (rows.length > 0) {
+      const pid = rows[0].pid;
+      await probe.query("SELECT pg_terminate_backend($1)", [pid]);
+      return pid;
+    }
+    await new Promise((wake) => setTimeout(wake, 25));
+  }
+  throw new Error("no backend ever parked on the project advisory lock");
 }
 
 function temporaryDirectory(prefix: string): string {
@@ -446,6 +504,9 @@ test("CLI help documents the v2 surface, config, and dialect rule", () => {
   assert.match(help.stdout, /--env <name>/);
   assert.match(help.stdout, /--dialect <name>\s+lint only/);
   assert.match(help.stdout, /Only lint accepts --dialect/);
+  // An opt-in switch nobody can find is off for everyone. The help is the one
+  // place an operator looks for it, and it has to say which stream it writes to.
+  assert.match(help.stdout, /ZERO_MIGRATE_LOG=1[\s\S]*stderr/);
   assert.match(help.stdout, /--commit/);
   assert.match(help.stdout, /--rollback/);
   assert.match(help.stdout, /--strict/);
@@ -1378,6 +1439,128 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
     assert.equal(uncontendedPlan.status, 0, uncontendedPlan.stderr);
     assert.match(uncontendedPlan.stdout, /would apply 1 migration/);
     assert.match(uncontendedPlan.stdout, /CREATE TABLE/i);
+  } finally {
+    if (held) {
+      await holder
+        .query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema])
+        .catch(() => {});
+    }
+    await holder
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${schema}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await holder.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The engine's cleanup warnings are the ONLY record of a secondary failure that
+// the reply cannot carry: the deploy already has an error to return, so a release
+// or a RESET that fails on the way out is reported nowhere else. They reached
+// nobody -- the events were emitted, no subscriber was ever installed, and every
+// one of them was discarded before it was formatted.
+//
+// The failure here is provoked, not simulated. A peer holds the project lock, the
+// deploy blocks inside `pg_advisory_lock`, and its backend is terminated from
+// another session. The acquisition fails, and the compensating
+// `pg_advisory_unlock` that `drop_grant_from_failed_acquire` runs to drop a grant
+// the server may still have recorded fails too, because it runs on the connection
+// that just died. That is the exact secondary failure the warning exists for, on a
+// real connection, reached through the shipped CLI.
+//
+// STDERR, not stdout: `lint`/`plan`/`status`/`history` write a single JSON
+// document to stdout under `--json` and callers parse it, so diagnostics on that
+// stream would corrupt the reply.
+test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
+  const holder = await connectLivePg(t);
+  if (holder === null) return;
+  const cwd = temporaryDirectory(".cli-log-cleanup-");
+  const schema = `zm_log_cleanup_${Date.now().toString(36)}`;
+  let held = false;
+  try {
+    writeSimpleMigration(cwd);
+    const policyPath = join(cwd, "policy.toml");
+    writeFileSync(policyPath, noInjectPolicy(schema));
+
+    await holder.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [schema]);
+    held = true;
+
+    const common = [
+      `--dir=${cwd}`,
+      `--policy=${policyPath}`,
+      `--database-url=${pgUrl()}`,
+      `--schema=${schema}`,
+      "--approve",
+    ];
+
+    // Opted in: the operator asked for diagnostics and gets the cleanup failure.
+    const logged = spawnCliAsync(["apply", ...common], {
+      env: { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, ZERO_MIGRATE_LOG: "1" },
+    });
+    await killAdvisoryLockWaiter(holder);
+    const loggedRun = await logged;
+
+    assert.equal(loggedRun.status, 1, loggedRun.stderr);
+    assert.match(
+      loggedRun.stderr,
+      /failed to drop a possible advisory-lock grant after a failed project-lock acquisition/,
+      "the opted-in operator must see the cleanup failure the reply cannot carry",
+    );
+    assert.doesNotMatch(
+      loggedRun.stdout,
+      /advisory-lock grant/,
+      "diagnostics must never reach the stream the JSON replies own",
+    );
+    assert.doesNotMatch(
+      loggedRun.stderr,
+      /\u001b\[/u,
+      "a piped stderr must carry no ANSI escapes",
+    );
+
+    // Default off: the identical run, with the variable unset, says nothing extra.
+    const quiet = spawnCliAsync(["apply", ...common], {
+      env: { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+    });
+    await killAdvisoryLockWaiter(holder);
+    const quietRun = await quiet;
+
+    assert.equal(quietRun.status, 1, quietRun.stderr);
+    assert.doesNotMatch(
+      quietRun.stderr,
+      /advisory-lock grant/,
+      "diagnostics are opt-in; an unset variable must change nothing an operator sees",
+    );
+
+    // Both runs failed for the SAME reason, so the arms above compare like with
+    // like: the only difference between them is the opt-in.
+    for (const run of [loggedRun, quietRun]) {
+      assert.match(run.stderr, /terminat/i, run.stderr);
+    }
+
+    // A verb whose stdout is a machine-readable reply still emits exactly one JSON
+    // document with the variable set.
+    await holder.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema]);
+    held = false;
+    const json = spawnCli(
+      [
+        "status",
+        "--strict",
+        "--json",
+        `--dir=${cwd}`,
+        `--policy=${policyPath}`,
+        `--database-url=${pgUrl()}`,
+        `--schema=${schema}`,
+      ],
+      {
+        env: { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, ZERO_MIGRATE_LOG: "1" },
+        timeout: 60_000,
+      },
+    );
+    assert.equal(json.status, 1, json.stderr);
+    const reply = JSON.parse(json.stdout) as StatusReply;
+    assert.equal(reply.pending.length, 1);
   } finally {
     if (held) {
       await holder

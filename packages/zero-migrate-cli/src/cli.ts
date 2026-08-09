@@ -1292,6 +1292,8 @@ Flags:
 
 Configuration precedence is flag, ZERO_MIGRATE_* environment variable, selected
 zero-migrate.toml environment, then default. DATABASE_URL remains the URL fallback.
+Set ZERO_MIGRATE_LOG=1 for engine diagnostics on stderr (off by default; they never
+touch the single JSON document --json writes to stdout).
 Only lint accepts --dialect; live commands derive it from the URL. lint is offline.
 plan and apply support PostgreSQL, MySQL 8, and SQLite; status supports PostgreSQL
 and MySQL 8; history and resolve are PostgreSQL-only. There is no down command and no clean command.
