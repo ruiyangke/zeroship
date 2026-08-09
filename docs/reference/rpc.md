@@ -91,8 +91,16 @@ export default defineApp({
 
 `publiclyAccessible: true` is the deliberate confirmation the manifest validator
 requires alongside `auth: "anon"` — it makes "this endpoint is intentionally
-public" explicit and reviewable. `auth: "admin"` restricts a procedure (or family)
-to platform admins. Manifest auth is enforced only by the gateway; the
+public" explicit and reviewable.
+
+> **`auth: "admin"` does not restrict anything today.** The gateway enforces it
+> exactly as `auth: "user"`: it checks that the caller is authenticated and
+> nothing more, so any signed-in end user reaches an `admin` procedure. The
+> level parses and inherits down a family, which makes it look like a control
+> it is not. Do not use it to protect an admin surface — put the check in your
+> own handler until this says otherwise.
+
+Manifest auth is enforced only by the gateway; the
 single-tenant `zeroship serve` and `pnpm dev` runtimes do not gate by policy, so
 local runs reach every procedure regardless of its declared auth.
 
