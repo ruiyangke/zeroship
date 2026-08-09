@@ -146,7 +146,16 @@ export class CompensateCase extends Workflow<{ label: string }, unknown> {
 
 const CASES: Record<string, { workflow: string; input: unknown }> = {
   basic: { workflow: "BasicCase", input: { label: "probe" } },
-  sleep: { workflow: "SleepCase", input: { ms: 1500 } },
+  // 20s, not 1.5s. The harness times this run and asserts it took at least
+  // 15s, because a `step.sleep` that was silently a no-op would still
+  // complete, still journal `before`/`after`, and still diff clean against a
+  // dev tier that did the same. The duration has to dominate the deployed
+  // engine's own latency for "slept" and "did not sleep" to be distinguishable
+  // at all: MEASURED on 2026-08-09, a deployed run of a case with NO sleep
+  // takes 4.1-5.4s end to end (basic 5353ms, child 4151ms, compensate 4143ms),
+  // so a 6s sleep left the two outcomes overlapping. See
+  // tests/e2e_dev_vs_deployed_workflows.sh, the `elapsed` verdict.
+  sleep: { workflow: "SleepCase", input: { ms: 20000 } },
   signal: { workflow: "SignalCase", input: { label: "probe" } },
   child: { workflow: "ChildCase", input: { n: 21 } },
   compensate: { workflow: "CompensateCase", input: { label: "probe" } },

@@ -37,6 +37,26 @@
 #                           deployed. That is how kv-dashboard shipped (#163).
 # Both must turn the diff RED. If they do not, this script is decorative.
 #
+# WHY SECTION 3b EXISTS (added 2026-08-09). The diff answers "do LocalFs and S3
+# AGREE"; it cannot answer "is the answer RIGHT". Both backends dropping
+# contentType, both listing an unfiltered prefix, both storing 512 KiB of a
+# 1 MiB upload -- every one of those produces byte-identical rows and a green
+# run. That failure mode is not hypothetical: production returned `Error.stack`
+# to anonymous callers while `e2e_dev_vs_deployed_auth.sh` stayed green because
+# dev leaked the same stack (39f6aa350; docs/pilot/e2e-scenarios.md, "What a
+# dev-vs-deployed comparison cannot see"). This harness normalises NOTHING, so
+# there is no scrub to blame -- two tiers agreeing on a wrong value produce an
+# empty diff with no normalisation at all.
+#
+# So section 3b asserts the DEPLOYED row against the fixture's own contract,
+# with dev not consulted. Three further mutations prove those verdicts are not
+# green-by-construction. Each edits the app source BOTH tiers build from, so
+# the diff stays GREEN and only the named verdict moves -- which is the blind
+# spot itself, demonstrated:
+#   MUTATE=text-no-ctype    the text put stops declaring a content type
+#   MUTATE=list-prefix-broad  the prefix listing stops filtering
+#   MUTATE=stream-corrupt   the streamed bytes stop matching their checksum
+#
 # Prereqs (docs/runbooks/local-dev.md):
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
 #   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
@@ -86,6 +106,8 @@ cleanup() {
   docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
   # Restore the config file if the no-config mutation moved it.
   [ -f "$WORK/config.ts.bak" ] && cp "$WORK/config.ts.bak" "$APP/src/server/config.ts"
+  # ...and the app source if a source mutation edited it.
+  [ -f "${MUTATE_BAK:-}" ] && cp "$MUTATE_BAK" "$APP/src/index.ts"
   # KEEP_WORK=1 leaves the service logs behind. A storage divergence is almost
   # always explained by a line in worker.log, and that line is gone by the time
   # the diff is on screen otherwise.
@@ -154,6 +176,36 @@ if [ "$MUTATE" = "no-config" ]; then
   rm "$APP/src/server/config.ts"
   echo "  (MUTATION: src/server/config.ts removed before build)"
 fi
+# Source mutations for the ABSOLUTE verdicts (section 3b). Both tiers build
+# from the edited file on purpose: a one-sided edit would show up in the diff
+# and would prove nothing about the case the diff cannot see.
+case "$MUTATE" in
+  text-no-ctype|list-prefix-broad|stream-corrupt)
+    MUTATE_BAK="$WORK/index.ts.bak"
+    cp "$APP/src/index.ts" "$MUTATE_BAK"
+    case "$MUTATE" in
+      text-no-ctype)
+        sed -i 's|store().put(key, TEXT, { contentType: "text/plain; charset=utf-8" })|store().put(key, TEXT)|' \
+          "$APP/src/index.ts"
+        grep -q 'store().put(key, TEXT))' "$APP/src/index.ts" \
+          || { fail "mutation did not apply"; exit 1; } ;;
+      list-prefix-broad)
+        # The prefix stops filtering; every key under the base comes back.
+        sed -i 's|store().list(`${base}a/`, { limit: 50 })|store().list(base, { limit: 50 })|' \
+          "$APP/src/index.ts"
+        grep -q 'const underA = must(await store().list(base, { limit: 50 }));' "$APP/src/index.ts" \
+          || { fail "mutation did not apply"; exit 1; } ;;
+      stream-corrupt)
+        # The bytes SENT diverge from the bytes checksummed: one flipped byte
+        # per chunk, after the running checksum has seen the original. Sizes
+        # and chunk counts are untouched, so only the checksum verdicts move.
+        sed -i 's|updateChecksum(acc, chunk, offset);|updateChecksum(acc, chunk, offset); chunk[0] ^= 0xff;|' \
+          "$APP/src/index.ts"
+        grep -q 'chunk\[0\] \^= 0xff;' "$APP/src/index.ts" \
+          || { fail "mutation did not apply"; exit 1; } ;;
+    esac
+    echo "  (MUTATION $MUTATE: both tiers build from the edited source)" ;;
+esac
 ( cd "$APP" && pnpm build ) > "$WORK/build.log" 2>&1
 [ -f "$ZSHIP" ] && pass "built app.zship ($(du -k "$ZSHIP" | cut -f1)KB)" \
   || { fail "build produced no app.zship"; tail -20 "$WORK/build.log"; exit 1; }
@@ -268,6 +320,137 @@ probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WOR
 grep -q '"textMatches":true' "$WORK/deployed.txt" && pass "deployed side answered the probe" \
   || { fail "deployed side did not round-trip text"; head -20 "$WORK/deployed.txt"; tail -10 "$WORK/worker.log"; }
 
+# ---------------------------------------------------------------------------
+# 3b. ABSOLUTE verdicts on the DEPLOYED answers. Dev is not consulted.
+#
+# Read the header note first. Every expectation here is derived from the
+# FIXTURE CONTRACT (examples/storage-probe/src/index.ts: a 256-byte all-values
+# body, "second" overwriting a longer string, five `page/` keys read two at a
+# time, a 1 MiB stream in 64 KiB chunks) -- never from a previous run's output.
+# Pinning observed output would bless whatever the backends do today, which is
+# the mistake this section exists to correct.
+#
+# What is deliberately NOT asserted: the `given: null` content-type row. The
+# SDK types contentType `string | null` and a backend that substitutes a
+# default is different rather than wrong, so the two-sided diff is the right
+# instrument for it and an absolute pin would invent a contract.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- absolute verdicts on the DEPLOYED answers (dev not consulted) ---"
+DP="$WORK/deployed.txt"
+drow() { grep -m1 "^$1 " "$DP"; }
+
+# THE CONTROL. A "field X is Y" verdict only means something if the row is a
+# result at all. A successful RPC body is `{"json":...}`; a refusal is a bare
+# `{"message":...}` (sdks/bootstrap/src/fetch-handler.ts errorBodyFromThrown).
+ROWS_WANT=13
+rows_got=$(grep -c . "$DP")
+rows_ok=$(grep -c ' {"json":' "$DP")
+if [ "$rows_got" -eq "$ROWS_WANT" ] && [ "$rows_ok" -eq "$ROWS_WANT" ]; then
+  pass "CONTROL: all $ROWS_WANT deployed rows returned a result envelope"
+  ABS_OK=1
+else
+  fail "CONTROL: $rows_ok of $rows_got deployed rows are results (want $ROWS_WANT) -- verdicts below are UNSAFE"
+  grep -v ' {"json":' "$DP" | head -3
+  ABS_OK=0
+fi
+
+# want <label> <what> <fixed string that must be IN the row>
+want() {
+  local row; row="$(drow "$1")"
+  if printf '%s' "$row" | grep -qF "$3"; then pass "deployed $1: $2"
+  else fail "deployed $1: $2 -- got $(printf '%s' "$row" | cut -c1-300)"; fi
+}
+# idem <labelA> <labelB> <field-regex> <what> -- byte-equal across two rows.
+idem() {
+  local a b
+  a="$(drow "$1" | grep -oE "$3" | head -1)"
+  b="$(drow "$2" | grep -oE "$3" | head -1)"
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then pass "deployed $4 ($1 == $2: $a)"
+  else fail "deployed $4 -- $1 has '${a:-<absent>}', $2 has '${b:-<absent>}'"; fi
+}
+# eqfields <label> <fieldA> <fieldB> <what> -- two fields of ONE row must carry
+# the same number. Order-independent, unlike matching the serialised pair.
+eqfields() {
+  local row a b
+  row="$(drow "$1")"
+  a="$(printf '%s' "$row" | grep -oE "\"$2\":[0-9]+" | head -1 | cut -d: -f2)"
+  b="$(printf '%s' "$row" | grep -oE "\"$3\":[0-9]+" | head -1 | cut -d: -f2)"
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then pass "deployed $1: $4 ($2=$3=$a)"
+  else fail "deployed $1: $4 -- $2='${a:-<absent>}' $3='${b:-<absent>}'"; fi
+}
+
+want reset 'the root is empty after reset' '"remaining":0'
+want reset 'no page remains after reset'   '"moreAfter":false'
+
+# A put that lost its content type is the ONE historical seam bug here, and a
+# tier-vs-tier diff went green on it for as long as only one side had it.
+want text 'the object is found'        '"found":true'
+want text 'the content type survives'  '"contentType":"text/plain; charset=utf-8"'
+want text 'the text round-trips'       '"textMatches":true'
+eqfields text putSize getSize 'put and get agree on size'
+
+# 256 distinct byte values: a backend that round-trips through a string
+# corrupts the high half, and both backends could corrupt it the same way.
+want binary 'all 256 bytes are stored'     '"putSize":256'
+want binary 'all 256 bytes come back'      '"getSize":256'
+want binary 'the bytes are byte-identical' '"bytesIdentical":true'
+want binary 'octet-stream survives'        '"contentType":"application/octet-stream"'
+
+want overwrite 'the shorter second write replaces the first' '"secondSize":6'
+want overwrite 'the second body is the one that is stored'   '"secondText":"second"'
+want overwrite 'the new content type replaces the old'       '"secondType":"application/json"'
+want overwrite 'an overwrite does not create a second entry' '"entriesUnderPrefix":1'
+
+want deleteAbsent 'delete of a present key reports deleted' '"firstDeleted":true'
+want deleteAbsent 'the key is gone after delete'            '"getAfterDeleteFound":false'
+want deleteAbsent 'nothing is left under the prefix'        '"entriesUnderPrefix":0'
+
+# Only the EXPLICIT content types are pinned; see the note above.
+want contentTypes 'text/plain round-trips' '{"given":"text/plain; charset=utf-8","got":"text/plain; charset=utf-8"'
+want contentTypes 'application/json round-trips' '{"given":"application/json","got":"application/json"'
+want contentTypes 'image/png round-trips'  '{"given":"image/png","got":"image/png"'
+
+# The whole array, so membership, ORDER and the excluded sibling (`ab.txt`,
+# which shares the `sp/list/a` string prefix but not the `sp/list/a/` one) are
+# one verdict. A prefix that stopped filtering would return all five.
+want listPrefix 'the prefix filters, and the order is ascending' \
+  '"aKeys":["sp/list/a/1.txt","sp/list/a/2.txt","sp/list/a/3.txt"]'
+want listPrefix 'entry sizes come back with the keys' '"aSizes":[1,2,3]'
+want listPrefix 'a complete page reports a null cursor' '"aCursorNull":true'
+want listPrefix 'the base listing is complete and ascending' \
+  '"baseKeys":["sp/list/a/1.txt","sp/list/a/2.txt","sp/list/a/3.txt","sp/list/ab.txt","sp/list/b/1.txt"]'
+
+# limit=2 over five keys: three pages, and the cursor is non-null IFF more
+# remains. A backend that ignored `limit` would return one page of five and
+# still diff clean against another that did the same.
+want listPaginate 'pages break at the limit' \
+  '"pages":[["sp/page/k0.txt","sp/page/k1.txt"],["sp/page/k2.txt","sp/page/k3.txt"],["sp/page/k4.txt"]]'
+want listPaginate 'the cursor is non-null IFF more remains' '"cursorNonNull":[true,true,false]'
+want listPaginate 'nothing is dropped or repeated' '"total":5'
+want listPaginate 'every key is distinct'          '"unique":5'
+want listPaginate 'listAll walks the same keys'    '"listAllMatches":true'
+want listOvershoot 'an oversized limit returns one page' '"count":5'
+want listOvershoot 'and a null cursor'                   '"cursorNull":true'
+
+# 1 MiB in 64 KiB chunks. `size == expectedSize` is the truncation verdict;
+# the checksum equalities are the corruption verdict; `multiChunk` is what
+# distinguishes a chunked read from a whole-object one.
+eqfields streamPut size expectedSize 'the stream stored every byte it sent'
+want streamPut 'the upload was chunked (1 MiB / 64 KiB)' '"chunksSent":16'
+want streamGet 'the streamed object reads back'       '"found":true'
+want streamGet 'the read was chunked'                 '"multiChunk":true'
+idem streamPut streamGet '"checksum":"[0-9a-f]+"' 'the streamed bytes survive the round trip'
+eqfields streamGet size declaredSize 'the bytes read match the declared size'
+want streamAbsent 'a streaming read of an absent key reports absence' '"found":false'
+want streamBuf 'the streamed object is visible to the buffered read' '"found":true'
+want streamBuf 'and reports the full size'   '"size":1048576'
+idem streamPut streamBuf '"checksum":"[0-9a-f]+"' 'the buffered read sees the same bytes'
+want streamBuf 'and lists under its prefix'  '"listedKeys":["sp/stream/blob.bin"],"listedSizes":[1048576]'
+
+[ "$ABS_OK" = "1" ] || echo "  (verdicts above are UNSAFE: the control failed)"
+echo ""
+
 # --- 4. THE POINT: identical operations must produce identical results -----
 if diff -q "$WORK/dev.txt" "$WORK/deployed.txt" >/dev/null 2>&1; then
   pass "dev and deployed results are identical across every probed operation"
@@ -292,6 +475,8 @@ cp "$WORK/dev.txt" "$KEEP/dev.txt" 2>/dev/null || true
 cp "$WORK/deployed.txt" "$KEEP/deployed.txt" 2>/dev/null || true
 echo ""
 echo "  results kept at $KEEP/{dev,deployed}.txt"
-echo "  env.storage dev vs deployed: $PASS passed, $FAIL failed"
-echo "  MUTATIONS: MUTATE=no-storage-url and MUTATE=no-config must both turn this RED"
+echo "  env.storage dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  MUTATIONS (diff half): MUTATE=no-storage-url and MUTATE=no-config must both turn this RED"
+echo "  MUTATIONS (absolute half): MUTATE=text-no-ctype | list-prefix-broad | stream-corrupt"
+echo "    -- each must leave the DIFF green and turn its own section-3b verdict RED"
 [ "$FAIL" -eq 0 ]

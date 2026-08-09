@@ -22,6 +22,34 @@
 #   child       step.call (child run's output journaled into the parent)
 #   compensate  a compensable step, then a permanent failure -> rollback
 #
+# WHY SECTION 3b EXISTS (added 2026-08-09). The diff answers "do the two engines
+# AGREE"; it cannot answer "did the durable primitive actually happen". Three of
+# the five cases would report SUCCESS with the primitive gutted on BOTH sides:
+#
+#   sleep   a `step.sleep` that returns immediately still completes, still
+#           journals before/after, and diffs clean. Nothing in the compared
+#           output records that any time passed. So the harness now TIMES the
+#           run and asserts the deployed one took at least the sleep.
+#   signal  a run that never parks completes without ever being signalled, and
+#           `payload:null` on both sides diffs clean. So the harness records
+#           whether it ever OBSERVED the run parked, and pins the payload it
+#           signalled.
+#   basic   step outputs are only ever compared, never checked against what the
+#           workflow says they should be.
+#
+# That is the same blind spot that let production ship `Error.stack` to
+# anonymous callers while `e2e_dev_vs_deployed_auth.sh` stayed green, because
+# dev leaked the same stack (39f6aa350; docs/pilot/e2e-scenarios.md, "What a
+# dev-vs-deployed comparison cannot see"). The child and compensate cases were
+# already pinned absolutely on the deployed side and are left alone.
+#
+# MUTATIONS for the new half edit examples/workflow-probe/src/index.ts, which
+# BOTH tiers build from, so the diff stays green and only the named verdict
+# moves:
+#   MUTATE=no-sleep                the sleep case asks for 0ms
+#   MUTATE=signal-payload-dropped  the signalled payload is not returned
+#   MUTATE=basic-step-drift        the second step computes a different number
+#
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
@@ -53,6 +81,16 @@ CONTROL_KEY="dd-wf-ck"; MASTER_KEY="dd-wf-mk"
 export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="wfprobe"
+MUTATE="${MUTATE:-none}"
+# The sleep the fixture asks for (examples/workflow-probe/src/index.ts CASES),
+# and the floor the deployed run must clear. The floor sits below the sleep
+# because the harness polls once a second and can only observe completion at a
+# poll boundary -- and far ABOVE the deployed engine's own latency, which is
+# what a no-op sleep would cost instead. MEASURED 2026-08-09: deployed runs
+# with no sleep at all take 4.1-5.4s end to end, so a floor near 5s would not
+# have discriminated. 20s/15s leaves both outcomes an order of magnitude apart.
+SLEEP_MS=20000
+SLEEP_FLOOR_MS=15000
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
@@ -61,6 +99,8 @@ cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
   lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  [ -f "${MUTATE_BAK:-}" ] && cp "$MUTATE_BAK" "$APP/src/index.ts"
+  [ "${KEEP_WORK:-0}" = "1" ] && { echo "  work dir kept: $WORK"; return; }
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -121,8 +161,16 @@ probe() {
   # before the run parks would be a different test, and doing it on a fixed
   # timer would make the two sides diverge on scheduler speed rather than on
   # behaviour.
+  #
+  # Two OBSERVATIONS are recorded to $OBSFILE beside the compared output, never
+  # into it: how long the run took wall-clock, and whether it was ever seen
+  # parked. Both are volatile (a clock, a scheduler race) so they cannot be
+  # diffed -- and both are the only evidence that `step.sleep` and
+  # `step.waitForSignal` did anything at all, which is why section 3b reads
+  # them for the deployed side.
   run_case() {
-    local case="$1" wf="$2" started rid state st signalled=0 i
+    local case="$1" wf="$2" started rid state st signalled=0 parked=0 i t0 t1
+    t0=$(date +%s%N)
     started=$(call wf.start "{\"case\":\"$case\"}")
     rid=$(printf '%s' "$started" | grep -oE 'run_[A-Za-z0-9]+' | head -1)
     if [ -z "$rid" ]; then
@@ -133,6 +181,7 @@ probe() {
     for i in $(seq 1 60); do
       st=$(call wf.status "{\"workflow\":\"$wf\",\"runId\":\"$rid\"}")
       state=$(printf '%s' "$st" | sed -nE 's/.*"state":"([a-z-]+)".*/\1/p')
+      [ "$state" = "waiting" ] && parked=1
       if [ "$case" = "signal" ] && [ "$signalled" -eq 0 ] && [ "$state" = "waiting" ]; then
         call wf.signal "{\"workflow\":\"$wf\",\"runId\":\"$rid\",\"token\":\"probe-token\"}" >/dev/null
         signalled=1
@@ -140,6 +189,9 @@ probe() {
       case "$state" in completed|failed|cancelled) break ;; esac
       sleep 1
     done
+    t1=$(date +%s%N)
+    printf '%s elapsedMs=%s parked=%s signalled=%s\n' \
+      "$case" $(( (t1 - t0) / 1000000 )) "$parked" "$signalled" >> "$OBSFILE"
     echo "$st"
   }
   echo "ping       $(call wf.ping)"
@@ -153,6 +205,28 @@ probe() {
 }
 
 # --- 1. real build ---
+#
+# The mutations edit the app source BOTH tiers build from. A one-sided edit
+# would show up in the diff and would prove nothing about the case the diff
+# cannot see, which is both engines wrong the same way.
+if [ "$MUTATE" != "none" ]; then
+  MUTATE_BAK="$WORK/index.ts.bak"
+  cp "$APP/src/index.ts" "$MUTATE_BAK"
+  case "$MUTATE" in
+    no-sleep)
+      sed -i "s/input: { ms: $SLEEP_MS }/input: { ms: 0 }/" "$APP/src/index.ts"
+      grep -q 'input: { ms: 0 }' "$APP/src/index.ts" || { fail "mutation did not apply"; exit 1; } ;;
+    signal-payload-dropped)
+      sed -i 's/payload: sig?.payload ?? null,/payload: null,/' "$APP/src/index.ts"
+      grep -q 'payload: null,' "$APP/src/index.ts" || { fail "mutation did not apply"; exit 1; } ;;
+    basic-step-drift)
+      sed -i 's/step.run("second", () => ({ n: first.n + 1 }))/step.run("second", () => ({ n: first.n + 5 }))/' \
+        "$APP/src/index.ts"
+      grep -q 'first.n + 5' "$APP/src/index.ts" || { fail "mutation did not apply"; exit 1; } ;;
+    *) fail "unknown MUTATE=$MUTATE"; exit 2 ;;
+  esac
+  echo "  MUTATED ($MUTATE): both tiers build from the edited source"
+fi
 ( cd "$APP" && pnpm build ) > "$WORK/build.log" 2>&1
 [ -f "$ZSHIP" ] && pass "built app.zship ($(du -k "$ZSHIP" | cut -f1)KB)" \
   || { fail "build produced no app.zship"; tail -20 "$WORK/build.log"; exit 1; }
@@ -191,6 +265,7 @@ for _ in $(seq 1 25); do
     "http://localhost:$DEV_PORT/__zeroship/v1/wf.ping" -d '{"json":{}}' && break
   sleep 2
 done
+OBSFILE="$WORK/dev.obs"; : > "$OBSFILE"
 probe "http://localhost:$DEV_PORT" > "$WORK/dev.txt" 2>&1
 grep -q '"ok":true' "$WORK/dev.txt" && pass "dev server answered the probe" \
   || { fail "dev server never answered"; tail -20 "$WORK/dev.log"; exit 1; }
@@ -280,9 +355,66 @@ SQL
 pass "workflows enabled for $APP_NAME (operator gate, not creator-settable)"
 sleep 5   # gateway route-sync poll
 
+OBSFILE="$WORK/deployed.obs"; : > "$OBSFILE"
 probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
 grep -q '"ok":true' "$WORK/deployed.txt" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -5 "$WORK/deployed.txt"; tail -5 "$WORK/worker.log"; }
+
+# ---------------------------------------------------------------------------
+# 3b. ABSOLUTE verdicts on the DEPLOYED run. Dev is not consulted.
+#
+# Read the header note first. Expectations come from the WORKFLOW SOURCE
+# (examples/workflow-probe/src/index.ts), not from a previous run's output:
+# BasicCase computes n=1 then n=2 and freezes 42 twice, SignalCase returns the
+# payload it was signalled with, SleepCase sleeps SLEEP_MS.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- absolute verdicts on the DEPLOYED runs (dev not consulted) ---"
+# `<label> <json>` lookup, shared with the comparison below.
+line_for() { grep -E "^$2 " "$WORK/$1.txt" | head -1; }
+dwant() {
+  local row; row="$(line_for deployed "$1")"
+  if printf '%s' "$row" | grep -qF "$3"; then pass "deployed $1: $2"
+  else fail "deployed $1: $2 -- got $(printf '%s' "$row" | cut -c1-300)"; fi
+}
+dobs() { grep -m1 "^$1 " "$WORK/deployed.obs"; }
+
+# step.run must journal what the workflow computed, not merely something both
+# tiers agree on.
+dwant basic 'the first step journals its input label' '"label":"probe"'
+dwant basic 'the second step computes n=2 from the first' '"second":{"n":2}'
+dwant basic 'sideEffect froze 42'          '"frozen":42'
+dwant basic 'and returned the frozen value unchanged on the second read' '"frozenAgain":42'
+dwant basic 'all four steps ran'           '"steps":4'
+
+# THE SLEEP VERDICT. Nothing in the compared output records that time passed,
+# so a `step.sleep` that returned immediately reads exactly like one that
+# suspended for the full SLEEP_MS -- on both tiers at once.
+sleep_ms="$(dobs sleep | grep -oE 'elapsedMs=[0-9]+' | cut -d= -f2)"
+if [ -n "$sleep_ms" ] && [ "$sleep_ms" -ge "$SLEEP_FLOOR_MS" ]; then
+  pass "deployed sleep: the run really suspended (${sleep_ms}ms >= ${SLEEP_FLOOR_MS}ms floor for a ${SLEEP_MS}ms sleep)"
+else
+  fail "deployed sleep: the run took ${sleep_ms:-<unmeasured>}ms, under the ${SLEEP_FLOOR_MS}ms floor -- step.sleep did not suspend"
+fi
+dwant sleep 'the step after the sleep ran' '"after":"after"'
+
+# THE SIGNAL VERDICTS. A run that never parked would complete unsignalled with
+# `payload:null`, which diffs clean against another that did the same.
+if printf '%s' "$(dobs signal)" | grep -q 'parked=1'; then
+  pass "deployed signal: the run was OBSERVED parked before it was signalled"
+else
+  fail "deployed signal: the run was never seen in state=waiting -- it did not park, so waitForSignal was not exercised ($(dobs signal))"
+fi
+if printf '%s' "$(dobs signal)" | grep -q 'signalled=1'; then
+  pass "deployed signal: the harness actually sent the signal"
+else
+  fail "deployed signal: no signal was sent -- the run completed on its own ($(dobs signal))"
+fi
+dwant signal 'the signal was received'              '"received":true'
+dwant signal 'the signalled payload is journaled'   '"payload":{"token":"probe-token"}'
+dwant signal 'the signal type is journaled'         '"type":"probe.go"'
+echo "  (deployed observations: $(tr '\n' '; ' < "$WORK/deployed.obs"))"
+echo ""
 
 # Re-emit each `<label> <json>` line with object keys sorted, so the comparison
 # is on values rather than on Postgres jsonb's key ordering. A line whose tail
@@ -309,8 +441,6 @@ canon() {
     }
   ' "$1"
 }
-
-line_for() { grep -E "^$2 " "$WORK/$1.txt" | head -1; }
 
 # Both sides must actually COMPLETE, not merely agree. Without this a platform
 # that failed every run identically would diff clean and the comparison would
@@ -422,5 +552,11 @@ echo ""
 echo "  --- dev results ---"; cat "$WORK/dev.txt"
 echo "  --- deployed results ---"; cat "$WORK/deployed.txt"
 echo ""
-echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed"
+echo "  --- observations (not diffed: a clock and a scheduler race) ---"
+echo "  dev:      $(tr '\n' '; ' < "$WORK/dev.obs")"
+echo "  deployed: $(tr '\n' '; ' < "$WORK/deployed.obs")"
+echo ""
+echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  MUTATIONS: MUTATE=no-sleep | signal-payload-dropped | basic-step-drift"
+echo "    each must leave the diff GREEN and turn its own section-3b verdict RED"
 [ "$FAIL" -eq 0 ]
