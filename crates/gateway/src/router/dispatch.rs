@@ -1302,8 +1302,18 @@ async fn execute_resource_tree(
     //     app must not serve static assets / redirects either: that egress is
     //     billed work the platform eats. `Warn`/`Allow`/`Degrade` pass here;
     //     Warn still only adds the `x-zs-spend-warn` header at the worker call
-    //     site, and Degrade is throttled by the degraded registries downstream.
+    //     site.
     //     Fail-closed: an unknown spend state maps to Block (see `check_spend`).
+    //
+    //     DEGRADE DOES NOT COVER EVERY ACTION CLASS, unlike Block above. The
+    //     degraded registries are consulted only by `check_rate_limit` /
+    //     `acquire_concurrency`, and those run inside `handle_dispatch` and
+    //     `handle_subscription_dispatch` — the worker arms. The `Static` and
+    //     `Redirect` arms return without reaching either, so a Degraded app
+    //     serving an SPA is throttled by nothing, on the same egress `Block`
+    //     refuses and the platform meters as `gateway_egress_bytes`. Making
+    //     Degrade uniform means hoisting both guards here, beside the two
+    //     gates above, and dropping them from the two handlers.
     if let Err(resp) = enforce::check_spend(compiled_route.entry.spend_state) {
         return resp;
     }
