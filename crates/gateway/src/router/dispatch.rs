@@ -784,29 +784,44 @@ fn parse_duration_number(raw: &str) -> Option<f64> {
 ///   when the connection has no peer address (test fixtures, exotic
 ///   transports). Uses the peer socket unless `trust_proxy` is enabled.
 /// * `RateLimitPer::User` — the authenticated user identity (the JWT
-///   `sub`, read unverified — the auth gate already verified it upstream;
-///   here we only need a stable bucket discriminator). Unlike `Session`,
-///   one user's many sessions/devices share a bucket. Anonymous callers
-///   (no bearer JWT) fall back to the session cookie, then the IP, so an
-///   unauthenticated burst still gets bucketed instead of sharing one ""
-///   key.
+///   `sub`). Unlike `Session`, one user's many sessions/devices share a
+///   bucket. Callers whose identity was not established fall back to the
+///   IP, so an unauthenticated burst still gets bucketed instead of
+///   sharing one `""` key.
 /// * `RateLimitPer::Session` — the `__Host-zeroship_app_session` cookie
 ///   value (the per-origin session id the gateway mints on
-///   `/__zeroship/auth/callback`). Anonymous callers (no cookie) fall back
-///   to the IP so an unauthenticated burst still gets bucketed;
-///   without the fallback they'd all share one "" key.
+///   `/__zeroship/auth/callback`), again only once identity is
+///   established; otherwise the IP.
 /// * `RateLimitPer::App` — constant `"app"`. One bucket platform-wide;
 ///   `(app_id, rule_idx, "app")` is the key, equivalent to a global
 ///   per-app limit at the rule level.
+///
+/// `identity_verified` says whether the auth gate actually resolved a
+/// user for this request. It is load-bearing, not decorative: the cookie
+/// and the JWT `sub` are read WITHOUT re-verifying a signature here, which
+/// is sound only because something upstream already did. On an `auth:
+/// "user"` route that holds — an invalid credential never reaches this
+/// point. On an `auth: "anon"` route it does not: `resolve_auth` lets a
+/// missing, expired, or outright forged credential through, so trusting
+/// those bytes would let the caller pick their own bucket and mint a
+/// fresh allowance per request simply by varying a cookie. Whenever
+/// identity was not established, the discriminator has to be something
+/// the caller does not control.
 pub(crate) fn compute_bucket_id(
     req: &HttpRequest,
     per: zeroship_bundle::RateLimitPer,
     insecure_dev: bool,
     trust_proxy: bool,
+    identity_verified: bool,
 ) -> String {
     use zeroship_bundle::RateLimitPer;
     match per {
         RateLimitPer::Ip => client_ip(req, trust_proxy),
+        // Unverified caller on an identity-scoped rule: the only honest
+        // discriminator left is the network peer.
+        RateLimitPer::User | RateLimitPer::Session if !identity_verified => {
+            client_ip(req, trust_proxy)
+        }
         RateLimitPer::User => {
             if let Some(sub) = req
                 .headers()
@@ -1425,6 +1440,7 @@ async fn execute_resource_tree(
             rl.per,
             state.config.insecure_dev,
             state.config.trust_proxy,
+            user_header_from_gate.is_some(),
         );
         if let Err(resp) = state.per_rule_rate_limits.check(
             app_id,
@@ -3298,7 +3314,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=abc")
             .to_http_request();
-        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false), "app");
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false, true), "app");
     }
 
     #[test]
@@ -3306,7 +3322,7 @@ mod tests {
         // The TestRequest has no peer addr → "unknown" sentinel keeps
         // the bucket lookup well-defined instead of crashing.
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false, true);
         assert_eq!(id, "unknown");
     }
 
@@ -3426,7 +3442,7 @@ mod tests {
 
         assert_eq!(client_ip(&req, true), "203.0.113.77");
         assert_eq!(
-            compute_bucket_id(&req, RateLimitPer::Ip, false, true),
+            compute_bucket_id(&req, RateLimitPer::Ip, false, true, true),
             "203.0.113.77"
         );
     }
@@ -3439,7 +3455,7 @@ mod tests {
                 "other=foo; __Host-zeroship_app_session=abc123; trailing=x",
             )
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false, true);
         assert_eq!(id, "abc123");
     }
 
@@ -3450,7 +3466,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false, true);
         assert_eq!(id, "unknown");
     }
 
@@ -3475,7 +3491,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {}", jwt_with_sub("usr_alice")))
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::User, false, false);
+        let id = compute_bucket_id(&req, RateLimitPer::User, false, false, true);
         assert_eq!(id, "sub:usr_alice");
     }
 
@@ -3495,9 +3511,9 @@ mod tests {
         let req_bob = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
             .to_http_request();
-        let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, false);
-        let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, false);
-        let bob = compute_bucket_id(&req_bob, RateLimitPer::User, false, false);
+        let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, false, true);
+        let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, false, true);
+        let bob = compute_bucket_id(&req_bob, RateLimitPer::User, false, false, true);
         assert_eq!(a1, a2, "same user shares a bucket across sessions");
         assert_ne!(a1, bob, "different users get different buckets");
     }
@@ -3509,13 +3525,13 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_sess, RateLimitPer::User, false, false),
+            compute_bucket_id(&req_sess, RateLimitPer::User, false, false, true),
             "sess:anon-tab"
         );
         // Neither bearer nor cookie → IP ("unknown" for the peer-less fixture).
         let req_none = ntex::web::test::TestRequest::default().to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_none, RateLimitPer::User, false, false),
+            compute_bucket_id(&req_none, RateLimitPer::User, false, false, true),
             "unknown"
         );
         // A malformed bearer (no decodable payload) is treated as anonymous —
@@ -3525,9 +3541,73 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_bad, RateLimitPer::User, false, false),
+            compute_bucket_id(&req_bad, RateLimitPer::User, false, false, true),
             "sess:anon-tab"
         );
+    }
+
+    /// On an `auth: "anon"` resource the caller used to control the
+    /// `per: "session"` discriminator outright. `extract_session_cookie`
+    /// returns the raw `__Host-zeroship_app_session` value without
+    /// verifying anything, and an anon route serves happily without a
+    /// session — `resolve_auth` answers `Allowed { user_header: None }`
+    /// rather than rejecting. So rotating the cookie minted a fresh
+    /// `TokenBucket` every request and the creator's declared cap never
+    /// bound: 50 of 50 admitted against `rps: 1`.
+    ///
+    /// `identity_verified: false` is the shape of that request — the gate
+    /// resolved nobody — and the caller must land in one IP bucket.
+    ///
+    /// What this does NOT catch: the same evasion via `per: "user"` (forge
+    /// a 3-segment JWT whose `iss` matches the OP so the Bearer arm returns
+    /// `Invalid` rather than 401, then rotate `sub`) — the fix covers that
+    /// arm, but only the `Session` arm is driven here. Nor the unbounded
+    /// growth of `PerRuleRateLimitRegistry::buckets`, which still has no
+    /// removal path: this fix stops an anonymous caller minting keys, not
+    /// the registry's inability to forget them.
+    #[test]
+    fn per_session_rule_cannot_be_evaded_by_rotating_the_cookie_value() {
+        let reg = crate::enforce::PerRuleRateLimitRegistry::new();
+        let app_id = uuid::Uuid::nil();
+        let rl = RateLimit {
+            rps: Some(1),
+            rpm: None,
+            per: RateLimitPer::Session,
+        };
+        let mut admitted = 0;
+        for i in 0..50 {
+            let req = ntex::web::test::TestRequest::default()
+                .header("cookie", format!("__Host-zeroship_app_session=forged-{i}"))
+                .to_http_request();
+            let bucket_id = compute_bucket_id(&req, rl.per, false, false, false);
+            if reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok() {
+                admitted += 1;
+            }
+        }
+        assert!(
+            admitted <= 2,
+            "a per-session `rps: 1` rule admitted {admitted}/50 requests from one \
+             caller who simply rotated the (unverified) session-cookie value; the \
+             discriminator must not be attacker-chosen on an anon route",
+        );
+    }
+
+    /// The counter-example: once the gate HAS resolved a user, the cookie
+    /// is a trustworthy discriminator again and two genuinely different
+    /// sessions must keep their own buckets. Without this, the test above
+    /// could be satisfied by collapsing every caller onto the IP and
+    /// throwing away per-session limiting altogether.
+    #[test]
+    fn a_verified_session_still_gets_its_own_bucket() {
+        let mk = |v: &str| {
+            ntex::web::test::TestRequest::default()
+                .header("cookie", format!("__Host-zeroship_app_session={v}"))
+                .to_http_request()
+        };
+        let a = compute_bucket_id(&mk("real-a"), RateLimitPer::Session, false, false, true);
+        let b = compute_bucket_id(&mk("real-b"), RateLimitPer::Session, false, false, true);
+        assert_eq!(a, "real-a");
+        assert_ne!(a, b, "two verified sessions must not share one bucket");
     }
 
     // -----------------------------------------------------------------------
@@ -3553,10 +3633,10 @@ mod tests {
         let app_id = uuid::Uuid::nil();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let bucket_id = compute_bucket_id(&req, rl.per, false, false);
+        let bucket_id = compute_bucket_id(&req, rl.per, false, false, true);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
-        let bucket_id2 = compute_bucket_id(&req, rl.per, false, false);
+        let bucket_id2 = compute_bucket_id(&req, rl.per, false, false, true);
         assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
@@ -3579,8 +3659,8 @@ mod tests {
         let req_b = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=user-b")
             .to_http_request();
-        let bucket_a = compute_bucket_id(&req_a, rl.per, false, false);
-        let bucket_b = compute_bucket_id(&req_b, rl.per, false, false);
+        let bucket_a = compute_bucket_id(&req_a, rl.per, false, false, true);
+        let bucket_b = compute_bucket_id(&req_b, rl.per, false, false, true);
         assert_eq!(bucket_a, "user-a");
         assert_eq!(bucket_b, "user-b");
         assert!(reg.check(&app_id, 0, rl.per, &bucket_a, &rl).is_ok());
