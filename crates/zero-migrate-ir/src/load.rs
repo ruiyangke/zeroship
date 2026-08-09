@@ -27,6 +27,13 @@
 //!    and a mismatch is a hard error (genuine drift / tamper). The engine is
 //!    authoritative; the hint is advisory and need not be present.
 //!
+//! Between the structural validation and the ownership check the chain also runs
+//! [`enforce_ir_finite_timeouts`], which refuses a `flags.timeout_ms` /
+//! `flags.lock_timeout_ms` of `0` (the engines' "no limit" sentinel). That one is
+//! author feedback rather than a security gate: apply enforces the same rule
+//! where the effective budget is resolved, which is the boundary a hand-built
+//! `Migration` or a config-sourced zero also crosses.
+//!
 //! Lowering the validated IR to an executable `zero_migrate::render::plan::AppliedPlan`
 //! (`IrAuthor::lower`, the snapshot-builder + per-dialect DDL render) is the
 //! next wave; this module is the load + gate that MUST run first.
@@ -108,6 +115,27 @@ pub enum IrLoadError {
         field: &'static str,
         /// A human-readable detail of the offending value.
         detail: String,
+    },
+    /// A `flags.timeout_ms` / `flags.lock_timeout_ms` override of `0`. Both
+    /// PostgreSQL and MySQL spell "no limit" as `0`, so a zero override does not
+    /// tighten the budget, it removes it, and the DDL waits indefinitely while
+    /// holding the locks it already took. The overrides exist to raise a FINITE
+    /// budget for one planned migration, so zero is outside their domain.
+    ///
+    /// This is the author-facing half of the rule: it fails the artifact at load,
+    /// where the author can still edit it. The binding half runs at apply, where
+    /// the effective value is resolved (`zero_migrate::apply::timeout`), because
+    /// an embedder can build the `Migration` directly and a zero can also come
+    /// from executor config that never passes through this gate.
+    #[error(
+        "indefinite timeout: flags.{field} is 0, which PostgreSQL and MySQL both read as \
+         \"no limit\" rather than a zero budget: the migration would wait indefinitely \
+         while holding the locks it already took. Set a finite number of milliseconds, \
+         or omit {field} to inherit the executor default"
+    )]
+    IndefiniteTimeoutFlag {
+        /// The zero-valued override (`timeout_ms` or `lock_timeout_ms`).
+        field: &'static str,
     },
 }
 
@@ -347,6 +375,33 @@ pub fn enforce_ir_ownership(
                     deploying_app: deploying_app.to_string(),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an IR envelope whose per-migration timeout override is `0`.
+///
+/// `0` is how both PostgreSQL and MySQL spell "no limit": `SET lock_timeout = 0`
+/// and `SET statement_timeout = 0` read back as `0`, not `0ms`. So an override of
+/// zero disables the very timeout it claims to set, and the migration's DDL waits
+/// indefinitely while holding whatever it already acquired. The overrides are
+/// documented as raising a FINITE budget for one planned migration, so zero was
+/// never in their domain.
+///
+/// This gate is early AUTHOR feedback, not the boundary: it catches the artifact
+/// while the author can still edit it. The binding refusal runs at apply, where
+/// the effective value is resolved.
+///
+/// # Errors
+/// [`IrLoadError::IndefiniteTimeoutFlag`] naming the zero-valued override.
+pub fn enforce_ir_finite_timeouts(ir: &MigrationIr) -> Result<(), IrLoadError> {
+    for (field, value) in [
+        ("timeout_ms", ir.flags.timeout_ms),
+        ("lock_timeout_ms", ir.flags.lock_timeout_ms),
+    ] {
+        if value.is_some_and(|ms| ms.get() == 0) {
+            return Err(IrLoadError::IndefiniteTimeoutFlag { field });
         }
     }
     Ok(())

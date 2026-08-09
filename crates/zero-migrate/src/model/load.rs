@@ -27,18 +27,18 @@ pub use zero_migrate_ir::load::*;
 /// `deploying_app` (a spoofed/absent value in the artifact is discarded) — ready
 /// for `IrAuthor::lower`.
 ///
-/// The steps run in the security-critical order: deserialize →
-/// `ir_version` → `validate_ir` (for `target_dialect`) → ownership → checksum-hint
-/// compare. Every step is fail-closed; lowering NEVER sees an artifact that
-/// failed any gate.
+/// The steps run in the security-critical order: deserialize, then `ir_version`,
+/// then `validate_ir` (for `target_dialect`), then finite timeout budgets, then
+/// ownership, then the checksum-hint compare. Every step is fail-closed; lowering
+/// NEVER sees an artifact that failed any gate.
 ///
 /// `registry` is the project's table→owner map; `target_dialect` is threaded from
 /// the deploy backend selection (`deploy_migrate.rs` / `--engine`).
 ///
 /// # Errors
 /// [`IrLoadError`] for a malformed document, an unknown future `ir_version`, a
-/// structural-validation failure, an ownership violation, or a checksum-hint
-/// mismatch.
+/// structural-validation failure, a zero (indefinite) timeout override, an
+/// ownership violation, or a checksum-hint mismatch.
 pub fn load_ir_document(
     bytes: &str,
     deploying_app: &str,
@@ -61,6 +61,14 @@ pub fn load_ir_document(
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
     validate_ir_scoped(&ir, target_dialect, &[], schema_scope)?;
+
+    // 3b. finite timeout budgets -- a `flags.timeout_ms` / `flags.lock_timeout_ms`
+    //    of 0 is the engines' "no limit" sentinel, not a zero budget, so it
+    //    disables the timeout it claims to set. Refused here so the author sees it
+    //    while the artifact is still editable; the binding refusal is at apply,
+    //    where the effective value is resolved and where a config-sourced zero or
+    //    a hand-built `Migration` also arrives.
+    enforce_ir_finite_timeouts(&ir)?;
 
     // 4. ownership — over the ARTIFACT's claimed owner is irrelevant; the check is
     //    against the deploying app + the project registry (fail-closed unknown).
@@ -182,6 +190,35 @@ mod tests {
     }
 
     // ── deserialize gate: unknown node tag / out-of-domain scalar ───────────
+
+    // -- finite timeout budgets on the PRODUCTION load path ------------------
+
+    #[test]
+    fn load_rejects_a_zero_timeout_override_on_either_field() {
+        for field in ["timeout_ms", "lock_timeout_ms"] {
+            let ops = r#"[{"op":"dropTable","table":"t"}]"#;
+            let bytes = envelope_json(ops, &format!(r#","flags":{{"{field}":0}}"#));
+            let reg = registry(&[("t", "app_a")]);
+            let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+                .expect_err("a zero timeout override disables the timeout it claims to set");
+            assert_eq!(
+                err,
+                IrLoadError::IndefiniteTimeoutFlag { field },
+                "the load gate must name the zero-valued override"
+            );
+        }
+    }
+
+    #[test]
+    fn load_accepts_a_finite_timeout_override_on_either_field() {
+        for field in ["timeout_ms", "lock_timeout_ms"] {
+            let ops = r#"[{"op":"dropTable","table":"t"}]"#;
+            let bytes = envelope_json(ops, &format!(r#","flags":{{"{field}":1}}"#));
+            let reg = registry(&[("t", "app_a")]);
+            load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+                .expect("the smallest expressible budget is finite and loads");
+        }
+    }
 
     #[test]
     fn load_rejects_unknown_expr_node_tag_at_deserialize() {

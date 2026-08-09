@@ -4342,6 +4342,92 @@ mod render_tests {
         );
     }
 
+    /// MySQL reads `max_execution_time = 0` and `innodb_lock_wait_timeout = 0` as
+    /// "no limit" exactly as PostgreSQL reads its two timeouts, so a zero override
+    /// is refused on the MySQL backend as well, before the session pin, and so
+    /// before the first byte of author SQL. Both fields, and the executor-config
+    /// source that no IR validation can see.
+    #[compio::test]
+    async fn a_zero_timeout_budget_is_refused_before_any_mysql_sql_is_sent() {
+        for (label, mutate) in [
+            (
+                "lock_timeout_ms",
+                Box::new(|m: &mut Migration, _cfg: &mut ExecutorConfig| {
+                    m.flags.lock_timeout_ms = Some(0);
+                }) as Box<dyn Fn(&mut Migration, &mut ExecutorConfig)>,
+            ),
+            (
+                "timeout_ms",
+                Box::new(|m: &mut Migration, _cfg: &mut ExecutorConfig| {
+                    m.flags.timeout_ms = Some(0);
+                }),
+            ),
+            (
+                "pg.lock_timeout",
+                Box::new(|_m: &mut Migration, cfg: &mut ExecutorConfig| {
+                    // A sub-millisecond config budget truncates to zero whole
+                    // milliseconds, with no migration flag and no IR involved.
+                    cfg.pg.lock_timeout = std::time::Duration::from_micros(500);
+                }),
+            ),
+        ] {
+            let rec = RecordingSession::new();
+            let backend = MysqlBackend::new_generic(&rec);
+            let mut cfg =
+                ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+            let mut m = trivial_migration();
+            mutate(&mut m, &mut cfg);
+
+            let result = backend
+                .apply_one(&cfg, &m, "tester", false, &[], "apply")
+                .await;
+            let error = result.expect_err("a zero budget disables the timeout and is refused");
+            assert!(
+                matches!(error, ApplyError::IndefiniteTimeout(_)),
+                "{label}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(label),
+                "{label}: the refusal must name the knob that produced the zero: {error}"
+            );
+            assert!(
+                rec.log.borrow().is_empty(),
+                "{label}: nothing may reach the server: {:?}",
+                rec.log.borrow()
+            );
+        }
+    }
+
+    /// The positive control for the MySQL leg: a finite override on both budgets
+    /// still applies, and the session pin carries the author's own numbers
+    /// (milliseconds for the execution budget, whole seconds for the lock wait).
+    #[compio::test]
+    async fn finite_mysql_timeout_overrides_still_apply_and_reach_the_session_pin() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let mut m = trivial_migration();
+        m.flags.timeout_ms = Some(45_000);
+        m.flags.lock_timeout_ms = Some(7_000);
+
+        backend
+            .apply_one(&cfg, &m, "tester", false, &[], "apply")
+            .await
+            .expect("a finite maintenance-window override still applies");
+
+        let log = rec.log.borrow();
+        let all = log.join("\n");
+        assert!(
+            all.contains("SESSION max_execution_time = 45000")
+                && all.contains("SESSION innodb_lock_wait_timeout = 7"),
+            "the finite overrides must reach the session pin: {all}"
+        );
+        assert!(
+            log.iter().any(|s| s == "batch: CREATE TABLE t (id INT)"),
+            "the author up still runs: {log:?}"
+        );
+    }
+
     #[compio::test]
     async fn overlong_inflight_marker_fields_fail_before_author_ddl() {
         for field in ["name", "applied_by"] {

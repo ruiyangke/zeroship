@@ -38,6 +38,7 @@ use std::time::Instant;
 use crate::apply::backend::mysql::journal_sql;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, CompletedRecord};
+use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, SqlSession};
 use crate::model::migration::{Checksum, Migration};
@@ -265,10 +266,19 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
 /// The effective `max_execution_time` (ms) for a migration: its per-migration
 /// override if set, else the executor-wide default. Mirrors the PG
 /// `statement_timeout` render.
-fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags
-        .timeout_ms
-        .unwrap_or_else(|| cfg.statement_timeout_ms())
+///
+/// MySQL reads `max_execution_time = 0` as "no limit", exactly as PostgreSQL
+/// reads `statement_timeout = 0`, so a zero is refused here too. See
+/// [`crate::apply::timeout`].
+fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
+    resolve_timeout_ms(
+        m.version.as_str(),
+        "max_execution_time",
+        m.flags.timeout_ms,
+        "timeout_ms",
+        cfg.statement_timeout_ms(),
+        "pg.statement_timeout",
+    )
 }
 
 /// The effective `innodb_lock_wait_timeout` (seconds) for a migration: its
@@ -276,14 +286,24 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// executor-wide default. Mirrors the PG `lock_timeout` render + the lock-safety
 /// envelope (a short lock-acquisition budget separate from the long statement
 /// budget).
-fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    let ms = m
-        .flags
-        .lock_timeout_ms
-        .unwrap_or_else(|| cfg.lock_timeout_ms());
+///
+/// The zero refusal runs BEFORE the rounding, so the two dialects answer a
+/// `lock_timeout_ms: 0` migration identically. Rounding 500ms up to 1s narrows a
+/// finite budget the author already asked for; rounding 0 up to 1s would
+/// substitute a budget for an explicit "no limit" the migration checksum
+/// describes, which is the clamp this rule exists to avoid.
+fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
+    let ms = resolve_timeout_ms(
+        m.version.as_str(),
+        "innodb_lock_wait_timeout",
+        m.flags.lock_timeout_ms,
+        "lock_timeout_ms",
+        cfg.lock_timeout_ms(),
+        "pg.lock_timeout",
+    )?;
     // Round UP to whole seconds (MySQL's unit), floor 1s so a sub-second budget
     // never becomes a 0 = "no wait" that fails every contended DDL.
-    ms.div_ceil(1000).max(1)
+    Ok(ms.div_ceil(1000).max(1))
 }
 
 /// Build the session invariant that every author-controlled MySQL statement
@@ -431,8 +451,8 @@ pub(crate) async fn configure_session<D: SqlSession>(
     // per-statement budget knob and is harmless for DDL; the lock-wait timeout is
     // the DDL-relevant one. Both are session-scoped SETs.
     let stmt = session_settings_sql(
-        effective_timeout_ms(cfg, m),
-        effective_lock_timeout_secs(cfg, m),
+        effective_timeout_ms(cfg, m)?,
+        effective_lock_timeout_secs(cfg, m)?,
     );
     conn.batch(&stmt).await?;
     Ok(())
@@ -442,12 +462,34 @@ pub(crate) async fn configure_session<D: SqlSession>(
 /// DML/backfill steps do not carry per-migration timeout overrides, so they use
 /// the executor defaults. MySQL's settings are session-scoped and therefore must
 /// be refreshed before each data step on a pooled connection.
+///
+/// Both budgets come from the config, which is where a sub-millisecond `Duration`
+/// truncates to the zero MySQL reads as "no limit", so this render runs the same
+/// refusal the per-migration one does.
 pub(crate) async fn configure_data_session<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    version: &str,
 ) -> Result<(), ApplyError> {
-    let lock_secs = cfg.lock_timeout_ms().div_ceil(1000).max(1);
-    conn.batch(&session_settings_sql(cfg.statement_timeout_ms(), lock_secs))
+    let timeout_ms = resolve_timeout_ms(
+        version,
+        "max_execution_time",
+        None,
+        "timeout_ms",
+        cfg.statement_timeout_ms(),
+        "pg.statement_timeout",
+    )?;
+    let lock_secs = resolve_timeout_ms(
+        version,
+        "innodb_lock_wait_timeout",
+        None,
+        "lock_timeout_ms",
+        cfg.lock_timeout_ms(),
+        "pg.lock_timeout",
+    )?
+    .div_ceil(1000)
+    .max(1);
+    conn.batch(&session_settings_sql(timeout_ms, lock_secs))
         .await?;
     Ok(())
 }
@@ -490,7 +532,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     conflict_target: Option<&[String]>,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
-    configure_data_session(conn, cfg).await?;
+    configure_data_session(conn, cfg, version).await?;
 
     let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
     let target_lock_sql = mutates_data
@@ -827,8 +869,8 @@ pub(crate) async fn rollback_one<D: SqlSession>(
         // Rollback is another author-SQL execution entry. Pin the same literal
         // mode and budgets as apply before the first byte of `down` reaches MySQL.
         conn.batch(&session_settings_sql(
-            effective_timeout_ms(cfg, m),
-            effective_lock_timeout_secs(cfg, m),
+            effective_timeout_ms(cfg, m)?,
+            effective_lock_timeout_secs(cfg, m)?,
         ))
         .await
         .map_err(|e| RollbackError::Db(e.into()))?;

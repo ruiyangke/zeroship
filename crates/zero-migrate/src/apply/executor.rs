@@ -445,6 +445,13 @@ pub enum ApplyError {
     /// [`JournalError`] (which also carries this `From`).
     #[error("apply: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    /// A migration's effective `statement_timeout` / `lock_timeout` budget
+    /// resolved to `0`, which the database reads as "no limit", the opposite of
+    /// the mandatory finite budget the executor advertises. Refused before the
+    /// migration's SQL reaches the server; nothing ran. See
+    /// [`crate::apply::timeout`].
+    #[error(transparent)]
+    IndefiniteTimeout(#[from] crate::apply::timeout::IndefiniteTimeoutError),
 }
 
 #[cfg(pg_seam)]
@@ -1876,6 +1883,12 @@ pub enum RollbackError {
     /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
     #[error("rollback: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    /// A migration's effective `statement_timeout` / `lock_timeout` budget
+    /// resolved to `0` while rendering the `down` session. Same rule as
+    /// [`ApplyError::IndefiniteTimeout`]: a `down` is author SQL that takes locks
+    /// too, so it never runs on an unbounded budget. Nothing was rolled back.
+    #[error(transparent)]
+    IndefiniteTimeout(#[from] crate::apply::timeout::IndefiniteTimeoutError),
     /// A dialect-level backend error whose message is already the intended
     /// operator-facing text. See [`ApplyError::Backend`].
     #[error("backend error: {0}")]

@@ -27,6 +27,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use crate::apply::backend::PgSessionSnapshot;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
+use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::model::migration::Migration;
@@ -152,13 +153,55 @@ pub(crate) async fn restore_session<D: SqlSession>(
     Ok(())
 }
 
+/// The two ways rendering a confined session can fail before any SQL is sent: an
+/// engine identifier that is not quotable, and a timeout budget the database
+/// would read as "no limit". Both are fail-closed pre-`BEGIN` refusals, and both
+/// reach callers that report [`ApplyError`] (apply, identity, primary key) and
+/// callers that report [`RollbackError`] (the `down` leaf), so the render names
+/// one type and each caller's `?` widens it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SessionRenderError {
+    /// An engine-supplied identifier was not quotable.
+    #[error(transparent)]
+    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    /// A timeout budget resolved to the database's "no limit" sentinel.
+    #[error(transparent)]
+    IndefiniteTimeout(#[from] TimeoutError),
+}
+
+impl From<SessionRenderError> for ApplyError {
+    fn from(error: SessionRenderError) -> Self {
+        match error {
+            SessionRenderError::IdentQuote(e) => Self::IdentQuote(e),
+            SessionRenderError::IndefiniteTimeout(e) => Self::IndefiniteTimeout(e),
+        }
+    }
+}
+
+impl From<SessionRenderError> for RollbackError {
+    fn from(error: SessionRenderError) -> Self {
+        match error {
+            SessionRenderError::IdentQuote(e) => Self::IdentQuote(e),
+            SessionRenderError::IndefiniteTimeout(e) => Self::IndefiniteTimeout(e),
+        }
+    }
+}
+
 /// The effective `statement_timeout` for a migration: its per-migration
 /// override ([`crate::model::migration::MigrationFlags::timeout_ms`]) if set, else
 /// the executor-wide default.
-fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags
-        .timeout_ms
-        .unwrap_or_else(|| cfg.statement_timeout_ms())
+///
+/// Zero is refused, not clamped; see [`crate::apply::timeout`] for why the rule
+/// lives at this resolution rather than only at the IR load gate.
+fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
+    resolve_timeout_ms(
+        m.version.as_str(),
+        "statement_timeout",
+        m.flags.timeout_ms,
+        "timeout_ms",
+        cfg.statement_timeout_ms(),
+        "pg.statement_timeout",
+    )
 }
 
 /// The effective `lock_timeout` for a migration: its per-migration override
@@ -168,11 +211,16 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// [`crate::conn::PgConfinement::lock_timeout`] honest: a single planned migration
 /// can legitimately raise ITS OWN lock-acquisition budget (run during a quiet
 /// window), while every other migration keeps the conservative fail-fast
-/// default. It mirrors [`effective_timeout_ms`] exactly.
-fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags
-        .lock_timeout_ms
-        .unwrap_or_else(|| cfg.lock_timeout_ms())
+/// default. It mirrors [`effective_timeout_ms`] exactly, refusal included.
+fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
+    resolve_timeout_ms(
+        m.version.as_str(),
+        "lock_timeout",
+        m.flags.lock_timeout_ms,
+        "lock_timeout_ms",
+        cfg.lock_timeout_ms(),
+        "pg.lock_timeout",
+    )
 }
 
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
@@ -191,14 +239,14 @@ fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 pub(super) fn set_local_session_sql(
     cfg: &ExecutorConfig,
     m: &Migration,
-) -> Result<String, crate::render::dml::IdentQuoteError> {
+) -> Result<String, SessionRenderError> {
     Ok(format!(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
         cfg.search_path_clause()?,
-        effective_timeout_ms(cfg, m),
-        effective_lock_timeout_ms(cfg, m),
+        effective_timeout_ms(cfg, m)?,
+        effective_lock_timeout_ms(cfg, m)?,
     ))
 }
 
@@ -225,17 +273,33 @@ pub(super) fn set_local_role_sql(
         .transpose()
 }
 
-fn dml_set_local_session_sql(
-    cfg: &ExecutorConfig,
-) -> Result<String, crate::render::dml::IdentQuoteError> {
+/// A DML step carries no per-migration override slot, so both budgets come from
+/// the executor config, which is exactly where a sub-millisecond `Duration` can
+/// truncate to the zero the database reads as "no limit", so this render runs the
+/// same refusal.
+fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<String, ApplyError> {
     Ok(format!(
         "{AUTHOR_SQL_LITERAL_MODE} \
          SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
         cfg.search_path_clause()?,
-        cfg.statement_timeout_ms(),
-        cfg.lock_timeout_ms(),
+        resolve_timeout_ms(
+            version,
+            "statement_timeout",
+            None,
+            "timeout_ms",
+            cfg.statement_timeout_ms(),
+            "pg.statement_timeout",
+        )?,
+        resolve_timeout_ms(
+            version,
+            "lock_timeout",
+            None,
+            "lock_timeout_ms",
+            cfg.lock_timeout_ms(),
+            "pg.lock_timeout",
+        )?,
     ))
 }
 
@@ -259,8 +323,8 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     let stmt = format!(
         "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
         cfg.search_path_clause()?,
-        effective_timeout_ms(cfg, m),
-        effective_lock_timeout_ms(cfg, m),
+        effective_timeout_ms(cfg, m)?,
+        effective_lock_timeout_ms(cfg, m)?,
     );
     conn.batch(&stmt).await?;
     Ok(())
@@ -627,7 +691,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
     // `set_local` is built from cfg directly (a DML step has no per-migration
     // timeout override slot).
-    let set_local = dml_set_local_session_sql(cfg)?;
+    let set_local = dml_set_local_session_sql(cfg, version)?;
     let role_sql = set_local_role_sql(cfg)?;
 
     conn.batch("BEGIN").await?;
@@ -1242,7 +1306,7 @@ mod pg_confinement_shape_tests {
     #[test]
     fn structured_dml_pins_standard_string_literals_transaction_locally() {
         let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let session = dml_set_local_session_sql(&cfg).expect("DML session SQL renders");
+        let session = dml_set_local_session_sql(&cfg, "mig_test").expect("DML session SQL renders");
 
         assert!(
             session.starts_with(AUTHOR_SQL_LITERAL_MODE),

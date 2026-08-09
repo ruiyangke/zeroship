@@ -271,7 +271,7 @@ pub(crate) async fn run_backfill<D: SqlSession>(
     applied_by: &str,
 ) -> Result<BackfillOutcome, ApplyError> {
     let contract = validate_spec(spec)?.clone();
-    session::configure_data_session(conn, cfg).await?;
+    session::configure_data_session(conn, cfg, version.as_str()).await?;
     ensure_progress_table(conn, cfg).await?;
 
     // The plan-step version is stable across content edits and is therefore the
