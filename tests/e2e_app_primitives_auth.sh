@@ -90,7 +90,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);console.log(o$1??'')}catch(e){console.log('')}})"; }
+jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
 
 # Build a worker /dispatch request envelope for an RPC procedure `id`,
 # carrying `{json: <args>}` as the body. The worker maps the URL path

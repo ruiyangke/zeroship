@@ -75,7 +75,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);console.log(o$1??'')}catch(e){console.log('')}})"; }
+jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
 
 # Build a worker /dispatch request envelope for an RPC procedure `id`,
 # carrying `{json: <args>}` as the body. The worker maps the URL path
@@ -255,9 +255,9 @@ echo "=== Stage 5: env.kv over the worker /dispatch ==="
 # assert the count climbs (round-trip through Redis).
 V1="$(dispatch "$KV_APP" "kv.visit" '{}')"; V1B="$(echo "$V1" | head -1)"; V1C="$(echo "$V1" | tail -1)"
 if [ "$V1C" = "200" ] && echo "$V1B" | grep -q '"json"'; then
-  VISITS1="$(echo "$V1B" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log(o.json.visits)}catch(e){console.log("")}})')"
+  VISITS1="$(echo "$V1B" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.json.visits)+"\n")}catch(e){console.log("")}})')"
   V2="$(dispatch "$KV_APP" "kv.visit" '{}' | head -1)"
-  VISITS2="$(echo "$V2" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log(o.json.visits)}catch(e){console.log("")}})')"
+  VISITS2="$(echo "$V2" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.json.visits)+"\n")}catch(e){console.log("")}})')"
   if [ -n "$VISITS1" ] && [ -n "$VISITS2" ] && [ "$VISITS2" -gt "$VISITS1" ]; then
     pass "env.kv incr round-trip: visits $VISITS1 → $VISITS2 (kv.visit over /dispatch)"
   else

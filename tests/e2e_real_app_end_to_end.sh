@@ -37,7 +37,7 @@ PGC=zs-e2e-app-pg; RPC=zs-e2e-app-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-app-e2e"; APP_HOST="starter.localhost"
 WORK="$(mktemp -d -t zs-e2e-app-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
-jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);console.log(o$1??'')}catch(e){console.log('')}})"; }
+jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 gw(){ curl -s -H "Host: $APP_HOST" "$@"; }   # host-routed request to the deployed app
 
