@@ -761,6 +761,14 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "array":
     case "actor":
     case "calendarDate":
+    // Descriptor-only names: a generated descriptor can carry these even
+    // though no `t.*` builder emits them, so the bridge handles them in
+    // `db-lexicon.ts` and this mirror has to as well.
+    case "int":
+    case "integer":
+    case "bigInt":
+    case "float":
+    case "timestamp":
       return;
     default: {
       const _exhaustive: never = token;
