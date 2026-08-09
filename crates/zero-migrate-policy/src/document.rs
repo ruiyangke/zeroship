@@ -133,6 +133,16 @@ pub enum LoadError {
     /// key, `author_primary_key = "allow"` lets the pin override one silently. An
     /// inject rule that pins no primary key may keep omitting the field.
     InjectPinsPrimaryKeyWithoutAuthorPolicy { primary_key: Vec<String> },
+    /// An `[[inject]]` rule sets `author_primary_key = "forbid"` and pins no
+    /// `primary_key`, so the restriction it states is one nothing enforces (II.4.3).
+    /// The scoping is deliberate: `forbid` reads only under a pin, because only a pin
+    /// supplies the key the author's is being refused in favour of. Unpinned, the
+    /// variant is still loaded, still composed, and still sealed into the canonical
+    /// bytes, and never consulted - the document asserts a restriction the engine does
+    /// not apply. Either pin the `primary_key` the restriction defers to, or drop the
+    /// `author_primary_key = "forbid"`. `author_primary_key = "allow"` without a pin
+    /// stays legal: it states the reading an unpinned rule already has.
+    InjectForbidsAuthorPrimaryKeyWithoutPin,
     /// A `mandatory = true` inject rule on a non-root layer (II.4.2).
     MandatoryInjectOnNonRootLayer,
     /// A single document both injects a column X and forbids X (or forbids the
@@ -802,9 +812,20 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
     // the author's key regardless. Reject the omission rather than resolve it. A rule
     // that pins nothing is genuinely inert here, so silence stays legal and resolves to
     // the `Allow` it has always resolved to.
+    //
+    // `forbid` without a pin is the mirror of that omission and gets the mirror answer.
+    // The variant reads only under a pin - by design, not by oversight - so unpinned it
+    // is carried, composed and sealed while nothing consults it, and the operator who
+    // wrote it is left with a restriction that restricts nothing. Refuse the inert rule
+    // rather than widen the check to the unpinned case, which would change behaviour for
+    // every document relying on the documented pinned-PK scoping. `allow` without a pin
+    // is inert the other way and stays legal: it states what an unpinned rule means.
     let author_primary_key = match (inj.author_primary_key, &inj.primary_key) {
         (Some(WireAuthorPk::Allow), _) => AuthorPkPolicy::Allow,
-        (Some(WireAuthorPk::Forbid), _) => AuthorPkPolicy::Forbid,
+        (Some(WireAuthorPk::Forbid), Some(_)) => AuthorPkPolicy::Forbid,
+        (Some(WireAuthorPk::Forbid), None) => {
+            return Err(LoadError::InjectForbidsAuthorPrimaryKeyWithoutPin)
+        }
         (None, None) => AuthorPkPolicy::Allow,
         (None, Some(pinned)) => {
             return Err(LoadError::InjectPinsPrimaryKeyWithoutAuthorPolicy {

@@ -94,7 +94,11 @@ pub struct InjectIndex {
 pub enum AuthorPkPolicy {
     /// The author may declare their own PK (when the inject rule does not pin one).
     Allow,
-    /// An author-declared PK (other than the folded `id` PK) is rejected.
+    /// An author-declared PK (other than the folded `id` PK) is rejected - but only
+    /// when the rule pins a `primary_key`, per the scoping this type states above.
+    /// An unpinned rule has no key to reject the author's in favour of, so it never
+    /// rejects one; the loader refuses that combination rather than accept a
+    /// restriction nothing applies.
     Forbid,
 }
 

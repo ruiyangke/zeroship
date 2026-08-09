@@ -545,6 +545,39 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     assert_eq!(author_pk_of(&doc), AuthorPkPolicy::Allow);
 }
 
+// -- gate: a forbidden author PK with no pinned primary key ---------------------
+
+#[test]
+fn unpinned_forbid_of_the_author_primary_key_rejects() {
+    let e = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+author_primary_key = "forbid"
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+"#,
+    )
+    .unwrap_err();
+    assert_eq!(e, LoadError::InjectForbidsAuthorPrimaryKeyWithoutPin);
+}
+
+#[test]
+fn unpinned_allow_of_the_author_primary_key_accepts_as_allow() {
+    // The control for the refusal above: an unpinned rule is not refused for being
+    // unpinned. `allow` states the reading an unpinned rule already has, so it is
+    // inert in the direction that costs the author nothing and stays legal.
+    let doc = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+author_primary_key = "allow"
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+"#,
+    )
+    .unwrap();
+    assert_eq!(author_pk_of(&doc), AuthorPkPolicy::Allow);
+}
+
 // ── gate: self-contradictory inject + validate ───────────────────────────────────
 
 #[test]
