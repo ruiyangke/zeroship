@@ -64,6 +64,29 @@ use std::collections::{BTreeMap, BTreeSet};
 // `TargetScope`, `validate_immutable_expr_context`, etc. exactly as before.
 pub use zero_migrate_ir::validate::*;
 
+/// The composed charter the load gate asks for vendor authority, plus the schema an op
+/// that carries no `schema` qualifier resolves in.
+///
+/// Vendor authority is the POLICY. Without this, the gate below derives the capability
+/// set from the threaded [`SchemaScope`](crate::model::policy::SchemaScope), which
+/// answers a different question - which schemas the migration may touch - so a charter
+/// confining `schema.cross_schema` to its own schema was refused the `access.rls` it
+/// explicitly granted. A caller holding a charter threads it here and the gate reads
+/// the grant at the object the op targets, the same query
+/// [`crate::render::lower::IrAuthor`] re-runs before rendering.
+///
+/// A caller holding no charter passes `None` and keeps the scope-derived gate, which
+/// grants nothing outside an operator posture. That fallback is what still refuses a
+/// vendor op reaching [`validate_ir`] or the node addon's load-verify entry, neither of
+/// which composes a policy.
+#[derive(Clone, Copy, Debug)]
+pub struct VendorAuthority<'a> {
+    /// The charter whose capability grants decide the op.
+    pub effective: &'a zero_migrate_policy::EffectivePolicy,
+    /// The schema an op without its own qualifier renders into.
+    pub default_schema: &'a str,
+}
+
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
 /// embedded expression-AST node against `target_dialect` — the "the
 /// Rust validator is the authoritative STRUCTURAL gate" obligation made
@@ -132,9 +155,29 @@ pub fn validate_ir_scoped(
     ts_locations: &[Option<String>],
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
+    validate_ir_authorized(ir, target_dialect, ts_locations, schema_scope, None)
+}
+
+/// [`validate_ir_scoped`] threaded with the charter that answers vendor authority.
+///
+/// `schema_scope` keeps its own job - schema confinement - and `authority` decides
+/// which privileged primitives the charter grants. See [`VendorAuthority`] for what a
+/// `None` authority falls back to and why that fallback stays.
+///
+/// # Errors
+/// The first [`AuthoringError`] any op produces (cross-schema, invalid schema ident,
+/// an ungranted vendor primitive, illegal guard direction, or an embedded-expression
+/// rejection).
+pub fn validate_ir_authorized(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
+    authority: Option<VendorAuthority<'_>>,
+) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
-        validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
+        validate_op_authorized(op, target_dialect, op_index, ts, schema_scope, authority)?;
     }
     validate_column_references(ir, target_dialect, ts_locations)?;
     validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
@@ -3821,6 +3864,7 @@ fn validate_dialectal_op(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
+    authority: Option<VendorAuthority<'_>>,
 ) -> Result<(), AuthoringError> {
     fn mk(
         target_dialect: Dialect,
@@ -3876,23 +3920,25 @@ fn validate_dialectal_op(
     if let Some(ops) = default {
         for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             for op in ops {
-                validate_op_scoped(op, dialect, op_index, ts_location, schema_scope)?;
+                validate_op_authorized(
+                    op,
+                    dialect,
+                    op_index,
+                    ts_location,
+                    schema_scope,
+                    authority,
+                )?;
             }
         }
     }
-    if let Some(ops) = pg {
+    for (dialect, leg) in [
+        (Dialect::Postgres, pg),
+        (Dialect::Sqlite, sqlite),
+        (Dialect::Mysql, mysql),
+    ] {
+        let Some(ops) = leg else { continue };
         for op in ops {
-            validate_op_scoped(op, Dialect::Postgres, op_index, ts_location, schema_scope)?;
-        }
-    }
-    if let Some(ops) = sqlite {
-        for op in ops {
-            validate_op_scoped(op, Dialect::Sqlite, op_index, ts_location, schema_scope)?;
-        }
-    }
-    if let Some(ops) = mysql {
-        for op in ops {
-            validate_op_scoped(op, Dialect::Mysql, op_index, ts_location, schema_scope)?;
+            validate_op_authorized(op, dialect, op_index, ts_location, schema_scope, authority)?;
         }
     }
     Ok(())
@@ -3910,6 +3956,28 @@ pub fn validate_op_scoped(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
+) -> Result<(), AuthoringError> {
+    validate_op_authorized(
+        op,
+        target_dialect,
+        op_index,
+        ts_location,
+        schema_scope,
+        None,
+    )
+}
+
+/// [`validate_op_scoped`] threaded with the charter that answers vendor authority.
+///
+/// # Errors
+/// Returns the first [`AuthoringError`] the gate or any embedded expression produces.
+pub fn validate_op_authorized(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
+    authority: Option<VendorAuthority<'_>>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
@@ -3931,6 +3999,7 @@ pub fn validate_op_scoped(
             op_index,
             ts_location,
             schema_scope,
+            authority,
         );
     }
 
@@ -3938,14 +4007,19 @@ pub fn validate_op_scoped(
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
-    // **VENDOR (`zero-migrate`)** — the capability-composition gate,
-    // BEFORE any expression walk. A privileged vendor op is
-    // refused fail-closed when (a) the target is SQLite (every vendor op is
-    // `PgOnly`), or (b) the active capability set — derived from the threaded
-    // [`SchemaScope`] — does not GRANT the op's required capability. The Confined
-    // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
-    // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
-    validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
+    // **VENDOR (`zero-migrate`)** - the capability gate, BEFORE any expression walk. A
+    // privileged vendor op is refused fail-closed when (a) the target is SQLite (every
+    // vendor op is `PgOnly`), or (b) the authority does not GRANT the op's required
+    // capability: the charter's own grant when the caller threaded one, else the
+    // capability set the threaded `SchemaScope` derives.
+    validate_vendor_op(
+        op,
+        target_dialect,
+        op_index,
+        ts_location,
+        schema_scope,
+        authority,
+    )?;
     validate_create_table_primary_key_policy(op, target_dialect, op_index, ts_location)?;
     validate_op_support(op, target_dialect, op_index, ts_location)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
@@ -5119,13 +5193,15 @@ fn validate_op_support(
 /// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
 ///    analogue); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
 ///    at load, never silently skipped.
-/// 2. **Capability gate** — the active
-///    [`VendorCapabilities`](crate::model::capability::VendorCapabilities), derived from the
-///    threaded [`SchemaScope`](crate::model::policy::SchemaScope), must GRANT the op's
-///    required [`VendorCapability`](crate::model::capability::VendorCapability). The
-///    Confined `Single` scope grants nothing ⇒ every vendor op is
-///    [`CODE_VENDOR_OP_DENIED`]. The gate keys on the CAPABILITY FLAG
-///    (`caps.grants(cap)`), not on a hard-coded profile name.
+/// 2. **Capability gate** - the authority must GRANT the op's required
+///    [`VendorCapability`](crate::model::capability::VendorCapability), else
+///    [`CODE_VENDOR_OP_DENIED`]. With a [`VendorAuthority`] the grant is read off the
+///    charter at the object the op targets, the same question
+///    `enforce_vendor_capability_at_lower` asks before rendering. Without one the
+///    capability set is derived from the threaded
+///    [`SchemaScope`](crate::model::policy::SchemaScope) and the Confined `Single`
+///    scope grants nothing, so every vendor op dies here. Either way the gate keys on
+///    the CAPABILITY FLAG, not on a hard-coded profile name.
 ///
 /// A non-vendor op is a no-op here.
 fn validate_vendor_op(
@@ -5134,6 +5210,7 @@ fn validate_vendor_op(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
+    authority: Option<VendorAuthority<'_>>,
 ) -> Result<(), AuthoringError> {
     let caps = crate::model::op_support::vendor_capabilities(op);
     if caps.is_empty() {
@@ -5186,33 +5263,63 @@ fn validate_vendor_op(
         });
     }
 
-    // (2) The capability-composition gate. Derive the active capability set from the
-    // threaded scope (the operator-gated, non-spoofable trust signal) and key on the
-    // capability FLAG — never a hard-coded profile name.
-    let caps = crate::model::capability::VendorCapabilities::from_scope(schema_scope);
+    // (2) The capability gate. A caller holding the composed charter gets the charter's
+    // own answer, read at the object the op targets; a caller holding none falls back to
+    // the scope-derived capability set. Both key on the capability FLAG - never a
+    // hard-coded profile name.
+    let scope_caps = authority
+        .is_none()
+        .then(|| crate::model::capability::VendorCapabilities::from_scope(schema_scope));
     for cap in crate::model::op_support::vendor_capabilities(op) {
-        if !caps.grants(cap) {
-            return Err(AuthoringError {
-                code: CODE_VENDOR_OP_DENIED.to_string(),
-                kind: None,
-                op_index,
-                ts_location: ts_location.map(str::to_string),
-                dialect: target_dialect,
-                reason: format!(
-                    "vendor PG primitive (op capability {:?}) requires the {} capability, which \
-                     the active (Confined creator) capability set does not grant — the privileged \
-                     zero-migrate primitives are unreachable from a confined migration by \
-                     construction",
-                    cap.as_token(),
-                    cap.flag_name(),
+        let granted = match authority {
+            Some(authority) => zero_migrate_ir::policy_capability::policy_grants_capability(
+                authority.effective,
+                cap,
+                zero_migrate_ir::policy_capability::capability_object_for_op(
+                    op,
+                    authority.default_schema,
+                )
+                .as_ref(),
+            ),
+            None => scope_caps.as_ref().is_some_and(|caps| caps.grants(cap)),
+        };
+        if granted {
+            continue;
+        }
+        let (reason_tail, fix) = if authority.is_some() {
+            (
+                "the composed charter does not grant at the object this op targets".to_string(),
+                format!(
+                    "grant {} in the charter, scoped to cover the object this op targets",
+                    zero_migrate_ir::policy_registry::capability_knob_key(cap).as_str(),
                 ),
-                suggested_fix: Some(format!(
+            )
+        } else {
+            (
+                "the active (Confined creator) capability set does not grant - the privileged \
+                 zero-migrate primitives are unreachable from a confined migration by construction"
+                    .to_string(),
+                format!(
                     "author this privileged migration under the operator/platform capability set \
                      (which composes {}), not the confined creator profile",
                     cap.flag_name(),
-                )),
-            });
-        }
+                ),
+            )
+        };
+        return Err(AuthoringError {
+            code: CODE_VENDOR_OP_DENIED.to_string(),
+            kind: None,
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "vendor PG primitive (op capability {:?}) requires the {} capability, which \
+                 {reason_tail}",
+                cap.as_token(),
+                cap.flag_name(),
+            ),
+            suggested_fix: Some(fix),
+        });
     }
     Ok(())
 }

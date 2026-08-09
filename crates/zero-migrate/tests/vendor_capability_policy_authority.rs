@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 
 use zero_migrate::guard::GuardConfig;
 use zero_migrate::model::capability::{VendorCapabilities, VendorCapability};
+use zero_migrate::model::load::{load_ir_document, IrLoadError};
 use zero_migrate::model::table_shape::resolve_create_table_policy;
+use zero_migrate::model::validate::{Dialect, CODE_VENDOR_OP_DENIED};
 use zero_migrate::render::lower::{
     IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema, LoadAndLowerGuardedError,
     LoweredArtifact,
@@ -71,6 +73,27 @@ scope = "all"
     )
 }
 
+/// Grants `access.rls` over the whole universe while confining `schema.cross_schema`
+/// to the project schema - the posture a creator charter that wants RLS on its own
+/// tables actually authors. It composes to `SchemaScope::Single("app")`, which
+/// `VendorCapabilities::from_scope` maps to the capability set that grants nothing, so
+/// the charter's own `access.rls` grant is the only thing that can admit the op.
+fn rls_granted_own_schema_charter() -> EffectivePolicy {
+    charter(
+        r#"
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "access.rls"
+value = true
+scope = "all"
+"#,
+    )
+}
+
 /// Grants the whole-universe `schema.cross_schema` and NOTHING from `access`. Under
 /// authority-by-scope this composes to `SchemaScope::Unconfined`, which
 /// `VendorCapabilities::from_scope` maps to the FULL operator capability set - so this
@@ -119,6 +142,12 @@ fn lower_rls_envelope(
     )
 }
 
+/// The refusal both gates owe an ungranted `setRls`, named at whichever one sees the
+/// op first. The load gate reads the charter when the author hands it one and the
+/// lower gate re-reads it before rendering, so the same missing grant surfaces as a
+/// `VENDOR_OP_DENIED` authoring error or as a `VendorCapabilityDenied`. Either is the
+/// contract; what is asserted is that the refusal names the RLS capability and that no
+/// SQL was produced.
 fn assert_rls_capability_denied(error: &LoadAndLowerGuardedError, label: &str) {
     match error {
         LoadAndLowerGuardedError::Lower(IrGuardedLowerError::Lower(
@@ -128,14 +157,22 @@ fn assert_rls_capability_denied(error: &LoadAndLowerGuardedError, label: &str) {
             VendorCapability::Rls,
             "{label}: refused for the wrong capability"
         ),
-        other => panic!("{label}: expected a VendorCapabilityDenied(Rls), got {other:?}"),
+        LoadAndLowerGuardedError::Load(IrLoadError::Validate(authoring)) => {
+            assert_eq!(
+                authoring.code, CODE_VENDOR_OP_DENIED,
+                "{label}: refused by the load gate for the wrong reason"
+            );
+            assert!(
+                authoring.reason.contains(VendorCapability::Rls.flag_name()),
+                "{label}: the load refusal does not name the RLS capability: {}",
+                authoring.reason
+            );
+        }
+        other => panic!("{label}: expected an RLS capability refusal, got {other:?}"),
     }
 }
 
-#[test]
-fn charter_granting_access_rls_lowers_set_rls_and_emits_its_sql() {
-    let artifact = lower_rls_envelope(&rls_granted_charter())
-        .expect("a charter granting access.rls admits setRls through the production entry");
+fn assert_emits_enable_rls(artifact: &LoweredArtifact, label: &str) {
     let sql = artifact
         .plan
         .steps
@@ -149,8 +186,26 @@ fn charter_granting_access_rls_lowers_set_rls_and_emits_its_sql() {
     assert!(
         sql.to_ascii_uppercase()
             .contains("ENABLE ROW LEVEL SECURITY"),
-        "granted setRls lowered without emitting its DDL:\n{sql}"
+        "{label}: granted setRls lowered without emitting its DDL:\n{sql}"
     );
+}
+
+#[test]
+fn charter_granting_access_rls_lowers_set_rls_and_emits_its_sql() {
+    let artifact = lower_rls_envelope(&rls_granted_charter())
+        .expect("a charter granting access.rls admits setRls through the production entry");
+    assert_emits_enable_rls(&artifact, "whole-universe cross_schema");
+}
+
+/// The same grant as the control above, with `schema.cross_schema` narrowed to the one
+/// schema the migration touches. A charter that confines itself to its own schema must
+/// not lose the capability it explicitly granted: confinement answers which schemas the
+/// migration may touch, never which privileged primitives it may render.
+#[test]
+fn charter_granting_access_rls_within_its_own_schema_lowers_set_rls_and_emits_its_sql() {
+    let artifact = lower_rls_envelope(&rls_granted_own_schema_charter())
+        .expect("a charter granting access.rls admits setRls even when confined to its own schema");
+    assert_emits_enable_rls(&artifact, "own-schema cross_schema");
 }
 
 #[test]
@@ -186,13 +241,35 @@ fn cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability() {
 fn confined_charter_still_refuses_set_rls() {
     let error = lower_rls_envelope(&confined_charter())
         .expect_err("a confined charter must keep refusing setRls");
-    match &error {
-        // The confined charter never reaches lower: the load gate's cross-schema
-        // capability check refuses the vendor op first. Either refusal is the
-        // contract; what matters is that no SQL is produced.
-        LoadAndLowerGuardedError::Load(_) => {}
-        LoadAndLowerGuardedError::Lower(_) => {
-            assert_rls_capability_denied(&error, "confined charter");
-        }
+    assert_rls_capability_denied(&error, "confined charter");
+}
+
+/// The load gate reached with no charter in hand keeps refusing. `load_ir_document`
+/// is public and the node addon's load-verify entry calls it with a confined scope and
+/// no policy at all, so the scope-derived capability set is the only answer available
+/// there. It must stay a refusal: an artifact the widest charter would admit is still
+/// denied when nothing supplies that charter.
+#[test]
+fn the_load_gate_without_a_charter_still_refuses_set_rls() {
+    let policy = rls_granted_charter();
+    let authored = serde_json::from_str(RLS_ENVELOPE).expect("test envelope parses");
+    let resolved =
+        resolve_create_table_policy(&authored, &policy, SCHEMA).expect("table shape resolves");
+    let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
+    let scope = SchemaScope::Single(SCHEMA.to_string());
+    let error = load_ir_document(
+        &resolved_json,
+        OWNER,
+        Dialect::Postgres,
+        &BTreeMap::new(),
+        Some(&scope),
+    )
+    .expect_err("a load gate holding no charter has no grant to read and must refuse");
+    match error {
+        IrLoadError::Validate(authoring) => assert_eq!(
+            authoring.code, CODE_VENDOR_OP_DENIED,
+            "the charter-free load gate refused for the wrong reason"
+        ),
+        other => panic!("expected a VENDOR_OP_DENIED authoring refusal, got {other:?}"),
     }
 }

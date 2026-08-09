@@ -5,7 +5,7 @@
 //! walkers — live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
 //! below. THIS module keeps [`load_ir_document`]: the full load chain, which
 //! threads a [`SchemaScope`](crate::model::policy::SchemaScope) into the POLICY
-//! validator ([`validate_ir_scoped`])
+//! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
 //! and therefore cannot live in the leaf. (Table-shape injection + author-PK
 //! conformance ride on the composed `EffectivePolicy` in
 //! `crate::model::table_shape::resolve_create_table_policy`, not a `PolicyProfile`.)
@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::MigrationIr;
-use crate::model::validate::validate_ir_scoped;
+use crate::model::validate::validate_ir_authorized;
 use crate::model::validate::Dialect;
 
 // The policy-free half of the load gate (ownership + checksum helpers + the
@@ -46,6 +46,35 @@ pub fn load_ir_document(
     registry: &BTreeMap<String, String>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<MigrationIr, IrLoadError> {
+    load_ir_document_authorized(
+        bytes,
+        deploying_app,
+        target_dialect,
+        registry,
+        schema_scope,
+        None,
+    )
+}
+
+/// [`load_ir_document`] threaded with the charter that answers vendor authority.
+///
+/// A caller holding the composed policy passes it here so the structural gate reads a
+/// privileged primitive's grant off the charter rather than deriving it from
+/// `schema_scope`, which answers schema confinement and nothing else. The two entries
+/// on [`crate::render::lower::IrAuthor`] hold that policy and call this; a caller that
+/// holds none keeps the scope-derived fallback described on
+/// [`VendorAuthority`](crate::model::validate::VendorAuthority).
+///
+/// # Errors
+/// [`IrLoadError`], on the same terms as [`load_ir_document`].
+pub fn load_ir_document_authorized(
+    bytes: &str,
+    deploying_app: &str,
+    target_dialect: Dialect,
+    registry: &BTreeMap<String, String>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
+    authority: Option<crate::model::validate::VendorAuthority<'_>>,
+) -> Result<MigrationIr, IrLoadError> {
     // 1. deserialize (closed AST + numeric domain reject malformed/lossy here).
     let mut ir: MigrationIr =
         serde_json::from_str(bytes).map_err(|e| IrLoadError::Deserialize(e.to_string()))?;
@@ -60,7 +89,7 @@ pub fn load_ir_document(
     //    threaded through a `PolicyProfile` here — that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
-    validate_ir_scoped(&ir, target_dialect, &[], schema_scope)?;
+    validate_ir_authorized(&ir, target_dialect, &[], schema_scope, authority)?;
 
     // 3b. finite timeout budgets -- a `flags.timeout_ms` / `flags.lock_timeout_ms`
     //    of 0 is the engines' "no limit" sentinel, not a zero budget, so it

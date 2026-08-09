@@ -2700,6 +2700,25 @@ impl IrAuthor {
         }
     }
 
+    /// The charter the LOAD GATE asks whether a privileged primitive is granted, and
+    /// the schema an op that carries no qualifier resolves in.
+    ///
+    /// Same charter and same fallback schema `effective_schema` resolves an unqualified
+    /// op against, so the load gate and `enforce_vendor_capability_at_lower` ask their
+    /// question at the same object. An op that DOES carry a qualifier supplies it to
+    /// both sides itself, and the resolution lowercases unquoted identifiers, so the
+    /// canonicalization `effective_schema` applies cannot split the two answers.
+    #[must_use]
+    fn vendor_authority(&self) -> crate::model::validate::VendorAuthority<'_> {
+        crate::model::validate::VendorAuthority {
+            effective: &self.effective,
+            default_schema: self
+                .default_schema
+                .as_deref()
+                .unwrap_or(&self.project_schema),
+        }
+    }
+
     /// The loader's IR branch: run the fail-closed IR envelope LOAD GATE
     /// (deserialize → `ir_version` → `validate_ir` → server-stamped ownership →
     /// advisory checksum-hint compare) and then LOWER the validated, owned IR to
@@ -2738,12 +2757,13 @@ impl IrAuthor {
         // cross-schema op is refused at validate-time here too (defense in depth for
         // any caller that does not go through `load_and_lower_guarded`).
         let scope = crate::model::policy::SchemaScope::Single(self.project_schema.clone());
-        let ir = crate::model::load::load_ir_document(
+        let ir = crate::model::load::load_ir_document_authorized(
             bytes,
             deploying_app,
             target,
             registry,
             Some(&scope),
+            Some(self.vendor_authority()),
         )
         .map_err(LoadAndLowerError::Load)?;
         self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
@@ -2787,12 +2807,13 @@ impl IrAuthor {
         // is the single source of truth (`GuardConfig::schema_scope`) shared with the
         // parse-guard cross-schema line-1 denial.
         let scope = guard_cfg.schema_scope();
-        let ir = crate::model::load::load_ir_document(
+        let ir = crate::model::load::load_ir_document_authorized(
             bytes,
             deploying_app,
             target,
             registry,
             scope.as_ref(),
+            Some(self.vendor_authority()),
         )
         .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
