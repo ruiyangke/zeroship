@@ -17,6 +17,53 @@
 # client aggregate exactly as a buffering proxy would: both sides then report
 # ttfc == total and the run fails. See the MUTATION note at the bottom.
 #
+# WHAT THE TIMING CHECK CANNOT SEE (added 2026-08-09). Unlike its siblings this
+# script never diffs the two tiers -- `judge` is already an absolute verdict,
+# applied to each side on its own, so a defect shared by both makes BOTH fail.
+# But it only ever looked at the TICK lines and the clock. The wire format
+# around them was unmeasured, and every part of it can break while five ticks
+# still arrive 200ms apart:
+#
+#   - the TERMINATOR. The stream is AI-SDK data-stream framing
+#     (sdks/bootstrap/src/fetch-handler.ts): `2:[<json>]` per chunk and a final
+#     `d:{}`. `d:` is what tells the client the stream ENDED
+#     (sdks/rpc/src/transport.ts consumeLine), so an omitted terminator leaves
+#     a correct-looking stream that a real client waits on until the socket
+#     closes. Every tick assertion here stays green through that.
+#   - the FRAME PREFIX. `grep '"mark":"TICK"'` matches the payload wherever it
+#     sits, so a change from `2:[...]` to anything else is invisible.
+#   - the RESPONSE HEADERS. A `content-length` on a streaming response is
+#     positive proof of buffering -- stronger evidence than any clock -- and
+#     `x-accel-buffering: no` is what stops an intermediary from doing it. The
+#     gateway could strip either and the timing check would still pass in this
+#     single-hop test rig.
+#
+# Those are asserted below, on the RAW frames and the RAW headers, per side.
+#
+# MUTATIONS for that half edit `sdks/bootstrap/src/fetch-handler.ts`, rebuild
+# the package and the app, and must move only the verdict named:
+#   MUTATE=no-terminator   the `d:{}` frame is never enqueued
+#   MUTATE=no-sse-ctype    the response declares application/json
+# Both restore the source and rebuild on exit.
+#
+# THEY REACH THE DEPLOYED TIER ONLY, and that is a finding rather than a
+# limitation. MEASURED 2026-08-09: with `no-terminator` applied and
+# @zeroship/bootstrap rebuilt, the DEPLOYED stream lost its `d:` frame while
+# the DEV stream still had one. The deployed side runs the fetch handler Vite
+# bundled into the `.zship` (the server blob carries both the `d:{}` emitter
+# and the `x-accel-buffering` header -- checked in the built artifact). The dev
+# side does NOT: `sdks/vite-plugin/src/dev-server.ts` boots
+# `sdks/vite-plugin/dist/dev-bootstrap.js`, a PREBUILT bundle that inlines its
+# own copy of the same handler and is only refreshed when the vite plugin is
+# rebuilt.
+#
+# So the two tiers can be running different VINTAGES of the same framework
+# code, and nothing here or in tests/lib/binary_freshness.sh (which watches
+# Rust binaries) would say so. For these mutations that is convenient -- the
+# dev row becomes a one-variable control -- but for a real change to the
+# framework it means a stale `dev-bootstrap.js` shows up as a
+# "dev-vs-deployed divergence" that is neither backend's fault.
+#
 # Prereqs (docs/runbooks/local-dev.md):
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
 #   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
@@ -44,6 +91,8 @@ export WORKER_KEY="${WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
 APP_NAME="streamp"
 # Set to 1 to run the buffering mutation described in the header.
 MUTATE_BUFFERED="${MUTATE_BUFFERED:-0}"
+MUTATE="${MUTATE:-none}"
+BOOTSTRAP_SRC="$ROOT/sdks/bootstrap/src/fetch-handler.ts"
 
 PASS=0; FAIL=0; PIDS=()
 ok() { PASS=$((PASS+1)); echo "  ok   $1"; }
@@ -51,6 +100,14 @@ no() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
   lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # A mutation edited a TRACKED SDK source and rebuilt its dist. Put both back
+  # before anything else can read them -- a half-restored bootstrap would make
+  # every later run in this tree report on the mutation instead of the product.
+  if [ -f "${MUTATE_BAK:-}" ]; then
+    cp "$MUTATE_BAK" "$BOOTSTRAP_SRC"
+    ( cd "$ROOT" && pnpm --filter @zeroship/bootstrap build ) >/dev/null 2>&1 \
+      || echo "  WARNING: bootstrap restore build FAILED -- run 'pnpm --filter @zeroship/bootstrap build' by hand"
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -77,12 +134,71 @@ drive() {
   [ -n "$key" ] && hdr=(-H "X-Api-Key: $key")
   [ "$MUTATE_BUFFERED" = "1" ] && nflag=()
   local start; start=$(date +%s%N)
-  curl -sS "${nflag[@]}" -m 25 -X POST -H 'content-type: application/json' \
+  # `-D` captures the RESPONSE HEADERS to a sidecar file. They are the other
+  # half of the buffering question: a clock says when bytes arrived, a
+  # `content-length` says the whole body was known before the first one was.
+  curl -sS "${nflag[@]}" -D "$out.hdr" -m 25 -X POST -H 'content-type: application/json' \
     -H 'accept: text/event-stream' "${hdr[@]}" "$url" -d '{"json":{}}' 2>&1 \
   | while IFS= read -r line; do
       local now; now=$(date +%s%N)
       printf '%s %s\n' $(( (now - start) / 1000000 )) "$line"
     done > "$out"
+}
+
+# ---------------------------------------------------------------------------
+# The WIRE FORMAT verdicts. Absolute, per side, and independent of the clock.
+# `$f` lines are "<ms> <frame>", so the frame is everything after the first
+# space. See the header for why each of these can break while the timing check
+# stays green.
+# ---------------------------------------------------------------------------
+frames() {
+  local label="$1" f="$2"
+  local frames_file="$f.frames"
+  cut -d' ' -f2- < "$f" | grep -v '^$' > "$frames_file"
+
+  # Every tick must ride in a `2:[...]` data frame. Grepping the payload alone
+  # would match it wherever it sat.
+  local ticks framed
+  ticks=$(grep -c '"mark":"TICK"' "$frames_file" || true)
+  framed=$(grep -c '^2:\[.*"mark":"TICK"' "$frames_file" || true)
+  [ "$ticks" -gt 0 ] && [ "$framed" -eq "$ticks" ] \
+    && ok "$label: all $ticks ticks arrived as \`2:[...]\` data frames" \
+    || no "$label: $framed of $ticks ticks are in a 2:[...] frame -- frame prefix changed?"
+
+  # The terminator. Exactly one, and LAST: a `d:{}` in the middle would end the
+  # stream early for a real client.
+  local dcount last
+  dcount=$(grep -c '^d:' "$frames_file" || true)
+  last=$(tail -1 "$frames_file")
+  if [ "$dcount" -eq 1 ] && [ "${last#d:}" != "$last" ]; then
+    ok "$label: the stream ENDS with exactly one \`d:\` terminator"
+  else
+    no "$label: terminator wrong -- $dcount \`d:\` frames, last frame is '${last:-<none>}' (a client waits forever without it)"
+  fi
+
+  # An `e:` frame is the dispatcher reporting a throw mid-stream. The ticks
+  # would still be there; the run would still look complete.
+  grep -q '^e:' "$frames_file" \
+    && no "$label: the stream carried an ERROR frame -- $(grep -m1 '^e:' "$frames_file" | cut -c1-200)" \
+    || ok "$label: no error frame in the stream"
+}
+
+headers() {
+  local label="$1" h="$2"
+  [ -s "$h" ] || { no "$label: no response headers captured"; return; }
+  grep -qi '^content-type: *text/event-stream' "$h" \
+    && ok "$label: response declares text/event-stream" \
+    || no "$label: content-type is not text/event-stream -- $(grep -i '^content-type' "$h" | tr -d '\r')"
+  # A content-length means the body was complete before it was sent. That is
+  # buffering, stated by the server, independent of any timing margin.
+  grep -qi '^content-length:' "$h" \
+    && no "$label: streaming response carries a content-length ($(grep -i '^content-length' "$h" | tr -d '\r')) -- the body was buffered whole" \
+    || ok "$label: no content-length on the streaming response"
+  # Emitted by the app's fetch handler. If dev has it and deployed does not,
+  # the gateway stripped it -- and the next proxy in front of it will buffer.
+  grep -qi '^x-accel-buffering: *no' "$h" \
+    && ok "$label: x-accel-buffering: no survives to the client" \
+    || no "$label: x-accel-buffering: no is MISSING -- an intermediary is free to buffer"
 }
 
 # ttfc < total/2 means chunks arrived spread out; ttfc == total means they all
@@ -105,7 +221,35 @@ judge() {
 }
 
 echo "=== streaming: dev vs deployed ==="
+echo "  mutation: $MUTATE   MUTATE_BUFFERED=$MUTATE_BUFFERED"
 [ "$MUTATE_BUFFERED" = "1" ] && echo "  (MUTATION ACTIVE: curl -N dropped, expect both sides to fail)"
+
+# Wire-format mutations. They edit the fetch handler BOTH tiers run, so the
+# defect is genuinely present on the deployed side rather than simulated at the
+# client, and the rebuild order matters: the package first, then the app that
+# bundles it.
+if [ "$MUTATE" != "none" ]; then
+  MUTATE_BAK="$WORK/fetch-handler.ts.bak"
+  cp "$BOOTSTRAP_SRC" "$MUTATE_BAK"
+  case "$MUTATE" in
+    no-terminator)
+      # The terminator frame becomes an empty chunk: the stream still ends and
+      # every tick still arrives, but nothing tells the client it is over.
+      sed -i 's|encoder.encode("d:{}\\n")|encoder.encode("")|g' "$BOOTSTRAP_SRC"
+      grep -q 'encoder.encode("")' "$BOOTSTRAP_SRC" \
+        || { no "mutation did not apply to $BOOTSTRAP_SRC"; exit 1; } ;;
+    no-sse-ctype)
+      sed -i 's|"content-type": "text/event-stream",|"content-type": "application/json",|' \
+        "$BOOTSTRAP_SRC"
+      grep -q '"content-type": "application/json",$' "$BOOTSTRAP_SRC" \
+        || { no "mutation did not apply to $BOOTSTRAP_SRC"; exit 1; } ;;
+    *) no "unknown MUTATE=$MUTATE"; exit 2 ;;
+  esac
+  ( cd "$ROOT" && pnpm --filter @zeroship/bootstrap build ) > "$WORK/bootstrap-build.log" 2>&1 \
+    || { no "bootstrap rebuild failed"; tail -20 "$WORK/bootstrap-build.log"; exit 1; }
+  echo "  MUTATED ($MUTATE): @zeroship/bootstrap rebuilt -- the DEPLOYED bundle picks"
+  echo "    it up; dev keeps the vite plugin's prebuilt dev-bootstrap.js (see header)"
+fi
 
 ( cd "$APP_DIR" && pnpm build ) > "$WORK/build.log" 2>&1
 [ -f "$ZSHIP" ] && ok "built stream-probe .zship" || { no "build produced no .zship"; tail -20 "$WORK/build.log"; exit 1; }
@@ -127,6 +271,8 @@ curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
   && ok "dev app reachable" || { no "dev app never came up"; tail -20 "$WORK/dev.log"; exit 1; }
 drive "http://localhost:$DEV_PORT/__zeroship/v1/probe.ticks" "" "$WORK/dev.txt"
 judge "dev" "$WORK/dev.txt"
+frames "dev" "$WORK/dev.txt"
+headers "dev" "$WORK/dev.txt.hdr"
 
 echo "=== deployed side"
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
@@ -158,8 +304,22 @@ curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' -H "X-Ap
   && ok "deployed app reachable" || no "deployed app did not answer ping"
 drive "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/probe.ticks" "$KEY" "$WORK/deployed.txt"
 judge "deployed" "$WORK/deployed.txt"
+frames "deployed" "$WORK/deployed.txt"
+headers "deployed" "$WORK/deployed.txt.hdr"
+
+# The frames and headers verbatim, so a reader can check the verdicts above
+# rather than take them.
+echo ""
+echo "  --- deployed frames (verbatim, <ms> <frame>) ---"
+sed 's/^/  /' "$WORK/deployed.txt"
+echo "  --- deployed response headers ---"
+tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 
 echo ""
-echo "  streaming: $PASS passed, $FAIL failed"
+echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE)"
 echo "  MUTATION: re-run with MUTATE_BUFFERED=1 to drop curl -N; both sides must then FAIL"
+echo "  MUTATIONS (wire format): MUTATE=no-terminator | no-sse-ctype -- each edits"
+echo "    sdks/bootstrap/src/fetch-handler.ts; the DEPLOYED side carries the defect"
+echo "    and exactly the named verdict must go RED while the tick/timing rows stay"
+echo "    green (dev keeps its prebuilt dev-bootstrap.js -- see the header note)"
 [ "$FAIL" -eq 0 ]
