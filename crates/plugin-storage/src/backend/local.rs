@@ -487,9 +487,21 @@ fn temp_sibling(full: &Path) -> PathBuf {
     }
 }
 
-// Directory walk is sync — listing isn't on the per-request hot path, and
-// compio's read_dir API churned across versions. std::fs::read_dir is the
-// stable choice; a dedicated blocking-task offload would be overkill here.
+// Directory walk is sync, and that is a known defect rather than a design
+// choice: `list` is a registered native op (`lib.rs`, `r.add("list", ...)`)
+// that app code calls per request through `env.storage.list`, so this
+// blocking `std::fs::read_dir` runs on the thread that also drives V8 and
+// every co-resident app's requests. A worker thread multiplexes many app
+// isolates, so one app's walk over a large bucket stalls the others.
+//
+// It is also unbounded: no pagination, no max-keys, and the caller
+// serialises the whole result into a single JSON string, so the cost scales
+// with the bucket rather than with what the app asked for.
+//
+// `std::fs::read_dir` was chosen because compio's read_dir API churned
+// across versions. That is a real constraint on the fix, not a reason the
+// blocking call is acceptable - the options are compio's own filesystem
+// API, an explicit blocking-task offload, or a bounded incremental walk.
 async fn walk(
     base: &Path,
     dir: &Path,
