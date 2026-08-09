@@ -239,11 +239,34 @@ macro_rules! skip_if_no_pg {
     }};
 }
 
+/// How the next statement matching a needle reports back to the engine AFTER the
+/// live server has already executed it.
+///
+/// The distinction from [`PgDevSession::fail_next_resolved_pending_contract_insert`]
+/// is the ordering: that one refuses BEFORE the statement reaches the server, so
+/// the server never does the work. These run the statement for real and only then
+/// corrupt the reply, which is the only way to reproduce a server that recorded
+/// something the client never learned about.
+enum ReplyFaultKind {
+    /// Report a driver error for a statement the server ran to completion.
+    Error,
+    /// Report a row whose named column carries text where the caller expects a
+    /// boolean, so the caller's decode fails on a statement the server ran.
+    UndecodableBool(String),
+}
+
+/// One armed reply fault: the SQL substring it waits for, and what it does.
+struct ReplyFault {
+    needle: String,
+    kind: ReplyFaultKind,
+}
+
 /// A TEST-ONLY [`SqlSession`] over a blocking `postgres::Client`, pinned to ONE
 /// connection (the seam's single-connection contract).
 pub struct PgDevSession {
     client: RefCell<Client>,
     fail_next_resolved_pending_contract_insert: Cell<bool>,
+    reply_fault: RefCell<Option<ReplyFault>>,
 }
 
 impl PgDevSession {
@@ -260,6 +283,7 @@ impl PgDevSession {
         Self {
             client: RefCell::new(client),
             fail_next_resolved_pending_contract_insert: Cell::new(false),
+            reply_fault: RefCell::new(None),
         }
     }
 
@@ -270,6 +294,45 @@ impl PgDevSession {
     /// tombstone without adding a production failpoint.
     pub fn fail_next_resolved_pending_contract_insert(&self) {
         self.fail_next_resolved_pending_contract_insert.set(true);
+    }
+
+    /// Let the live server run the next statement containing `needle`, then report
+    /// a driver error for it.
+    ///
+    /// This is a client that lost the reply to work the server actually did. The
+    /// server-side effect is real and outlives the error, which is what makes the
+    /// resulting database state worth asserting against from a second session.
+    pub fn fail_reply_after_running(&self, needle: &str) {
+        *self.reply_fault.borrow_mut() = Some(ReplyFault {
+            needle: needle.to_string(),
+            kind: ReplyFaultKind::Error,
+        });
+    }
+
+    /// Let the live server run the next statement containing `needle`, then report
+    /// its `column` as text so a caller expecting a boolean fails to decode it.
+    ///
+    /// Same real server-side effect as [`Self::fail_reply_after_running`], reached
+    /// through the decode branch instead of the transport branch.
+    pub fn undecodable_bool_reply_after_running(&self, needle: &str, column: &str) {
+        *self.reply_fault.borrow_mut() = Some(ReplyFault {
+            needle: needle.to_string(),
+            kind: ReplyFaultKind::UndecodableBool(column.to_string()),
+        });
+    }
+
+    /// Take the armed reply fault if `sql` matches its needle. One-shot: a matched
+    /// fault disarms itself so the compensating statement the engine sends next is
+    /// never itself faulted.
+    fn take_reply_fault(&self, sql: &str) -> Option<ReplyFaultKind> {
+        let mut armed = self.reply_fault.borrow_mut();
+        if armed
+            .as_ref()
+            .is_some_and(|fault| sql.contains(&fault.needle))
+        {
+            return armed.take().map(|fault| fault.kind);
+        }
+        None
     }
 }
 
@@ -590,10 +653,17 @@ impl SqlSession for PgDevSession {
         }
         let holders = bind_holders(binds);
         let refs = holder_refs(&holders);
-        self.client
+        let outcome = self
+            .client
             .borrow_mut()
             .execute(sql, &refs)
-            .map_err(|e| to_db_error(&e))
+            .map_err(|e| to_db_error(&e));
+        match self.take_reply_fault(sql) {
+            None => outcome,
+            Some(_) => Err(DbError::message(
+                "test fault: the server ran the statement and the client lost the reply",
+            )),
+        }
     }
 
     async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
@@ -631,12 +701,21 @@ impl SqlSession for PgDevSession {
     async fn query_one(&self, sql: &str, binds: &[Bind]) -> Result<Row, DbError> {
         let holders = bind_holders(binds);
         let refs = holder_refs(&holders);
-        let row = self
+        let outcome = self
             .client
             .borrow_mut()
             .query_one(sql, &refs)
-            .map_err(|e| to_db_error(&e))?;
-        row_to_neutral(&row)
+            .map_err(|e| to_db_error(&e));
+        match self.take_reply_fault(sql) {
+            None => row_to_neutral(&outcome?),
+            Some(ReplyFaultKind::Error) => Err(DbError::message(
+                "test fault: the server ran the statement and the client lost the reply",
+            )),
+            Some(ReplyFaultKind::UndecodableBool(column)) => Ok(Row::new(
+                vec![column],
+                vec![Value::Text("not a boolean".to_string())],
+            )),
+        }
     }
 }
 

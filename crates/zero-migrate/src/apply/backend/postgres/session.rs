@@ -60,12 +60,60 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<(), ApplyError> {
-    conn.exec(
-        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[project_id.into()],
-    )
-    .await?;
-    Ok(())
+    match conn
+        .exec(
+            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+            &[project_id.into()],
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            drop_grant_from_failed_acquire(conn, project_id).await;
+            Err(error.into())
+        }
+    }
+}
+
+/// Drop a grant the server may have recorded for an acquisition that then failed,
+/// so a session outliving the failure does not carry a lock nobody tracks.
+///
+/// PostgreSQL can grant a session advisory lock and still fail the acquiring
+/// statement. `LockErrorCleanup` re-grants a waiter that was kicked off the lock
+/// queue ("If they did grant us the lock, we'd better remember it in our local
+/// table"), and `pg_advisory_lock` acquires with `sessionLock = true`, so the
+/// grant outlives the transaction abort that follows. A cancelled lock wait is the
+/// live case: a peer's release lands in the same instant as the acquirer's
+/// `statement_timeout`, and the acquirer holds a lock it was told it never got. An
+/// acquisition whose reply is lost on the way back has the same shape. In every
+/// one of them the acquisition reported failure, so no caller has anything to
+/// release with.
+///
+/// The shipped CLI is not exposed: it opens a fresh `pg.Client` per verb and
+/// closes it in a `finally`, and session exit drops every advisory lock. What is
+/// exposed is a Rust embedder, or any pooled or long-lived session, where the
+/// connection survives the failed acquisition and nothing ever releases the grant.
+///
+/// Best effort by construction, on the ERROR path only. Releasing after a
+/// SUCCESSFUL acquisition would free the lock the caller is about to rely on.
+/// `pg_advisory_unlock` on a key this session never held returns false rather than
+/// erroring, so compensating for a grant that never happened cannot turn a failed
+/// acquisition into a worse failure. Session advisory locks stack by depth, so
+/// this would drop an outer bracket's hold if one existed -- none does: every
+/// acquisition site is the outermost bracket for its session, and an inner
+/// sub-batch runs under `LockMode::AlreadyHeld` and takes no lock of its own.
+///
+/// PostgreSQL only, deliberately. MySQL's `GET_LOCK` grants nothing when it
+/// returns 0 or errors, and SQLite's project lock is a local file try_lock, so
+/// neither has a grant to compensate for and neither gets this call.
+#[cfg(pg_seam)]
+async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &str) {
+    if let Err(error) = release_project_lock(conn, project_id).await {
+        tracing::warn!(
+            error = %error,
+            "zero-migrate: failed to drop a possible advisory-lock grant after a failed project-lock acquisition"
+        );
+    }
 }
 
 /// Take the project lock if it is free right now, without waiting.
@@ -73,6 +121,12 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
 /// `pg_try_advisory_lock` is the non-waiting peer of the `pg_advisory_lock` above
 /// and takes the identical `hashtext(project_id)` key, so a reader and a deploy
 /// contend on exactly the same lock.
+///
+/// `pg_try_advisory_lock` never waits, so it has no grant-then-cancel window of
+/// its own; what it shares with the blocking acquisition is a lock the server
+/// granted and the caller never learned about, whether the reply was lost in
+/// transport or arrived undecodable. Both failure paths therefore compensate
+/// through [`drop_grant_from_failed_acquire`], which documents why.
 ///
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure, [`ApplyError::Backend`] if the boolean
@@ -82,17 +136,28 @@ pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<bool, ApplyError> {
-    let row = conn
+    let row = match conn
         .query_one(
             "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
             &[project_id.into()],
         )
-        .await?;
-    row.try_get::<_, bool>("got").map_err(|e| {
-        ApplyError::Backend(format!(
-            "pg_try_advisory_lock returned an undecodable result: {e}"
-        ))
-    })
+        .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            drop_grant_from_failed_acquire(conn, project_id).await;
+            return Err(error.into());
+        }
+    };
+    match row.try_get::<_, bool>("got") {
+        Ok(got) => Ok(got),
+        Err(error) => {
+            drop_grant_from_failed_acquire(conn, project_id).await;
+            Err(ApplyError::Backend(format!(
+                "pg_try_advisory_lock returned an undecodable result: {error}"
+            )))
+        }
+    }
 }
 
 /// Report the sessions holding this project's advisory lock, for an operator

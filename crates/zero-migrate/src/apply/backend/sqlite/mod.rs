@@ -440,6 +440,13 @@ impl MigrationBackend for SqliteBackend {
     // extends that boundary across processes for the complete migration plan, so
     // catalog probes, DDL, DML, progress updates, and journal writes cannot
     // interleave with another zero-migrate process targeting the same app file.
+    //
+    // No compensating release on the acquisition's error path, unlike the
+    // PostgreSQL leaf, and deliberately so. PostgreSQL can grant a session advisory
+    // lock and still fail the acquiring statement, so a failed acquisition there
+    // can leave a grant nobody tracks. This lock is a local file `try_lock` whose
+    // result IS the acquisition: it either returns the handle or it does not, with
+    // no window between the grant and the caller learning about it.
 
     async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
         let mut held = self.project_lock_held.lock().map_err(|_| {

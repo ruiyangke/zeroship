@@ -217,6 +217,13 @@ pub(crate) async fn release_journal_bootstrap_lock<D: SqlSession>(
 /// Acquire the project apply-serialization lock via MySQL `GET_LOCK` (the analogue
 /// of `pg_advisory_lock`). The lock name is bound, not interpolated.
 ///
+/// No compensating release on the error path, unlike the PostgreSQL leaf, and
+/// deliberately so. PostgreSQL can grant a session advisory lock and still fail
+/// the acquiring statement, which leaves a grant nobody tracks. `GET_LOCK` has no
+/// such window: it reports its outcome in the value it returns, and the failures
+/// raised below are exactly the values that say the lock was NOT taken -- 0 for a
+/// timeout, NULL for a lock error.
+///
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure; [`ApplyError::Backend`] if `GET_LOCK`
 /// returns a non-1 result (0 = timeout, NULL = error/killed) — surfaced rather
