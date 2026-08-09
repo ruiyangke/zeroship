@@ -639,11 +639,18 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
             });
         }
     }
-    // Acquire the project advisory lock only when WE own it. Under
-    // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole
-    // declarative deploy — re-acquiring here (and releasing below) would FREE the
-    // lock between sub-batches (PG advisory locks are session-re-entrant, so a
-    // nested unlock would pop one level), letting a concurrent deploy interleave.
+    // Acquire the project advisory lock only when WE own it. Under `AlreadyHeld`
+    // the outer `apply_declarative` holds it for the whole declarative deploy, so
+    // this sub-batch inherits that hold and takes none of its own.
+    //
+    // The skip is not what keeps a concurrent deploy out. Session advisory locks
+    // stack by depth: measured on PostgreSQL 18.4, two acquires followed by ONE
+    // unlock leave the lock still held, and only the matching second unlock
+    // releases it. A balanced re-acquire and release here would therefore keep the
+    // outer hold intact the whole way through. What the skip buys is a round trip
+    // per sub-batch, and one fewer place an error path can leave the depth
+    // unbalanced. The hold that actually excludes a second deploy is the outer
+    // one, acquired once by `apply_declarative`.
     if lock_mode == LockMode::Acquire {
         backend.acquire_project_lock(cfg).await?;
     }

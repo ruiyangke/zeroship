@@ -2161,8 +2161,10 @@ impl MigrationEngine {
             std::collections::BTreeSet::new();
         // The project lock is held for the whole plan (acquired by `apply_plan` or
         // owned by the outer declarative caller), so every sub-batch re-enters it
-        // with `AlreadyHeld` — never re-acquiring (which would pop a re-entrant level
-        // on release and free the lock between sub-batches).
+        // with `AlreadyHeld` and takes no lock of its own. Session advisory locks
+        // stack by depth, so a balanced re-acquire and release per sub-batch would
+        // keep the hold too; skipping saves the round trip and leaves no error path
+        // that could strand an unbalanced level.
         let next_lock = LockMode::AlreadyHeld;
 
         // Net-applied journal state for the rebuild net-applied-skip — read lazily
