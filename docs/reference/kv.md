@@ -118,6 +118,19 @@ do {
 } while (cursor !== null);
 ```
 
+### `limit` is a request, not a bound
+
+`limit` asks for a page size; it does not cap one. The embedded store used by
+`pnpm dev` fills a page to exactly `limit` and stops, but a Redis-backed
+deployment passes `limit` to `SCAN` as a `COUNT` hint, so a page can come back
+shorter or longer than asked, including empty while keys still remain.
+
+That difference bites one common idiom: stopping once a page comes back short.
+Against the dev backend it terminates correctly, because that backend returns a
+cursor only when it filled the page. Against a deployed app it truncates the
+listing silently. `cursor === null` is the only exhaustion signal, which is why
+the loop above tests the cursor and not the page length.
+
 ### Key order is unspecified
 
 `list` makes no ordering guarantee, and the order genuinely differs between
