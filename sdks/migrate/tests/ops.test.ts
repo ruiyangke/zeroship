@@ -984,12 +984,13 @@ test("backfill remains the batched-write spelling", () => {
     table("t").backfill({
       set: { x: now() },
       where: (col) => col("id").isNotNull(),
-      cursorColumn: "id",
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 500,
     }),
   );
   assert.equal(ops[0].op, "backfill");
-  assert.equal(ops[0].cursorColumn, "id");
+  assert.deepEqual(ops[0].cursorColumns, ["id"]);
   assert.equal(ops[0].batchSize, 500);
 });
 
@@ -1695,6 +1696,10 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
       "refund_status_drift",
       "dispute_status_drift",
       "missing_dispute",
+      // Added with the stream→provider event forwarder (cdb30b3a2); the dead-letter
+      // sink inserts `'provider_reject'::zeroship.reconciliation_finding_kind`
+      // (crates/control/src/cron/event_forwarder.rs:154), so the domain must admit it.
+      "provider_reject",
     ]),
     inDomain("reconciliation_finding_severity", ["low", "medium", "high"]),
     inDomain("refund_destination", ["cash", "credit"]),
@@ -2329,12 +2334,39 @@ test("comment records closed COMMENT ON targets through handles and top-level AP
   ]);
 });
 
-test("backfill defaults cursorColumn to 'id' and batchSize to the engine default", () => {
-  const ops = record(() => table("u").backfill({ set: { x: now() } }));
-  assert.equal(ops[0].cursorColumn, "id");
+test("backfill defaults batchSize + name, but never the cursor tuple or its stability", () => {
+  const ops = record(() =>
+    table("u").backfill({
+      set: { x: now() },
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+    }),
+  );
   assert.equal(typeof ops[0].batchSize, "number");
   assert.equal(ops[0].name, "backfill_u");
   assert.equal(ops[0].set.x.fn, "now");
+  // The two required knobs have no defaults: a guessed cursor changes which rows a
+  // resume revisits, and a guessed stability mode silently picks a durability
+  // contract the author never wrote.
+  const isOpInvalid = (e: any) => e.code === "OP_INVALID";
+  assert.throws(() => record(() => table("u").backfill({ set: { x: now() } } as any)), isOpInvalid);
+  assert.throws(
+    () => record(() => table("u").backfill({ set: { x: now() }, cursorColumns: ["id"] } as any)),
+    isOpInvalid,
+  );
+  // The removed singular spelling is refused loudly, not ignored.
+  assert.throws(
+    () =>
+      record(() =>
+        table("u").backfill({
+          set: { x: now() },
+          cursorColumn: "id",
+          cursorColumns: ["id"],
+          cursorStability: { mode: "guardUpdates" },
+        } as any),
+      ),
+    (e: any) => isOpInvalid(e) && /cursorColumn \}\) is not a field/.test(e.message),
+  );
 });
 
 test("chain splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
@@ -2417,5 +2449,157 @@ test("determinism lint is a coarse whole-source scan (over-flags, never under-fl
   assert.ok(
     inHelper.some((f) => f.accessor.includes("Date.now")),
     "the coarse scan flags a clock accessor in a non-op helper (fail-safe over-flag)",
+  );
+});
+
+// ── column-level typed foreign-key reference (the `references` FACET) ──
+//
+// The engine IR spells `references` TWICE: as a column TYPE variant
+// (`{ ref: { references: "<table>" } }`, table only) and as a column FACET
+// (`$defs/ColumnReference`, a SIBLING of `name`/`type` carrying `table` AND
+// `column`). `fluent_ddl.mig.js:31` authors the FACET
+// (`t.text().references("users", "id")`) and `fluent_ddl.golden.json` records
+// `type: "text"` beside `references: { table, column }`. These tests pin the
+// facet path; the `{ ref: … }` type variant (`t.ref`) is a different construct
+// and keeps its own tests.
+
+test("a column .references(table, column) records the FACET beside a fully specified type", () => {
+  const ops = record(() =>
+    table("accounts").create({ columns: { owner: t.text().references("users", "id") } }),
+  );
+  const owner = ops[0].columns.find((c: any) => c.name === "owner");
+  assert.deepEqual(owner, {
+    name: "owner",
+    type: "text",
+    references: { table: "users", column: "id" },
+  });
+  // The facet must NOT collapse into the `{ ref: … }` column-type variant: the
+  // local storage type stays exactly what the builder selected.
+  assert.equal(owner.type, "text");
+});
+
+test("column .references refuses a missing or empty column (loud, never a silent narrowing)", () => {
+  const isOpInvalid = (e: any) => e.code === "OP_INVALID";
+  assert.throws(
+    () => record(() => table("a").create({ columns: { owner: (t.text() as any).references("users") } })),
+    (e: any) => isOpInvalid(e) && /references\(table, column, options\): column/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("a").create({ columns: { owner: t.text().references("users", "") } })),
+    (e: any) => isOpInvalid(e) && /column must be a non-empty string/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("a").create({ columns: { owner: t.text().references("", "id") } })),
+    (e: any) => isOpInvalid(e) && /table must be a non-empty string/.test(e.message),
+  );
+});
+
+test("column .references carries name/onDelete/onUpdate and rejects an out-of-set action", () => {
+  const ops = record(() =>
+    table("accounts").create({
+      columns: {
+        owner: t
+          .uuid()
+          .notNull()
+          .references("users", "id", { onDelete: "cascade", onUpdate: "restrict", name: "accounts_owner_fk" }),
+      },
+    }),
+  );
+  const owner = ops[0].columns.find((c: any) => c.name === "owner");
+  assert.deepEqual(owner, {
+    name: "owner",
+    type: "uuid",
+    nullable: false,
+    references: {
+      table: "users",
+      column: "id",
+      name: "accounts_owner_fk",
+      onDelete: "cascade",
+      onUpdate: "restrict",
+    },
+  });
+  assert.throws(
+    () =>
+      record(() =>
+        table("a").create({ columns: { owner: t.text().references("users", "id", { onDelete: "nope" as any }) } }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /onDelete/.test(e.message),
+  );
+});
+
+test("column .references returns a FRESH ColumnDef (immutability, §4)", () => {
+  const base = t.text();
+  const withRef = base.references("users", "id");
+  const ops = record(() => table("a").create({ columns: { plain: base, owner: withRef } }));
+  const plain = ops[0].columns.find((c: any) => c.name === "plain");
+  assert.equal("references" in plain, false);
+  assert.deepEqual(ops[0].columns.find((c: any) => c.name === "owner").references, {
+    table: "users",
+    column: "id",
+  });
+});
+
+test("a .references() ColumnDef is refused outside create({ columns }) (never silently dropped)", () => {
+  const refused = (e: any) => e.code === "OP_INVALID" && /references\(\) ColumnDef|typed references/.test(e.message);
+  assert.throws(
+    () => record(() => table("a").column("owner").add({ type: t.text().references("users", "id") })),
+    refused,
+  );
+  assert.throws(
+    () => record(() => table("a").column("owner").setType({ to: t.text().references("users", "id") })),
+    refused,
+  );
+  assert.throws(
+    () => record(() => table("a").create({ columns: { s: t.encrypted({ of: t.text().references("users", "id") }) } })),
+    refused,
+  );
+});
+
+// ── backfill cursor tuple + stability (the engine `Op::backfill` wire shape) ──
+//
+// `src/generated/ir.ts` (generated FROM the engine schema) declares
+// `{ op: "backfill"; cursorColumns: string[]; cursorStability: CursorStability; … }`
+// and `fluent_dml.golden.json` records exactly that. The singular `cursorColumn`
+// this recorder used to emit is not a field of the op at all.
+
+test("backfill records the ordered cursorColumns tuple and the explicit cursorStability", () => {
+  const ops = record(() =>
+    table("t").backfill({
+      set: { x: now() },
+      where: (col) => col("id").isNotNull(),
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+      batchSize: 500,
+    }),
+  );
+  assert.equal(ops[0].op, "backfill");
+  assert.deepEqual(ops[0].cursorColumns, ["id"]);
+  assert.deepEqual(ops[0].cursorStability, { mode: "guardUpdates" });
+  assert.equal("cursorColumn" in ops[0], false);
+  assert.equal(ops[0].batchSize, 500);
+});
+
+test("backfill accepts the externalInvariant stability mode and refuses a malformed one", () => {
+  const ops = record(() =>
+    table("t").backfill({
+      set: { x: now() },
+      cursorColumns: ["tenant", "id"],
+      cursorStability: { mode: "externalInvariant", name: "cursor_frozen_by_ops" },
+    }),
+  );
+  assert.deepEqual(ops[0].cursorColumns, ["tenant", "id"]);
+  assert.deepEqual(ops[0].cursorStability, { mode: "externalInvariant", name: "cursor_frozen_by_ops" });
+  const isOpInvalid = (e: any) => e.code === "OP_INVALID";
+  assert.throws(
+    () => record(() => table("t").backfill({ set: { x: now() }, cursorColumns: ["id"], cursorStability: { mode: "nope" } as any })),
+    isOpInvalid,
+  );
+  assert.throws(
+    () => record(() => table("t").backfill({ set: { x: now() }, cursorColumns: [] as any, cursorStability: { mode: "guardUpdates" } })),
+    isOpInvalid,
+  );
+  assert.throws(
+    () => record(() => table("t").backfill({ set: { x: now() }, cursorColumns: ["id", "id"] as any, cursorStability: { mode: "guardUpdates" } })),
+    isOpInvalid,
   );
 });

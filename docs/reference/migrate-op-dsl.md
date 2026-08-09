@@ -55,6 +55,8 @@ export default {
         last_name: (col) => col("name").splitPart(" ", 2),
       },
       where: (col) => col("first_name").isNull(),
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
     });
     users.column("name").drop();
   },
@@ -65,6 +67,8 @@ export default {
     users.backfill({
       // concatWs is NULL-skipping — the safe join; copy this, not `.concat`
       set: { name: (col) => concatWs(" ", col("first_name"), col("last_name")) },
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
     });
     users.column("first_name").drop();
     users.column("last_name").drop();
@@ -210,7 +214,7 @@ Spec-level dialectal fragments, such as wrapping one index element inside
 **Every table/column/name reference is a plain `string`.** There is no generic
 `S extends Schema` parameter, no `TableName<S>` / `keyof RowOf<S,T>` binding to
 the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
-`cursorColumn`, every `set` key, every `where`-referenced column, and every
+`cursorColumns`, every `set` key, every `where`-referenced column, and every
 `col("…")` argument are strings whose existence is validated at **apply time
 against the real DB**, never at `tsc` time (the typing-stance prose lives in the
 module header, `sdks/migrate/src/types.ts:1-11`, "§3.3 — names are plain
@@ -305,6 +309,7 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | `.default(value)` | a typed scalar literal, `now()` / `uuidV4()`, **or** a function-expression callback for composed defaults — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
+| `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
@@ -318,6 +323,7 @@ export default {
         total: t.numeric({ precision: 12, scale: 2 }).notNull().default(0),
         status: t.text().notNull().default("pending"),
         customer_id: t.ref("customers").notNull(),
+        owner_id: t.uuid().notNull().references("users", "id", { onDelete: "cascade" }),
       },
     });
   },
@@ -326,6 +332,21 @@ export default {
 
 `t.ref(target)` carries the target table as a plain string — it is never bound
 to the live schema (existence is validated at apply time).
+
+**`t.ref(target)` and `.references(table, column)` are two different
+constructs.** `t.ref` is a column **type** that names the target table only.
+`.references` is a column **facet**: the column keeps the storage type you chose
+(`t.uuid()` above) and the facet records the full target identity
+(`references: { table, column }`) plus the optional referential actions and an
+explicit constraint name (absent ⇒ `<table>_<column>_fkey`). Both halves of the
+target are required — a missing target column is an `OP_INVALID` at authoring
+time, never a silently table-only reference.
+
+The facet is **create-table only**: `.column().add()`, `.setType()`, and nested
+type positions (`t.encrypted({ of })`, a domain's `as`) reject a `.references()`
+`ColumnDef` rather than dropping the reference. Add a foreign key to an existing
+table with `.foreignKey(name).add({ columns, references })`, which is also the
+only shape for a **composite** key.
 
 ### Sensitive-data facets
 
@@ -548,7 +569,8 @@ table("sessions").delete({ where: (col) => col("expires_at").lt("2026-01-01T00:0
 
 table("orders").backfill({
   set: { total_norm: (col) => col("total").coalesce(0) },
-  cursorColumn: "id", // defaults to the single-column PK ("id")
+  cursorColumns: ["id"], // REQUIRED ordered cursor tuple (no default)
+  cursorStability: { mode: "guardUpdates" }, // REQUIRED; or { mode: "externalInvariant", name }
   batchSize: 1000, // defaults to the engine's chosen size
 });
 ```
@@ -557,6 +579,12 @@ table("orders").backfill({
   synonym.
 - `.del`'s `where` is **mandatory** — an unguarded full-table delete is rejected
   at record time.
+- `.backfill` requires an ordered `cursorColumns` tuple and an explicit
+  `cursorStability` mode. Neither is defaulted: the cursor decides which rows a
+  resume revisits, and the stability mode is the invariant that keeps the cursor
+  components immutable across an interrupted apply
+  (`{ mode: "guardUpdates" }` installs an engine-owned guard;
+  `{ mode: "externalInvariant", name }` acknowledges an operator-owned one).
 - `.backfill` is a batched, per-batch-transactional,
   resumable loop that persists crash-safe cursor progress under the project
   lock. It runs on **both backends** (PG via the existing windowed executor;
@@ -1240,7 +1268,7 @@ byte-identically on PG and SQLite from this one artifact.
 > The hero `up()` operates on `users` and relies on the engine's defaults
 > (`batchSize` 1000, an auto-derived backfill `name`); this artifact is the
 > standalone form the Rust apply gate seeds and applies, so it names `people`,
-> pins `batchSize: 50`, `cursorColumn: "id"`, and `name: "split_name_bf"`
+> pins `batchSize: 50`, and `name: "split_name_bf"`
 > explicitly. Copy the TS hero, not this JSON — the build evaluator records the
 > JSON for you (with the hero's own table and defaults).
 
@@ -1254,7 +1282,8 @@ byte-identically on PG and SQLite from this one artifact.
     {
       "op": "backfill",
       "table": "people",
-      "cursorColumn": "id",
+      "cursorColumns": ["id"],
+      "cursorStability": { "mode": "guardUpdates" },
       "batchSize": 50,
       "name": "split_name_bf",
       "set": {

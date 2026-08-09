@@ -29,7 +29,11 @@
 // BINDING (§3.3): this bridge converts a column's TYPE only. It never binds
 // table/column NAMES to the live schema — a `t.ref(target)` carries the target
 // table as a plain string (existence validated at apply time), exactly as the
-// migration DSL's own `t.ref` does.
+// migration DSL's own `t.ref` does. §3.3 constrains WHEN a name is resolved, not
+// HOW MANY names a construct carries: the migration DSL's column-level
+// `.references(table, column)` facet is just as unbound and records both halves
+// of the target. It is a separate construct from this `ref` TYPE arm and is
+// recorded on `IrColumn.references`, not here.
 
 import { TypeBuilder, type FieldDef } from "@zeroship/db";
 
@@ -138,9 +142,18 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     // same column the migration DSL's `t.id()` carries.
     case "id":
       return "uuid";
-    // A foreign-key column: the neutral `ref` arm carries the target table as a
-    // PLAIN STRING (§3.3 — never live-schema-bound). `refTarget` is required on a
-    // well-formed `t.ref(...)` FieldDef.
+    // A foreign-key column: the neutral `ref` arm carries the target TABLE only,
+    // because that is all a `@zeroship/db` `t.ref(...)` FieldDef holds — its
+    // `refTarget` is a single table name, with the referenced column implied by
+    // the target's primary key. That is a property of the SOURCE shape, not of
+    // §3.3: §3.3 is a TYPING stance (names stay plain strings, validated at apply
+    // time, never bound to the live schema at tsc time) and says nothing about how
+    // many names a construct may carry — the migration DSL's own
+    // `.references(table, column)` facet is equally unbound and carries BOTH.
+    // A migration that needs the target column records the column-level
+    // `references` facet (`IrColumn.references`) beside an explicit type; it does
+    // not come through this arm. `refTarget` is required on a well-formed
+    // `t.ref(...)` FieldDef.
     case "ref": {
       const references = def.refTarget;
       if (typeof references !== "string" || references.length === 0) {

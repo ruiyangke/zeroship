@@ -202,8 +202,12 @@ export type {
   CharOptions,
   VectorOptions,
   MaskOptions,
+  ColumnReferenceOptions,
+  OrderedColumns,
   // re-exported generated IR wire types (ergonomics; goldens are the contract)
   ColType,
+  ColumnReference,
+  CursorStability,
   Expr,
   IrBatch,
   IrJsonValue,

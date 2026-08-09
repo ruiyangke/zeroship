@@ -142,7 +142,8 @@ Facets chain onto any `t.*` value. Order is free; each returns a `ColumnDef`.
 t.text().notNull()
 t.uuid().notNull().primaryKey()
 t.text().unique()
-t.uuid().ref("users")                        // inline FK to users(id)
+t.ref("users")                               // FK column TYPE naming the target table only
+t.uuid().references("users", "id")           // uuid column + typed FK facet (target table AND column)
 t.bigInt().notNull().default(0)              // scalar default
 t.char(3).notNull().default("usd")           // string literal default
 ```
@@ -216,7 +217,11 @@ Adding a column and backfilling it in one flow:
 ```ts
 table("users")
   .column("first_name").add({ type: t.text() })
-  .backfill({ set: { first_name: (col) => col("name").splitPart(" ", 1) } });
+  .backfill({
+    set: { first_name: (col) => col("name").splitPart(" ", 1) },
+    cursorColumns: ["id"],
+    cursorStability: { mode: "guardUpdates" },
+  });
 ```
 
 ---
@@ -794,10 +799,12 @@ table("plans").update({ set: { name: (col) => lit("Professional") },
 // Delete — the method is `del` (JS reserves `delete`); wire tag is "delete"
 table("plans").del({ where: (col) => col("id").eq("legacy") });
 
-// Backfill a column with an expression (chunked; cursorColumn for large tables)
+// Backfill a column with an expression (chunked; the ordered cursorColumns tuple
+// pages large tables, cursorStability keeps those components immutable)
 table("users").backfill({
   set: { display_name: (col) => col("nickname").coalesce(col("name")) },
-  cursorColumn: "id",
+  cursorColumns: ["id"],
+  cursorStability: { mode: "guardUpdates" },
   });
 ```
 

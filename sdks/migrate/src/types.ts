@@ -16,7 +16,9 @@ import type {
   Classification,
   CastTarget,
   ColType,
+  ColumnReference,
   CommentTarget,
+  CursorStability,
   Expr,
   ExtractField,
   ExclusionMethod,
@@ -53,7 +55,9 @@ import type {
 export type {
   CastTarget,
   ColType,
+  ColumnReference,
   CommentTarget,
+  CursorStability,
   Expr,
   ExtractField,
   ExclusionMethod,
@@ -159,6 +163,16 @@ export interface GeneratedOptions {
   virtual?: boolean;
 }
 
+/** Options for the column-level `.references(table, column, options)` facet. The
+ *  target `table`/`column` are positional and REQUIRED; only the referential
+ *  actions and the explicit constraint name are optional. */
+export interface ColumnReferenceOptions {
+  onDelete?: RefAction;
+  onUpdate?: RefAction;
+  /** Explicit FK constraint name. Absent ⇒ derived as `<table>_<column>_fkey`. */
+  name?: string;
+}
+
 /** Options for `.identity({ always })`. Omitted ⇒ `BY DEFAULT AS IDENTITY`. */
 export interface IdentityOptions {
   always?: boolean;
@@ -202,6 +216,27 @@ export interface ColumnDef {
   primaryKey(): ColumnDef;
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
   unique(): ColumnDef;
+  /**
+   * Declare a TYPED single-column foreign-key reference — the `references`
+   * FACET on `IrColumn` (`$defs/ColumnReference`), a SIBLING of `name`/`type`.
+   * The local physical type stays exactly the one this builder selected
+   * (`t.text().references("users", "id")` records `type: "text"` beside
+   * `references: { table, column }`); the facet adds only the target identity,
+   * the optional explicit constraint name, and the referential actions. Omitting
+   * `name` leaves the constraint name derived as `<table>_<column>_fkey`.
+   *
+   * BOTH `table` and `column` are REQUIRED — a missing target column is a loud
+   * OP_INVALID, never a silent narrowing to a table-only reference. (The
+   * table-only `{ ref: { references } }` COLUMN TYPE is a different construct;
+   * see `t.ref`.)
+   *
+   * Create-table only: `.column().add()`/`.setType()` and nested type positions
+   * REFUSE a `.references()` def rather than dropping the facet. Composite
+   * foreign keys stay table-level (`create({ foreignKeys })` /
+   * `.foreignKey(name).add()`), which is the only shape with ordered
+   * local/referenced column lists. Returns a fresh def.
+   */
+  references(table: string, column: string, options?: ColumnReferenceOptions): ColumnDef;
   /**
    * Declare a STANDALONE column mask (#174) — the field reads back as
    * `MaskedValue<T>` and the op lower emits the `__zsmask` sentinel + `_masked`
@@ -789,6 +824,11 @@ export interface UpdateArgs {
   schema?: string;
 }
 
+/** A NON-EMPTY ordered column-name tuple. The order is meaningful (a cursor
+ *  tuple is paged over lexicographically), so the emptiness is a type error, not
+ *  only a runtime one. */
+export type OrderedColumns = readonly [string, ...string[]];
+
 export interface DelArgs {
   where: ExprFn | ExprChain | Expr;
   limit?: number;
@@ -799,8 +839,14 @@ export interface DelArgs {
 export interface BackfillArgs {
   set: Record<string, DmlSetValue>;
   where?: ExprFn | ExprChain | Expr;
-  /** Defaults to the single-column PK (`"id"`). */
-  cursorColumn?: string;
+  /** The ORDERED cursor tuple paged over lexicographically; a single-column
+   *  cursor is `["id"]`. Required — the engine's `backfill` op has no default
+   *  and a guessed cursor silently changes which rows a resume revisits. */
+  cursorColumns: OrderedColumns;
+  /** How updates to the cursor components are forbidden for the WHOLE operation,
+   *  including the gap between an interrupted apply and its resume. Required —
+   *  the two modes are different durability contracts, not a default. */
+  cursorStability: CursorStability;
   /** Defaults to the engine's chosen batch size. */
   batchSize?: number;
   name?: string;
