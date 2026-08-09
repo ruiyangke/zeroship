@@ -88,7 +88,14 @@ export interface IncrOptions {
 export interface ListOptions {
   /** Opaque, backend-specific continuation cursor. `null`/omit = start. */
   cursor?: string;
-  /** Page size. Defaults to 1000; clamped to 10 000 by the runtime. */
+  /**
+   * Requested page size. Defaults to 1000; clamped to 10 000 by the
+   * runtime. This is a request, not a bound: a Redis-backed deployment
+   * passes it to `SCAN` as a `COUNT` hint, so a page may come back
+   * shorter or longer, including empty while keys still remain. Never
+   * read a short page as the end of the listing; `cursor === null` is
+   * the only exhaustion signal.
+   */
   limit?: number;
 }
 
