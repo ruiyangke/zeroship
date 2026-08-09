@@ -22,8 +22,8 @@
 mod support;
 
 use zero_migrate::{
-    fold_to_field_defs, BinaryOp, ColType, Expr, GeneratedCol, IrColumn, IrConstraint,
-    IrConstraintKind, IrScalar, Op, SqlDialect,
+    diff_snapshots, fold_ops, fold_to_field_defs, BinaryOp, ColType, Expr, GeneratedCol, IrColumn,
+    IrConstraint, IrConstraintKind, IrScalar, Op, SqlDialect,
 };
 
 const SCHEMA: &str = "app";
@@ -238,5 +238,81 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
         renamed.get("max").and_then(serde_json::Value::as_f64),
         Some(100.0),
         "the bound survives the rename onto the new column name: {renamed}"
+    );
+}
+
+// The OTHER lane, and the reason it is left alone. `SchemaSnapshot` renders a
+// generated expression to a `String` when the snapshot is built, so the structure a
+// rename would need is already gone - the same reason re-rendering an index body was
+// rejected. Here that staleness costs nothing, because no reader exists: the
+// expression is emission-only, and the emitter that would consume it is never handed
+// a folded snapshot on the applied path (a pure rename replays the pre-rename stored
+// body and lets the engine rewrite its own dependent expressions).
+//
+// Each side is asserted SEPARATELY. Asserting only that the differ is quiet would
+// pass just as well against a differ that had stopped looking at columns entirely.
+#[test]
+fn the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it() {
+    let effective = support::confined_charter();
+
+    let folded = fold_ops(
+        &[create_line_items(), rename_qty_to_quantity()],
+        SqlDialect::Postgres,
+        SCHEMA,
+        &effective,
+    )
+    .expect("the op stream folds");
+
+    let table = folded
+        .tables
+        .get("line_items")
+        .expect("the folded table is present");
+    let total = table
+        .columns
+        .iter()
+        .find(|c| c.name == "total_cents")
+        .expect("the generated column survives the rename");
+
+    // Side one: the fold's rendered body still names the pre-rename column.
+    let generated = total
+        .generated
+        .as_ref()
+        .expect("the snapshot carries the generated body");
+    assert!(
+        generated.expr.contains("qty"),
+        "this pins the KNOWN staleness rather than endorsing it - the rendered body \
+         still names the pre-rename column: {}",
+        generated.expr
+    );
+
+    // Side two: nothing compares it. Two columns differing ONLY in the generated body
+    // are equal, so the differ cannot see the staleness above even in principle.
+    let mut rewritten = total.clone();
+    rewritten.generated = Some(zero_migrate::model::snapshot::GeneratedColumnSnapshot {
+        expr: "(\"quantity\" * \"unit_cents\")".to_string(),
+        stored: true,
+    });
+    assert_eq!(
+        total, &rewritten,
+        "column equality excludes the generated body, so a rename cannot show up as drift"
+    );
+
+    // And end to end through the differ, for the same reason.
+    let mut other = folded.clone();
+    for column in &mut other
+        .tables
+        .get_mut("line_items")
+        .expect("the folded table is present")
+        .columns
+    {
+        if let Some(generated) = column.generated.as_mut() {
+            generated.expr = "(\"quantity\" * \"unit_cents\")".to_string();
+        }
+    }
+    let drift = diff_snapshots(&folded, &other);
+    assert!(
+        drift.is_clean(),
+        "a rewritten generated body reports no drift, which is why the fold is free to \
+         leave it stale: {drift:?}"
     );
 }
