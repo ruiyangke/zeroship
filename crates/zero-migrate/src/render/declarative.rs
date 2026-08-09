@@ -2866,14 +2866,22 @@ pub(crate) fn push_primary_key_snapshot(snap: &mut TableSnapshot, columns: &[Str
 }
 
 /// Deterministic name for a non-unique single-column index
-/// (`<table>_<col>_idx`), matching plugin-db's `index_name(table, &[col], false)`
-/// and NAMEDATALEN-capped via [`crate::plan::author::cap_ident_name`] so a long
-/// table+col round-trips to the same (truncated) live name.
+/// (`<table>_<col>_idx`), capped via [`crate::plan::author::cap_ident_name`].
+///
+/// This agrees with the data plane's `query::index_name(table, &[col], false)`
+/// only at 60 bytes or fewer. Above that the two schemes diverge: this one
+/// returns a 61..=63 byte natural name verbatim and hashes to 63 beyond, while
+/// `query::index_name` cuts at 60 with a tail of its own. A desired snapshot
+/// built here and a live index the data plane created for the same shape
+/// therefore carry different names, and the differ compares names exactly. Read
+/// this as agreement below 61 bytes, not as a byte-for-byte guarantee.
 ///
 /// Offline replay uses this to derive a short created-partition clone name from
-/// the child relation rather than the parent index's authored name. This does
-/// not cover PostgreSQL's native truncation of overlong generated names; the
-/// fold rejects those instead of using this authored-name hash cap.
+/// the child relation rather than the parent index's authored name. That caller
+/// is unaffected by the divergence: the fold refuses any name `cap_ident_name`
+/// would alter, so both sides of that comparison speak this scheme. It does not
+/// cover PostgreSQL's native truncation of overlong generated names; the fold
+/// rejects those instead of using this authored-name hash cap.
 pub(crate) fn non_unique_index_name(table: &str, col: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{col}_idx"))
 }
@@ -3430,8 +3438,10 @@ fn build_table_snapshot_impl(
         // pgvector ANN index (`USING ivfflat` with the metric-appropriate
         // opclass). The live snapshot carries it as `access_method =
         // 'ivfflat'`, so the desired snapshot must model it identically or it
-        // phantom-drops; routed through the shared `crate::schema` kernel so
-        // the opclass + name match plugin-db's runtime form byte-for-byte.
+        // phantom-drops. The opclass is routed through the shared
+        // `crate::schema` kernel and matches plugin-db's runtime form. The NAME
+        // is not: it comes from `non_unique_index_name`, which caps at 63 where
+        // the data plane caps at 60, so the two agree only below 61 bytes.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
                 indexes.push(spec);
@@ -3441,8 +3451,9 @@ fn build_table_snapshot_impl(
         // spatial index over its `geography(POINT, 4326)` column. The live
         // snapshot carries it as `access_method = 'gist'`, so the desired
         // snapshot must model it identically or the runtime-created GiST index
-        // phantom-drops (and spatial search degrades to a full scan). Mirrors
-        // plugin-db's `SpatialIndex::ensure_spatial_index`.
+        // phantom-drops. Mirrors plugin-db's `SpatialIndex::ensure_spatial_index`.
+        // The name agrees with the data plane's only below 61 bytes; see
+        // `non_unique_index_name`.
         if f.ty == "geoPoint" {
             if let Some(spec) = geo_index_snapshot(&d.name, f) {
                 indexes.push(spec);
@@ -3880,12 +3891,18 @@ pub fn is_system_managed_constraint(
     inject.primary_key().is_some() && constraint_name == format!("{table}_pkey")
 }
 
-/// Deterministic name for a per-field unique index (`<table>_<field>_key`,
-/// matching the Postgres convention so the desired snapshot round-trips to the
-/// live one a `CREATE UNIQUE INDEX` of this name produces). Capped to ≤63 bytes
-/// via [`crate::plan::author::cap_ident_name`] (1c) — an un-capped name would be
-/// truncated server-side on CREATE, so the desired (full) name would never match
-/// the live (truncated) name and a re-diff would churn DROP+CREATE forever.
+/// Deterministic name for a per-field unique index (`<table>_<field>_key`, the
+/// PostgreSQL convention), capped to 63 bytes via
+/// [`crate::plan::author::cap_ident_name`]. The cap is what keeps an over-long
+/// name from being truncated server-side on CREATE, which would leave the
+/// desired (full) name never matching the live (truncated) one.
+///
+/// Server truncation is not the only way the two names disagree. The data plane
+/// builds this same object through `query::index_name(collection, &[field],
+/// true)`, which caps at 60, so above 60 bytes the desired and live names differ
+/// even though neither was truncated. Because `render_drop_index` classifies a
+/// unique index drop as destructive, that disagreement surfaces as a migration
+/// waiting on approval rather than as silent churn.
 fn unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
 }
@@ -4035,8 +4052,9 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         return None;
     }
     Some(IndexSnapshot {
-        // `<table>_<col>_idx`, matching `crate::schema::query::index_name`
-        // (= plugin-db `ensure_vector_index`'s name).
+        // `<table>_<col>_idx`. Equal to `crate::schema::query::index_name`
+        // (= plugin-db `ensure_vector_index`'s name) below 61 bytes, and
+        // different above it; see `non_unique_index_name`.
         name: non_unique_index_name(table, &f.name),
         unique: false,
         columns: vec![f.name.clone()],
@@ -4060,11 +4078,11 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
 /// runtime plugin's `SpatialIndex::ensure_spatial_index` (a separate
 /// repository). The live snapshot carries it as
 /// `access_method = 'gist'`, so the desired snapshot must model it identically or
-/// the runtime-created GiST index phantom-drops (and spatial `ST_DWithin` search
-/// falls back to a full table scan). The index name is the same
-/// `<table>_<col>_idx` `non_unique_index_name` / `crate::schema::query::index_name`
-/// produce; no opclass and no storage params (`render_create_index` spells the
-/// bare `USING gist ("col")`).
+/// the runtime-created GiST index phantom-drops. The index name is the
+/// `<table>_<col>_idx` that `non_unique_index_name` produces, which equals
+/// `crate::schema::query::index_name` below 61 bytes and differs above it. No
+/// opclass and no storage params (`render_create_index` spells the bare
+/// `USING gist ("col")`).
 fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
     if f.ty != "geoPoint" {
         return None;
