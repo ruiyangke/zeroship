@@ -83,3 +83,21 @@ The bootstrap's fallback subscription transport currently uses `WebSocketPair` a
 - streamed frames are JSON envelopes carrying `data`, `error`, or `end`
 
 See [`crates/runtime/src/core/init.rs`](../../crates/runtime/src/core/init.rs) for the exact wire behavior.
+
+## Authentication
+
+A WebSocket upgrade goes through the same gateway auth gate as any other
+request: the upgrade check only rejects non-upgrade traffic on a socket route,
+and the request then reaches `resolve_auth` exactly as an HTTP call would. So a
+socket opened from your own app's origin authenticates on the session cookie,
+which the browser attaches automatically.
+
+**A cross-origin socket cannot authenticate today.** The cookie is not sent
+cross-origin, and there is no alternative credential: under the BFF model the
+browser never holds a token it could offer in a subprotocol. This is a
+consequence of that design rather than a gap in the socket implementation, and
+nothing in the platform will report it as an auth failure - the socket simply
+arrives unauthenticated, and an `auth: "user"` procedure behind it refuses.
+
+If you need a socket from another origin, put it behind your own same-origin
+endpoint rather than pointing a browser at the app directly.
