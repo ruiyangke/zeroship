@@ -1090,7 +1090,9 @@ pub struct WorkerUser<'a> {
     pub id: &'a str,
     pub email: &'a str,
     pub name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Serialised even when absent, as `null`. The SDK's `User` declares
+    /// `avatar: string | null`, so dropping the key made `user.avatar === null`
+    /// and `"avatar" in user` answer differently under `pnpm dev` than deployed.
     pub avatar: Option<&'a str>,
     pub email_verified: bool,
     /// OAuth scopes granted to THIS app for this user. A PERMANENT
@@ -1132,6 +1134,43 @@ mod tests {
     use super::*;
 
     const TEST_BROKER_MASTER: &[u8] = b"gateway-test-broker-master-secret-32-bytes";
+
+    /// `avatar` is declared `string | null` on the SDK's `User`, so the key has
+    /// to be there even when the user has none. Omitting it made
+    /// `user.avatar === null` answer differently depending on whether the app
+    /// ran under `pnpm dev` or deployed, and `"avatar" in user` differ with it.
+    ///
+    /// This pins the serialised shape only. It does not pin the SDK type, and
+    /// nothing here would notice if `User.avatar` were later made optional.
+    #[test]
+    fn worker_user_keeps_avatar_when_the_user_has_none() {
+        let absent = WorkerUser {
+            id: "pws_x",
+            email: "a@b.c",
+            name: "n",
+            avatar: None,
+            email_verified: true,
+            scopes: vec!["openid"],
+        };
+        let json = serde_json::to_value(&absent).expect("serialises");
+        assert_eq!(
+            json.get("avatar"),
+            Some(&serde_json::Value::Null),
+            "avatar must serialise as null, not vanish: the SDK type declares it required"
+        );
+
+        // One-variable control: a user WITH an avatar must still carry the
+        // value, so this cannot be satisfied by always emitting null.
+        let present = WorkerUser {
+            avatar: Some("https://example.test/a.png"),
+            ..absent
+        };
+        let json = serde_json::to_value(&present).expect("serialises");
+        assert_eq!(
+            json.get("avatar").and_then(serde_json::Value::as_str),
+            Some("https://example.test/a.png")
+        );
+    }
 
     fn test_broker_secret() -> BrokerSecret {
         BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("valid test broker secret")
