@@ -20,7 +20,7 @@
 #
 # Env overrides:
 #   DATABASE_URL     — postgres connection URL (default: compose instance on 5440)
-#   PG_CONTAINER     — docker container name for cleanup (default: appbase-postgres-1)
+#   PG_CONTAINER     — docker container name for cleanup (default: compose-postgres-1)
 #   PG_USER / PG_DB  — user/database for cleanup
 set -euo pipefail
 
@@ -31,7 +31,10 @@ CONTROL_PORT=9090
 WORKER_PORTS=(8080 8081 8082)
 GATE_PORT=8000
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/zeroship}"
-PG_CONTAINER="${PG_CONTAINER:-appbase-postgres-1}"
+# deploy/compose names this `compose-postgres-1`. The old default here,
+# `appbase-postgres-1`, predates the rename to zeroship; DB_URL's port was
+# updated at the time and the container name was not.
+PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship}"
 CONTROL_KEY="test-ck"
@@ -105,11 +108,27 @@ for port in $CONTROL_PORT ${WORKER_PORTS[@]} $GATE_PORT; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 rm -rf /tmp/zeroship-e2e-bundles
-docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
+
+# Say which container is missing rather than dying mute. Under `set -e` a failed
+# `docker exec` with its output discarded ends the run here, printing nothing
+# after the Setup banner, which reads as a hang rather than a missing dependency.
+if ! docker inspect "$PG_CONTAINER" > /dev/null 2>&1; then
+    echo "  ✗ postgres container '$PG_CONTAINER' not found."
+    echo "    Start it (deploy/compose) or set PG_CONTAINER to the running one:"
+    docker ps --format '      {{.Names}}  {{.Ports}}' | grep -i postgres || true
+    exit 2
+fi
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
+    -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start control
+# --dev-insecure: control refuses to start otherwise ("WORKER_KEY is required
+# outside --dev-insecure"), a check added after this harness was last touched.
+# Logs go to files rather than /dev/null so the next such refusal is readable
+# instead of surfacing as an unexplained "control unhealthy".
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --blob-store /tmp/zeroship-e2e-bundles \
-    --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > /dev/null 2>&1 &
+    --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" --dev-insecure \
+    > /tmp/zeroship-platform-control.log 2>&1 &
 PIDS+=($!)
 sleep 3
 
@@ -124,9 +143,16 @@ for port in "${WORKER_PORTS[@]}"; do
 done
 sleep 2
 
-# Start gateway
+# Start gateway. cd54028e7 made it refuse to start without a broker master
+# secret; this harness was never updated, so the gateway died on launch and
+# every routing test below failed against a port nothing was listening on.
+GATE_SECRET="$(mktemp -t zeroship-e2e-gate-secret-XXXXXX)"
+openssl rand -base64 48 > "$GATE_SECRET"
+chmod 600 "$GATE_SECRET"
 "$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
-    --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 > /dev/null 2>&1 &
+    --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 \
+    --gateway-broker-secret-file "$GATE_SECRET" --dev-insecure \
+    > /tmp/zeroship-platform-gate.log 2>&1 &
 PIDS+=($!)
 sleep 3
 echo "  control=$CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$GATE_PORT"
