@@ -924,7 +924,17 @@ fn rename_expr_table(expr: &mut Expr, from: &str, to: &str) {
     *expr = serde_json::from_value(value).expect("an edited colRef remains a valid Expr");
 }
 
-fn rename_expr_column(
+/// Rewrite every reference to `table`.`from` inside `expr` to name `to`.
+///
+/// Walks the SERIALIZED expression and rewrites only `colRef` nodes, so a string
+/// literal that happens to spell the old column name is left alone. That is what
+/// makes a rename safe to follow into an expression at all: substituting inside
+/// rendered SQL text would turn `note <> 'qty'` into `note <> 'quantity'`, which is
+/// why every other site in this crate refuses to touch a rendered body.
+///
+/// `include_unqualified` covers the ops that carry a bare column reference because
+/// the enclosing table is implied.
+pub(crate) fn rename_expr_column(
     expr: &mut Expr,
     table: &str,
     from: &str,

@@ -4076,6 +4076,50 @@ pub fn fold_to_field_defs(
                             cols.shift_insert(idx, to.clone(), field);
                         }
                     }
+                    // A generated expression reads OTHER columns, so the rename has
+                    // to walk the whole table rather than just the renamed column.
+                    // `FieldDescriptor.generated` keeps the closed `Expr` rather than
+                    // rendered SQL, so the rewrite matches column references and
+                    // cannot corrupt a string literal that spells the old name.
+                    // Without it the descriptor this fold ships describes a column
+                    // the database no longer has, while the authoring types emitted
+                    // beside it - which run this same rewrite - describe the new one.
+                    for field in cols.values_mut() {
+                        if let Some(generated) = field.generated.as_mut() {
+                            crate::render::gen_types::rename_expr_column(
+                                &mut generated.expr,
+                                table,
+                                from,
+                                to,
+                                true,
+                            );
+                        }
+                    }
+                }
+                // The CHECK and foreign-key facets recovered from this table's
+                // constraints are lifted onto columns BY NAME once the op stream has
+                // been walked. They still carry the pre-rename name, and the lift
+                // looks the column up rather than failing, so leaving them would
+                // silently drop a `min`/`max` bound or an `onDelete`/`onUpdate`
+                // policy instead of reporting anything.
+                if let Some(recovered) = checks.get_mut(table) {
+                    for check in recovered.iter_mut() {
+                        match check {
+                            RecoveredCheck::Range { column, .. }
+                            | RecoveredCheck::Enum { column, .. } => {
+                                if column == from {
+                                    column.clone_from(to);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(recovered) = fks.get_mut(table) {
+                    for fk in recovered.iter_mut() {
+                        if &fk.column == from {
+                            fk.column.clone_from(to);
+                        }
+                    }
                 }
             }
             Op::AlterPrimaryKey { table, action, .. } => {
