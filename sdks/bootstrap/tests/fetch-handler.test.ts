@@ -108,8 +108,16 @@ describe("createFetchHandler — superjson wire", () => {
   // ISS-67: a `requireUser()`-shaped throw carries an explicit `status: 401`.
   // The fetch-handler's `statusFromError` must honor it (4xx), and because the
   // body-sanitizer only blanks 5xx, the "Authentication required" message and
-  // the `unauthenticated` code reach the client intact — NOT masked to 500 /
+  // the `UNAUTHENTICATED` code reach the client intact, NOT masked to 500 /
   // "internal error".
+  //
+  // The code here mirrors what `requireUser()` actually throws
+  // (`sdks/auth/src/server.ts`, `crates/runtime/src/auth.rs`); it used to say
+  // "unauthenticated", which encoded a producer spelling no consumer compares
+  // against. `errorBodyFromThrown` copies `code` verbatim, so this handler is
+  // the pipe that carries the divergence to the client. See
+  // `sdks/auth/tests/auth-expired-seam.test.ts` for the behavioural
+  // consequence (`onAuthExpired` never firing in dev).
   test("honors a requireUser 401 throw and does NOT mask its message", async () => {
     await withDispatch(async () => {
       const handler = createFetchHandler(async () => ({
@@ -120,7 +128,7 @@ describe("createFetchHandler — superjson wire", () => {
             // The exact shape the kernel/SDK requireUser throws.
             throw Object.assign(new Error("Authentication required"), {
               status: 401,
-              code: "unauthenticated",
+              code: "UNAUTHENTICATED",
             });
           },
         },
@@ -139,7 +147,7 @@ describe("createFetchHandler — superjson wire", () => {
       assert.equal(res.status, 401, "401 throw must surface as 401, not 500");
       assert.equal(body.message, "Authentication required", "4xx message must NOT be masked");
       assert.notEqual(body.message, "internal error");
-      assert.equal(body.code, "unauthenticated");
+      assert.equal(body.code, "UNAUTHENTICATED", "the code must survive the handler verbatim");
     });
   });
 

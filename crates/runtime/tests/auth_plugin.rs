@@ -20,6 +20,7 @@ use std::time::Duration;
 use zeroship_runtime::auth::AuthPlugin;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::rpc::error::ZsErrorCode;
 use zeroship_runtime::state::{OpResult, SharedState};
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch,
@@ -361,9 +362,94 @@ fn require_user_anonymous_surfaces_as_401_not_masked_500() {
         v["message"], "internal error",
         "the message must NOT be the 5xx mask sentinel; body: {body}"
     );
+    // This previously asserted the lowercase "unauthenticated", which ENCODED
+    // the dev-vs-deployed divergence: no consumer in the tree compares against
+    // that spelling. Compare against the wire enum rather than a literal so a
+    // drift in either direction fails here.
     assert_eq!(
-        v["code"], "unauthenticated",
-        "the throw should carry a stable machine code; body: {body}"
+        v["code"],
+        ZsErrorCode::Unauthenticated.as_wire_str(),
+        "the throw should carry the canonical machine code; body: {body}"
+    );
+}
+
+/// The dev-vs-deployed seam, Rust half. The `code` the native `requireUser()`
+/// throw carries must be a MEMBER of the canonical RPC wire-code set and must
+/// classify as `Unauthenticated`, not merely be "some stable string".
+///
+/// Why that is behaviour and not spelling: `@zeroship/rpc`'s
+/// `parseErrorResponse` lifts the body's `code` VERBATIM, falling back to the
+/// status-derived "UNAUTHENTICATED" only when the body carries NONE. A code
+/// outside the canonical set therefore does not merely fail to match the
+/// client's `onAuthExpired` guard: it OVERRIDES the correct status-derived
+/// one. Deployed, the gateway's `unauthenticated_response` answers 401 with the
+/// canonical code before the worker ever runs, so the hook fires; in dev this
+/// throw IS the 401 source, so a divergent code silently disables an app's
+/// re-authentication. JS half: `sdks/auth/tests/auth-expired-seam.test.ts`.
+#[test]
+fn require_user_anonymous_code_is_canonical_unauthenticated() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                env.auth.requireUser();
+                return Response.json({ unreachable: true });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, None);
+    assert_eq!(status, 401, "body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    let code = v["code"].as_str().unwrap_or_else(|| {
+        panic!("the 401 body must carry a string `code`; body: {body}");
+    });
+    assert_eq!(
+        ZsErrorCode::from_wire_str(code),
+        Some(ZsErrorCode::Unauthenticated),
+        "`{code}` is not the canonical UNAUTHENTICATED wire code: a client \
+         that classifies by the canonical set cannot recognise it, and it \
+         overrides the status-derived code rather than deferring to it; \
+         body: {body}"
+    );
+}
+
+/// One-variable control for the test above. Identical throw shape, identical
+/// 401 status, identical dispatch rail; only the `code` string differs. It
+/// separates "the producer emits the auth code" from "`from_wire_str` maps
+/// everything to `Unauthenticated`" / "the rail rewrites every 401's code".
+#[test]
+fn non_auth_code_at_the_same_401_status_does_not_classify_as_unauthenticated() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                throw Object.assign(new Error("Authentication required"), {
+                    status: 401,
+                    code: "INVALID_ARGUMENT",
+                });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, None);
+    assert_eq!(status, 401, "the control must hold the status variable fixed; body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    let code = v["code"].as_str().unwrap_or_else(|| {
+        panic!("the 401 body must carry a string `code`; body: {body}");
+    });
+    assert_eq!(
+        ZsErrorCode::from_wire_str(code),
+        Some(ZsErrorCode::InvalidArgument),
+        "the rail must carry the thrown code through unchanged; body: {body}"
+    );
+    assert_ne!(
+        ZsErrorCode::from_wire_str(code),
+        Some(ZsErrorCode::Unauthenticated),
+        "a non-auth code at a 401 status must NOT classify as UNAUTHENTICATED, \
+         else the assertion above would pass for any 401; body: {body}"
     );
 }
 
@@ -819,9 +905,11 @@ fn anonymous_rpc_frame_does_not_fall_back_to_foreign_user() {
         value["json"]["bObservation"]["getUserIsNull"], true,
         "body: {body}"
     );
+    // Was "unauthenticated", the same defect-encoding spelling; the code the
+    // native throw carries is the canonical wire token.
     assert_eq!(
         value["json"]["bObservation"]["requireUserCode"],
-        "unauthenticated",
+        ZsErrorCode::Unauthenticated.as_wire_str(),
         "body: {body}"
     );
 }

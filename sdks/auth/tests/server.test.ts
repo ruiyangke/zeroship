@@ -78,8 +78,15 @@ describe("server auth — env.auth absent", () => {
   // ISS-67: the fallback throw must carry an explicit 401 so the dispatcher's
   // `statusFromError` renders a clean 401 (4xx → not masked) rather than a
   // status-less Error that defaults to 500 and gets blanked to "internal
-  // error". `code` gives clients a stable machine-readable handle.
-  test("requireUser throw carries status:401 + code so the dispatcher 401s it", () => {
+  // error".
+  //
+  // `code` is not a free-form label: it is the canonical RPC wire token the
+  // client branches on. This assertion previously read "unauthenticated" and
+  // so ENCODED the dev-vs-deployed divergence: it locked in a spelling no
+  // consumer in the tree compares against. The behavioural consequence is
+  // covered by `tests/auth-expired-seam.test.ts`; this stays as the cheap
+  // shape check on the throw itself.
+  test("requireUser throw carries status:401 + the canonical wire code", () => {
     let thrown: (Error & { status?: unknown; code?: unknown }) | undefined;
     try {
       auth.requireUser();
@@ -89,7 +96,11 @@ describe("server auth — env.auth absent", () => {
     assert.ok(thrown, "requireUser must throw when env.auth is absent");
     assert.equal(thrown!.message, "Authentication required");
     assert.equal(thrown!.status, 401, "throw must carry status 401, not be status-less (→500)");
-    assert.equal(thrown!.code, "unauthenticated");
+    assert.equal(
+      thrown!.code,
+      "UNAUTHENTICATED",
+      "the code must be the canonical wire token the RPC client branches on",
+    );
   });
 });
 

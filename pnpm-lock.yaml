@@ -998,6 +998,9 @@ importers:
       '@zeroship/bootstrap':
         specifier: workspace:*
         version: link:../bootstrap
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../rpc
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types
