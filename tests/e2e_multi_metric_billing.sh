@@ -43,7 +43,7 @@ PGC=zs-e2e-mm-pg; RPC=zs-e2e-mm-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-mm-e2e"
 WORK="$(mktemp -d -t zs-e2e-mm-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
-jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);console.log(o$1??'')}catch(e){console.log('')}})"; }
+jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 spend_state(){ psql_exec -tA -c "SELECT state::text FROM zeroship.app_spend_state WHERE app_id='$1'" 2>/dev/null | tr -d '[:space:]'; }
 set_limit(){ curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$1/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$2}"; curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"; }
