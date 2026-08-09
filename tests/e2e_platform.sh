@@ -7,21 +7,39 @@
 #   3. Identity verification (each app returns its own response)
 #   4. Routing consistency (CHWBL: same app → same worker)
 #   5. Isolation (app-01 state doesn't leak into app-02)
-#   6. Auth enforcement (missing/wrong key rejected)
+#   6. Auth enforcement (control-plane PAT gate + gateway rpc auth gate)
 #   7. Worker on-demand loading (cold start)
 #   8. Hot deploy (update code while serving)
+#   9. Deploy edge cases (content-type / size cap / auth, pre-body)
+#
+# THREE workers on purpose: tests 4 and 5 are about CHWBL routing
+# consistency and cross-worker isolation, which a single worker cannot
+# show. That is why this file does its own bring-up instead of calling
+# `stack_up` from tests/lib/e2e_stack.sh; it borrows the workspace, the
+# ephemeral-Postgres + migration bring-up and the PAT mint from there.
 #
 # Prerequisites:
-#   - cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker -p zeroship
-#   - docker compose -f deploy/compose/docker-compose.yml up -d postgres (Postgres on port 5440 per deploy/compose/docker-compose.yml)
+#   - cargo build --release
+#   - cargo build --release -p zeroship-migrate-adapter --features platform-cli \
+#         --bin zeroship-platform-migrate
+#   - pnpm install (jose, used to sign the admin PAT offline)
+#   - docker (an EPHEMERAL Postgres is started and removed by this script)
 #
 # Usage:
 #   ./tests/e2e_platform.sh
 #
 # Env overrides:
-#   DATABASE_URL     — postgres connection URL (default: compose instance on 5440)
-#   PG_CONTAINER     — docker container name for cleanup (default: compose-postgres-1)
-#   PG_USER / PG_DB  — user/database for cleanup
+#   PG_PORT / PG_CONTAINER   — ephemeral Postgres port + container name
+#
+# NOTE ON THE DATABASE. This harness used to point at the long-lived
+# `compose-postgres-1` and open with
+# `DROP TABLE IF EXISTS usage_history, usage, apps CASCADE`. That is why
+# that database has no `zeroship.apps` table today (measured 2026-08-09:
+# 101 tables in schema `zeroship`, `apps` absent) — the harness deleted
+# it, and the platform migration ledger considers the migration that
+# created it already applied, so nothing puts it back. It now starts its
+# own Postgres, applies db/migrations-ts from scratch, and removes the
+# container on exit. Nothing shared is mutated.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,15 +48,9 @@ BIN="$ROOT/target/release"
 CONTROL_PORT=9090
 WORKER_PORTS=(8080 8081 8082)
 GATE_PORT=8000
-DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/zeroship}"
-# deploy/compose names this `compose-postgres-1`. The old default here,
-# `appbase-postgres-1`, predates the rename to zeroship; DB_URL's port was
-# updated at the time and the container name was not.
-PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
-PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-zeroship}"
+PG_PORT="${PG_PORT:-5456}"
+PG_CONTAINER="${PG_CONTAINER:-zs-e2e-platform-pg}"
 CONTROL_KEY="test-ck"
-MASTER_KEY="test-mk"
 
 PASS=0
 FAIL=0
@@ -47,27 +59,108 @@ PIDS=()
 pass() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
 
+# The stack lib is SOURCED for stack_workspace / stack_pg_up / mint_admin_pat.
+# Sourcing (rather than copying mint_admin_pat here) is deliberate: the PAT
+# mint is a five-part contract — users row, platform_admin_roles row,
+# permission_tokens row, the canonical policy hash, and the EdDSA header/claim
+# shape — and a copy of it in this file would drift from the control plane the
+# next time any of the five moves. stack_up() is defined by the source but
+# never called; its port defaults use `:=` so the ports set above win.
+# shellcheck source=tests/lib/e2e_stack.sh
+. "$ROOT/tests/lib/e2e_stack.sh"
+
+REACHED_SUMMARY=0
 cleanup() {
-    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    if [ ${#PIDS[@]} -gt 0 ]; then
+        for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    fi
     wait 2>/dev/null || true
-    rm -rf /tmp/zeroship-e2e-*
+    docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+    # Keep $WORK (control/worker/gateway logs + the migration log) whenever the
+    # run did not finish clean. An aborted bring-up is exactly when someone
+    # needs control.log, and deleting it is how the previous refuse-to-start
+    # causes stayed invisible for four cycles.
+    if [ -n "${WORK:-}" ]; then
+        if [ "$REACHED_SUMMARY" = 1 ] && [ "$FAIL" -eq 0 ]; then
+            rm -rf "$WORK"
+        else
+            echo "  logs kept: $WORK"
+        fi
+    fi
+    return 0
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Helpers
+# HTTP helper
+#
+# Every request in this file goes through `http`/`http_ok`. The previous
+# version used `VAR=$(curl -sf ...)` at nineteen sites: under
+# `set -euo pipefail`, `-f` throws the body away and the non-zero exit
+# propagates out of the command substitution, so ANY failing request ended
+# the whole run with no output at all — indistinguishable from a pass, since
+# the summary never printed either. `http` never aborts the run and always
+# has the status and body available to report.
+#
+#   http METHOD URL [curl args...]   → sets HTTP_STATUS/HTTP_BODY, returns 0
+#                                      unless curl itself failed (status 000)
+#   http_ok METHOD URL [curl args...]→ as above, plus non-2xx returns 1 after
+#                                      printing status + body
 # ---------------------------------------------------------------------------
+HTTP_STATUS=""
+HTTP_BODY=""
 
+http() {
+    local method="$1" url="$2"; shift 2
+    local raw rc
+    set +e
+    raw="$(curl -sS -m 180 -X "$method" -w $'\n%{http_code}' "$@" "$url" 2>&1)"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+        HTTP_STATUS="000"
+        HTTP_BODY="$raw"
+        printf '    curl transport failure (exit %s): %s %s\n      %s\n' \
+            "$rc" "$method" "$url" "$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-300)" >&2
+        return 1
+    fi
+    HTTP_STATUS="${raw##*$'\n'}"
+    HTTP_BODY="${raw%$'\n'*}"
+    return 0
+}
+
+http_ok() {
+    http "$@" || return 1
+    case "$HTTP_STATUS" in
+        2*) return 0 ;;
+    esac
+    printf '    HTTP %s: %s %s\n      body: %s\n' \
+        "$HTTP_STATUS" "$1" "$2" "$(printf '%s' "$HTTP_BODY" | tr '\n' ' ' | cut -c1-400)" >&2
+    return 1
+}
+
+jget() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null || true; }
+
+# ---------------------------------------------------------------------------
+# Fixture builder
+#
 # build_zship <js_file> <out_zship_path>
 #
-# Pack a single-module worker into a `.zship` archive (tar.zst) the
-# control plane accepts at `POST /api/apps/{id}/deploy` with
-# `Content-Type: application/x-zship`. Manifest is the first tar entry,
-# the JS payload lives at `blobs/<sha256>`. Schema v2 — see
-# `docs/reference/zship.md`.
+# Pack a single-module worker into a `.zship` archive (tar.zst) the control
+# plane accepts at `POST /api/apps/{id}/deploy` with
+# `Content-Type: application/x-zship`. Manifest is the first tar entry, the JS
+# payload lives at `blobs/<sha256>`.
+#
+# Manifest shape is v1 `resources` (`crates/bundle/src/manifest.rs`;
+# `validate()` rejects any version but 1). The previous version of this file
+# emitted `{"version":2,"rules":[...]}` with `POST /_rpc/* → rpc`, a shape
+# that predates RPC v1 (fe571dc03, 2026-04-30) — both the version and the
+# routing model. Optional 3rd arg overrides the resources object.
 build_zship() {
-    local js_file="$1"
-    local out_path="$2"
+    local js_file="$1" out_path="$2" resources="${3:-}"
+    if [ -z "$resources" ]; then
+        resources='{"/[...rest]":{"auth":"anon","publicly_accessible":true}}'
+    fi
 
     local stage; stage=$(mktemp -d -t zeroship-e2e-zship-XXXXXX)
     mkdir -p "$stage/blobs"
@@ -78,23 +171,54 @@ build_zship() {
     hash=$(sha256sum "$js_file" | awk '{print $1}')
     cp "$js_file" "$stage/blobs/$hash"
 
-    # Minimal manifest: one worker module, no static assets, the same
-    # routing rules as `Manifest::passthrough()` (POST /_rpc/* → rpc,
-    # everything else → ssr).
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     cat > "$stage/manifest.json" <<EOF
-{"version":2,"rules":[{"action":{"kind":"worker","mode":"rpc"},"match":{"kind":"prefix","method":"POST","path":"/_rpc/"}},{"action":{"kind":"worker","mode":"ssr"},"match":{"kind":"any"}}],"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"metadata":{"compiler":"e2e-test-fixture","built_at":"$now"}}
+{"version":1,"resources":$resources,"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"metadata":{"compiler":"e2e-test-fixture","built_at":"$now"}}
 EOF
 
-    # Tar manifest.json first, then blobs/<hash>. Listing files
-    # explicitly avoids a directory entry and pins the order. Stream
-    # the tar through zstd so we never write the intermediate tar to
-    # disk; the inner `cd` means the tar paths are relative to $stage
-    # while $out_path stays in the caller's cwd.
+    # Tar manifest.json first, then blobs/<hash>. Listing files explicitly
+    # avoids a directory entry and pins the order.
     (cd "$stage" && tar --format=ustar -cf - manifest.json "blobs/$hash") \
         | zstd -q -f -o "$out_path"
     rm -rf "$stage"
+}
+
+# create_app <name> → echoes the app id, or returns 1 having reported why.
+create_app() {
+    local name="$1"
+    if ! http_ok POST "http://localhost:$CONTROL_PORT/api/apps" \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $PAT" \
+        -d "{\"name\":\"$name\"}"; then
+        return 1
+    fi
+    local id; id="$(jget "$HTTP_BODY" '.id')"
+    if [ -z "$id" ]; then
+        echo "    create_app($name): no .id in $HTTP_BODY" >&2
+        return 1
+    fi
+    printf '%s' "$id"
+}
+
+# deploy_js <app_id> <js_source> [resources_json] → 0 on a deploy_hash reply
+deploy_js() {
+    local app_id="$1" src="$2" resources="${3:-}"
+    local tmpf tmpz out rc
+    tmpf=$(mktemp --suffix=.js); tmpz=$(mktemp --suffix=.zship)
+    printf '%s\n' "$src" > "$tmpf"
+    if [ -n "$resources" ]; then build_zship "$tmpf" "$tmpz" "$resources"; else build_zship "$tmpf" "$tmpz"; fi
+    set +e
+    out="$("$BIN/zeroship" deploy "$tmpz" --app="$app_id" \
+        --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+    rc=$?
+    set -e
+    rm -f "$tmpf" "$tmpz"
+    if [ $rc -ne 0 ] || ! printf '%s' "$out" | grep -q "deploy_hash"; then
+        echo "    deploy($app_id) failed (exit $rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)" >&2
+        return 1
+    fi
+    return 0
 }
 
 echo "============================================"
@@ -104,69 +228,68 @@ echo ""
 
 # --- Setup ---
 echo "=== Setup ==="
-for port in $CONTROL_PORT ${WORKER_PORTS[@]} $GATE_PORT; do
-    lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+stack_preflight || { echo "  ✗ preflight failed"; exit 2; }
+for port in $CONTROL_PORT "${WORKER_PORTS[@]}" $GATE_PORT; do
+    lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
-rm -rf /tmp/zeroship-e2e-bundles
 
-# Say which container is missing rather than dying mute. Under `set -e` a failed
-# `docker exec` with its output discarded ends the run here, printing nothing
-# after the Setup banner, which reads as a hang rather than a missing dependency.
-if ! docker inspect "$PG_CONTAINER" > /dev/null 2>&1; then
-    echo "  ✗ postgres container '$PG_CONTAINER' not found."
-    echo "    Start it (deploy/compose) or set PG_CONTAINER to the running one:"
-    docker ps --format '      {{.Names}}  {{.Ports}}' | grep -i postgres || true
-    exit 2
-fi
-docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
-    -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
+stack_workspace || { echo "  ✗ stack_workspace failed"; exit 2; }
+stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 
-# Start control
-# --dev-insecure: control refuses to start otherwise ("WORKER_KEY is required
-# outside --dev-insecure"), a check added after this harness was last touched.
-# Logs go to files rather than /dev/null so the next such refusal is readable
-# instead of surfacing as an unexplained "control unhealthy".
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --blob-store /tmp/zeroship-e2e-bundles \
-    --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" --dev-insecure \
-    > /tmp/zeroship-platform-control.log 2>&1 &
+# Start control. --signing-key-file is load-bearing: `mint_admin_pat` signs
+# the admin PAT with $WORK/signing-key.pem, and control verifies platform
+# tokens against the key it was started with. Without the flag every
+# `/api/apps` call answers 401 "platform token verification failed" — which
+# is exactly how this harness died before, silently, inside a `$(curl -sf)`.
+"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" --blob-store "$WORK/blobs" \
+    --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" --dev-insecure \
+    > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-sleep 3
+for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
     "$BIN/zeroship-worker" --port "$port" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
-        --control-key "$CONTROL_KEY" --poll-interval 2 > /dev/null 2>&1 &
+        --control-key "$CONTROL_KEY" --db "$DBURL" --blob-store "$WORK/blobs" \
+        --poll-interval 2 --dev-insecure > "$WORK/worker-$port.log" 2>&1 &
     PIDS+=($!)
     [ -n "$WORKER_URL_LIST" ] && WORKER_URL_LIST="$WORKER_URL_LIST,"
     WORKER_URL_LIST="${WORKER_URL_LIST}http://localhost:${port}"
 done
-sleep 2
 
 # Start gateway. cd54028e7 made it refuse to start without a broker master
-# secret; this harness was never updated, so the gateway died on launch and
-# every routing test below failed against a port nothing was listening on.
-GATE_SECRET="$(mktemp -t zeroship-e2e-gate-secret-XXXXXX)"
-openssl rand -base64 48 > "$GATE_SECRET"
-chmod 600 "$GATE_SECRET"
+# secret; $WORK/gate-secret comes from stack_workspace.
 "$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
     --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 \
-    --gateway-broker-secret-file "$GATE_SECRET" --dev-insecure \
-    > /tmp/zeroship-platform-gate.log 2>&1 &
+    --db "$DBURL" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+    --signing-key-file "$WORK/signing-key.pem" \
+    --gateway-broker-secret-file "$WORK/gate-secret" --dev-insecure \
+    > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-sleep 3
-echo "  control=$CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$GATE_PORT"
+for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+echo "  control=$CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$GATE_PORT pg=$PG_PORT"
+echo "  logs in $WORK"
 
 # ---------------------------------------------------------------------------
 # Test 1: Health checks
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Test 1: Health checks ==="
-curl -sf "http://localhost:$CONTROL_PORT/health" > /dev/null && pass "control healthy" || fail "control unhealthy"
+if http_ok GET "http://localhost:$CONTROL_PORT/health"; then pass "control healthy"
+else fail "control unhealthy"; tail -15 "$WORK/control.log" | sed 's/^/      /'; fi
 for port in "${WORKER_PORTS[@]}"; do
-    curl -sf "http://localhost:$port/health" > /dev/null && pass "worker:$port healthy" || fail "worker:$port unhealthy"
+    if http_ok GET "http://localhost:$port/health"; then pass "worker:$port healthy"
+    else fail "worker:$port unhealthy"; tail -15 "$WORK/worker-$port.log" | sed 's/^/      /'; fi
 done
-curl -sf "http://localhost:$GATE_PORT/health" > /dev/null && pass "gateway healthy" || fail "gateway unhealthy"
+if http_ok GET "http://localhost:$GATE_PORT/health"; then pass "gateway healthy"
+else fail "gateway unhealthy"; tail -15 "$WORK/gate.log" | sed 's/^/      /'; fi
+
+# The whole suite needs an admin PAT. Without it nothing below can run, so
+# this is the one place that aborts.
+echo ""
+echo "=== Setup: admin PAT ==="
+mint_admin_pat || { echo "  ✗ cannot mint admin PAT — aborting"; echo "  Results: $PASS passed, $((FAIL + 1)) failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Test 2: App lifecycle
@@ -174,32 +297,34 @@ curl -sf "http://localhost:$GATE_PORT/health" > /dev/null && pass "gateway healt
 echo ""
 echo "=== Test 2: App lifecycle ==="
 
-# Create
-APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -d '{"name":"lifecycle-test"}')
-APP_ID=$(echo "$APP" | jq -r '.id')
-API_KEY=$(echo "$APP" | jq -r '.api_key')
-[ -n "$APP_ID" ] && [ "$APP_ID" != "null" ] && pass "create app ($APP_ID)" || fail "create app"
+APP_ID="$(create_app lifecycle-test || true)"
+if [ -n "$APP_ID" ]; then pass "create app ($APP_ID)"; else fail "create app"; fi
 
-# Deploy
-tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zship)
-echo 'export function ping() { return "lifecycle-ok"; }' > "$tmpf"
-build_zship "$tmpf" "$tmpz"
-DEPLOY=$("$BIN/zeroship" deploy "$tmpz" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
-rm "$tmpf" "$tmpz"
-echo "$DEPLOY" | grep -q "deploy_hash" && pass "deploy" || fail "deploy"
+if [ -n "$APP_ID" ]; then
+    if deploy_js "$APP_ID" 'export default { fetch() { return new Response("lifecycle-ok"); } };'; then
+        pass "deploy"
+    else
+        fail "deploy"
+    fi
 
-# Verify via internal API
-sleep 3
-VERSIONS=$(curl -sf "http://localhost:$CONTROL_PORT/internal/versions" -H "Authorization: Bearer $CONTROL_KEY")
-echo "$VERSIONS" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1 && pass "version in internal API" || fail "version missing"
+    sleep 3
+    if http_ok GET "http://localhost:$CONTROL_PORT/internal/versions" -H "Authorization: Bearer $CONTROL_KEY"; then
+        if printf '%s' "$HTTP_BODY" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1; then
+            pass "version in internal API"
+        else
+            fail "version missing from /internal/versions: $(printf '%s' "$HTTP_BODY" | cut -c1-200)"
+        fi
+    else
+        fail "/internal/versions unreachable"
+    fi
 
-# Delete
-DEL=$(curl -sf -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $MASTER_KEY")
-echo "$DEL" | grep -q "true" && pass "delete app" || fail "delete app"
+    if http_ok DELETE "http://localhost:$CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $PAT" \
+        && printf '%s' "$HTTP_BODY" | grep -q "true"; then
+        pass "delete app"
+    else
+        fail "delete app (HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Test 3: Identity verification
@@ -207,40 +332,35 @@ echo "$DEL" | grep -q "true" && pass "delete app" || fail "delete app"
 echo ""
 echo "=== Test 3: Identity (10 apps, each returns its own name) ==="
 
+# The app is a raw-JS deploy under the current contract:
+# `default = { fetch }` (docs/reference/zeroship-standard.md). The old
+# fixture exported a bare `ping()` and was called with a JSON-RPC envelope
+# at `/apps/<name>/rpc`; neither the envelope nor that path has existed
+# since RPC v1 (fe571dc03).
 declare -A APP_IDS
-declare -A APP_KEYS
 
 for i in $(seq 1 10); do
-    name="id-$(printf '%02d' $i)"
-    result=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-        -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $MASTER_KEY" \
-        -d "{\"name\":\"$name\"}")
-    APP_IDS[$name]=$(echo "$result" | jq -r '.id')
-    APP_KEYS[$name]=$(echo "$result" | jq -r '.api_key')
-
-    tmpf=$(mktemp --suffix=.js)
-    tmpz=$(mktemp --suffix=.zship)
-    echo "export function ping() { return \"I am $name\"; }" > "$tmpf"
-    build_zship "$tmpf" "$tmpz"
-    "$BIN/zeroship" deploy "$tmpz" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-    rm "$tmpf" "$tmpz"
+    name="id-$(printf '%02d' "$i")"
+    id="$(create_app "$name" || true)"
+    APP_IDS[$name]="$id"
+    if [ -z "$id" ]; then
+        fail "$name: create failed"
+        continue
+    fi
+    deploy_js "$id" "export default { fetch() { return new Response(\"I am $name\"); } };" \
+        || fail "$name: deploy failed"
 done
-sleep 4
+sleep 5
 
 ID_PASS=0
 for i in $(seq 1 10); do
-    name="id-$(printf '%02d' $i)"
-    key="${APP_KEYS[$name]}"
-    result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/$name/rpc" \
-        -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $key" \
-        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "")
-    returned=$(echo "$result" | jq -r '.result // empty')
-    if [ "$returned" = "I am $name" ]; then
+    name="id-$(printf '%02d' "$i")"
+    [ -n "${APP_IDS[$name]:-}" ] || continue
+    if http GET "http://localhost:$GATE_PORT/apps/$name/" && [ "$HTTP_STATUS" = "200" ] \
+        && [ "$HTTP_BODY" = "I am $name" ]; then
         ID_PASS=$((ID_PASS + 1))
     else
-        fail "$name returned '$returned' (expected 'I am $name')"
+        fail "$name returned HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-120)' (expected 200 'I am $name')"
     fi
 done
 [ $ID_PASS -eq 10 ] && pass "all 10 apps returned correct identity" || fail "$ID_PASS/10 correct"
@@ -251,40 +371,32 @@ done
 echo ""
 echo "=== Test 4: Routing consistency ==="
 
-# Deploy an app with a counter
-name="counter-app"
-result=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -d "{\"name\":\"$name\"}")
-CID=$(echo "$result" | jq -r '.id')
-CKEY=$(echo "$result" | jq -r '.api_key')
-
-tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zship)
-cat > "$tmpf" << 'JSEOF'
-let counter = 0;
-export function ping() { counter++; return { count: counter }; }
-JSEOF
-build_zship "$tmpf" "$tmpz"
-"$BIN/zeroship" deploy "$tmpz" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf" "$tmpz"
-sleep 4
-
-# Send 10 requests — counters should increase (across 1-2 threads)
-COUNTS=""
-for j in $(seq 1 10); do
-    result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/$name/rpc" \
-        -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $CKEY" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":[],\"id\":$j}")
-    c=$(echo "$result" | jq -r '.result.count // 0')
-    COUNTS="$COUNTS $c"
-done
-echo "  counters:$COUNTS"
-# Verify counters are non-zero and generally increasing
-MAX_COUNT=$(echo $COUNTS | tr ' ' '\n' | sort -rn | head -1)
-[ "$MAX_COUNT" -ge 3 ] && pass "counter reached $MAX_COUNT (routing consistent)" || fail "counter only reached $MAX_COUNT"
+CID="$(create_app counter-app || true)"
+if [ -z "$CID" ]; then
+    fail "counter-app: create failed"
+elif ! deploy_js "$CID" 'let counter = 0;
+export default { fetch() { counter++; return new Response(JSON.stringify({ count: counter }), { headers: { "content-type": "application/json" } }); } };'; then
+    fail "counter-app: deploy failed"
+else
+    sleep 5
+    COUNTS=""
+    for j in $(seq 1 10); do
+        if http GET "http://localhost:$GATE_PORT/apps/counter-app/?n=$j" && [ "$HTTP_STATUS" = "200" ]; then
+            COUNTS="$COUNTS $(jget "$HTTP_BODY" '.count')"
+        else
+            COUNTS="$COUNTS x"
+            echo "    request $j: HTTP $HTTP_STATUS $(printf '%s' "$HTTP_BODY" | cut -c1-120)"
+        fi
+    done
+    echo "  counters:$COUNTS"
+    MAX_COUNT=$(printf '%s' "$COUNTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -rn | head -1)
+    MAX_COUNT="${MAX_COUNT:-0}"
+    # 3 workers x 2 threads = 6 candidate isolates. CHWBL pins the app to one
+    # worker, so 10 requests land on <= 2 isolates and at least one of them
+    # must be hit 3+ times. Round-robin across all six would cap at 2.
+    [ "$MAX_COUNT" -ge 3 ] && pass "counter reached $MAX_COUNT (routing consistent)" \
+        || fail "counter only reached $MAX_COUNT — requests are spread across isolates"
+fi
 
 # ---------------------------------------------------------------------------
 # Test 5: Isolation
@@ -292,56 +404,101 @@ MAX_COUNT=$(echo $COUNTS | tr ' ' '\n' | sort -rn | head -1)
 echo ""
 echo "=== Test 5: Isolation ==="
 
-# app id-01 and id-02 should have independent state
-# Send 10 requests to id-01
-key1="${APP_KEYS[id-01]}"
-for j in $(seq 1 10); do
-    curl -sf -X POST "http://localhost:$GATE_PORT/apps/id-01/rpc" \
-        -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $key1" \
-        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' > /dev/null
-done
-
-# id-02 should still return its own identity
-key2="${APP_KEYS[id-02]}"
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/id-02/rpc" \
-    -H 'Content-Type: application/json' \
-    -H "X-Api-Key: $key2" \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}')
-returned=$(echo "$result" | jq -r '.result // empty')
-[ "$returned" = "I am id-02" ] && pass "id-02 isolated from id-01" || fail "id-02 returned '$returned'"
+if [ -z "${APP_IDS[id-01]:-}" ] || [ -z "${APP_IDS[id-02]:-}" ]; then
+    fail "isolation: id-01/id-02 were not created"
+else
+    for j in $(seq 1 10); do
+        http GET "http://localhost:$GATE_PORT/apps/id-01/?n=$j" >/dev/null 2>&1 || true
+    done
+    if http GET "http://localhost:$GATE_PORT/apps/id-02/" && [ "$HTTP_BODY" = "I am id-02" ]; then
+        pass "id-02 isolated from id-01"
+    else
+        fail "id-02 returned HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-120)'"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Test 6: Auth enforcement
 # ---------------------------------------------------------------------------
+# WHAT THIS NO LONGER TESTS, and why. Until fe571dc03 (2026-04-30) the
+# gateway called `auth::check_api_key` for `WorkerMode::Rpc` requests and
+# SSR was open by design. RPC v1 replaced the key check with the compiled
+# per-resource `EffectivePolicy` (`auth: anon|user|...`), and deleted the
+# only call site. `crates/gateway/src/auth.rs::check_api_key` and
+# `RouteEntry.api_key_hash` are still there but nothing calls them
+# (grep: the sole match in non-test gateway code is the definition), so a
+# request carrying a wrong X-Api-Key is not rejected — there is no key gate
+# left to reject it. The old assertions here "passed" regardless: they ran
+# `curl -sf ... || echo rejected` and then grepped for "rejected", so any
+# failure — including a gateway that was not running — satisfied them.
+#
+# The gate that DOES exist is asserted instead, on ONE app whose manifest
+# carries two `rpc:` resources differing in exactly one field — `auth` —
+# plus an anon URL resource. 6b alone would not prove the auth level is what
+# rejects: a 401 on any `/__zeroship/v1/` path would satisfy it. 6c is the
+# one-variable partner (same app, same deploy, same path shape, auth: anon)
+# and must come back 200.
 echo ""
 echo "=== Test 6: Auth ==="
 
-# No API key
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/id-01/rpc" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "rejected")
-echo "$result" | grep -qi "missing\|unauthorized\|api.key\|rejected" && pass "missing key rejected" || fail "missing key not rejected: $result"
+AUTH_ID="$(create_app authgate || true)"
+if [ -z "$AUTH_ID" ]; then
+    fail "authgate: create failed"
+elif ! deploy_js "$AUTH_ID" 'export default { fetch() { return new Response("open"); } };' \
+        '{"/[...rest]":{"auth":"anon","publicly_accessible":true},"rpc:secret":{"auth":"user"},"rpc:open":{"auth":"anon","publicly_accessible":true}}'; then
+    fail "authgate: deploy failed"
+else
+    sleep 5
+    # 6a: anon URL resource is reachable — proves the app is live, so a 401
+    #     on 6b cannot be "the app never deployed".
+    if http GET "http://localhost:$GATE_PORT/apps/authgate/" && [ "$HTTP_STATUS" = "200" ]; then
+        pass "auth:anon resource served (HTTP 200)"
+    else
+        fail "auth:anon resource: HTTP $HTTP_STATUS $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+    fi
+    # 6b: rpc resource declaring auth:user, no session.
+    if http POST "http://localhost:$GATE_PORT/apps/authgate/__zeroship/v1/secret" \
+        -H 'Content-Type: application/json' -d '{"json":{}}' \
+        && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
+        pass "rpc resource with auth:user rejected without a session (HTTP $HTTP_STATUS)"
+    else
+        fail "rpc auth:user returned HTTP $HTTP_STATUS (expected 401/403): $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+    fi
+    # 6c: the control. Identical in every respect except `auth: anon`.
+    if http POST "http://localhost:$GATE_PORT/apps/authgate/__zeroship/v1/open" \
+        -H 'Content-Type: application/json' -d '{"json":{}}' \
+        && [ "$HTTP_STATUS" = "200" ]; then
+        pass "rpc resource with auth:anon passes the same gate (HTTP 200)"
+    else
+        fail "rpc auth:anon returned HTTP $HTTP_STATUS (expected 200) — 6b's 401 may not be the auth gate: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+    fi
+fi
 
-# Wrong API key
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/id-01/rpc" \
-    -H 'Content-Type: application/json' \
-    -H 'X-Api-Key: wrong-key-12345' \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "rejected")
-echo "$result" | grep -qi "invalid\|unauthorized\|rejected" && pass "wrong key rejected" || fail "wrong key not rejected: $result"
+# 6c: unknown app → 404 at the gateway.
+if http GET "http://localhost:$GATE_PORT/apps/nonexistent-app/" && [ "$HTTP_STATUS" = "404" ]; then
+    pass "unknown app returns 404"
+else
+    fail "unknown app returned HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+fi
 
-# Unknown app
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/nonexistent/rpc" \
-    -H 'Content-Type: application/json' \
-    -H 'X-Api-Key: any' \
-    -d '{}' 2>/dev/null || echo "not_found")
-echo "$result" | grep -qi "not.found\|not_found" && pass "unknown app returns 404" || fail "unknown app: $result"
+# 6d/6e: the control plane's platform-token gate — the credential that
+# actually guards app CRUD today.
+if http POST "http://localhost:$CONTROL_PORT/api/apps" \
+    -H 'Content-Type: application/json' -d '{"name":"should-fail"}' \
+    && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
+    pass "app-create without a platform token rejected (HTTP $HTTP_STATUS)"
+else
+    fail "app-create with no auth returned HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+fi
 
-# Admin API without master key
-result=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -d '{"name":"should-fail"}' 2>/dev/null || echo "rejected")
-echo "$result" | grep -qi "unauthorized\|master.key\|rejected" && pass "admin without master key rejected" || fail "admin not rejected: $result"
+if http POST "http://localhost:$CONTROL_PORT/api/apps" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer not-a-real-token' \
+    -d '{"name":"should-fail"}' \
+    && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
+    pass "app-create with a bogus platform token rejected (HTTP $HTTP_STATUS)"
+else
+    fail "app-create with a bogus token returned HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+fi
 
 # ---------------------------------------------------------------------------
 # Test 7: Cold start (on-demand loading)
@@ -349,42 +506,33 @@ echo "$result" | grep -qi "unauthorized\|master.key\|rejected" && pass "admin wi
 echo ""
 echo "=== Test 7: Cold start ==="
 
-# Create + deploy a NEW app (not yet loaded on any worker)
-result=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -d '{"name":"cold-start"}')
-COLD_ID=$(echo "$result" | jq -r '.id')
-COLD_KEY=$(echo "$result" | jq -r '.api_key')
+COLD_ID="$(create_app cold-start || true)"
+if [ -z "$COLD_ID" ]; then
+    fail "cold-start: create failed"
+elif ! deploy_js "$COLD_ID" 'export default { fetch() { return new Response("cold-ok"); } };'; then
+    fail "cold-start: deploy failed"
+else
+    sleep 4
+    START=$(date +%s%N)
+    http GET "http://localhost:$GATE_PORT/apps/cold-start/" || true
+    END=$(date +%s%N)
+    COLD_MS=$(( (END - START) / 1000000 ))
+    if [ "$HTTP_STATUS" = "200" ] && [ "$HTTP_BODY" = "cold-ok" ]; then
+        pass "cold start in ${COLD_MS}ms"
+    else
+        fail "cold start: HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-160)'"
+    fi
 
-tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zship)
-echo 'export function ping() { return "cold-ok"; }' > "$tmpf"
-build_zship "$tmpf" "$tmpz"
-"$BIN/zeroship" deploy "$tmpz" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf" "$tmpz"
-sleep 3
-
-# First request triggers on-demand load
-START=$(date +%s%N)
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/cold-start/rpc" \
-    -H 'Content-Type: application/json' \
-    -H "X-Api-Key: $COLD_KEY" \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}')
-END=$(date +%s%N)
-COLD_MS=$(( (END - START) / 1000000 ))
-returned=$(echo "$result" | jq -r '.result // empty')
-[ "$returned" = "cold-ok" ] && pass "cold start in ${COLD_MS}ms" || fail "cold start failed: $result"
-
-# Second request should be warm
-START=$(date +%s%N)
-curl -sf -X POST "http://localhost:$GATE_PORT/apps/cold-start/rpc" \
-    -H 'Content-Type: application/json' \
-    -H "X-Api-Key: $COLD_KEY" \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":2}' > /dev/null
-END=$(date +%s%N)
-WARM_MS=$(( (END - START) / 1000000 ))
-pass "warm request in ${WARM_MS}ms"
+    START=$(date +%s%N)
+    http GET "http://localhost:$GATE_PORT/apps/cold-start/" || true
+    END=$(date +%s%N)
+    WARM_MS=$(( (END - START) / 1000000 ))
+    if [ "$HTTP_STATUS" = "200" ] && [ "$HTTP_BODY" = "cold-ok" ]; then
+        pass "warm request in ${WARM_MS}ms"
+    else
+        fail "warm request: HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-160)'"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Test 8: Hot deploy
@@ -392,54 +540,34 @@ pass "warm request in ${WARM_MS}ms"
 echo ""
 echo "=== Test 8: Hot deploy ==="
 
-# Deploy v1
-result=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -d '{"name":"hot-deploy"}')
-HOT_ID=$(echo "$result" | jq -r '.id')
-HOT_KEY=$(echo "$result" | jq -r '.api_key')
+HOT_ID="$(create_app hot-deploy || true)"
+if [ -z "$HOT_ID" ]; then
+    fail "hot-deploy: create failed"
+elif ! deploy_js "$HOT_ID" 'export default { fetch() { return new Response("v1"); } };'; then
+    fail "hot-deploy: v1 deploy failed"
+else
+    sleep 4
+    if http GET "http://localhost:$GATE_PORT/apps/hot-deploy/" && [ "$HTTP_BODY" = "v1" ]; then
+        pass "v1 deployed"
+    else
+        fail "expected v1, got HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-160)'"
+    fi
 
-tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zship)
-echo 'export function ping() { return "v1"; }' > "$tmpf"
-build_zship "$tmpf" "$tmpz"
-"$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf" "$tmpz"
-sleep 3
-
-# Verify v1
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/hot-deploy/rpc" \
-    -H 'Content-Type: application/json' \
-    -H "X-Api-Key: $HOT_KEY" \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}')
-v=$(echo "$result" | jq -r '.result // empty')
-[ "$v" = "v1" ] && pass "v1 deployed" || fail "expected v1, got '$v'"
-
-# Deploy v2
-tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zship)
-echo 'export function ping() { return "v2"; }' > "$tmpf"
-build_zship "$tmpf" "$tmpz"
-"$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf" "$tmpz"
-
-# Wait for worker sync to pick up new hash + reload
-# Worker polls every 2s, needs time to detect + download + reload
-sleep 12
-
-# Verify v2
-v=""
-for attempt in $(seq 1 5); do
-    result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/hot-deploy/rpc" \
-        -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $HOT_KEY" \
-        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "")
-    v=$(echo "$result" | jq -r '.result // empty')
-    [ "$v" = "v2" ] && break
-    sleep 3
-done
-[ "$v" = "v2" ] && pass "v2 hot deployed" || fail "expected v2, got '$v'"
+    if ! deploy_js "$HOT_ID" 'export default { fetch() { return new Response("v2"); } };'; then
+        fail "hot-deploy: v2 deploy failed"
+    else
+        # Worker polls every 2s, then has to download + reload.
+        v=""
+        for _ in $(seq 1 10); do
+            sleep 3
+            http GET "http://localhost:$GATE_PORT/apps/hot-deploy/" || true
+            v="$HTTP_BODY"
+            [ "$v" = "v2" ] && break
+        done
+        [ "$v" = "v2" ] && pass "v2 hot deployed" \
+            || fail "expected v2 within 30s, got HTTP $HTTP_STATUS '$(printf '%s' "$v" | cut -c1-160)'"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Test 9: Deploy edge cases (streaming early-rejection paths)
@@ -451,86 +579,67 @@ done
 echo ""
 echo "=== Test 9: Deploy edge cases ==="
 
-# Fresh app for these cases — independent of earlier-test state.
-EDGE_RESP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -d '{"name":"deploy-edge"}')
-EDGE_APP_ID=$(echo "$EDGE_RESP" | jq -r '.id')
-[ -n "$EDGE_APP_ID" ] && [ "$EDGE_APP_ID" != "null" ] && pass "9.0: create edge-case app ($EDGE_APP_ID)" || fail "9.0: create edge-case app"
+EDGE_APP_ID="$(create_app deploy-edge || true)"
+if [ -n "$EDGE_APP_ID" ]; then pass "9.0: create edge-case app ($EDGE_APP_ID)"; else fail "9.0: create edge-case app"; fi
 
-# Build a small valid `.zship` for the content-type / auth cases. The
-# size-cap case sends raw urandom and doesn't need a real zship.
-edge_js=$(mktemp --suffix=.js)
-edge_zship=$(mktemp --suffix=.zship)
-echo 'export function ping() { return "edge"; }' > "$edge_js"
-build_zship "$edge_js" "$edge_zship"
-rm "$edge_js"
+if [ -n "$EDGE_APP_ID" ]; then
+    edge_js=$(mktemp --suffix=.js)
+    edge_zship=$(mktemp --suffix=.zship)
+    echo 'export default { fetch() { return new Response("edge"); } };' > "$edge_js"
+    build_zship "$edge_js" "$edge_zship"
+    rm -f "$edge_js"
 
-# --- 9.1: wrong content-type returns 415 ---
-echo "  -- 9.1: wrong content-type"
-RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
-    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -H 'Content-Type: application/octet-stream' \
-    --data-binary "@$edge_zship")
-RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
-if [ "$RESP_CODE" = "415" ] && echo "$RESP_BODY" | grep -q "unsupported content type"; then
-    pass "9.1: wrong content-type rejected with 415"
-else
-    fail "9.1: expected 415 + 'unsupported content type', got $RESP_CODE (body: $RESP_BODY)"
+    # --- 9.1: wrong content-type returns 415 ---
+    echo "  -- 9.1: wrong content-type"
+    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+        -H "Authorization: Bearer $PAT" -H 'Content-Type: application/octet-stream' \
+        --data-binary "@$edge_zship" \
+        && [ "$HTTP_STATUS" = "415" ] && printf '%s' "$HTTP_BODY" | grep -q "unsupported content type"; then
+        pass "9.1: wrong content-type rejected with 415"
+    else
+        fail "9.1: expected 415 + 'unsupported content type', got $HTTP_STATUS (body: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+
+    # --- 9.2: body exceeding MAX_COMPRESSED_BYTES (256 MiB) returns 413 ---
+    # Cap is enforced PRE-decompression, so raw bytes (no zstd needed)
+    # trigger it. /dev/zero is fine — the streaming helper counts bytes.
+    echo "  -- 9.2: body over 256 MiB cap"
+    big_body=$(mktemp --suffix=.bin)
+    dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
+    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+        -H "Authorization: Bearer $PAT" -H 'Content-Type: application/x-zship' \
+        --data-binary "@$big_body" \
+        && [ "$HTTP_STATUS" = "413" ] && printf '%s' "$HTTP_BODY" | grep -q "deploy too large"; then
+        pass "9.2: oversized body rejected with 413"
+    else
+        fail "9.2: expected 413 + 'deploy too large', got $HTTP_STATUS (body: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+    rm -f "$big_body"
+
+    # --- 9.3: wrong Authorization returns 401/403 ---
+    echo "  -- 9.3: wrong auth on deploy"
+    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+        -H "Authorization: Bearer wrong-key-12345" -H 'Content-Type: application/x-zship' \
+        --data-binary "@$edge_zship" \
+        && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
+        pass "9.3: wrong auth rejected with $HTTP_STATUS"
+    else
+        fail "9.3: expected 401/403, got $HTTP_STATUS (body: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+    rm -f "$edge_zship"
+
+    if http_ok DELETE "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $PAT" \
+        && printf '%s' "$HTTP_BODY" | grep -q "true"; then
+        pass "9.4: cleanup edge-case app"
+    else
+        fail "9.4: cleanup edge-case app (HTTP $HTTP_STATUS)"
+    fi
 fi
-rm -f /tmp/zeroship-e2e-resp.body
-
-# --- 9.2: body exceeding MAX_COMPRESSED_BYTES (256 MiB) returns 413 ---
-# Cap is enforced PRE-decompression, so raw bytes (no zstd needed) trigger
-# it. Use /dev/zero for fast generation — the streaming helper checks
-# total bytes written, not entropy.
-echo "  -- 9.2: body over 256 MiB cap"
-big_body=$(mktemp --suffix=.bin)
-# 257 MiB = 256 MiB cap + 1 MiB overshoot. dd from /dev/zero is ~instant.
-dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
-RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
-    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
-    -H "Authorization: Bearer $MASTER_KEY" \
-    -H 'Content-Type: application/x-zship' \
-    --data-binary "@$big_body")
-RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
-if [ "$RESP_CODE" = "413" ] && echo "$RESP_BODY" | grep -q "deploy too large"; then
-    pass "9.2: oversized body rejected with 413"
-else
-    fail "9.2: expected 413 + 'deploy too large', got $RESP_CODE (body: $RESP_BODY)"
-fi
-rm -f "$big_body" /tmp/zeroship-e2e-resp.body
-
-# --- 9.3: wrong Authorization returns 401 ---
-# Test 6 exercises auth at the gateway and on app-create, but not on
-# the deploy endpoint specifically. Adds direct coverage of the
-# `check_admin_auth` gate inside `deploy()` — must reject before any
-# body byte is consumed.
-echo "  -- 9.3: wrong auth on deploy"
-RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
-    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
-    -H "Authorization: Bearer wrong-key-12345" \
-    -H 'Content-Type: application/x-zship' \
-    --data-binary "@$edge_zship")
-RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
-if [ "$RESP_CODE" = "401" ] || [ "$RESP_CODE" = "403" ]; then
-    pass "9.3: wrong auth rejected with $RESP_CODE"
-else
-    fail "9.3: expected 401/403, got $RESP_CODE (body: $RESP_BODY)"
-fi
-rm -f /tmp/zeroship-e2e-resp.body
-rm -f "$edge_zship"
-
-# Cleanup: delete the edge-case app, matching Test 2's pattern.
-DEL=$(curl -sf -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID" \
-    -H "Authorization: Bearer $MASTER_KEY")
-echo "$DEL" | grep -q "true" && pass "9.4: cleanup edge-case app" || fail "9.4: cleanup edge-case app"
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+REACHED_SUMMARY=1
 echo ""
 echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
