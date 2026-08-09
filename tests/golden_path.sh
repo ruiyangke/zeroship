@@ -144,8 +144,76 @@ else
   fail "RPC round-trip (getMessages did not return the expected data)"
 fi
 
+# --- 6. The DEV half of the golden path, and it must agree with deployed ---
+#
+# Everything above proves the deployed side. The golden path a creator actually
+# follows starts one step earlier -- `pnpm dev`, edit, refresh -- and this
+# script never ran it, so scenario 1 in docs/pilot/e2e-scenarios.md read "dev
+# server run repeatedly, not recorded as a scenario". Running it is half the
+# point; the other half is that it must answer the SAME as the deployed app,
+# because dev and deployed are different backends behind one contract and a
+# divergence between them is invisible to any test that only drives one.
+#
+# `vite` is spawned directly rather than via `pnpm dev` so the PID is the dev
+# server itself and cleanup cannot leave an orphan behind a package-manager
+# wrapper.
+echo "=== 6. Dev server: pnpm dev serves the same app, and agrees with deployed ==="
+DEV_PORT="${DEV_PORT:-3091}"
+lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+( cd "$STARTER" && ./node_modules/.bin/vite --port "$DEV_PORT" --strictPort ) >/tmp/gp-dev.log 2>&1 &
+PIDS+=($!)
+
+DEV_RPC=""
+for _ in $(seq 1 25); do
+  DEV_RPC=$(curl -sf -m 3 "http://localhost:$DEV_PORT/__zeroship/v1/getMessages" 2>/dev/null || echo "")
+  [ -n "$DEV_RPC" ] && break
+  sleep 2
+done
+
+if [ -z "$DEV_RPC" ]; then
+  fail "dev server never answered getMessages on :$DEV_PORT"
+  tail -20 /tmp/gp-dev.log
+else
+  pass "dev server executed the same server function"
+
+  # `createdAt` is dropped from BOTH sides before comparing, and nothing else is.
+  #
+  # examples/starter/src/server.ts:28 seeds its messages with
+  # `createdAt: Date.now() - 60_000`, evaluated when the module is first
+  # imported. The dev server and the worker are separate processes that import
+  # it at different moments, so the two payloads can never be byte-identical no
+  # matter how correct the platform is. The first version of this check compared
+  # the raw bodies and reported a divergence of 1786274106211 vs 1786274103764 --
+  # a 2.4-second gap, which is process start time, not a platform defect.
+  #
+  # So this is normalisation of a field that is volatile BY CONSTRUCTION, not a
+  # weakened assertion. What IS still compared: the envelope shape, every id and
+  # text, their order, and the array length. What is NOT compared, and would be
+  # missed: any divergence confined to createdAt itself.
+  strip_volatile() { printf '%s' "$1" | sed -E 's/"createdAt":[0-9]+/"createdAt":<t>/g'; }
+  DEV_CMP=$(strip_volatile "$DEV_RPC")
+  DEP_CMP=$(strip_volatile "$RPC")
+
+  # Set to 1 to corrupt the dev body before comparing. The comparison below is
+  # the only assertion in this script that can catch a dev-vs-deployed
+  # divergence, so a version of it that never fires would be worse than absent.
+  [ "${MUTATE_DEV_DIVERGE:-0}" = "1" ] && DEV_CMP="${DEV_CMP}__mutated__"
+
+  if [ "$DEV_CMP" = "$DEP_CMP" ]; then
+    pass "dev and deployed agree on getMessages (identical apart from createdAt)"
+  else
+    fail "dev and deployed DIVERGE on the same RPC"
+    echo "    dev      : ${DEV_CMP:0:160}"
+    echo "    deployed : ${DEP_CMP:0:160}"
+    echo "    A divergence here is the finding, not a flaky test: both sides ran the"
+    echo "    same source through different backends and disagreed. createdAt is"
+    echo "    already normalised out, so this is not process-start skew."
+  fi
+fi
+
 echo ""
 echo "============================================"
 echo "  golden path: $PASS passed, $FAIL failed"
+echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
 echo "============================================"
 [ "$FAIL" -eq 0 ]
