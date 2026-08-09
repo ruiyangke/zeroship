@@ -4110,8 +4110,12 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
 fn fts_column_name() -> &'static str {
     "__fts"
 }
+/// Delegates to [`crate::schema::query::fts_index_name`] so the desired snapshot and
+/// the data plane derive one spelling, including the clip PostgreSQL applies to an
+/// over-long name at CREATE. Capping only here would move the desired-vs-live mismatch
+/// rather than close it.
 fn fts_index_name(table: &str) -> String {
-    format!("{table}__fts_idx")
+    crate::schema::query::fts_index_name(table)
 }
 
 /// The tsvector configuration (language) for a collection's FTS index: the first
