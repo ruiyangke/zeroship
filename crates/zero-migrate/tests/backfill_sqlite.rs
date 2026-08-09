@@ -12,11 +12,10 @@
 //! - approval/cursor-safety gates fire (defense-in-depth).
 
 // Every test holds the `serial()` `MutexGuard` across its `.await`s ON PURPOSE:
-// the guard is a test-only serialization lock over `()` (see `serial`) whose whole
-// job is to keep the PROCESS-GLOBAL armed-fault window exclusive for the duration
-// of one backfill run. There is no cross-task contention to deadlock (compio test,
-// single executor), so `await_holding_lock` is a false positive for this
-// deliberate pattern — allowed narrowly, scoped to this one test file.
+// the guard is a test-only serialization lock over `()` (see `serial`). There is
+// no cross-task contention to deadlock (compio test, single executor), so
+// `await_holding_lock` is a false positive for this deliberate pattern - allowed
+// narrowly, scoped to this one test file.
 #![allow(clippy::await_holding_lock)]
 
 use std::path::PathBuf;
@@ -26,13 +25,31 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::SqliteBackend;
 use zero_migrate::{apply::backend::BackfillError, BackfillSpec, CursorStability};
 
-/// A process-wide lock serializing every backfill test in this file. The
-/// crash-fuzz test arms the PROCESS-GLOBAL fault registry
-/// (`fault::arm(BACKFILL_MID_BATCHES, …)`), which would trip a CONCURRENT backfill
-/// in another test. Holding this lock for each test's backfill run makes the
-/// armed-fault window exclusive (the `SQLite` analog of the `_pg` suite's
-/// `--test-threads=1` convention, scoped to this file so the rest of the suite
-/// still parallelizes).
+/// A lock serializing every backfill test in this file.
+///
+/// It is NOT what keeps an armed fault out of another test's backfill.
+/// `zero_migrate::fault::arm` writes a `thread_local!` registry, so a fault armed
+/// by one test is scoped to the thread that armed it and cannot fire on another
+/// thread - `armed_fault_does_not_cross_thread_boundary` below pins that through
+/// the same `BACKFILL_MID_BATCHES` point the crash-fuzz test uses. The one
+/// process-global piece, `fault::ARMED_THREADS`, is a counter that gates the
+/// fast path; it can only suppress a fire, never cause one.
+///
+/// That counter is what the lock is for. Three tests here assert on
+/// `fault::armed_thread_count()` in absolute terms - nothing armed at entry, one
+/// claim after arming, none left after release - and those readings are only true
+/// while no other thread in the process holds a claim. The crash-fuzz test arms on
+/// its own thread, so an overlapping run makes the counter read two and the
+/// assertion fails on a process-wide observation rather than on anything about the
+/// backfill under test.
+///
+/// Measured, not assumed: removing the acquisition from all 18 tests fails
+/// `armed_fault_fires_when_armed_on_the_applying_thread` and
+/// `armed_fault_claim_is_released_when_a_thread_exits_without_disarming` on every
+/// run, with `left: 2, right: 1` and `left: 2, right: 0`. The other 16 pass
+/// without it, so the serialization buys them nothing measurable - narrowing the
+/// lock to the three counter-observing tests, or having them assert a delta rather
+/// than an absolute, would let the rest run in parallel.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
