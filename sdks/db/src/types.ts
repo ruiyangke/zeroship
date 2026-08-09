@@ -726,7 +726,31 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * injects the seven platform system fields; PR 1 ships the builders
  * + wire discriminators only.
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
+/**
+ * Column names that reach the runtime descriptor but that nobody authors.
+ *
+ * `PrimitiveTypeName` is the surface a creator writes. These are what the
+ * generator emits when it reproduces the columns the MIGRATIONS built:
+ * `t.int()` becomes `"int"` in `schema.runtime.json`, not `"number"`. They
+ * therefore arrive at `validateValue`, and leaving them out of the union does
+ * not keep them out of the data -- it only stops the code that handles them
+ * from typechecking. `render-env-db.ts` switches on exactly these names.
+ *
+ * That is not hypothetical. The integer handling and the fail-closed unknown
+ * type guard in `validate.ts` were both added after an `int` field was
+ * measured accepting the string `"abc"` while the same field declared
+ * `"number"` rejected it. The union was never widened to match, so those
+ * comparisons became `TS2367` "no overlap" errors and `pnpm build` failed
+ * workspace-wide -- with the runtime behaviour correct the whole time.
+ *
+ * `timestamp` is here on the generator's authority rather than on a sighting:
+ * no descriptor in this repo currently emits it, because no example calls
+ * `t.timestamp()`, but the renderer handles it beside `date`. Waiting for an
+ * example to use it is how the integer case stayed broken.
+ */
+export type DescriptorOnlyTypeName = "int" | "integer" | "bigInt" | "float" | "timestamp";
+
+export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
 
 /**
  * distance metric for `t.vector(...)` fields. The three

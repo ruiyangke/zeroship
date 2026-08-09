@@ -23,6 +23,15 @@ type Doc = PlainObject;
 const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "string",
   "number",
+  // The generator emits these for columns the migrations declared as integer
+  // or float; they are handled by the numeric branch above and are listed
+  // here so the fail-closed guard agrees with it. Without them this set and
+  // that branch disagree about what a known type is.
+  "int",
+  "integer",
+  "bigInt",
+  "float",
+  "timestamp",
   "boolean",
   "date",
   "json",

@@ -107,9 +107,25 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "string";
     case "number":
       return "double";
+    // The generator emits these when it reproduces the columns the migrations
+    // built, so they reach this bridge even though nobody authors them:
+    // `t.int()` lands in the descriptor as `"int"`, not `"number"`. Each maps
+    // onto the neutral ColType of the same name, so the round trip is exact
+    // rather than widened -- mapping `int` to `double` here would quietly
+    // restate an integer column as a float one.
+    case "int":
+    case "integer":
+      return "int";
+    case "bigInt":
+      return "bigInt";
+    case "float":
+      return "double";
     case "boolean":
       return "boolean";
     case "date":
+    // `timestamp` reaches here for the same reason, and `date` already maps to
+    // the `timestamp` ColType, so they share an arm.
+    case "timestamp":
       return "timestamp";
     case "json":
       return "json";
