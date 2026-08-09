@@ -360,6 +360,31 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
         .expect("put small again");
     assert_eq!(outcome2, PutOutcome::Deduped, "[{tag}] second put dedups");
 
+    // Dedup must verify the bytes the CALLER supplied, not merely that the
+    // store already holds that hash. `unpack` records a hash as satisfied
+    // on any `Ok` from `put_blob_stream` and step 8 only checks set
+    // membership, so crediting a caller who shipped something else lets a
+    // deploy claim a blob it never possessed and then point an `anon`
+    // asset at another tenant's content. The gateway keys its blob caches
+    // on the bare hash with no app partition, so it would serve those
+    // bytes. Knowing the hash is not evidence of holding the content: it
+    // is the ETag on every 200/206/304, and blobs are never deleted.
+    //
+    // Asserted inside `run_contract` so it binds BOTH backends: the S3
+    // store is what production uses, and LocalDisk is what dev uses, and
+    // they must not diverge on an authorization-carrying invariant.
+    let mut junk = std::io::Cursor::new(&b"x"[..]);
+    let claimed = store
+        .put_blob_stream(&small_hash, small.len() as u64, &mut junk)
+        .await;
+    assert!(
+        claimed.is_err(),
+        "[{tag}] a caller that did not ship the bytes for {small_hash} was \
+         credited with them (got {claimed:?}); ingest treats that as the blob \
+         being present, so the manifest is accepted and the asset resolves to \
+         whatever another tenant stored under that hash",
+    );
+
     // ---- MULTIPART-sized blob: forces the streaming multipart path on S3 ----
     // PART_SIZE + a remainder so we exercise (full part)+(short last part).
     let big_len = PART_SIZE + 4096;

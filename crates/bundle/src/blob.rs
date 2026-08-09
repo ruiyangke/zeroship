@@ -537,7 +537,7 @@ impl BlobStore for LocalDiskBlobStore {
 /// Read `reader` to EOF and return the hex SHA-256 of everything it
 /// yielded. Streams in fixed chunks so a caller-supplied length can never
 /// drive the allocation.
-fn hash_reader_to_end(reader: &mut dyn std::io::Read) -> Result<String, BlobError> {
+pub(crate) fn hash_reader_to_end(reader: &mut dyn std::io::Read) -> Result<String, BlobError> {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     let mut scratch = vec![0u8; 64 * 1024];
