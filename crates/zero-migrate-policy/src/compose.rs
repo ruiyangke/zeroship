@@ -692,6 +692,29 @@ impl EffectivePolicy {
             .collect()
     }
 
+    /// `obligation_values_anywhere(key)`: every value a require rule for `key`
+    /// carries at a NON-EMPTY scope, anywhere in the layer stack.
+    ///
+    /// This answers "is this obligation authored at all", the question a PEP must ask
+    /// when it holds no object to resolve at: an input it cannot attribute to a
+    /// concrete object (raw SQL naming no relation, an unqualified name with no
+    /// schema pin) is not provably outside an obligation, so it must fail closed,
+    /// but only where an obligation exists to fail closed against. It is NOT a
+    /// substitute for [`Self::obligations`]: it erases scope by construction, so a
+    /// decision that HAS an object must resolve at that object instead.
+    #[must_use]
+    pub fn obligation_values_anywhere(&self, key: &KnobKey) -> Vec<KnobValue> {
+        self.layers
+            .iter()
+            .flat_map(|l| l.requires.iter())
+            .filter(|r| !matches!(r.scope, Scope::Nothing))
+            .filter_map(|r| match &r.kind {
+                RuleKind::Require { key: k, value } if k == key => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// `injects_for(object)` — every covering inject rule's [`InjectSpec`] at
     /// `object`, across ALL layers in the SEALED cross-layer inject total order
     /// (outermost/base first, innermost/draft last — union-up, II.4.4).

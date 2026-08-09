@@ -39,8 +39,8 @@ use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
 use zero_migrate_policy::{
-    normalize_pg_identifier, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName,
-    ShapeElement,
+    normalize_pg_identifier, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectModel,
+    ObjectName, ShapeElement,
 };
 
 /// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
@@ -264,13 +264,6 @@ impl GuardConfig {
         })
     }
 
-    /// Data-security RLS requirement carried into the guard (the `safety.require_rls`
-    /// obligation).
-    #[must_use]
-    pub fn require_rls(&self) -> bool {
-        self.obligates_require_rls(&global_witness())
-    }
-
     /// Data-security destructive-op posture carried into the guard (the
     /// `safety.destructive_ops` grant).
     #[must_use]
@@ -289,7 +282,39 @@ impl GuardConfig {
     /// stable global witness. Reproduces `caps.grants(cap)`: absent grant ⇒ the
     /// knob default (`false`, deny).
     fn grants_global_bool(&self, key: &str) -> bool {
+        self.grants_bool_at(key, &self.global_witness_for(key))
+    }
+
+    /// The witness object for a Global-model read of `key`, checked against the
+    /// registry rather than asserted in prose: a knob whose `ObjectModel` is not
+    /// `Global` resolves differently at different objects, so reading it at ONE
+    /// witness erases the rule's scope.
+    ///
+    /// `schema.create_schema`, `access.policy` and `access.rls` are object-scoped and
+    /// are still read at a witness; they go through
+    /// [`Self::witness_pending_object_resolution`] instead, which makes that the
+    /// visible exception rather than a silent one.
+    fn global_witness_for(&self, key: &str) -> ObjectName {
+        debug_assert!(
+            self.knob_object_model(key) == Some(ObjectModel::Global),
+            "{key} is not a Global-model knob: a single witness erases its scope"
+        );
+        global_witness()
+    }
+
+    /// The witness object for an OBJECT-SCOPED knob the guard has not yet taught to
+    /// resolve per object. Reading here answers "is this granted at `zsg`", which is
+    /// not the question the caller means to ask; every use is a known-open scope
+    /// erasure kept at today's behaviour on purpose.
+    fn witness_pending_object_resolution(&self, key: &str) -> bool {
         self.grants_bool_at(key, &global_witness())
+    }
+
+    /// The registered [`ObjectModel`] of `key`, or `None` for a key this policy's
+    /// registry does not define.
+    fn knob_object_model(&self, key: &str) -> Option<ObjectModel> {
+        let k = KnobKey::parse(key).ok()?;
+        Some(self.effective.registry().get(&k)?.object_model)
     }
 
     /// Does the effective policy grant Bool `key` at the concrete `object`? For a
@@ -311,13 +336,14 @@ impl GuardConfig {
     /// `platform_drop_object_allowed` via the PDP.
     fn grants_drop_object(&self, remove_type: i32) -> bool {
         if remove_type == ObjectType::ObjectSchema as i32 {
-            return self.grants_global_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA);
+            return self
+                .witness_pending_object_resolution(policy_registry::KEY_SCHEMA_CREATE_SCHEMA);
         }
         if remove_type == ObjectType::ObjectExtension as i32 {
             return self.grants_extension_capability();
         }
         if remove_type == ObjectType::ObjectPolicy as i32 {
-            return self.grants_global_bool(policy_registry::KEY_ACCESS_POLICY);
+            return self.witness_pending_object_resolution(policy_registry::KEY_ACCESS_POLICY);
         }
         if remove_type == ObjectType::ObjectRole as i32 {
             return self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
@@ -341,16 +367,22 @@ impl GuardConfig {
         let Some(k) = KnobKey::parse(policy_registry::KEY_CODE_EXTENSION).ok() else {
             return Vec::new();
         };
-        match self.effective.grants(&k, &global_witness()) {
+        let witness = self.global_witness_for(policy_registry::KEY_CODE_EXTENSION);
+        match self.effective.grants(&k, &witness) {
             Some(KnobValue::StrSet(names)) => names,
             _ => Vec::new(),
         }
     }
 
-    /// True iff the effective policy obligates RLS on `object` — the
-    /// `safety.require_rls` Require obligation covers it. Reproduces the
-    /// `self.require_rls` read, object-scoped.
-    fn obligates_require_rls(&self, object: &ObjectName) -> bool {
+    /// True iff the effective policy obligates RLS on `object`: a covering
+    /// `safety.require_rls` Require rule.
+    ///
+    /// The knob is registered `ObjectModel::PerTable`, so this takes the object it is
+    /// deciding about. There is deliberately no scalar form: a charter may obligate
+    /// RLS on one table, one schema, or everything, and a caller holding no object
+    /// has no question this can answer.
+    #[must_use]
+    pub fn requires_rls_at(&self, object: &ObjectName) -> bool {
         let Some(want) = KnobKey::parse(policy_registry::KEY_SAFETY_REQUIRE_RLS).ok() else {
             return false;
         };
@@ -358,6 +390,25 @@ impl GuardConfig {
             .obligations(object)
             .iter()
             .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
+    }
+
+    /// Is a `safety.require_rls = true` obligation authored ANYWHERE in the effective
+    /// policy, at any scope?
+    ///
+    /// This is the fail-closed side of [`Self::requires_rls_at`], and it is only ever
+    /// correct where there is no object to resolve at: a table the guard cannot
+    /// qualify, or a raw statement naming no relation. Such an input is not provably
+    /// outside the obligation, so it is refused, but only when an obligation exists
+    /// to refuse it against, otherwise a charter that never mentions RLS would start
+    /// rejecting migrations.
+    fn require_rls_authored_anywhere(&self) -> bool {
+        let Some(want) = KnobKey::parse(policy_registry::KEY_SAFETY_REQUIRE_RLS).ok() else {
+            return false;
+        };
+        self.effective
+            .obligation_values_anywhere(&want)
+            .iter()
+            .any(|v| matches!(v, KnobValue::Bool(true)))
     }
 
     /// The effective destructive-op posture — the `safety.destructive_ops` OrderedEnum
@@ -368,7 +419,8 @@ impl GuardConfig {
         let Some(k) = KnobKey::parse(policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS).ok() else {
             return DestructiveOps::Forbid;
         };
-        match self.effective.grants(&k, &global_witness()) {
+        let witness = self.global_witness_for(policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS);
+        match self.effective.grants(&k, &witness) {
             Some(KnobValue::Str(s)) => match s.as_str() {
                 "allow" => DestructiveOps::Allow,
                 "warn" => DestructiveOps::Warn,
@@ -469,8 +521,53 @@ impl GuardConfig {
 /// (`⊤`-scope or absent) resolves the same at every object, so any witness decides
 /// it; `zsg` is an arbitrary fixed schema that never collides with a real target
 /// (the value is irrelevant for a ⊤-scope / default grant).
+///
+/// The soundness condition, that the knob really is `ObjectModel::Global`, is checked
+/// against the registry by [`GuardConfig::global_witness_for`], which is how every
+/// Global read reaches this. Call this directly only from
+/// [`GuardConfig::witness_pending_object_resolution`], the named exception.
 fn global_witness() -> ObjectName {
     ObjectName::schema(b"zsg".to_vec())
+}
+
+/// What a raw statement's `RangeVar` attributes to.
+enum RawRelationTarget {
+    /// The concrete PG-folded object the relation names.
+    Resolved(ObjectName),
+    /// Unqualified, and the config owns no unique schema to resolve it against.
+    UnpinnedSchema,
+    /// No name, or a name no identifier fold accepts.
+    Unattributable,
+}
+
+/// Attribute one raw `RangeVar` to a concrete object. An unqualified relation
+/// resolves to the config's pinned project schema (the search_path is pinned under
+/// Confined); with no unique pinned schema the name is unattributable.
+///
+/// This is the single relation-attribution rule for raw SQL: the namespace gate turns
+/// the two failure arms into its own denial codes, and the data-security walk treats
+/// both as "not provably outside the obligation".
+fn raw_relation_target<D: GuardDecisions + ?Sized>(
+    cfg: &D,
+    schemaname: &str,
+    relname: &str,
+) -> RawRelationTarget {
+    let relname = relname.trim();
+    if relname.is_empty() {
+        return RawRelationTarget::Unattributable;
+    }
+    let schema = if schemaname.trim().is_empty() {
+        match cfg.pinned_schema() {
+            Some(s) => s,
+            None => return RawRelationTarget::UnpinnedSchema,
+        }
+    } else {
+        schemaname.trim().to_string()
+    };
+    match normalize_pg_identifier(&format!("{schema}.{relname}")) {
+        Some(object) => RawRelationTarget::Resolved(object),
+        None => RawRelationTarget::Unattributable,
+    }
 }
 
 /// The literal schemas an effective policy OWNS — the `schema.cross_schema` grant's
@@ -761,6 +858,7 @@ trait GuardDecisions {
     fn injects_cover(&self, object: &ObjectName) -> bool;
     fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape>;
     fn grants_global_bool(&self, key: &str) -> bool;
+    fn witness_pending_object_resolution(&self, key: &str) -> bool;
     fn grants_drop_object(&self, remove_type: i32) -> bool;
     fn granted_extension_allowlist(&self) -> Vec<String>;
     fn grants_cross_schema(&self, schema: &str) -> bool;
@@ -791,6 +889,10 @@ impl GuardDecisions for GuardConfig {
 
     fn grants_global_bool(&self, key: &str) -> bool {
         Self::grants_global_bool(self, key)
+    }
+
+    fn witness_pending_object_resolution(&self, key: &str) -> bool {
+        Self::witness_pending_object_resolution(self, key)
     }
 
     fn grants_drop_object(&self, remove_type: i32) -> bool {
@@ -870,6 +972,10 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     }
 
     fn grants_global_bool(&self, _key: &str) -> bool {
+        false
+    }
+
+    fn witness_pending_object_resolution(&self, _key: &str) -> bool {
         false
     }
 
@@ -1239,38 +1345,21 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         rel: Option<&protobuf::RangeVar>,
         raw: &str,
     ) -> Result<ObjectName, GuardError> {
-        let Some(rel) = rel else {
-            return Err(namespace_denied(
-                namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
-                raw,
-            ));
+        let (schemaname, relname) = match rel {
+            Some(rel) => (rel.schemaname.as_str(), rel.relname.as_str()),
+            None => ("", ""),
         };
-        let relname = rel.relname.trim();
-        if relname.is_empty() {
-            return Err(namespace_denied(
+        match raw_relation_target(self.cfg, schemaname, relname) {
+            RawRelationTarget::Resolved(object) => Ok(object),
+            RawRelationTarget::UnpinnedSchema => Err(namespace_denied(
+                namespace_rule::UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL,
+                raw,
+            )),
+            RawRelationTarget::Unattributable => Err(namespace_denied(
                 namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
                 raw,
-            ));
+            )),
         }
-        let schema = if rel.schemaname.trim().is_empty() {
-            // Unqualified. Resolve to the pinned project schema; if none, the name is
-            // unattributable → deny (fail-closed).
-            match self.cfg.pinned_schema() {
-                Some(s) => s,
-                None => {
-                    return Err(namespace_denied(
-                        namespace_rule::UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL,
-                        raw,
-                    ))
-                }
-            }
-        } else {
-            rel.schemaname.trim().to_string()
-        };
-        let qualified = format!("{schema}.{relname}");
-        normalize_pg_identifier(&qualified).ok_or_else(|| {
-            namespace_denied(namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL, raw)
-        })
     }
 
     /// Gate a CREATE-TABLE-shaped statement: inside an inject scope the statement
@@ -1887,7 +1976,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
             NodeEnum::CreateSchemaStmt(_) => {
-                if !self.cfg.grants_global_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA) {
+                if !self.cfg.witness_pending_object_resolution(policy_registry::KEY_SCHEMA_CREATE_SCHEMA) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
@@ -1895,7 +1984,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // Platform (0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
             NodeEnum::CreatePolicyStmt(_) => {
-                if !self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_POLICY) {
+                if !self.cfg.witness_pending_object_resolution(policy_registry::KEY_ACCESS_POLICY) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
@@ -2023,7 +2112,9 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
-        let allow_rls = self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_RLS);
+        let allow_rls = self
+            .cfg
+            .witness_pending_object_resolution(policy_registry::KEY_ACCESS_RLS);
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
                 let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
@@ -2807,22 +2898,19 @@ pub struct IrDataSecurityError {
 ///
 /// `require_rls` is a cross-op obligation over the migration's final table RLS
 /// state, not a textual co-occurrence rule. Any table this migration creates and
-/// leaves present must end RLS-enabled; any attempt to turn RLS/force off while
-/// the profile obligates RLS is refused outright. Raw SQL islands are rejected
-/// under this obligation because the guard cannot enumerate their net table
-/// state fail-closed.
+/// leaves present must end RLS-enabled; any attempt to turn RLS/force off is refused
+/// outright. Raw SQL islands are rejected because the guard cannot enumerate their
+/// net table state fail-closed.
+///
+/// `safety.require_rls` is registered `ObjectModel::PerTable`, so every one of those
+/// decisions resolves at the CONCRETE table it is about, the same way
+/// `zero_migrate_ir::policy_approval` resolves its sibling `safety.require_approval`.
+/// The net-state walk therefore runs unconditionally: whether an obligation covers a
+/// table is a property of that table, not of the migration.
 pub fn check_ir_data_security_policy(
     cfg: &GuardConfig,
     ir: &MigrationIr,
 ) -> Result<(), IrDataSecurityError> {
-    // The require-RLS obligation now rides in the effective policy (the ⊤-scope
-    // `safety.require_rls` Require rule); a policy with no such obligation covering
-    // tables is a no-op. Probe the global witness — the obligation is authored
-    // ⊤-scope, so any covered object confirms it.
-    if !cfg.obligates_require_rls(&global_witness()) {
-        return Ok(());
-    }
-
     fn push_policy_ops<'a>(
         cfg: &GuardConfig,
         op_index: usize,
@@ -2877,7 +2965,11 @@ pub fn check_ir_data_security_policy(
                 enabled,
                 forced,
             } => {
-                if enabled == &Some(false) {
+                // Turning RLS or its force flag off is refused at the table THIS op
+                // names, not at the migration: an obligation over `app.users` says
+                // nothing about `app.audit`.
+                let obligated = require_rls_covers(cfg, &table_key_for_policy(cfg, schema, table));
+                if obligated && enabled == &Some(false) {
                     return Err(IrDataSecurityError {
                         op_index,
                         source: GuardError::DataSecurityPolicy {
@@ -2888,7 +2980,7 @@ pub fn check_ir_data_security_policy(
                         },
                     });
                 }
-                if forced == &Some(false) {
+                if obligated && forced == &Some(false) {
                     return Err(IrDataSecurityError {
                         op_index,
                         source: GuardError::DataSecurityPolicy {
@@ -2951,7 +3043,7 @@ pub fn check_ir_data_security_policy(
                     tables.insert(to_key, state);
                 }
             }
-            Op::PgRaw { .. } => {
+            Op::PgRaw { sql, .. } if raw_island_within_require_rls(cfg, sql) => {
                 return Err(IrDataSecurityError {
                     op_index,
                     source: GuardError::DataSecurityPolicy {
@@ -2964,8 +3056,8 @@ pub fn check_ir_data_security_policy(
         }
     }
 
-    for state in tables.values() {
-        if state.exists_after && !state.rls_enabled {
+    for (key, state) in &tables {
+        if state.exists_after && !state.rls_enabled && require_rls_covers(cfg, key) {
             return Err(IrDataSecurityError {
                 op_index: state.last_op_index,
                 source: GuardError::DataSecurityPolicy {
@@ -2980,6 +3072,67 @@ pub fn check_ir_data_security_policy(
     }
 
     Ok(())
+}
+
+/// Does a `safety.require_rls` obligation cover the table this policy key names?
+///
+/// The object is built THROUGH [`normalize_pg_identifier`], the same way
+/// `zero_migrate_ir::policy_approval` builds its own: the composer's scope matcher
+/// PG-folds both sides, so raw table bytes would let `CREATE TABLE "Users"` slip past
+/// a scope of `app.users`.
+///
+/// [`table_key_for_policy`] yields an EMPTY schema for an unqualified table under a
+/// charter with no unique owned schema, and no `ObjectName` can be built from `.users`.
+/// That table is not provably outside the obligation, so it falls back closed to
+/// [`GuardConfig::require_rls_authored_anywhere`] rather than open.
+fn require_rls_covers(cfg: &GuardConfig, key: &(String, String)) -> bool {
+    let (schema, table) = key;
+    match normalize_pg_identifier(&format!("{schema}.{table}")) {
+        Some(object) => cfg.requires_rls_at(&object),
+        None => cfg.require_rls_authored_anywhere(),
+    }
+}
+
+/// Is a raw island inside the reach of a `safety.require_rls` obligation?
+///
+/// The guard cannot enumerate a raw island's net table state, so an island the
+/// obligation reaches is refused, as it always has been. What is new is the REACH:
+/// each statement is attributed to the relations its parse names, resolved by
+/// [`raw_relation_target`] exactly as a raw create target is, and an island naming
+/// only relations the obligation does not cover is admitted.
+///
+/// Three cases carry no usable attribution and are treated as inside the reach: SQL
+/// the Postgres parser rejects, a relation with no schema the config can pin, and a
+/// statement naming no relation at all (`SET`, `DO`, `CALL`: a body that can create a
+/// table this parse never shows us). All three are only refused when an obligation is
+/// authored to refuse them against.
+fn raw_island_within_require_rls(cfg: &GuardConfig, sql: &str) -> bool {
+    if !cfg.require_rls_authored_anywhere() {
+        return false;
+    }
+    let Ok(parsed) = pg_query::parse(sql) else {
+        return true;
+    };
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Ok(json) = serde_json::to_value(raw_stmt) else {
+            return true;
+        };
+        let mut named_a_relation = false;
+        let mut within = false;
+        walk_range_vars(&json, &mut |schemaname, relname| {
+            named_a_relation = true;
+            within = match raw_relation_target(cfg, schemaname, relname) {
+                RawRelationTarget::Resolved(object) => cfg.requires_rls_at(&object),
+                RawRelationTarget::UnpinnedSchema | RawRelationTarget::Unattributable => true,
+            };
+            within
+        });
+        if within || !named_a_relation {
+            return true;
+        }
+    }
+    // An island of zero statements names nothing to refuse.
+    false
 }
 
 #[derive(Debug, Clone)]
