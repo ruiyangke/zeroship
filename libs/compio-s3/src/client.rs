@@ -639,10 +639,17 @@ impl S3Client {
     }
 
     /// One `ListObjectsV2` page (raw, internal-prefixed keys).
+    ///
+    /// `start_after` is S3's own "resume strictly after this key" parameter —
+    /// the server-side seek that lets a caller page a listing without ever
+    /// asking for (and paying for) the keys it already has. `max_keys` bounds
+    /// the page; S3 itself caps it at 1000 whatever we ask for.
     pub async fn list_objects_v2(
         &self,
         prefix: &str,
         continuation: Option<&str>,
+        start_after: Option<&str>,
+        max_keys: Option<u32>,
     ) -> S3Result<ListPage> {
         let mut query: Vec<(String, String)> = vec![
             ("list-type".to_string(), "2".to_string()),
@@ -653,6 +660,15 @@ impl S3Client {
         }
         if let Some(token) = continuation {
             query.push(("continuation-token".to_string(), token.to_string()));
+        }
+        // `start-after` is ignored by S3 when a continuation token is present
+        // (the token already encodes the position), so sending both is
+        // harmless — but only the first request of a page loop passes it.
+        if let Some(after) = start_after {
+            query.push(("start-after".to_string(), after.to_string()));
+        }
+        if let Some(n) = max_keys {
+            query.push(("max-keys".to_string(), n.to_string()));
         }
 
         let (url, host, canonical_uri, _cq) = self.bucket_url(&query);
@@ -693,14 +709,98 @@ impl S3Client {
         })
     }
 
+    /// One BOUNDED page of a listing: at most `limit` entries, resuming
+    /// strictly after `start_after`, with the internal prefix stripped.
+    ///
+    /// This is the entry point for anything a *tenant* can drive. Unlike
+    /// [`S3Client::list`], the work and the result are proportional to `limit`
+    /// rather than to the number of stored objects: `start-after` seeks
+    /// server-side, `max-keys` bounds each request, and the loop stops as soon
+    /// as one more entry than `limit` has been seen.
+    ///
+    /// Returns `(entries, more)` where `more` is true iff at least one further
+    /// entry exists beyond the returned page.
+    pub async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> S3Result<(Vec<ListEntry>, bool)> {
+        /// S3 caps `max-keys` at 1000 per request whatever is asked for.
+        const MAX_KEYS_PER_REQUEST: usize = 1000;
+
+        let limit = limit.max(1);
+        let stored_prefix = self.stored_prefix(prefix);
+        let stored_after = start_after.map(|a| self.stored_prefix(a));
+        let internal_prefix: Option<String> = self.config.prefix.as_ref().map(|p| format!("{p}/"));
+
+        let mut out: Vec<ListEntry> = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            // One more than the page needs: the extra entry is what proves the
+            // listing is truncated, and it is never returned.
+            let want = (limit + 1 - out.len()).min(MAX_KEYS_PER_REQUEST);
+            let page = self
+                .list_objects_v2(
+                    &stored_prefix,
+                    token.as_deref(),
+                    // Only the first request seeks; afterwards the
+                    // continuation token carries the position.
+                    if token.is_none() { stored_after.as_deref() } else { None },
+                    u32::try_from(want).ok(),
+                )
+                .await?;
+            for e in page.entries {
+                out.push(ListEntry {
+                    key: strip_internal_prefix(&e.key, internal_prefix.as_deref())?,
+                    size: e.size,
+                    last_modified: e.last_modified,
+                });
+            }
+            // Enough to fill the page AND prove there is more.
+            if out.len() > limit {
+                break;
+            }
+            // Server says that was the last page: the listing is complete.
+            if !page.is_truncated {
+                break;
+            }
+            token = page.next_continuation_token;
+            if token.is_none() {
+                return Err(S3Error::InvalidResponse(
+                    "truncated list without continuation token".into(),
+                ));
+            }
+        }
+
+        // S3 lists in ascending UTF-8 binary key order; sorting is belt-and-
+        // braces, and it must happen BEFORE the truncation so the page and its
+        // cursor describe the same ordering the next page resumes from.
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        let more = out.len() > limit;
+        out.truncate(limit);
+        Ok((out, more))
+    }
+
+    /// The stored (internal-prefixed) key or prefix for a logical one.
+    fn stored_prefix(&self, logical: &str) -> String {
+        match &self.config.prefix {
+            Some(p) if logical.is_empty() => format!("{p}/"),
+            Some(p) => format!("{p}/{logical}"),
+            None => logical.to_string(),
+        }
+    }
+
     /// Loop `ListObjectsV2` pages internally, returning all entries with the
     /// internal prefix stripped. Caps at `max_list_entries`.
+    ///
+    /// **Exhaustive — for platform-owned prefixes only.** Its cost scales with
+    /// the number of stored objects, and it FAILS the whole call once
+    /// `max_list_entries` is passed rather than telling the caller the answer
+    /// was partial. Anything a tenant can aim at an arbitrary keyspace must
+    /// use [`S3Client::list_page`].
     pub async fn list(&self, prefix: &str) -> S3Result<Vec<ListEntry>> {
-        let stored_prefix = match &self.config.prefix {
-            Some(p) if prefix.is_empty() => format!("{p}/"),
-            Some(p) => format!("{p}/{prefix}"),
-            None => prefix.to_string(),
-        };
+        let stored_prefix = self.stored_prefix(prefix);
         // The internal prefix to strip from each returned key, as a string
         // (`<prefix>/`). Stripping by `strip_prefix` rather than a byte index
         // is REQUIRED: `e.key` is server-supplied and a raw byte-index slice
@@ -713,7 +813,7 @@ impl S3Client {
         let mut token: Option<String> = None;
         loop {
             let page = self
-                .list_objects_v2(&stored_prefix, token.as_deref())
+                .list_objects_v2(&stored_prefix, token.as_deref(), None, None)
                 .await?;
             for e in page.entries {
                 let logical = strip_internal_prefix(&e.key, internal_prefix.as_deref())?;

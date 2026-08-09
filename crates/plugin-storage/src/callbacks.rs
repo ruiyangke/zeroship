@@ -63,6 +63,39 @@ fn optional_string_arg(
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// Read a string property off an options object. Absent object, absent
+/// property, `null`/`undefined`, or an empty string all read as `None`.
+fn opt_string_field(
+    scope: &mut v8::PinScope<'_, '_>,
+    opts: Option<v8::Local<v8::Value>>,
+    name: &str,
+) -> Option<String> {
+    let val = opt_field(scope, opts, name)?;
+    let s = val.to_rust_string_lossy(scope);
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Read a numeric property off an options object. A non-numeric value reads
+/// as `None`; callers normalise (e.g. `limits::resolve_list_limit` clamps).
+fn opt_number_field(
+    scope: &mut v8::PinScope<'_, '_>,
+    opts: Option<v8::Local<v8::Value>>,
+    name: &str,
+) -> Option<f64> {
+    opt_field(scope, opts, name)?.number_value(scope)
+}
+
+fn opt_field<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    opts: Option<v8::Local<v8::Value>>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let obj = opts?.to_object(scope)?;
+    let key = v8::String::new(scope, name)?;
+    let val = obj.get(scope, key.into())?;
+    if val.is_null_or_undefined() { None } else { Some(val) }
+}
+
 fn throw_type(scope: &mut v8::PinScope, arg_name: &str) -> Option<String> {
     let msg = v8::String::new(scope, &format!("storage: missing required argument '{arg_name}'")).unwrap();
     let exc = v8::Exception::type_error(scope, msg);
@@ -284,7 +317,8 @@ pub fn delete(
 }
 
 // ---------------------------------------------------------------------------
-// list(bucket, prefix?) → [{ key, size, modifiedAt }]
+// list(bucket, prefix?, { cursor?, limit? })
+//   → { entries: [{ key, size, modifiedAt }], cursor: string | null }
 // ---------------------------------------------------------------------------
 
 pub fn list(
@@ -296,6 +330,9 @@ pub fn list(
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let prefix = optional_string_arg(scope, &args, 1).unwrap_or_default();
+    let opts = if args.length() > 2 { Some(args.get(2)) } else { None };
+    let cursor = opt_string_field(scope, opts, "cursor");
+    let limit = crate::limits::resolve_list_limit(opt_number_field(scope, opts, "limit"));
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -313,22 +350,35 @@ pub fn list(
 
     let meter = meter_handle(&app_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.list(&app_id, &bucket, &prefix).await {
-            Ok(entries) => {
+        let req = crate::backend::ListRequest {
+            prefix: &prefix,
+            cursor: cursor.as_deref(),
+            limit,
+        };
+        match backend.list(&app_id, &bucket, req).await {
+            Ok(page) => {
                 // Success arm only: one storage op (the list).
                 if let Some(m) = &meter {
                     m.record(STORAGE_OPS, 1);
                 }
-                let arr: Vec<serde_json::Value> = entries.into_iter().map(|e| {
+                let arr: Vec<serde_json::Value> = page.entries.into_iter().map(|e| {
                     let modified = e.modified_at
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     json!({ "key": e.key, "size": e.size, "modifiedAt": modified })
                 }).collect();
+                // `cursor` is the truncation signal: null iff the listing is
+                // complete. Never omit it — a caller that cannot tell a full
+                // answer from a partial one is the bug this shape exists to
+                // prevent.
+                let cursor_v = match page.cursor {
+                    Some(c) => serde_json::Value::String(c),
+                    None => serde_json::Value::Null,
+                };
                 OpResult::Completed {
                     op_id,
-                    value: serde_json::Value::Array(arr).to_string(),
+                    value: json!({ "entries": arr, "cursor": cursor_v }).to_string(),
                     request_id,
                 }
             }

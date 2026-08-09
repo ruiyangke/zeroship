@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use zeroship_plugin_storage::backend::{
-    Backend, BoxByteStream, ChunkResult, ChunkSource, LocalFs,
+    Backend, BoxByteStream, ChunkResult, ChunkSource, ListPage, ListRequest, LocalFs,
 };
 
 const APP: &str = "app_test";
@@ -49,6 +49,24 @@ impl VecChunks {
 impl ChunkSource for VecChunks {
     async fn next_chunk(&mut self) -> Option<ChunkResult> {
         self.0.pop_front().map(Ok)
+    }
+}
+
+/// Every key under `prefix`, obtained by paging to exhaustion. Used by the
+/// assertions that care about *which* keys exist rather than about paging.
+async fn all_keys(backend: &dyn Backend, prefix: &str, label: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = backend
+            .list(APP, BUCKET, ListRequest { prefix, cursor: cursor.as_deref(), limit: 1000 })
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] list {prefix:?}: {e}"));
+        keys.extend(page.entries.into_iter().map(|e| e.key));
+        match page.cursor {
+            Some(c) => cursor = Some(c),
+            None => return keys,
+        }
     }
 }
 
@@ -160,19 +178,24 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
     );
 
     // ---- list ----
-    let entries = backend.list(APP, BUCKET, "").await.unwrap();
-    let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
-    assert!(keys.contains(&key), "[{label}] list missing {key}: {keys:?}");
-    assert!(keys.contains(&skey), "[{label}] list missing {skey}: {keys:?}");
+    let keys = all_keys(backend, "", label).await;
+    assert!(
+        keys.iter().any(|k| k == key),
+        "[{label}] list missing {key}: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k == skey),
+        "[{label}] list missing {skey}: {keys:?}"
+    );
 
     // prefix-scoped list
-    let pref = backend.list(APP, BUCKET, "stream").await.unwrap();
+    let pref = all_keys(backend, "stream", label).await;
     assert!(
-        pref.iter().all(|e| e.key.starts_with("stream")),
+        pref.iter().all(|k| k.starts_with("stream")),
         "[{label}] prefix list leaked non-matching keys: {pref:?}"
     );
     assert!(
-        pref.iter().any(|e| e.key == skey),
+        pref.iter().any(|k| k == skey),
         "[{label}] prefix list missing {skey}"
     );
 
@@ -289,9 +312,8 @@ async fn run_content_type_parity(backend: &dyn Backend, label: &str) {
     // ---- listing must not surface any sidecar/companion file as an object ----
     // A metadata file stored beside the object would otherwise show up as a
     // phantom key that a creator never wrote and cannot get/delete.
-    let entries = backend.list(APP, BUCKET, "ct-").await.unwrap();
-    let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
-    let mut expected = vec!["ct-default.bin", "ct-overwrite.bin"];
+    let keys = all_keys(backend, "ct-", label).await;
+    let mut expected = vec!["ct-default.bin".to_string(), "ct-overwrite.bin".to_string()];
     expected.sort_unstable();
     let mut actual = keys.clone();
     actual.sort_unstable();
@@ -302,6 +324,80 @@ async fn run_content_type_parity(backend: &dyn Backend, label: &str) {
 
     backend.delete(APP, BUCKET, "ct-default.bin").await.unwrap();
     backend.delete(APP, BUCKET, "ct-overwrite.bin").await.unwrap();
+}
+
+/// `list` pagination parity — the property that used to differ silently.
+///
+/// Before this existed, `LocalFs::list` returned EVERY key in the bucket with
+/// no truncation signal, while `S3::list` followed continuation tokens until
+/// `compio_s3`'s `max_list_entries` and then FAILED the whole call. Two
+/// backends, two behaviours, neither of which a caller could page through.
+///
+/// Both must now: honour `limit` exactly, report `cursor = Some(_)` iff more
+/// keys remain, and resume from that cursor to yield every remaining key
+/// exactly once in ascending key order.
+///
+/// Does NOT catch: cursor stability across concurrent mutation (a key written
+/// between two pages may or may not appear — deliberately unspecified), nor
+/// the COST of producing a page on either backend.
+async fn run_list_pagination_parity(backend: &dyn Backend, label: &str) {
+    const N: usize = 7;
+    const LIMIT: usize = 3;
+    let expected: Vec<String> = (0..N).map(|i| format!("pg/k{i}.txt")).collect();
+    for k in &expected {
+        backend
+            .put(APP, BUCKET, k, b"x", None)
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] pagination put {k}: {e}"));
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let page = backend
+            .list(APP, BUCKET, ListRequest { prefix: "pg/", cursor: cursor.as_deref(), limit: LIMIT })
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] list page: {e}"));
+        assert!(
+            page.entries.len() <= LIMIT,
+            "[{label}] page returned {} entries for limit {LIMIT}",
+            page.entries.len()
+        );
+        pages += 1;
+        assert!(pages <= N + 1, "[{label}] pagination did not terminate");
+        seen.extend(page.entries.iter().map(|e| e.key.clone()));
+        match page.cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(
+        pages,
+        N.div_ceil(LIMIT),
+        "[{label}] {N} keys at limit {LIMIT} must take {} pages",
+        N.div_ceil(LIMIT)
+    );
+    assert_eq!(
+        seen, expected,
+        "[{label}] paging must yield every key exactly once, in ascending order"
+    );
+
+    // A page that exactly exhausts the listing must still say so: asking for
+    // more than remains reports `cursor = None`, not a phantom next page.
+    let whole = backend
+        .list(APP, BUCKET, ListRequest { prefix: "pg/", cursor: None, limit: N * 2 })
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] whole list: {e}"));
+    assert_eq!(whole.entries.len(), N, "[{label}] whole listing size");
+    assert!(
+        whole.cursor.is_none(),
+        "[{label}] a complete listing must report cursor = None"
+    );
+
+    for k in &expected {
+        backend.delete(APP, BUCKET, k).await.unwrap();
+    }
 }
 
 /// Large streaming round-trip: put a > part-size object as many chunks, get
@@ -367,7 +463,7 @@ async fn run_large_stream(backend: &dyn Backend, label: &str) {
 
 use std::time::SystemTime;
 
-use zeroship_plugin_storage::backend::{ListEntry, ObjectMeta};
+use zeroship_plugin_storage::backend::ObjectMeta;
 
 /// A fake backend whose `get_stream` reports a chosen `advertised_size` but
 /// only ever yields `body` bytes. Lets the C2 test assert both the
@@ -419,8 +515,8 @@ impl Backend for LyingSizeBackend {
         Ok(false)
     }
 
-    async fn list(&self, _: &str, _: &str, _: &str) -> Result<Vec<ListEntry>, String> {
-        Ok(vec![])
+    async fn list(&self, _: &str, _: &str, _: ListRequest<'_>) -> Result<ListPage, String> {
+        Ok(ListPage { entries: Vec::new(), cursor: None })
     }
 }
 
@@ -474,6 +570,7 @@ fn localfs_parity_and_large_stream() {
         .block_on(async {
             run_parity(&backend, "localfs").await;
             run_content_type_parity(&backend, "localfs").await;
+            run_list_pagination_parity(&backend, "localfs").await;
             run_large_stream(&backend, "localfs").await;
         });
 
@@ -592,6 +689,7 @@ fn s3_parity_and_large_stream() {
             .block_on(async {
                 run_parity(&backend, "s3").await;
                 run_content_type_parity(&backend, "s3").await;
+                run_list_pagination_parity(&backend, "s3").await;
                 run_large_stream(&backend, "s3").await;
                 // Parallel multipart: a many-part object with concurrency > 1
                 // round-trips byte-exact (parts sorted by number before

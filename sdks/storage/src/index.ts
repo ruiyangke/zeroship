@@ -17,7 +17,11 @@ interface NativeStorage {
   put(bucket: string, key: string, bytesBase64: string, contentType?: string): Promise<string>;
   get(bucket: string, key: string): Promise<string>;
   delete(bucket: string, key: string): Promise<string>;
-  list(bucket: string, prefix?: string): Promise<string>;
+  list(
+    bucket: string,
+    prefix?: string,
+    opts?: { cursor?: string; limit?: number },
+  ): Promise<string>;
   // Streaming surface (proposal "env.storage streaming through V8"). These
   // back the streaming put/get below; the buffered forms above stay for
   // small objects.
@@ -86,6 +90,29 @@ export interface ListEntry {
   key: string;
   size: number;
   modifiedAt: Date;
+}
+
+export interface ListOptions {
+  /**
+   * Resume from a previous page. Pass the `cursor` that page returned;
+   * treat it as opaque.
+   */
+  cursor?: string;
+  /**
+   * Maximum entries in this page (default 1000, clamped to 10000). Asking
+   * for more than remains is fine — the page just reports `cursor: null`.
+   */
+  limit?: number;
+}
+
+export interface ListPage {
+  entries: ListEntry[];
+  /**
+   * `null` iff this page completed the listing. A non-null cursor means
+   * MORE keys exist — pass it back as `opts.cursor` to continue. A listing
+   * is never silently truncated.
+   */
+  cursor: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,25 +265,71 @@ export class Bucket {
     }
   }
 
-  /** List entries (optionally filtered by key prefix). */
-  async list(prefix = ""): Promise<Result<ListEntry[]>> {
+  /**
+   * List one page of entries, optionally filtered by a literal key prefix
+   * (not a glob), in ascending key order.
+   *
+   * Listing is paginated because the alternative — return whatever the
+   * bucket holds — makes one request cost whatever the app has stored.
+   * `cursor` is the truncation signal: non-null means more keys exist.
+   *
+   * ```ts
+   * let cursor: string | null = null;
+   * do {
+   *   const { data } = await uploads.list("avatars/", { cursor: cursor ?? undefined });
+   *   for (const e of data!.entries) { ... }
+   *   cursor = data!.cursor;
+   * } while (cursor !== null);
+   * ```
+   *
+   * Or let {@link Bucket.listAll} drive the loop.
+   */
+  async list(prefix = "", opts: ListOptions = {}): Promise<Result<ListPage>> {
     try {
-      const raw = await this.#native.list(this.#name, prefix);
-      const parsed = JSON.parse(raw) as Array<{
-        key: string;
-        size: number;
-        modifiedAt: number;
-      }>;
-      return ok(
-        parsed.map((e) => ({
+      const raw = await this.#native.list(this.#name, prefix, opts);
+      const parsed = JSON.parse(raw) as {
+        entries: Array<{ key: string; size: number; modifiedAt: number }>;
+        cursor: string | null;
+      };
+      return ok({
+        entries: parsed.entries.map((e) => ({
           key: e.key,
           size: e.size,
           modifiedAt: new Date(e.modifiedAt),
         })),
-      );
+        cursor: parsed.cursor,
+      });
     } catch (e) {
       return err(e instanceof Error ? e : new Error(String(e)));
     }
+  }
+
+  /**
+   * Every entry under `prefix`, yielded one at a time, fetching pages lazily
+   * as you consume them. Memory stays bounded by the page size, not by the
+   * bucket — stop iterating (`break`) and the remaining pages are never
+   * fetched.
+   *
+   * Throws (rather than returning the `{ data, error }` envelope) if a page
+   * fails mid-iteration: a `for await` loop has nowhere to put an error
+   * result, and silently ending the iteration would look like the end of the
+   * listing.
+   *
+   * ```ts
+   * for await (const entry of uploads.listAll("avatars/")) { ... }
+   * ```
+   */
+  async *listAll(prefix = "", opts: { limit?: number } = {}): AsyncGenerator<ListEntry> {
+    let cursor: string | null = null;
+    do {
+      const r: Result<ListPage> = await this.list(prefix, {
+        limit: opts.limit,
+        cursor: cursor ?? undefined,
+      });
+      if (r.error) throw r.error;
+      yield* r.data.entries;
+      cursor = r.data.cursor;
+    } while (cursor !== null);
   }
 }
 

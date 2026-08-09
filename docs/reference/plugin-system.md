@@ -62,7 +62,8 @@ Buffered (small objects, base64 over the JSON wire):
 - `env.storage.put(bucket, key, bytesBase64, contentType?)`
 - `env.storage.get(bucket, key)`
 - `env.storage.delete(bucket, key)`
-- `env.storage.list(bucket, prefix)`
+- `env.storage.list(bucket, prefix?, { cursor?, limit? })` → `{ entries, cursor }`
+  (paginated; `cursor` is non-null iff more keys remain)
 
 Streaming (no whole-object buffering — bounded memory):
 

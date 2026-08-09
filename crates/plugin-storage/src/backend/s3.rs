@@ -40,7 +40,7 @@ use compio_s3::{PartETag, PutOptions, S3Client, S3Config, S3Credentials, S3Error
 
 use super::{
     validate_list_coords, validate_object_coords, Backend, BoxByteStream, BoxChunkSource,
-    ChunkResult, ChunkSource, ListEntry, ObjectMeta, DEFAULT_CONTENT_TYPE,
+    ChunkResult, ChunkSource, ListEntry, ListPage, ListRequest, ObjectMeta, DEFAULT_CONTENT_TYPE,
 };
 
 /// Multipart part size. S3 requires every part except the last to be
@@ -558,16 +558,27 @@ impl Backend for S3 {
         &self,
         app_id: &str,
         bucket: &str,
-        prefix: &str,
-    ) -> Result<Vec<ListEntry>, String> {
+        req: ListRequest<'_>,
+    ) -> Result<ListPage, String> {
         validate_list_coords(app_id, bucket)?;
-        let scope = Self::list_prefix(app_id, bucket, prefix);
-        // The client loops continuation tokens internally and strips the
-        // configured `config.prefix`, returning logical keys that still
-        // carry our `<app_id>/<bucket>/...` scope.
-        let entries = self
+        let scope = Self::list_prefix(app_id, bucket, req.prefix);
+        // A page of at least one entry — see the `LocalFs` counterpart.
+        let limit = req.limit.max(1);
+        // The cursor is an app-facing key, so it needs the same
+        // `<app_id>/<bucket>/` scoping the listed keys carry before S3 can
+        // seek past it. `validate_list_coords` has proven neither part can
+        // contain a `/` that would move the seek into another tenant's space.
+        let start_after = req.cursor.map(|c| Self::object_key(app_id, bucket, c));
+
+        // `list_page` bounds the work server-side (`start-after` + `max-keys`)
+        // and strips the configured `config.prefix`, returning logical keys
+        // that still carry our `<app_id>/<bucket>/...` scope. It is used
+        // instead of the exhaustive `client.list`, whose cost scales with the
+        // bucket and which fails outright past `max_list_entries` instead of
+        // reporting a partial answer.
+        let (entries, more) = self
             .client
-            .list(&scope)
+            .list_page(&scope, start_after.as_deref(), limit)
             .await
             .map_err(|e| map_s3("list", &scope, e))?;
 
@@ -586,8 +597,21 @@ impl Backend for S3 {
                 modified_at: e.last_modified,
             });
         }
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(out)
+        let cursor = match (more, out.last()) {
+            (true, Some(last)) => Some(last.key.clone()),
+            (false, _) => None,
+            // More entries exist but every key on this page was dropped by the
+            // guard above, so there is no key to resume from. Reporting `None`
+            // here would claim a complete listing that is not — fail loudly
+            // instead. Unreachable unless S3 returns keys outside the prefix
+            // it was asked for.
+            (true, None) => {
+                return Err(format!(
+                    "storage: s3 list on '{scope}': page held no in-scope keys but more remain"
+                ))
+            }
+        };
+        Ok(ListPage { entries: out, cursor })
     }
 }
 

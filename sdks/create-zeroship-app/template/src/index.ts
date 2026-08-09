@@ -69,6 +69,9 @@ export const uploadFile = mutation(
 
 export const listFiles = query(
   async () => {
+    // `list` is paginated: one page of entries plus a `cursor` that is
+    // non-null when more files remain. Pass it back as `{ cursor }` for the
+    // next page, or use `uploads.listAll()` to iterate everything lazily.
     const r = await uploads.list();
     if (r.error) throw r.error;
     return r.data;

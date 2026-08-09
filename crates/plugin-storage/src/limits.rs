@@ -84,6 +84,35 @@ pub fn upload_concurrency() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// List pagination
+// ---------------------------------------------------------------------------
+
+/// Default `list` page size when the caller doesn't specify `limit`.
+///
+/// Mirrors `zeroship_plugin_kv::limits::LIST_DEFAULT_LIMIT` — the same
+/// question (how many keys does one `list` call return) answered the same way,
+/// so a creator moving between `env.kv.list` and `env.storage.list` does not
+/// meet two different defaults.
+pub const LIST_DEFAULT_LIMIT: usize = 1000;
+
+/// Hard ceiling on a `list` page. A caller-supplied `limit` above this is
+/// **clamped**, not rejected — and the clamp is never silent, because a
+/// clamped page that does not exhaust the listing still reports a
+/// [`crate::backend::ListPage::cursor`]. Also mirrors plugin-kv.
+pub const LIST_MAX_LIMIT: usize = 10_000;
+
+/// Normalise a caller-supplied `list` limit into the effective page size.
+/// `None` → [`LIST_DEFAULT_LIMIT`]; anything above [`LIST_MAX_LIMIT`] is
+/// clamped; a non-positive or non-finite value falls back to the default.
+#[must_use]
+pub fn resolve_list_limit(limit: Option<f64>) -> usize {
+    match limit {
+        Some(l) if l.is_finite() && l >= 1.0 => (l as usize).min(LIST_MAX_LIMIT),
+        _ => LIST_DEFAULT_LIMIT,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Live download streams
 // ---------------------------------------------------------------------------
 
@@ -150,6 +179,17 @@ mod tests {
     #[test]
     fn s3_part_ceiling_is_10000() {
         assert_eq!(MAX_MULTIPART_PARTS, 10_000);
+    }
+
+    #[test]
+    fn resolve_list_limit_defaults_and_clamps() {
+        assert_eq!(resolve_list_limit(None), LIST_DEFAULT_LIMIT);
+        assert_eq!(resolve_list_limit(Some(50.0)), 50);
+        assert_eq!(resolve_list_limit(Some(1e9)), LIST_MAX_LIMIT);
+        assert_eq!(resolve_list_limit(Some(0.0)), LIST_DEFAULT_LIMIT);
+        assert_eq!(resolve_list_limit(Some(-5.0)), LIST_DEFAULT_LIMIT);
+        assert_eq!(resolve_list_limit(Some(f64::NAN)), LIST_DEFAULT_LIMIT);
+        assert_eq!(resolve_list_limit(Some(f64::INFINITY)), LIST_DEFAULT_LIMIT);
     }
 
     #[test]
