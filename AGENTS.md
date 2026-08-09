@@ -133,7 +133,8 @@ crates/
 ├── worker/           V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-└── cli/              CLI: build, serve, deploy, inspect
+└── cli/              CLI: serve, deploy, login, logout, whoami, secret, var
+                      (no `build` — builds go through @zeroship/vite-plugin)
 ```
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
