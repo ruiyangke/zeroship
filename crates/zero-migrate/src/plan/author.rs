@@ -153,12 +153,27 @@ pub(crate) const PG_MAX_IDENT_BYTES: usize = 63;
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
 ///
-/// This is the single source of truth for the cap discipline both the
-/// deterministic author (`index_name`) and the declarative author
-/// (`declarative::unique_index_name`) use, so an over-long generated index name
-/// can never desync `up`/`down`/on-disk (which would cause CREATE/DROP churn —
-/// the emitted full name ≠ the server-truncated live name on a re-diff). Mirrors
-/// the sanitize/truncate discipline of [`crate::apply::role::migrator_role_name`].
+/// This is the cap discipline for every name the MIGRATION ENGINE generates: the
+/// deterministic author (`index_name`), the declarative author
+/// (`declarative::unique_index_name`), and the lower / fold / gen_types / validate
+/// derivations. Within that set an over-long generated index name cannot desync
+/// `up`/`down`/on-disk (which would cause CREATE/DROP churn - the emitted full name
+/// != the server-truncated live name on a re-diff). Mirrors the sanitize/truncate
+/// discipline of [`crate::apply::role::migrator_role_name`].
+///
+/// It is NOT the only capping scheme in the tree. [`crate::schema::query`] - the
+/// schema-authority kernel that also serves the out-of-repo data plane - caps
+/// `query::index_name`, `query::named_index_name` and its union-CHECK constraint
+/// name at 60 bytes with an 8-char base32 tail of its own, never through this
+/// function. That 60 is not a stale guess at 63, and nothing appends to what those
+/// return: it is the byte-for-byte on-disk name contract with the data plane, so
+/// widening it to 63 would rename indexes that already exist on live databases.
+///
+/// The two agree on a natural name of 60 bytes or fewer and diverge above it. So
+/// `declarative::non_unique_index_name`, which caps `<table>_<col>_idx` HERE, is
+/// interchangeable with `query::index_name(table, &[col], false)` only below 61
+/// bytes; a name that crosses the two subsystems has to be compared, not assumed
+/// equal.
 pub fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
     if natural.len() <= PG_MAX_IDENT_BYTES {
