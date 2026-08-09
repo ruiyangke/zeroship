@@ -235,6 +235,38 @@ describe("subscribeCall — happy path", () => {
     handle.unsubscribe();
   });
 
+  test("the bearer token is never put on the wire as a subprotocol", async () => {
+    // The client used to append `auth.zsbearer.<jwt>` to the protocol
+    // list, on the stated rationale that "the gateway adapts". No server
+    // in this repo reads it: the gateway resolves identity from
+    // `Authorization: Bearer`, the session cookie, then the IP
+    // (`crates/gateway/src/router/dispatch.rs`), and the subscription
+    // path runs that same `resolve_auth`. So the token bought nothing
+    // and rode in `Sec-WebSocket-Protocol`, a request header proxies and
+    // CDNs log by default while `Authorization` is commonly redacted.
+    //
+    // What this does NOT establish: that cross-origin WebSocket auth
+    // works. It does not — the credential has to arrive by cookie, which
+    // is exactly what a cross-origin caller cannot rely on. Removing the
+    // leak does not supply the missing capability.
+    const { factory, records } = makeWsFactory();
+    const cfg: TransportConfig = { ...makeCfg(), authResolver: () => "jwt-secret-value" };
+    const handle = subscribeCall("todoTicker", undefined, cfg, { onData: () => {} }, factory);
+    await ticks(2);
+    const rec = records[0];
+    assert.ok(rec, "WebSocket constructed");
+    assert.deepEqual(
+      rec.protocols,
+      ["zs.v1"],
+      `the protocol list must carry no credential, got: ${rec.protocols.join(", ")}`,
+    );
+    assert.ok(
+      !rec.protocols.some((p) => p.includes("jwt-secret-value")),
+      "the bearer token leaked into the WebSocket subprotocol list",
+    );
+    handle.unsubscribe();
+  });
+
   test("input non-undefined is wrapped per-transformer and sent in hello", async () => {
     const { factory, records } = makeWsFactory();
     subscribeCall("search", { q: "build" }, makeCfg(), { onData: () => {} }, factory);
