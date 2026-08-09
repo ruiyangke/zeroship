@@ -118,9 +118,17 @@ stack_up() {
   # per-app brokered oac_ clients") made the gateway REFUSE TO START without it,
   # and this file was not updated -- so `stack_up` has been unable to bring a
   # gateway up since, taking every harness that sources it with it (e2e_auth_rpc,
-  # e2e_uri, e2e_s3_*, e2e_app_primitives_render, tests/e2e_browser). The 17
-  # harnesses that bring their own stack pass the flag directly and were
-  # unaffected, which is why the breakage stayed invisible.
+  # e2e_uri, e2e_s3_*, e2e_app_primitives_render, tests/e2e_browser).
+  #
+  # An earlier version of this comment claimed every harness bringing its own
+  # stack passed the flag directly and was unaffected. That was wrong, and the
+  # claim is why nobody rechecked: seven own-stack harnesses launch a gateway
+  # with no secret at all (e2e_app_primitives{,_auth,_kv_storage}, e2e_platform,
+  # bench_platform, m0_gate, supabase_deploy_e2e). Running e2e_app_primitives.sh
+  # is what surfaced it - it dies at "gateway unhealthy" before reaching a single
+  # env.db assertion, so its header's "env.db GREEN" describes a run that has not
+  # happened since cd54028e7. The three app_primitives ones now generate their
+  # own secret; the rest are tracked separately.
   openssl rand -base64 48 > "$WORK/gate-secret"
   chmod 600 "$WORK/gate-secret"
   local p
