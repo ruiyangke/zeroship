@@ -4922,6 +4922,40 @@ pub enum DeclarativeError {
         /// The specific operation that has no rebuild expression (human-readable).
         op: String,
     },
+    /// The diff would CREATE a table that a `safety.require_rls` obligation covers.
+    ///
+    /// The obligation is a final-state one: every table a migration creates and
+    /// leaves present must end RLS-enabled. The IR path can discharge it, because an
+    /// author can write a `setRls` op next to the create. The declarative path
+    /// cannot: the desired model is a
+    /// [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot), which records RLS
+    /// only as `RoleSnapshot.bypass_rls` and carries nothing per table, so no diff of
+    /// it can author the `ENABLE ROW LEVEL SECURITY` the obligation asks for.
+    ///
+    /// So the create is refused rather than planned. Auto-appending the enable
+    /// instead would invent a final state the author never declared, and planning it
+    /// anyway would put an unprotected table in a schema the charter obligates - the
+    /// gap this variant closes.
+    ///
+    /// Only the CREATEs the obligation actually covers are refused: an alter-only
+    /// diff, a no-op diff, and a create into a schema the obligation does not name
+    /// all keep planning.
+    #[error(
+        "refusing to create {tables:?} in schema '{schema}': a safety.require_rls \
+         obligation covers these tables, and a declarative diff carries no RLS \
+         transition that could satisfy it - the desired model records no per-table \
+         RLS, so nothing here can render ENABLE ROW LEVEL SECURITY. Teaching the \
+         declarative model, the introspector and the differ about RLS is a separate \
+         feature and is not implied by this refusal. Either author these tables \
+         through the IR migration path, where a setRls op can accompany the create, \
+         or narrow the obligation's scope so it does not cover them"
+    )]
+    RequireRlsUnsatisfiable {
+        /// The schema the refused tables would have been created in.
+        schema: String,
+        /// The covered tables this diff would create, sorted ascending.
+        tables: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -4979,6 +5013,14 @@ pub struct DeclarativePlan {
     /// name, instead of emitting a CREATE plus a DROP for them. Reported so an
     /// alias-accepted no-op is visible rather than silent; it drives no DDL.
     pub accepted_index_aliases: Vec<AcceptedIndexAlias>,
+    /// The tables this diff CREATEs, sorted ascending. Recorded by the create pass
+    /// itself, from the same map the deferred FKs read, so it names exactly the
+    /// tables a `CREATE TABLE` migration was emitted for - not a re-derivation of
+    /// "desired minus live" that could drift from what the pass actually did.
+    ///
+    /// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) reads
+    /// it to resolve `safety.require_rls` at each newly created table.
+    pub created_tables: Vec<String>,
 }
 
 /// one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
@@ -5186,6 +5228,17 @@ impl DeclarativeAuthor {
     #[must_use]
     pub(crate) fn owner_app(&self) -> &str {
         &self.owner_app
+    }
+
+    /// The schema every table this author CREATEs lands in.
+    ///
+    /// The create pass qualifies through `self.project_schema` on every dialect leg,
+    /// so this is the schema a policy question about a newly created table resolves
+    /// at. (`with_project_schema` re-qualifies a clone for a single lowered op; it is
+    /// not used by the diff.)
+    #[must_use]
+    pub(crate) fn project_schema(&self) -> &str {
+        &self.project_schema
     }
 
     /// Select the per-dialect DDL emission seam. The dialect choice is made
@@ -5874,6 +5927,7 @@ impl DeclarativeAuthor {
             renames,
             rebuilds,
             accepted_index_aliases,
+            created_tables: created_version.into_keys().collect(),
         })
     }
 
@@ -9831,6 +9885,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
+            created_tables: Vec::new(),
         };
         let advisories = plan.advisories();
         // Only the drop produced an advisory entry (the additive create is silent).
@@ -9860,6 +9915,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
+            created_tables: Vec::new(),
         };
         assert!(plan.advisories().is_empty());
     }
@@ -9882,6 +9938,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
+            created_tables: Vec::new(),
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
@@ -9902,6 +9959,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
+            created_tables: Vec::new(),
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(

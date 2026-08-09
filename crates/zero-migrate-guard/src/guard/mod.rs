@@ -413,6 +413,27 @@ impl GuardConfig {
             .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
     }
 
+    /// [`Self::requires_rls_at`] for a caller holding a schema and a table name
+    /// rather than a built [`ObjectName`].
+    ///
+    /// The object is built THROUGH [`normalize_pg_identifier`], the same way
+    /// `zero_migrate_ir::policy_approval` builds its own: the composer's scope matcher
+    /// PG-folds both sides, so raw table bytes would let a table spelled `"Users"` slip
+    /// past a scope of `app.users`.
+    ///
+    /// A pair no `ObjectName` can be built from - an empty schema, say - is not
+    /// provably outside the obligation, so it falls back closed onto the weaker
+    /// question `require_rls_authored_anywhere` asks: is the obligation authored at
+    /// ANY scope? That refuses such a table under an RLS charter and leaves a charter
+    /// that never mentions RLS untouched.
+    #[must_use]
+    pub fn requires_rls_at_table(&self, schema: &str, table: &str) -> bool {
+        match normalize_pg_identifier(&format!("{schema}.{table}")) {
+            Some(object) => self.requires_rls_at(&object),
+            None => self.require_rls_authored_anywhere(),
+        }
+    }
+
     /// Is a `safety.require_rls = true` obligation authored ANYWHERE in the effective
     /// policy, at any scope?
     ///
@@ -3211,21 +3232,13 @@ pub fn check_ir_data_security_policy(
 
 /// Does a `safety.require_rls` obligation cover the table this policy key names?
 ///
-/// The object is built THROUGH [`normalize_pg_identifier`], the same way
-/// `zero_migrate_ir::policy_approval` builds its own: the composer's scope matcher
-/// PG-folds both sides, so raw table bytes would let `CREATE TABLE "Users"` slip past
-/// a scope of `app.users`.
-///
 /// [`table_key_for_policy`] yields an EMPTY schema for an unqualified table under a
 /// charter with no unique owned schema, and no `ObjectName` can be built from `.users`.
-/// That table is not provably outside the obligation, so it falls back closed to
-/// [`GuardConfig::require_rls_authored_anywhere`] rather than open.
+/// [`GuardConfig::requires_rls_at_table`] is where that fall-back-closed rule lives,
+/// so the declarative path resolves the obligation the same way this walk does.
 fn require_rls_covers(cfg: &GuardConfig, key: &(String, String)) -> bool {
     let (schema, table) = key;
-    match normalize_pg_identifier(&format!("{schema}.{table}")) {
-        Some(object) => cfg.requires_rls_at(&object),
-        None => cfg.require_rls_authored_anywhere(),
-    }
+    cfg.requires_rls_at_table(schema, table)
 }
 
 /// Is a raw island inside the reach of a `safety.require_rls` obligation?

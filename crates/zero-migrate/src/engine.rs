@@ -724,6 +724,14 @@ impl MigrationEngine {
     /// (`NotTableOwner` / `DropOfUnownedTable` — fail-closed drop ownership). A
     /// guard *denial* on generated SQL is NOT an error here — it lands in
     /// [`MigrationPlan::denied`] like any other.
+    ///
+    /// Also
+    /// [`DeclarativeError::RequireRlsUnsatisfiable`](crate::render::declarative::DeclarativeError::RequireRlsUnsatisfiable)
+    /// when a `safety.require_rls` obligation covers a table this diff would CREATE.
+    /// The obligation is a final-state one and a declarative diff renders no RLS
+    /// transition, so the covered creates are refused instead of planned unprotected.
+    /// Creates the obligation does not cover, alter-only diffs and no-op diffs are
+    /// unaffected.
     pub fn plan_declarative(
         &self,
         desired: &crate::render::declarative::DesiredSchema,
@@ -745,6 +753,28 @@ impl MigrationEngine {
         // expand-contract), so the PG `DeclarativeDeployPlan` is byte-identical to
         // before; only the SQLite leg gains a non-empty `rebuilds`.
         let policy_guard_cfg = cfg.clone().with_effective_policy(effective.clone());
+        // `safety.require_rls` is a final-state obligation over every table a
+        // migration creates, and its check - `check_ir_data_security_policy` - runs on
+        // a `MigrationIr`. This path never builds one: it diffs two snapshots into SQL
+        // text and lints the text, so the obligation reached nothing here however it
+        // was scoped. Resolve it at each table the diff CREATES, at the schema the
+        // create pass qualified into, and refuse the ones it covers. A declarative
+        // diff has no RLS transition to offer, so refusing is the only honest answer;
+        // see `DeclarativeError::RequireRlsUnsatisfiable`.
+        let obligated: Vec<String> = diff
+            .created_tables
+            .iter()
+            .filter(|table| policy_guard_cfg.requires_rls_at_table(author.project_schema(), table))
+            .cloned()
+            .collect();
+        if !obligated.is_empty() {
+            return Err(
+                crate::render::declarative::DeclarativeError::RequireRlsUnsatisfiable {
+                    schema: author.project_schema().to_string(),
+                    tables: obligated,
+                },
+            );
+        }
         let plain = self.plan(&diff.migrations, &policy_guard_cfg);
         Ok(DeclarativeDeployPlan {
             plain,
