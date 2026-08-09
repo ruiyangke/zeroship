@@ -37,6 +37,9 @@ import type {
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
+  ColumnReference,
+  ColumnReferenceOptions,
+  CursorStability,
   CommentTargetArg,
   ConstraintRef,
   AlterSequenceArgs,
@@ -100,6 +103,7 @@ import type {
   MaskOptions,
   NextvalDefault,
   NextvalOptions,
+  OrderedColumns,
   OrderItem,
   PartitionBoundArgs,
   PartitionBoundInput,
@@ -547,6 +551,50 @@ function requireString(v: unknown, what: string): asserts v is string {
   }
 }
 
+function requireNonEmptyString(v: unknown, what: string): asserts v is string {
+  requireString(v, what);
+  if (v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+}
+
+/** The closed referential-action lexicon (`RefAction`), enforced client-side so a
+ *  typo is a friendly OP_INVALID instead of an engine-side validate failure. */
+const REF_ACTIONS: readonly RefAction[] = ["cascade", "restrict", "setNull", "setDefault", "noAction"];
+
+function requireReferenceAction(v: unknown, what: string): RefAction | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || !REF_ACTIONS.includes(v as RefAction)) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be one of ${REF_ACTIONS.join(" | ")}; got ${JSON.stringify(v)}`,
+    );
+  }
+  return v as RefAction;
+}
+
+/** Validate the non-empty ORDERED column tuple at the runtime boundary as well as
+ *  in the types: plain JavaScript callers (and `as any` escapes) must not be able
+ *  to record an empty or duplicated cursor tuple. */
+function requireOrderedColumns(v: unknown, what: string): asserts v is OrderedColumns {
+  if (!Array.isArray(v) || v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty ordered column-name array`);
+  }
+  const seen = new Set<string>();
+  for (let position = 0; position < v.length; position += 1) {
+    const column = v[position];
+    requireNonEmptyString(column, `${what}[${position}]`);
+    if (seen.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)} more than once`,
+        { column, position },
+      );
+    }
+    seen.add(column);
+  }
+}
+
 function requireStrictness(v: unknown, what: string): TableStrictness | undefined {
   if (v === undefined) return undefined;
   if (v !== "strict" && v !== "lenient" && v !== "off") {
@@ -709,6 +757,10 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _default: unknown;
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
+  // The TYPED single-column foreign-key facet (`$defs/ColumnReference`): a
+  // SIBLING of `name`/`type` on the wire IrColumn, never a replacement for the
+  // local storage type.
+  readonly _reference: ColumnReference | undefined;
   // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
   // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
   // (`t.vector({ dimensions, metric })`). #174: a standalone column mask (`.mask({…})`).
@@ -727,6 +779,7 @@ class ColumnDefImpl implements ColumnDefType {
       default?: unknown;
       primaryKey?: boolean;
       unique?: boolean;
+      reference?: ColumnReference;
       idPrefix?: string;
       vectorMetric?: string;
       caseSensitive?: boolean;
@@ -740,6 +793,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._default = fields?.default;
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
+    this._reference = fields?.reference;
     this._idPrefix = fields?.idPrefix;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
@@ -755,6 +809,7 @@ class ColumnDefImpl implements ColumnDefType {
     default?: unknown;
     primaryKey?: boolean;
     unique?: boolean;
+    reference?: ColumnReference;
     idPrefix?: string;
     vectorMetric?: string;
     caseSensitive?: boolean;
@@ -767,6 +822,7 @@ class ColumnDefImpl implements ColumnDefType {
       default: "default" in over ? over.default : this._default,
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
+      reference: "reference" in over ? over.reference : this._reference,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
@@ -796,6 +852,31 @@ class ColumnDefImpl implements ColumnDefType {
   }
   unique(): ColumnDefImpl {
     return this.with({ unique: true });
+  }
+
+  /** `.references(table, column, options?)` — the TYPED single-column foreign-key
+   *  FACET (`$defs/ColumnReference`). It records `references: { table, column, … }`
+   *  as a SIBLING of `name`/`type` on the wire `IrColumn` and leaves `type` exactly
+   *  as authored; it is NOT the table-only `{ ref: { references } }` column TYPE.
+   *
+   *  `column` is REQUIRED. A missing/empty target column is a structured OP_INVALID
+   *  rather than a silent narrowing to a table-only reference — the facet's whole
+   *  point is that both halves of the target identity are recorded. */
+  references(table: string, column: string, options: ColumnReferenceOptions = {}): ColumnDefImpl {
+    requireNonEmptyString(table, "t.*.references(table, column, options): table");
+    requireNonEmptyString(column, "t.*.references(table, column, options): column");
+    requirePlainObject(options, "t.*.references(table, column, options): options");
+    if (options.name !== undefined) {
+      requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
+    }
+    const reference = compact({
+      table,
+      column,
+      name: options.name,
+      onDelete: requireReferenceAction(options.onDelete, "t.*.references(table, column, { onDelete })"),
+      onUpdate: requireReferenceAction(options.onUpdate, "t.*.references(table, column, { onUpdate })"),
+    }) as unknown as ColumnReference;
+    return this.with({ reference: Object.freeze(reference) });
   }
 
   /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
@@ -871,6 +952,9 @@ class ColumnDefImpl implements ColumnDefType {
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
+      // The typed single-column FK facet, a SIBLING of `name`/`type` (never a
+      // replacement for the local storage type). Absent ⇒ omitted (compact).
+      references: this._reference,
       // P2a/#174 — carry the declared-only facets onto the wire IrColumn (camelCase
       // keys `idPrefix`/`vectorMetric`/`mask`, lock-step with `migrate_ops.js`).
       // Absent ⇒ omitted (compact), so a plain column is byte-identical to the
@@ -884,6 +968,13 @@ class ColumnDefImpl implements ColumnDefType {
     });
   }
   __toAddColumnTail(): Node {
+    // `Op::AddColumn` has NO `references` slot: carrying the facet here would
+    // silently drop the FK on the wire. Refuse instead (lock-step with the
+    // idPrefix refusal below).
+    rejectColumnReferenceFacet(
+      this,
+      ".column(name).add({ type }): typed references are not a lifecycle operation",
+    );
     // #173: a typed-id prefix on an ADDED column is meaningless (an added column is
     // never the system PK) — `Op::AddColumn` has no `idPrefix` slot. Carrying it
     // would SILENTLY drop the prefix on the wire (the one outcome the closed-contract
@@ -914,6 +1005,20 @@ class ColumnDefImpl implements ColumnDefType {
 
 function isColumnDef(x: unknown): x is ColumnDefImpl {
   return x instanceof ColumnDefImpl;
+}
+
+/** The `references` facet has exactly ONE wire home: an `IrColumn` inside
+ *  `createTable`. Every other position that takes a `ColumnDef` (an added column,
+ *  a `setType`/`rename` type, a nested `t.encrypted({ of })` / domain `as`) has no
+ *  slot for it, so a `.references()` def there is REFUSED rather than recorded
+ *  without its FK. */
+function rejectColumnReferenceFacet(def: ColumnDefImpl, where: string): void {
+  if (def._reference !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a .references() ColumnDef; typed references are supported only in table(...).create({ columns })`,
+    );
+  }
 }
 
 function textColumn(opts?: TextOptions): ColumnDefImpl {
@@ -1407,6 +1512,11 @@ export const t: TypeLexicon = {
   },
   encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
+    if (isColumnDef(inner)) {
+      // `ColType::Encrypted { of }` carries a TYPE, not a column: a `.references()`
+      // on the inner def has nowhere to go.
+      rejectColumnReferenceFacet(inner, "t.encrypted({ of })");
+    }
     const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
     if (innerType === undefined) {
       throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
@@ -1416,7 +1526,12 @@ export const t: TypeLexicon = {
 };
 
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
-  if (isColumnDef(typeArg)) return typeArg._type;
+  if (isColumnDef(typeArg)) {
+    // Every caller here wants the TYPE only (setType/rename targets, domain `as`,
+    // …); a `.references()` def would lose its facet silently.
+    rejectColumnReferenceFacet(typeArg, "this lifecycle or nested type position");
+    return typeArg._type;
+  }
   return typeArg as ColType;
 }
 
@@ -3507,14 +3622,60 @@ function recordDel(table: string, args: DelArgs): void {
   });
 }
 
-const DEFAULT_BACKFILL_CURSOR = "id";
 const DEFAULT_BACKFILL_BATCH = 1000;
 
+/** `CursorStability` is internally tagged on `mode` and CLOSED: exactly
+ *  `{ mode: "guardUpdates" }` or `{ mode: "externalInvariant", name }`. The extra-key
+ *  checks keep a typo (`{ mode: "externalInvariant", named: … }`) from recording a
+ *  weaker invariant than the author wrote. */
+function resolveCursorStability(value: unknown): CursorStability {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw structuredError(
+      "OP_INVALID",
+      'backfill({ cursorStability }) must be { mode: "guardUpdates" } or { mode: "externalInvariant", name: string }',
+    );
+  }
+  const stability = value as Record<string, unknown>;
+  if (stability.mode === "guardUpdates") {
+    const keys = Object.keys(stability);
+    if (keys.length !== 1 || keys[0] !== "mode") {
+      throw structuredError(
+        "OP_INVALID",
+        'backfill({ cursorStability: { mode: "guardUpdates" } }) accepts only the mode field',
+      );
+    }
+    return { mode: "guardUpdates" };
+  }
+  if (stability.mode === "externalInvariant") {
+    const keys = Object.keys(stability).sort();
+    if (keys.length !== 2 || keys[0] !== "mode" || keys[1] !== "name") {
+      throw structuredError(
+        "OP_INVALID",
+        'backfill({ cursorStability: { mode: "externalInvariant", name } }) accepts exactly mode and name',
+      );
+    }
+    requireNonEmptyString(stability.name, "backfill({ cursorStability.name })");
+    return { mode: "externalInvariant", name: stability.name };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    'backfill({ cursorStability.mode }) must be "guardUpdates" or "externalInvariant"',
+  );
+}
+
 function recordBackfill(table: string, args: BackfillArgs): void {
+  if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
+    throw structuredError(
+      "OP_INVALID",
+      'backfill({ cursorColumn }) is not a field of the backfill op; use cursorColumns: ["column"]',
+    );
+  }
   if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+  requireOrderedColumns(args.cursorColumns, "backfill({ cursorColumns })");
   emitBackfill({
     table,
-    cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
+    cursorColumns: [...args.cursorColumns],
+    cursorStability: resolveCursorStability(args.cursorStability),
     batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
     set: resolveSet(args.set),
     filter: resolveExpr(args.where),

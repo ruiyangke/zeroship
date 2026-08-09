@@ -89,6 +89,9 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
       // a standalone mask defaulting classification → "pii"
       email: t.text().mask({ kind: "email" }),
+      // .references(table, column, opts) → IrColumn.references:{table,column,…},
+      // a SIBLING of name/type (the local `uuid` type survives).
+      owner_id: t.uuid().references("users", "id", { onDelete: "cascade" }),
       title: t.text(),
     },
   });
@@ -127,6 +130,14 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });
   // classification defaults to "pii"
   assert.deepEqual(byName("email").mask, { kind: "email", classification: "pii" });
+
+  // .references(...) → the `references` FACET beside a fully specified type.
+  assert.equal(byName("owner_id").type, "uuid");
+  assert.deepEqual(byName("owner_id").references, {
+    table: "users",
+    column: "id",
+    onDelete: "cascade",
+  });
 
   // generated/identity facets carry their exact nested camelCase shape.
   assert.deepEqual(byName("seq").identity, { always: true });

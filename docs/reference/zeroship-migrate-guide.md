@@ -360,7 +360,7 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 | `t.bytes()` | — | `bytes` | `bytea` / blob |
 | `t.boolean()` | — | `boolean` | boolean |
 | `t.json()` | — | `json` | `jsonb` |
-| `t.ref(targetTable)` | `string` | `{ ref: { references: target } }` | inline FK to `target(id)` (plain-string target) |
+| `t.ref(targetTable)` | `string` | `{ ref: { references: target } }` | inline FK column TYPE naming the target table only; for the target column use an explicit type plus `.references(table, column)` ([§3.6](#36-columndef--facets--defaults)) |
 | `t.vector(opts)` | `{ dimensions, metric? }` **dims required** | `{ vector: { vector: n } }`; `vectorMetric` facet | pgvector / sqlite-vec; metric ∈ closed set |
 | `t.geoPoint()` | — | `geoPoint` | spatial point |
 | `t.smallInt()` | — | `smallInt` | int2 |
@@ -386,6 +386,7 @@ Closed token sets validated client-side (friendly `OP_INVALID` before serde): `V
 | `.notNull()` | `(): ColumnDef` | `NOT NULL` (`ops.ts:743`) |
 | `.primaryKey()` | `(): ColumnDef` | table PK; **implies `NOT NULL`** (`ops.ts:749-751`) |
 | `.unique()` | `(): ColumnDef` | single-column UNIQUE |
+| `.references(table, column, opts?)` | `string`, `string`, `{ onDelete?, onUpdate?, name? }` | typed single-column FK **facet** (`IrColumn.references`): keeps this column's storage type and records the full target `{ table, column }`. Both names required (a missing target column is `OP_INVALID`); create-table only — an added/retyped/nested position rejects it |
 | `.default(v)` | `DefaultValue \| DefaultExprFn \| ExprChain \| Expr` | structured default (never raw SQL) |
 | `.mask(opts)` | `{ kind, classification? }` | column mask; `classification` defaults `"pii"`; `kind:"none"` opts out; overrides an encrypted column's auto-mask (`ops.ts:763-786`) |
 | `.generated(expr, opts?)` | `expr`, `{ virtual? }` | computed column; omitted ⇒ STORED, `{virtual:true}` ⇒ SQLite VIRTUAL (rejected on PG) |
@@ -458,7 +459,11 @@ table("users").column("email").comment("primary contact");                   // 
 
 ```ts
 table("users").column("first_name").add({ type: t.text() })
-  .backfill({ set: { first_name: (col) => col("name").splitPart(" ", 1) } });
+  .backfill({
+    set: { first_name: (col) => col("name").splitPart(" ", 1) },
+    cursorColumns: ["id"],
+    cursorStability: { mode: "guardUpdates" },
+  });
 ```
 
 ### 3.9 Constraints
@@ -596,7 +601,7 @@ table("plans").insert({ rows: [{ id:"free", name:"Free" }, { id:"pro", name:"Pro
 table("plans").update({ set: { name: (col) => lit("Professional") }, where: (col) => col("id").eq("pro") });
 table("plans").delete({ where: (col) => col("id").eq("legacy") });  // where mandatory (no unfiltered delete)
 table("users").backfill({ set: { display_name: (col) => col("nickname").coalesce(col("name")) },
-  cursorColumn: "id" });    // defaults "id"; batchSize defaults 1000
+  cursorColumns: ["id"], cursorStability: { mode: "guardUpdates" } });  // both required; batchSize defaults 1000
 ```
 
 `insert` rows must be non-ragged; `onConflict` is PG-only (SQLite surfaces the structured envelope at build); `delete({ where })` throws `OP_INVALID` if `where` is missing.
@@ -845,7 +850,7 @@ The `Op` enum (`ir.rs:2429-3394`) is closed, internally tagged on `"op"`, camel-
 
 **Partitioning:** `createPartition@2463`, `attachPartition@2478`, `detachPartition@2490` (`concurrently`), `dropPartition@2503` (`cascade`).
 
-**DML:** `insert@2850` (`on_conflict: Option<IrOnConflict>` PG-only upsert), `update@2870` (`set: BTreeMap<String, IrValue>` sorted for canonicality), `delete@2889` (`where: Expr` **mandatory** — no unfiltered delete; **wire tag `"delete"`** even though the JS method is `del()`), `backfill@2903` (`cursorColumn`, `batchSize: SafeU64`, `set`, `filter`, `name` progress key).
+**DML:** `insert@2850` (`on_conflict: Option<IrOnConflict>` PG-only upsert), `update@2870` (`set: BTreeMap<String, IrValue>` sorted for canonicality), `delete@2889` (`where: Expr` **mandatory** — no unfiltered delete; **wire tag `"delete"`** even though the JS method is `del()`), `backfill@2903` (`cursorColumns`, `cursorStability`, `batchSize: SafeU64`, `set`, `filter`, `name` progress key).
 
 **Views, enums, domains, sequences:** `createView@2923` (`query: ViewQuery`, `materialized`), `dropView@2942`, `createEnum@2958`, `dropEnum@2968`, `createDomain@2981` (`check: Option<Expr>` where a `ColRef` named `VALUE` = the domain value), `dropDomain@3002`, `createSequence@3016` (present-nullable `min_value/max_value/owned_by`), `alterSequence@3063` (`restart: Option<Option<SafeI64>>` — `null` → bare `RESTART`), `dropSequence@3112`. The present-nullable fields use `deserialize_present_nullable` (`ir.rs:150-156`) so the wire distinguishes "absent" (omit clause) from "`null`" (emit `NO MINVALUE`/`RESTART`).
 

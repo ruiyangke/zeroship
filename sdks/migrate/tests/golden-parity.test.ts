@@ -6,6 +6,15 @@
 // golden fixture's `up()` through `table()` and asserts the post-policy op list
 // equals the committed golden `.golden.json`'s `ops`.
 //
+// WHAT THIS TEST MATCHES. The committed `<stem>.golden.json` is the CONTRACT
+// (`src/types.ts:11-12`). The `<stem>.mig.js` sitting beside it is a HINT about
+// the intended authoring, not a harness: nothing executes it (the engine's own
+// support-matrix runner skips every non-`.golden.json` file and its JS parity
+// test inlines its authoring), so the two are tied by filename alone. When the
+// authoring below is updated, it is derived from the GOLDEN and only sanity-read
+// against the `.mig.js`; a disagreement between them is an upstream finding, not
+// a licence to match the input file.
+//
 // Re-bless note: `fluent_ddl`'s `label` column was authored via the now-removed
 // `t.string()` alias (wire `string`). The spec removes that alias (canonical
 // `text`/`integer`), so `label` is re-authored as `t.text()` and the golden's
@@ -128,7 +137,12 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
-        owner: t.ref("users"),
+        // The golden records `{"name":"owner","type":"text","references":{"table":
+        // "users","column":"id"}}` — a fully specified local type PLUS the typed
+        // single-column FK facet. `t.ref("users")` would record the table-only
+        // `{ ref: { references: "users" } }` column TYPE instead: a different
+        // construct that drops the target column.
+        owner: t.text().references("users", "id"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         // re-blessed string → text (t.string alias removed, §7).
@@ -220,7 +234,10 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
         token: uuidV4(),
       },
       where: (col) => col("code").gt(0),
-      cursorColumn: "code",
+      // The golden records the ORDERED cursor tuple plus an explicit stability
+      // mode; neither has a default in the engine's `backfill` op.
+      cursorColumns: ["code"],
+      cursorStability: { mode: "guardUpdates" },
       batchSize: 500,
       name: "fluent_backfill",
     });
@@ -247,58 +264,58 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
   const ops = record(() => {
     extension("citext").create({ ifNotExists: true });
     extension("citext").drop({ ifExists: true });
-    schema("zeroship").create({ ifNotExists: true });
-    schema("zeroship").drop({ ifExists: true, cascade: true });
+    schema("zero_migrate").create({ ifNotExists: true });
+    schema("zero_migrate").drop({ ifExists: true, cascade: true });
 
-    role("zeroship_auth").create({
+    role("zero_migrate_auth").create({
       login: true,
-      password: "zeroship_auth",
+      password: "zero_migrate_auth",
       bypassRls: true,
-      setSearchPath: ["zeroship", "public"],
+      setSearchPath: ["zero_migrate", "public"],
       ifNotExists: true,
     });
-    role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
-    role("zeroship_auth").drop({ ifExists: true });
-    dropOwnedBy({ roles: ["zeroship_auth"] });
+    role("zero_migrate_auth").setOptions({ setSearchPath: ["zero_migrate", "public"] });
+    role("zero_migrate_auth").drop({ ifExists: true });
+    dropOwnedBy({ roles: ["zero_migrate_auth"] });
 
     grant({
       privileges: ["select", "insert", "update", "delete"],
-      on: { kind: "table", names: ["users"], schema: "zeroship" },
-      to: ["zeroship_auth"],
+      on: { kind: "table", names: ["users"], schema: "zero_migrate" },
+      to: ["zero_migrate_auth"],
     });
     revoke({
       privileges: ["update", "delete", "truncate"],
-      on: { kind: "table", names: ["audit_events"], schema: "zeroship" },
+      on: { kind: "table", names: ["audit_events"], schema: "zero_migrate" },
       from: ["public"],
     });
 
-    table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+    table("events", { schema: "zero_migrate" }).partition("events_2026_11").attach({
       from: ["2026-11-01T00:00:00Z"],
       to: ["2026-12-01T00:00:00Z"],
     });
 
-    const secrets = table("app_secrets", { schema: "zeroship" });
+    const secrets = table("app_secrets", { schema: "zero_migrate" });
     secrets.setRls({ enabled: true, forced: true });
     secrets.policy("tenant_isolation").create({
       for: "all",
       using: (col) =>
-        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+        col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
       withCheck: (col) =>
-        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+        col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
     });
     secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.setRls({ enabled: false, forced: false });
 
     createFunction({
       name: "audit_events_block_tamper",
-      schema: "zeroship",
+      schema: "zero_migrate",
       returns: "trigger",
       language: "plpgsql",
       replace: true,
       body: "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;",
     });
 
-    const audit = table("audit_events", { schema: "zeroship" });
+    const audit = table("audit_events", { schema: "zero_migrate" });
     audit.trigger("audit_events_block_update").create({
       timing: "before",
       events: ["update", "delete"],
@@ -316,12 +333,12 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
 
     dropFunction({
       name: "audit_events_block_tamper",
-      schema: "zeroship",
+      schema: "zero_migrate",
       ifExists: true,
     });
 
     raw({
-      sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+      sql: "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
       reason: "set tenant app GUC for pg vendor fixture",
     });
   });
