@@ -578,6 +578,12 @@ impl Manifest {
                     "resource key {key:?} is malformed: must be \"*\", \"/<path>\", or \"rpc:<id>\""
                 ));
             }
+            if catch_all_is_not_last(key) {
+                return Err(format!(
+                    "resource key {key:?} is malformed: a [...name] catch-all absorbs the \
+                     rest of the path, so it can only be the final segment"
+                ));
+            }
             // Credentialed CORS cannot use the wildcard origin.
             if entry.cors.as_ref().is_some_and(|cors| {
                 cors.allow_credentials && cors.allow_origins.iter().any(|origin| origin == "*")
@@ -737,6 +743,27 @@ fn is_valid_resource_key(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '*' | '-'));
     }
     s.starts_with('/')
+}
+
+/// `true` when a URL-namespace key puts a `[...name]` catch-all anywhere
+/// but the final segment.
+///
+/// A catch-all means "and everything after this", so a segment following
+/// one names a position that cannot exist. The gateway's glob compiler
+/// treats the shape as unrepresentable rather than merely useless, so a
+/// key like `/[...rest]/foo` must not reach it.
+///
+/// Only `/`-prefixed keys are inspected: `*` has no segments, and `rpc:`
+/// ids are a different grammar that never reaches the glob compiler.
+fn catch_all_is_not_last(s: &str) -> bool {
+    if !s.starts_with('/') {
+        return false;
+    }
+    let segs: Vec<&str> = s.trim_start_matches('/').split('/').collect();
+    let last = segs.len().saturating_sub(1);
+    segs.iter()
+        .enumerate()
+        .any(|(i, seg)| i != last && seg.starts_with("[...") && seg.ends_with(']'))
 }
 
 fn is_schema_ref(s: &str) -> bool {
@@ -918,5 +945,42 @@ mod runtime_descriptor_validation_tests {
             err.contains("runtime_descriptor.hash") && err.contains("sha256"),
             "malformed descriptor hash must be rejected, got {err}"
         );
+    }
+
+    /// A `[...name]` catch-all only has a meaning as the LAST segment of a
+    /// path: it is what absorbs the remainder. Written mid-path it names a
+    /// remainder that is then followed by more path, which no matcher can
+    /// honour. The gateway's compiler agrees so firmly that it `assert!`s
+    /// on the shape, and it compiles every app's manifest on a detached
+    /// task where a panic is swallowed. So accepting the key here does not
+    /// produce a broken route, it takes route sync down for every app on
+    /// that gateway. Reject it where the deploy can still be told why.
+    ///
+    /// What this does NOT catch: the same shape in an `rpc:` key (a
+    /// different grammar, and `compile_glob` is not reached for it), nor
+    /// whether the gateway survives such a key arriving by another route.
+    /// The compile side is pinned separately in `zeroship-gateway`.
+    #[test]
+    fn rejects_a_catch_all_that_is_not_the_last_path_segment() {
+        let mut m = base();
+        m.resources
+            .insert("/[...rest]/foo".to_string(), ResourceEntry::default());
+        let err = m.validate().unwrap_err();
+        assert!(
+            err.contains("/[...rest]/foo"),
+            "a mid-path catch-all must be rejected by name, got {err}"
+        );
+    }
+
+    /// The counter-example to the test above: a trailing catch-all is the
+    /// legal, intended shape and must keep validating. Without this, that
+    /// rejection could be satisfied by banning catch-alls outright.
+    #[test]
+    fn accepts_a_catch_all_as_the_last_path_segment() {
+        let mut m = base();
+        m.resources
+            .insert("/docs/[...rest]".to_string(), ResourceEntry::default());
+        m.validate()
+            .expect("a trailing catch-all is the legal shape and must validate");
     }
 }
