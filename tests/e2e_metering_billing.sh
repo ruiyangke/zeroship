@@ -113,7 +113,7 @@ PIDFILE="$WORK/pids"; : > "$PIDFILE"
 PLAN_ID="pln_metering_test_e2e"
 
 # A node JSON field reader: `... | jget '.id'`.
-jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
+jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
 psql_exec() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 

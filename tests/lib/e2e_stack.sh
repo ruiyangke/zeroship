@@ -64,7 +64,7 @@ _stk_ok()   { if declare -F pass >/dev/null 2>&1; then pass "$1"; else echo "  â
 _stk_bad()  { if declare -F fail >/dev/null 2>&1; then fail "$1"; else echo "  âœ— $1"; fi; }
 
 # node helper: read a JSON field from stdin (e.g. `... | _stk_jget '.id'`)
-_stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
+_stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
 # --- preflight: required binaries + tooling ---------------------------------
 stack_preflight() {

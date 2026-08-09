@@ -47,7 +47,7 @@ PGC=zs-e2e-dedup-pg; RPC=zs-e2e-dedup-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-dedup-e2e"; FWD_GROUP="zs-fwd-dedup-e2e"
 WORK="$(mktemp -d -t zs-e2e-dedup-XXXXXX)"; mkdir -p "$WORK/blobs"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
-jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??"")+"\n")}catch(e){console.log('')}})"; }
+jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 lago(){ curl -s -H "Authorization: Bearer $LAGO_KEY" -H "Content-Type: application/json" "$@"; }
 lago_txids(){ lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=new Set((JSON.parse(s).events||[]).filter(e=>e.code==="requests").map(e=>e.transaction_id));console.log(t.size)}catch(e){console.log(0)}})'; }
