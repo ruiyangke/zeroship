@@ -272,7 +272,7 @@ impl S3 {
             self.client
                 .complete_multipart_on(&session_client, s3_key, id, &parts)
                 .await
-                .map_err(|e| map_s3(s3_key, e))?;
+                .map_err(|e| map_s3("complete_multipart", s3_key, e))?;
             // Completed — disarm the guard so neither the explicit error path
             // nor the Drop path aborts the now-live object.
             let _ = guard.take();
@@ -286,7 +286,7 @@ impl S3 {
             self.client
                 .put(s3_key, &part_buf, opts)
                 .await
-                .map_err(|e| map_s3(s3_key, e))?;
+                .map_err(|e| map_s3("put", s3_key, e))?;
         }
 
         Ok(total)
@@ -343,7 +343,7 @@ impl S3 {
                     .client
                     .create_multipart(s3_key, content_type)
                     .await
-                    .map_err(|e| map_s3(s3_key, e))?;
+                    .map_err(|e| map_s3("create_multipart", s3_key, e))?;
                 // Arm the drop-safety guard the INSTANT the id exists.
                 guard.set(id.clone());
                 *upload_id = Some(id);
@@ -420,7 +420,7 @@ impl S3 {
                         attempt += 1;
                         compio::time::sleep(upload_retry_backoff(attempt)).await;
                     }
-                    Err(e) => return Err(map_s3(&key, e)),
+                    Err(e) => return Err(map_s3("upload_part", &key, e)),
                 }
             }
         }
@@ -519,7 +519,7 @@ impl Backend for S3 {
                 Ok(Some((object_meta, boxed)))
             }
             Err(S3Error::NotFound) => Ok(None),
-            Err(e) => Err(map_s3(&s3_key, e)),
+            Err(e) => Err(map_s3("get_stream", &s3_key, e)),
         }
     }
 
@@ -542,7 +542,7 @@ impl Backend for S3 {
             .client
             .head_object(&s3_key)
             .await
-            .map_err(|e| map_s3(&s3_key, e))?
+            .map_err(|e| map_s3("head_object", &s3_key, e))?
             .is_some();
         if !existed {
             return Ok(false);
@@ -550,7 +550,7 @@ impl Backend for S3 {
         self.client
             .delete(&s3_key)
             .await
-            .map_err(|e| map_s3(&s3_key, e))?;
+            .map_err(|e| map_s3("delete", &s3_key, e))?;
         Ok(true)
     }
 
@@ -569,7 +569,7 @@ impl Backend for S3 {
             .client
             .list(&scope)
             .await
-            .map_err(|e| map_s3(&scope, e))?;
+            .map_err(|e| map_s3("list", &scope, e))?;
 
         let strip = format!("{app_id}/{bucket}/");
         let mut out = Vec::with_capacity(entries.len());
@@ -609,6 +609,44 @@ impl ChunkSource for S3Chunks {
 }
 
 /// Flatten an `S3Error` into the `String` channel the `Backend` trait uses.
-fn map_s3(key: &str, e: S3Error) -> String {
-    format!("storage: s3 op on '{key}': {e}")
+/// Render an S3 failure for the app, naming the operation that failed.
+///
+/// `op` is mandatory rather than defaulted: every caller here goes through a
+/// different S3 verb, and eight of them used to collapse to the same
+/// contentless "s3 op" prefix, so a creator seeing a failure could not tell a
+/// refused HEAD from a failed multipart upload without the underlying S3
+/// message happening to say so.
+///
+/// `key` is the internal `<app_id>/<bucket>/<key>` layout. That is the app's
+/// own id and bucket, not another tenant's, so this is a layout detail rather
+/// than a disclosure - but it is also not information the app asked for, and
+/// it would want trimming if the key shape ever carries anything else.
+fn map_s3(op: &str, key: &str, e: S3Error) -> String {
+    format!("storage: s3 {op} on '{key}': {e}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each S3 verb must be distinguishable in the message a creator sees.
+    /// Before this, all eight call sites rendered the same "s3 op" prefix, so
+    /// a failed multipart upload and a refused HEAD were indistinguishable
+    /// unless the underlying S3 text happened to differ.
+    ///
+    /// Asserts only that the op reaches the string. It does NOT check that
+    /// each call site passes the RIGHT op - nothing here can catch a site
+    /// mislabelled at the point of call.
+    #[test]
+    fn an_s3_failure_names_the_operation() {
+        let msg = map_s3("head_object", "app_x/uploads/a.txt", S3Error::NotFound);
+        assert!(
+            msg.contains("head_object"),
+            "s3 error must name the operation; got {msg:?}"
+        );
+        assert!(
+            msg.contains("app_x/uploads/a.txt"),
+            "s3 error must still name the key; got {msg:?}"
+        );
+    }
 }
