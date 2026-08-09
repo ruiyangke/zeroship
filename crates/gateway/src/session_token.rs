@@ -27,19 +27,27 @@
 //! No resource server accepts it as authorization; the gateway emits the signed
 //! `ZeroShip-User` header directly from these claims on the cookie arm.
 //!
-//! ## Revocation: per-app family marker (one DB read, NOT cached)
+//! ## Revocation: per-app family marker, read through a short-TTL cache
 //!
 //! Identity verification is stateless (local signature, `kid`, `iss`, `exp`,
-//! and `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
-//! SAME per-app family-marker check the Bearer arm uses —
+//! and `app` binding, no DB). The revocation gate is not: the cookie arm runs
+//! the SAME per-app family-marker check the Bearer arm uses,
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
-//! ([`zeroship_authz::wrapper_revocation`]) — and that is a direct
-//! `SELECT EXISTS` against a pooled connection, with NO in-memory TTL cache in
-//! front of it. `iat` is the binding instant, so a revoked `(client_id, pws_)`
-//! family rejects a still-valid signed cookie WITHOUT re-reading any session
-//! store — but it does cost one revocation DB round-trip per request when a DB
-//! is configured. With `db = None` (smoke mode) the gate is skipped and the
-//! whole path is DB-free.
+//! ([`zeroship_authz::wrapper_revocation`]). `iat` is the binding instant, so a
+//! revoked `(client_id, pws_)` family rejects a still-valid signed cookie
+//! without re-reading any session store.
+//!
+//! That marker is read THROUGH A CACHE, not per request. See
+//! [`zeroship_authz::wrapper_revocation`] for the query, the TTL, and the
+//! staleness bound it commits to; this module deliberately does not restate
+//! them, because the previous version of this comment described a direct
+//! uncached read and drifted into claiming the opposite of what runs. What
+//! matters here: a cache hit costs no round-trip, so the steady-state request
+//! is DB-free, and revocation written on ANOTHER node is therefore not
+//! instantaneous on this one. A same-node writer busts the entry immediately.
+//!
+//! With `db = None` (smoke mode) the gate is skipped and the whole path is
+//! DB-free for a different reason: nothing is consulted at all.
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
