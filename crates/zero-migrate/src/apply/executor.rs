@@ -1348,7 +1348,7 @@ fn order_repeatables<'a>(
 /// The verdict of evaluating a migration's preconditions.
 ///
 /// `pub` because it is the return type of
-/// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
+/// [`MigrationBackend::evaluate_preconditions`]
 /// — the preconditions seam rides through the (public) trait so the generic
 /// apply body never holds a concrete connection. The variants carry no data; a
 /// consumer can only match on the apply/skip decision.
@@ -1363,7 +1363,7 @@ pub enum PreconditionVerdict {
 
 /// The per-migration precondition verdict loop now lives in
 /// [`crate::apply::precondition::evaluate_all`] — the **Postgres** leaf reached only via
-/// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
+/// [`MigrationBackend::evaluate_preconditions`]
 /// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
 /// `pg_query` / `information_schema` query directly.

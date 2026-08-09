@@ -1,5 +1,5 @@
 //! Engine-side dialect-support + vendor-capability computation for the closed
-//! [`Op`](crate::model::ir::Op) wire type.
+//! [`Op`] wire type.
 //!
 //! These were inherent methods on `Op` in `model/ir.rs`. When the wire contract
 //! was extracted into the `zero-migrate-ir` leaf crate, the

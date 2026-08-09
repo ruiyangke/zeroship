@@ -576,7 +576,7 @@ pub trait MigrationBackend {
     /// standalone batched backfill rewrites existing data, so it requires explicit
     /// approval and `scope` must admit its stable `version`. The data-mutating
     /// EXPAND backfill rides
-    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online),
+    /// [`OnlineSchemaChange::run_online`],
     /// NOT this method.
     async fn run_backfill_step(
         &self,
@@ -680,7 +680,7 @@ pub trait MigrationBackend {
     /// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
     /// branch on `shadow().is_some()`, never holding a concrete connection, and a
     /// backend with no shadow capability surfaces a clear
-    /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported)
+    /// [`DryRunError::ShadowUnsupported`]
     /// rather than a false-success report.
     ///
     /// # Why SQLite is `None` (a deliberate capability gap, not a silent hole)

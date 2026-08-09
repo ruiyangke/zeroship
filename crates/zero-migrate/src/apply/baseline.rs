@@ -12,7 +12,7 @@
 //! # Safety
 //!
 //! - **Guard-checked.** The baseline SQL is still run through the
-//! [`SqlGuard`](crate::guard::SqlGuard) (defense-in-depth): it represents the
+//! [`SqlGuard`] (defense-in-depth): it represents the
 //! real schema and must not carry a denied/cross-schema construct, even though
 //! it does not execute here.
 //! - **First-entry only.** Baseline refuses if the journal already records ANY

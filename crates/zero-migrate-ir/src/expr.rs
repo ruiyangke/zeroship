@@ -23,7 +23,7 @@
 //!   (`UNSUPPORTED { kind: "expr" }` at load), there is no "unknown function"
 //!   parse path because there is no text to parse.
 //! - The numeric domain of a [`Literal`](Expr::Literal) is the constrained
-//!   [`IrScalar`](crate::ir::IrScalar) — a fractional/exponential/`>=2^53` value
+//!   [`IrScalar`] — a fractional/exponential/`>=2^53` value
 //!   is rejected at DESERIALIZE before any checksum runs.
 //!
 //! NB: the per-dialect *rendering* of an `Expr` is the engine's job — this module

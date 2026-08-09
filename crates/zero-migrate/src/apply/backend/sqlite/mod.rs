@@ -1,4 +1,4 @@
-//! The SQLite [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl
+//! The SQLite [`MigrationBackend`] impl
 //! (confinement folded in).
 //!
 //! `SqliteBackend` is the security core for SQLite migrations. It owns a
@@ -197,7 +197,7 @@ impl SqliteBackend {
     /// `rolled_back` event, atomically. The direct executor-internal seam (no
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
-    /// [`RollbackError::SqliteRebuildRequired`](crate::apply::executor::RollbackError::SqliteRebuildRequired);
+    /// [`RollbackError::SqliteRebuildRequired`];
     /// the rebuild is not built.
     ///
     /// # Errors
@@ -227,7 +227,7 @@ impl SqliteBackend {
     /// generic [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
     /// which classifies the rebuild's `destructive + requires_approval` journal
     /// migration and refuses an un-approved rebuild BEFORE calling down into
-    /// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
+    /// [`MigrationBackend::rebuild_one`]
     /// (which forwards here). So a caller reaching THIS inherent method directly
     /// (tests) has bypassed that gate and MUST gate approval itself; callers going
     /// through the engine get the gate for free.

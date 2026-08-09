@@ -64,7 +64,7 @@ pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 /// **no** public constructor: a creator-supplied `PolicyDoc` (a *draft*) can never
 /// become a `TrustedDoc`.
 ///
-/// This is the type-level encoding that keeps [`overlay`](crate::compose::overlay) /
+/// This is the type-level encoding that keeps [`overlay`] /
 /// [`restrict`] from ever seeing an untrusted operand: both accept only `TrustedDoc`.
 /// The `extends`-laundering hole (a draft inheriting a trusted base into `overlay`)
 /// is closed by construction, not by a runtime provenance check.

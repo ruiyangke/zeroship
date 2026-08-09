@@ -17,7 +17,7 @@
 //! second concurrent verb would deadlock (its `tsfn.call` blocks on a socket the
 //! first hasn't released); the guard converts that into a loud panic. Only
 //! `Send + 'static` data crosses the dispatcher boundary: the owned
-//! [`JsRequest`](crate::marshal::JsRequest) payload out, and an owned
+//! [`JsRequest`] payload out, and an owned
 //! `Result<Vec<JsRow>, JsError>` back.
 
 use std::sync::atomic::{AtomicBool, Ordering};

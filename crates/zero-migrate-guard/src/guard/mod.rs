@@ -745,7 +745,7 @@ pub struct GuardReport {
     pub classes: Vec<StatementClass>,
     /// True if *any* statement is destructive (data loss). The gate decides.
     pub destructive: bool,
-    /// Operational [`Advisory`](crate::analyze::Advisory)s — lock-heavy ops,
+    /// Operational [`Advisory`]s — lock-heavy ops,
     /// destructive/backward-incompatible shapes, missing FK indexes, etc.
     /// **Advisory-only:** these never deny or gate (the deny-list +
     /// least-privilege role own security; the engine gate owns data-loss
@@ -2671,7 +2671,7 @@ pub struct GuardOutcome {
     /// True if *any* statement is destructive (data loss). The engine's gate
     /// decides on approval; the guard only flags.
     pub destructive: bool,
-    /// Operational [`Advisory`](crate::analyze::Advisory)s (lock-heavy ops,
+    /// Operational [`Advisory`]s (lock-heavy ops,
     /// backward-incompatible shapes, missing FK indexes, …). Advisory-only —
     /// never deny or gate. Empty for engines that emit none (e.g. `SQLite`'s
     /// descriptor path).

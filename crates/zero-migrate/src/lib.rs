@@ -11,13 +11,13 @@
 //! This crate implements the **security core** + the **migration unit** (the
 //! migration data types and the parse-time SQL security guard
 //! deny-list / cross-schema confinement), and the **Postgres executor**:
-//! the append-only journal ([`apply::journal`](crate::apply::journal)),
+//! the append-only journal ([`apply::journal`]),
 //! the project advisory lock, and the apply flow
-//! ([`apply::executor::apply`](crate::apply::executor::apply)) — transactional + two-phase
+//! ([`apply::executor::apply`]) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
 //! every `up`, and a drift/tamper checksum check — the least-privilege
-//! `migrator` role ([`apply::role`](crate::apply::role)), and the **public
-//! authoring pipeline + engine API** ([`plan::author`](crate::plan::author) +
+//! `migrator` role ([`apply::role`]), and the **public
+//! authoring pipeline + engine API** ([`plan::author`] +
 //! [`engine`]).
 //!
 //! # The pipeline
@@ -37,7 +37,7 @@
 //!    approval requirement, and guard *denials*.
 //! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
 //!    denied plan, refuses a destructive plan without approval, and otherwise
-//!    delegates to [`apply::executor::apply`](crate::apply::executor::apply) — which **independently re-runs the
+//!    delegates to [`apply::executor::apply`] — which **independently re-runs the
 //!    guard and the least-privilege `migrator` role** (defense in depth: the
 //!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!

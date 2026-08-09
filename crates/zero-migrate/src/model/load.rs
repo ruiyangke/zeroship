@@ -5,7 +5,7 @@
 //! walkers — live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
 //! below. THIS module keeps [`load_ir_document`]: the full load chain, which
 //! threads a [`SchemaScope`](crate::model::policy::SchemaScope) into the POLICY
-//! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
+//! validator ([`validate_ir_scoped`])
 //! and therefore cannot live in the leaf. (Table-shape injection + author-PK
 //! conformance ride on the composed `EffectivePolicy` in
 //! `crate::model::table_shape::resolve_create_table_policy`, not a `PolicyProfile`.)

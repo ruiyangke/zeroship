@@ -1,6 +1,6 @@
 //! The VENDOR (`zero-migrate`) Postgres render seam.
 //!
-//! Renders the privileged vendor [`Op`](crate::model::ir::Op) variants to **structured**
+//! Renders the privileged vendor [`Op`] variants to **structured**
 //! Postgres DDL: identifiers double-quoted via the crate's single quoting seam
 //! (`quote_ident_checked`), policy/trigger predicates rendered from the CLOSED
 //! [`Expr`](crate::model::expr::Expr) AST via the existing inline renderer

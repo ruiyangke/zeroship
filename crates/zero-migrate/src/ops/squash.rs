@@ -65,7 +65,7 @@ pub struct SquashOutcome {
 pub enum SquashError {
     /// A **dialect-neutral** backend error — the project lock acquire/release or
     /// the supersession journal write failed behind the
-    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam. The payload is
+    /// [`MigrationBackend`] seam. The payload is
     /// the backend's own error rendered to a string (PG `db error: …` / a non-PG
     /// `backend error: …`), so squash never leaks a concrete driver error type on
     /// its public surface. The PG lock/write path routes through the backend's
@@ -151,7 +151,7 @@ pub enum SquashError {
 /// - [`SquashError::NotAllApplied`] / [`SquashError::PartialOverlap`] — the
 ///   superseded set is not fully net-applied.
 /// - [`SquashError::Backend`] / [`SquashError::Journal`] — infrastructure failures
-///   behind the [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam (the
+///   behind the [`MigrationBackend`] seam (the
 ///   project lock, the journal reads, the supersession write).
 ///
 /// # The backend seam (part of the multi-engine abstraction)
@@ -161,7 +161,7 @@ pub enum SquashError {
 /// [`release_project_lock`](MigrationBackend::release_project_lock)), the journal
 /// reads ([`ensure_journal`](MigrationBackend::ensure_journal) /
 /// [`applied`](MigrationBackend::applied)), the parse-time guard
-/// ([`guard_for`](crate::guard::guard_for), dialect-selected from the backend),
+/// ([`guard_for`], dialect-selected from the backend),
 /// and the supersession write
 /// ([`record_squash`](MigrationBackend::record_squash)) all route through the
 /// trait. No concrete driver client / `pg_advisory_lock` / `pg_query` appears

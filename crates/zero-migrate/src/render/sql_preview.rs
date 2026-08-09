@@ -16,7 +16,7 @@
 //! `addForeignKey`/`addUnique`/`addCheck`/`dropConstraint`/`createIndex`/
 //! `dropIndex` + one-shot `insert`/`update`/`delete` — render their REAL SQL: their
 //! `up`/`template` is fully determined offline (`IrAuthor::lower_*` lowers them with
-//! an EMPTY [`LiveSchema`](crate::render::lower::LiveSchema), needing no DB).
+//! an EMPTY [`LiveSchema`], needing no DB).
 //!
 //! DB-STATE-DEPENDENT ops CANNOT be faithfully rendered offline. For these the
 //! preview emits a CLEARLY-LABELED `-- [runtime-resolved] …` comment line and

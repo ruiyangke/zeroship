@@ -1,7 +1,7 @@
-//! MySQL [`MigrationBackend`](crate::apply::backend::MigrationBackend)
+//! MySQL [`MigrationBackend`]
 //! implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
+//! Generic over the dialect-neutral [`SqlSession`] seam
 //! (engine root `crate::driver`) — a host driver (the napi `mysql2` shell) supplies
 //! the `SqlSession` impl, exactly as the `pg` shell does for
 //! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the

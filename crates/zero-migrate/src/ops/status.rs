@@ -1083,7 +1083,7 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 /// `net_rolled_back`) run inside ONE `REPEATABLE READ READ ONLY` transaction, so a
 /// concurrent apply/rollback committing between them can never split the view into
 /// an inconsistent applied-vs-rolled-back bucketing. The transaction is driven
-/// explicitly through the shared [`SqlSession`](crate::driver::SqlSession), mirroring how the
+/// explicitly through the shared [`SqlSession`], mirroring how the
 /// executor drives its apply/rollback transactions. `ensure_journal` (which emits
 /// `CREATE … IF NOT EXISTS` DDL) runs BEFORE the snapshot, since a `READ ONLY`
 /// transaction forbids DDL and bootstrap must stay idempotent regardless.
@@ -1094,7 +1094,7 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///
 /// # Preconditions
 /// The caller MUST pass an **admin/read** connection. This function takes whatever
-/// [`SqlSession`](crate::driver::SqlSession) implementation it is handed and never
+/// [`SqlSession`] implementation it is handed and never
 /// elevates to the `migrator` role; schema
 /// scoping by `cfg.meta_schema` keeps reads bound to this project's journal, but
 /// the privilege of the connection is the caller's obligation.
@@ -1574,7 +1574,7 @@ fn derive_pending_contract_status_for_plans(
 /// # Preconditions
 /// The caller MUST pass an **admin/read** connection. Like [`status`] and
 /// [`snapshot_schema`](crate::snapshot_schema), this takes whatever
-/// [`SqlSession`](crate::driver::SqlSession) implementation it is handed and never
+/// [`SqlSession`] implementation it is handed and never
 /// elevates to the `migrator` role; the reads are scoped to
 /// `cfg.meta_schema`, but the connection's privilege is the caller's obligation.
 ///

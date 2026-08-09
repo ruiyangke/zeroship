@@ -265,7 +265,7 @@ impl VendorCapabilities {
     }
 
     /// Derive the capability set from the validate-layer
-    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads. Guarded paths
+    /// [`SchemaScope`] the loader threads. Guarded paths
     /// derive this scope from the caller-supplied effective policy:
     /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).
     /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).

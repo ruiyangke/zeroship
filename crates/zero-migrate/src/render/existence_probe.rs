@@ -92,7 +92,7 @@
 //! by the SAME shared snapshot builders the lowering arms call
 //! (`build_table_snapshot` / `add_column_snapshot` / `create_index_snapshot` / the
 //! addConstraint kind), so they are byte-comparable against the introspected
-//! [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot).
+//! [`SchemaSnapshot`].
 
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;

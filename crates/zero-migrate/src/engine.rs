@@ -1,5 +1,5 @@
 //! The public `MigrationEngine` API — `plan` (lint/preview) → `gate` (approval)
-//! → [`executor::apply`](crate::apply::executor::apply) (guard + role).
+//! → [`executor::apply`] (guard + role).
 //!
 //! This is the surface a caller (control plane / CLI / builder) drives. The
 //! pieces beneath it — the [`SqlGuard`](crate::guard::SqlGuard), the Postgres
@@ -14,10 +14,10 @@
 //!    are *denied* (un-appliable);
 //! 3. [`MigrationEngine::apply`] is the **gate**: it refuses a plan with any
 //!    denial, refuses a destructive plan without explicit [`Approval::Approved`],
-//!    and otherwise delegates to [`executor::apply`](crate::apply::executor::apply).
+//!    and otherwise delegates to [`executor::apply`].
 //!
 //! **Defense in depth — the gate is additional, not a replacement.**
-//! [`executor::apply`](crate::apply::executor::apply) *re-runs* the guard over every
+//! [`executor::apply`] *re-runs* the guard over every
 //! pending `up` and runs the DDL under the least-privilege `migrator` role
 //! (the guard + role defense lines). The engine gate is a third check layered in front: even
 //! if a caller hand-built a plan, the executor still independently denies the
@@ -148,7 +148,7 @@ pub enum EngineError {
     /// from relative to the trusted [`ManifestHash`] stamped at build/review time.
     /// Refused by [`MigrationEngine::apply_verified`] **before** the advisory lock
     /// or any DDL: NOTHING was applied. Carries the
-    /// [`ManifestError`](crate::plan::manifest::ManifestError) diagnostic.
+    /// [`ManifestError`] diagnostic.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     /// **Fail-closed cross-deploy pending-contract refusal.** The
@@ -2805,7 +2805,7 @@ impl MigrationEngine {
     ///    (never apply — a denied batch applies *nothing*);
     /// 2. if [`MigrationPlan::requires_approval`] and `approval != Approved` ⇒
     ///    [`EngineError::ApprovalRequired`] (nothing applied);
-    /// 3. otherwise delegate to [`executor::apply`](crate::apply::executor::apply),
+    /// 3. otherwise delegate to [`executor::apply`],
     ///    which **independently re-runs the guard** over every pending `up` and
     ///    runs the DDL under the least-privilege `migrator` role — defense in
     ///    depth, not bypassed by this gate.
@@ -2945,7 +2945,7 @@ impl MigrationEngine {
     /// (the pre-apply gate).
     ///
     /// This is the trusted-deploy entry point. Before ANY apply work — before the
-    /// guard/approval gate, before [`executor::apply`](crate::apply::executor::apply)
+    /// guard/approval gate, before [`executor::apply`]
     /// acquires the project advisory lock, before a single statement of DDL runs —
     /// it recomputes the integrity manifest over the SUPPLIED `migrations` (in the
     /// given order) and compares it to `expected`:
@@ -3377,7 +3377,7 @@ pub struct DeclarativeDeployPlan {
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
     /// FK redefinition), each a structured 12-step table rebuild
     /// ([`SqliteRebuild`](crate::render::declarative::SqliteRebuild)). Driven through
-    /// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
+    /// [`MigrationBackend::rebuild_one`]
     /// by [`apply_declarative`](MigrationEngine::apply_declarative), under the
     /// destructive/approval gate (the paired migration is `destructive +
     /// requires_approval`). ALWAYS empty on the PG dialect.

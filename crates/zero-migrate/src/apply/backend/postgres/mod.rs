@@ -1,6 +1,6 @@
-//! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
+//! Postgres [`MigrationBackend`] implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
+//! Generic over the dialect-neutral [`SqlSession`] seam
 //! (engine root `crate::driver`) — a host driver (the napi `pg` shell) supplies the
 //! `SqlSession` impl. SQLite does NOT ride this seam (it is an in-process rusqlite
 //! actor).

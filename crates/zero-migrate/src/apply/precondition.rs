@@ -19,7 +19,7 @@
 //! - **[`Precondition::SqlBoolean`]** is UNTRUSTED creator/AI SQL. It is the
 //! escape hatch for assertions the structured checks cannot express, and it is
 //! confined three ways before it is allowed to run:
-//! 1. it MUST pass the [`SqlGuard`](crate::guard::SqlGuard) (read-only SELECT;
+//! 1. it MUST pass the [`SqlGuard`] (read-only SELECT;
 //! a cross-schema / file / network / dangerous precondition is denied — the
 //! same line-1 defense the `up` gets);
 //! 2. it MUST pass the **shape gate** (`validate_single_select`): a SINGLE
