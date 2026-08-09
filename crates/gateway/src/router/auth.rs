@@ -237,11 +237,7 @@ fn scopes_satisfied(granted: &[String], required: &[String]) -> bool {
 /// yields `[]`, which fails the scope gate closed (a route demanding a
 /// scope rejects an unreadable principal rather than waving it through).
 fn decode_header_scopes(state: &Arc<GateState>, header: &str) -> Vec<String> {
-    let key = state.config.worker_key.as_bytes();
-    let Some(json) = zeroship_core::auth::verify_zeroship_user_header(key, header) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+    let Some(value) = decode_user_header(state, header) else {
         return Vec::new();
     };
     value
@@ -253,6 +249,35 @@ fn decode_header_scopes(state: &Arc<GateState>, header: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Verify a freshly-built `ZeroShip-User` header under the worker key and
+/// return its decoded claims object — the SAME bytes, verified the SAME
+/// way, that the worker will read as the request's principal.
+///
+/// Reading identity back out of the header rather than threading it
+/// separately keeps ONE source of truth: whatever arm authenticated, the
+/// principal the gateway acts on is exactly the principal the worker
+/// sees, so the two can never drift. A verify/parse failure yields `None`
+/// and every caller MUST fail closed on it.
+fn decode_user_header(state: &Arc<GateState>, header: &str) -> Option<serde_json::Value> {
+    let key = state.config.worker_key.as_bytes();
+    let json = zeroship_core::auth::verify_zeroship_user_header(key, header)?;
+    serde_json::from_str::<serde_json::Value>(&json).ok()
+}
+
+/// The authenticated principal's stable per-app identity (the pairwise
+/// `pws_…` subject) recovered from its `ZeroShip-User` header.
+///
+/// Used to partition the idempotency dedupe namespace. Returns `None`
+/// when the header cannot be verified/parsed or carries no non-empty
+/// `id`; callers must NOT substitute an unpartitioned key in that case.
+pub(super) fn user_header_subject(state: &Arc<GateState>, header: &str) -> Option<String> {
+    decode_user_header(state, header)?
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]

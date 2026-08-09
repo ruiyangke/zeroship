@@ -238,7 +238,20 @@ marked `idempotent: true`, because idempotent writes carry a stable
 What the platform does with that key: the first response your handler produces
 is stored under it and replayed verbatim to every later request carrying the
 same key and the same input, for the procedure's idempotency TTL (24h by
-default). **Server errors are the exception — a `5xx` is never stored.** A
+default).
+
+The stored response belongs to the caller who produced it. Keys are scoped per
+signed-in user, so two people can use the same key on the same procedure and
+each gets their own result. On procedures declared `auth: "anon"` there is no
+signed-in user to scope by, so every anonymous caller shares one keyspace and
+the key must be unguessable: pass a UUIDv4 or UUIDv7 in the canonical hyphenated
+form (`crypto.randomUUID()` produces one). Anything else is rejected with `400
+INVALID_ARGUMENT` and `details.reason:
+"anonymous_idempotency_key_must_be_uuid_v4_or_v7"` before your handler runs.
+Authenticated procedures accept any key string up to 255 characters, so a
+natural key such as an order id is fine there.
+
+**Server errors are the exception — a `5xx` is never stored.** A
 `5xx` means no outcome was reported (the app threw, or the platform could not
 reach it), so the key stays open and a retry re-runs the call. Rejections you
 want remembered must be `4xx`: return `400`/`409`/`422` and the retry gets that

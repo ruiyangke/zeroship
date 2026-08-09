@@ -4,7 +4,12 @@
 //!
 //! - Wire requires `Idempotency-Key` for any procedure whose
 //!   `EffectivePolicy.idempotent` is `true`.
-//! - Stored response keyed by `(app_id, wireId, idempotency_key)`.
+//! - Stored response keyed by `(app_id, wireId, principal,
+//!   idempotency_key)`. The principal partition is load-bearing, not
+//!   bookkeeping: a hit replays a stored body verbatim, so an unpartitioned
+//!   key hands user A's response to any user B who picks the same key.
+//!   Anonymous callers share one partition and pay for it with the
+//!   [`is_high_entropy_key`] admission check.
 //! - Same key + same input hash within TTL → return stored response
 //!   verbatim (a hit).
 //! - Same key + different input hash within TTL → 409 ALREADY_EXISTS
@@ -125,12 +130,80 @@ pub fn hash_body(body: &[u8]) -> String {
 // KV key derivation
 // ---------------------------------------------------------------------------
 
-pub fn entry_key(app_id: &Uuid, wire_id: &str, idem_key: &str) -> String {
-    format!("idem:{app_id}:{wire_id}:{idem_key}")
+/// Whose dedupe namespace a request lands in.
+///
+/// A stored response is replayed VERBATIM to whoever hits the same entry
+/// key, so the key MUST carry the identity of the caller it was stored
+/// for. Without this, user B sending user A's `Idempotency-Key` on the
+/// same procedure receives A's response body — a cross-user disclosure.
+///
+/// The `User` subject is the per-app pairwise `pws_…` the gateway
+/// resolved for the request (the same value it puts in `ZeroShip-User`),
+/// so the namespace is per-app by construction as well as by `app_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Principal<'a> {
+    /// An authenticated caller, keyed on their per-app pairwise subject.
+    User(&'a str),
+    /// No identity resolved. This namespace is SHARED by every anonymous
+    /// caller of the app+procedure, which is exactly why
+    /// [`is_high_entropy_key`] gates admission to it.
+    Anon,
 }
 
-pub fn lock_key(app_id: &Uuid, wire_id: &str, idem_key: &str) -> String {
-    format!("idem-lock:{app_id}:{wire_id}:{idem_key}")
+impl Principal<'_> {
+    /// The key segment identifying this principal.
+    ///
+    /// The `u:`/`anon` discriminator makes the two arms un-confusable: a
+    /// `pws_…` subject is `[A-Za-z0-9]+` with no `:`, so it always
+    /// terminates at the following separator and no choice of subject or
+    /// user-supplied key can spell another principal's segment.
+    fn key_segment(&self) -> String {
+        match self {
+            Principal::User(sub) => format!("u:{sub}"),
+            Principal::Anon => "anon".to_string(),
+        }
+    }
+}
+
+pub fn entry_key(app_id: &Uuid, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
+    format!(
+        "idem:{app_id}:{wire_id}:{}:{idem_key}",
+        principal.key_segment()
+    )
+}
+
+pub fn lock_key(app_id: &Uuid, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
+    format!(
+        "idem-lock:{app_id}:{wire_id}:{}:{idem_key}",
+        principal.key_segment()
+    )
+}
+
+/// Whether `key` carries enough entropy to be safe in the SHARED
+/// anonymous namespace ([`Principal::Anon`]).
+///
+/// Spec §8 (`docs/proposals/rpc.md`, "Anonymous mutations + idempotency"):
+/// an anonymous mutation's key has no principal to partition on, so the
+/// key itself must be unguessable — a `UUIDv4` (122 random bits) or `UUIDv7`
+/// (74 random bits per millisecond). Every other shape is refused,
+/// including UUID versions that are NOT random: v1 (timestamp + MAC) and
+/// v3/v5 (a hash of a name the caller may know) parse fine as UUIDs and
+/// are trivially guessable, so parsing is not the test — the version is.
+///
+/// Only the canonical 36-char hyphenated spelling is accepted. The
+/// braced/URN/simple forms the `uuid` crate also parses would each hash
+/// to a DIFFERENT entry key for the same UUID, so accepting them would
+/// silently break dedupe for a client that varied its spelling.
+#[must_use]
+pub fn is_high_entropy_key(key: &str) -> bool {
+    if key.len() != 36 {
+        return false;
+    }
+    let Ok(parsed) = Uuid::parse_str(key) else {
+        return false;
+    };
+    matches!(parsed.get_version_num(), 4 | 7)
+        && matches!(parsed.get_variant(), uuid::Variant::RFC4122)
 }
 
 // ---------------------------------------------------------------------------
@@ -380,14 +453,19 @@ pub enum DedupeDecision {
 /// HTTP response on `Hit` / `Conflict` / etc.
 ///
 /// `idempotency_key` is the value of the `Idempotency-Key` header, if
-/// any. `body` is the raw request bytes. `ttl_hours` is the resolved
-/// per-procedure TTL (already clamped via `clamp_ttl_hours`).
-/// `inflight_wait_ms` is how long we'll block on a per-key lock when
-/// the original request is in flight.
+/// any. `principal` partitions the dedupe namespace so one caller can
+/// never be served another caller's stored response; the call site
+/// resolves it from the request's authenticated identity. `body` is the
+/// raw request bytes. `ttl_hours` is the resolved per-procedure TTL
+/// (already clamped via `clamp_ttl_hours`). `inflight_wait_ms` is how
+/// long we'll block on a per-key lock when the original request is in
+/// flight.
+#[allow(clippy::too_many_arguments)]
 pub async fn pre_dispatch(
     store: &dyn IdempotencyStore,
     app_id: &Uuid,
     wire_id: &str,
+    principal: Principal<'_>,
     idempotency_key: Option<&str>,
     body: &[u8],
     ttl_hours: u32,
@@ -398,8 +476,8 @@ pub async fn pre_dispatch(
     };
 
     let body_hash = hash_body(body);
-    let key = entry_key(app_id, wire_id, idem_key);
-    let l_key = lock_key(app_id, wire_id, idem_key);
+    let key = entry_key(app_id, wire_id, principal, idem_key);
+    let l_key = lock_key(app_id, wire_id, principal, idem_key);
 
     if let Some(stored) = store.get_entry(&key).await? {
         if stored.input_hash == body_hash {
@@ -626,7 +704,7 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let dec = pre_dispatch(&store, &app, "todos.add", None, b"{}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "todos.add", Principal::Anon, None, b"{}", 24, 1000)
                 .await
                 .unwrap();
             assert!(matches!(dec, DedupeDecision::MissingHeader));
@@ -638,13 +716,13 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let dec = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             match dec {
                 DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, .. } => {
-                    assert_eq!(ek, entry_key(&app, "todos.add", "k1"));
-                    assert_eq!(lk, lock_key(&app, "todos.add", "k1"));
+                    assert_eq!(ek, entry_key(&app, "todos.add", Principal::Anon, "k1"));
+                    assert_eq!(lk, lock_key(&app, "todos.add", Principal::Anon, "k1"));
                     assert!(body_hash.starts_with("sha256:"));
                 }
                 other => panic!("expected Proceed, got {other:?}"),
@@ -673,7 +751,7 @@ mod tests {
 
         run_ready(async {
             let app = fixture_app();
-            let key = entry_key(&app, "todos.add", "k1");
+            let key = entry_key(&app, "todos.add", Principal::Anon, "k1");
             let stored = StoredResponse {
                 input_hash: hash_body(b"{}"),
                 status: 200,
@@ -697,7 +775,7 @@ mod tests {
             let app = fixture_app();
 
             // First request proceeds, captures.
-            let dec = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{\"x\":1}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{\"x\":1}", 24, 1000)
                 .await
                 .unwrap();
             let DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, ttl_hours } = dec
@@ -721,7 +799,7 @@ mod tests {
             .unwrap();
 
             // Second request, same body → Hit.
-            let dec2 = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{\"x\":1}", 24, 1000)
+            let dec2 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{\"x\":1}", 24, 1000)
                 .await
                 .unwrap();
             match dec2 {
@@ -740,7 +818,7 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let dec = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{\"a\":1}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{\"a\":1}", 24, 1000)
                 .await
                 .unwrap();
             let DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, ttl_hours } = dec
@@ -753,7 +831,7 @@ mod tests {
             .await
             .unwrap();
 
-            let dec2 = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{\"b\":2}", 24, 1000)
+            let dec2 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{\"b\":2}", 24, 1000)
                 .await
                 .unwrap();
             match dec2 {
@@ -772,10 +850,10 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let d1 = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{}", 24, 1000)
+            let d1 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
-            let d2 = pre_dispatch(&store, &app, "todos.add", Some("k2"), b"{}", 24, 1000)
+            let d2 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k2"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             assert!(matches!(d1, DedupeDecision::Proceed { .. }));
@@ -789,7 +867,7 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let key = entry_key(&app, "todos.add", "k1");
+            let key = entry_key(&app, "todos.add", Principal::Anon, "k1");
             let stored = StoredResponse {
                 input_hash: hash_body(b"{}"),
                 status: 200,
@@ -804,7 +882,7 @@ mod tests {
             assert!(store.get_entry(&key).await.unwrap().is_none());
 
             // pre_dispatch → Proceed (no live entry).
-            let dec = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             assert!(matches!(dec, DedupeDecision::Proceed { .. }));
@@ -849,7 +927,7 @@ mod tests {
             let body = b"{\"hello\":\"world\"}".to_vec();
 
             // First request gets the lock (Proceed). Don't capture yet.
-            let d1 = pre_dispatch(&*store, &app, "todos.add", Some("k1"), &body, 24, 5_000)
+            let d1 = pre_dispatch(&*store, &app, "todos.add", Principal::Anon, Some("k1"), &body, 24, 5_000)
                 .await
                 .unwrap();
             let DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, ttl_hours } = d1
@@ -886,7 +964,7 @@ mod tests {
 
             // Second concurrent request should block, then get the
             // captured response back.
-            let d2 = pre_dispatch(&*store, &app, "todos.add", Some("k1"), &body, 24, 5_000)
+            let d2 = pre_dispatch(&*store, &app, "todos.add", Principal::Anon, Some("k1"), &body, 24, 5_000)
                 .await
                 .unwrap();
             match d2 {
@@ -906,14 +984,14 @@ mod tests {
             let app = fixture_app();
 
             // First request takes the lock; never captures.
-            let d1 = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{}", 24, 1000)
+            let d1 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             assert!(matches!(d1, DedupeDecision::Proceed { .. }));
 
             // Second request waits for ~50ms (short timeout); the
             // first never completes, so we must get InFlightTimedOut.
-            let d2 = pre_dispatch(&store, &app, "todos.add", Some("k1"), b"{}", 24, 50)
+            let d2 = pre_dispatch(&store, &app, "todos.add", Principal::Anon, Some("k1"), b"{}", 24, 50)
                 .await
                 .unwrap();
             assert!(matches!(d2, DedupeDecision::InFlightTimedOut), "got {d2:?}");
@@ -927,7 +1005,7 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let dec = pre_dispatch(&store, &app, "billing.charge", Some("k1"), b"{}", 24, 1000)
+            let dec = pre_dispatch(&store, &app, "billing.charge", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             let DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, ttl_hours } = dec
@@ -940,7 +1018,7 @@ mod tests {
             .await
             .unwrap();
 
-            let dec2 = pre_dispatch(&store, &app, "billing.charge", Some("k1"), b"{}", 24, 1000)
+            let dec2 = pre_dispatch(&store, &app, "billing.charge", Principal::Anon, Some("k1"), b"{}", 24, 1000)
                 .await
                 .unwrap();
             match dec2 {
@@ -979,7 +1057,7 @@ mod tests {
         run_async(async {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
-            let key = entry_key(&app, "todos.add", "k1");
+            let key = entry_key(&app, "todos.add", Principal::Anon, "k1");
             let now = now_ms();
             // 1h TTL but stored 1h+1ms ago so it has just expired.
             let stored = StoredResponse {
@@ -996,6 +1074,166 @@ mod tests {
         });
     }
 
+    // ---------------------------------------------------------------
+    // Principal partitioning
+    // ---------------------------------------------------------------
+
+    /// Seed a stored response for `principal` under `k1`/`{"x":1}`.
+    async fn seed_entry(store: &InMemoryIdempotencyStore, app: &Uuid, principal: Principal<'_>) {
+        let dec = pre_dispatch(store, app, "todos.add", principal, Some("k1"), b"{\"x\":1}", 24, 1000)
+            .await
+            .unwrap();
+        let DedupeDecision::Proceed { entry_key: ek, lock_key: lk, body_hash, ttl_hours } = dec
+        else {
+            panic!("expected Proceed");
+        };
+        capture_response(
+            store,
+            app,
+            &ek,
+            &lk,
+            &body_hash,
+            200,
+            &HashMap::new(),
+            b"first-users-response",
+            ttl_hours,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn a_second_user_with_the_same_key_gets_no_hit() {
+        // The disclosure in decision form: user B must NOT be handed
+        // user A's stored entry.
+        run_async(async {
+            let store = InMemoryIdempotencyStore::new();
+            let app = fixture_app();
+            seed_entry(&store, &app, Principal::User("pws_aaa")).await;
+
+            let dec = pre_dispatch(
+                &store,
+                &app,
+                "todos.add",
+                Principal::User("pws_bbb"),
+                Some("k1"),
+                b"{\"x\":1}",
+                24,
+                1000,
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(dec, DedupeDecision::Proceed { .. }),
+                "a different principal must not read the first one's entry, got {dec:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_same_user_with_the_same_key_still_hits() {
+        // Control for the test above: ONE variable differs (the subject).
+        // Partitioning must not degrade into "never dedupe".
+        run_async(async {
+            let store = InMemoryIdempotencyStore::new();
+            let app = fixture_app();
+            seed_entry(&store, &app, Principal::User("pws_aaa")).await;
+
+            let dec = pre_dispatch(
+                &store,
+                &app,
+                "todos.add",
+                Principal::User("pws_aaa"),
+                Some("k1"),
+                b"{\"x\":1}",
+                24,
+                1000,
+            )
+            .await
+            .unwrap();
+            match dec {
+                DedupeDecision::Hit(stored) => {
+                    assert_eq!(stored.body_bytes(), b"first-users-response");
+                }
+                other => panic!("same principal must still dedupe, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn the_anonymous_namespace_is_disjoint_from_an_authenticated_one() {
+        // An anonymous caller must not read an authenticated caller's
+        // entry, nor the reverse.
+        run_async(async {
+            let store = InMemoryIdempotencyStore::new();
+            let app = fixture_app();
+            seed_entry(&store, &app, Principal::User("pws_aaa")).await;
+
+            let anon = pre_dispatch(
+                &store, &app, "todos.add", Principal::Anon, Some("k1"), b"{\"x\":1}", 24, 1000,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(anon, DedupeDecision::Proceed { .. }), "got {anon:?}");
+
+            let store2 = InMemoryIdempotencyStore::new();
+            seed_entry(&store2, &app, Principal::Anon).await;
+            let user = pre_dispatch(
+                &store2,
+                &app,
+                "todos.add",
+                Principal::User("pws_aaa"),
+                Some("k1"),
+                b"{\"x\":1}",
+                24,
+                1000,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(user, DedupeDecision::Proceed { .. }), "got {user:?}");
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Anonymous-key entropy gate
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn high_entropy_key_accepts_uuid_v4_and_v7() {
+        assert!(is_high_entropy_key("3f2504e0-4f89-41d3-9a0c-0305e82c3301"), "v4");
+        assert!(is_high_entropy_key("018f9a1c-3d2b-7c4e-8f01-2a3b4c5d6e7f"), "v7");
+        // Case-insensitive hex, still the canonical 36-char layout.
+        assert!(is_high_entropy_key("3F2504E0-4F89-41D3-9A0C-0305E82C3301"), "v4 upper");
+    }
+
+    #[test]
+    fn high_entropy_key_rejects_guessable_shapes() {
+        // Not a UUID at all — the whole point.
+        assert!(!is_high_entropy_key("checkout-1"));
+        assert!(!is_high_entropy_key(""));
+        // v1 = timestamp + MAC; v3/v5 = a hash of a name the caller may
+        // know. All parse as UUIDs; none are unguessable.
+        assert!(!is_high_entropy_key("d9428888-122b-11e1-b85c-61cd3cbb3210"), "v1");
+        assert!(!is_high_entropy_key("3d813cbb-47fb-32ba-91df-831e1593ac29"), "v3");
+        assert!(!is_high_entropy_key("74738ff5-5367-5958-9aee-98fffdcd1876"), "v5");
+        // Nil / max are constants, so every caller would collide.
+        assert!(!is_high_entropy_key("00000000-0000-0000-0000-000000000000"), "nil");
+        // Non-RFC4122 variant with a v4 version nibble.
+        assert!(!is_high_entropy_key("3f2504e0-4f89-41d3-ca0c-0305e82c3301"), "variant");
+    }
+
+    #[test]
+    fn high_entropy_key_rejects_non_canonical_spellings() {
+        // Each of these is the SAME UUID as the accepted form above, but
+        // would produce a DIFFERENT entry key — a silent dedupe miss.
+        assert!(!is_high_entropy_key("3f2504e04f8941d39a0c0305e82c3301"), "simple");
+        assert!(!is_high_entropy_key("{3f2504e0-4f89-41d3-9a0c-0305e82c3301}"), "braced");
+        assert!(
+            !is_high_entropy_key("urn:uuid:3f2504e0-4f89-41d3-9a0c-0305e82c3301"),
+            "urn"
+        );
+    }
+
     #[test]
     fn live_key_cap_evicts_oldest() {
         // Use a tighter cap by checking the eviction path against a
@@ -1006,7 +1244,7 @@ mod tests {
             let store = InMemoryIdempotencyStore::new();
             let app = fixture_app();
             for i in 0..5 {
-                let key = entry_key(&app, "todos.add", &format!("k{i}"));
+                let key = entry_key(&app, "todos.add", Principal::Anon, &format!("k{i}"));
                 let stored = StoredResponse {
                     input_hash: hash_body(b"{}"),
                     status: 200,

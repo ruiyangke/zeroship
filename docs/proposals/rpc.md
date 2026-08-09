@@ -1580,17 +1580,31 @@ The `(app_id, wireId, idempotency_key)` tuple has three possible states:
 - A request whose key was just evicted (false-cache-miss) re-runs the handler. The handler must remain idempotent against the underlying data store; the cache is best-effort.
 - Eviction emits a warn-level log line per 1000 evictions, surfaced in the creator's usage dashboard.
 
+### The dedupe tuple is partitioned by principal
+
+A dedupe hit replays the stored response **verbatim**, so the entry key must name the caller it was stored for. The tuple is:
+
+```
+(app_id, wireId, principal, idempotency_key)
+```
+
+`principal` is the per-app pairwise `pws_…` subject the gateway resolved for the request — the same identity it puts in `ZeroShip-User`, read back out of that verified header so the partition and the worker's view of the caller can never drift. This applies on **every** route, not only `auth: "user"`/`"admin"` ones: an `auth: "anon"` procedure can still resolve a session when the visitor happens to be logged in, and when it does, that visitor gets their own partition.
+
+When a procedure is declared `auth: "user"`/`"admin"` and the gateway cannot read a principal, it does **not** fall back to the shared namespace — that would be precisely the leak the partition prevents. It answers `500 INTERNAL` with `details.reason: "idempotency_principal_unavailable"`. This is unreachable in normal operation (the auth gate 401s an unauthenticated caller long before dispatch, and the header is minted by the same process moments earlier); it exists so an invariant break fails closed instead of silently sharing.
+
 ### Anonymous mutations + idempotency
 
-When `auth: "anon"` and `idempotent: true` both apply to a mutation, the dedupe tuple `(app_id, wireId, idempotency_key)` has no user partition — two anonymous clients picking the same `Idempotency-Key` would otherwise see each other's responses (cross-user leak).
+Requests with no resolved identity all land in **one** shared partition per `(app_id, wireId)` — two anonymous clients picking the same `Idempotency-Key` would otherwise see each other's responses (cross-user leak). The compensating control is that the key itself must be unguessable.
 
-To prevent this, anonymous mutations require **high-entropy** idempotency keys:
+When `auth: "anon"` and `idempotent: true` both apply to a mutation, the key must be **high-entropy**:
 
-- The key must parse as either a UUIDv4 (random) or UUIDv7 (timestamp + random).
-- If the key fails the parse, the gateway returns `400 INVALID_ARGUMENT` with `details.reason: "anonymous_idempotency_key_must_be_uuid_v4_or_v7"` — and the build's `idempotent: true` declaration on an `auth: "anon"` mutation emits a warning at deploy time naming this constraint.
+- The key must be a UUIDv4 (random) or UUIDv7 (timestamp + random), in the canonical 36-character hyphenated spelling. Other UUID versions are refused even though they parse: v1 is a timestamp plus a MAC address, and v3/v5 are a hash of a name the caller may already know — neither is unguessable. The braced/URN/unhyphenated spellings are refused too, because the same UUID written two ways would hash to two different entry keys and silently miss dedupe.
+- If the key fails that check, the gateway returns `400 INVALID_ARGUMENT` with `details.reason: "anonymous_idempotency_key_must_be_uuid_v4_or_v7"` — and the build's `idempotent: true` declaration on an `auth: "anon"` mutation emits a warning at deploy time naming this constraint.
 - Collision probability with proper UUIDs is `2^-122` (UUIDv4) or `2^-74` per ms (UUIDv7) — astronomically safe.
 
-For authenticated mutations (`auth: "user"`/`"admin"`), the dedupe tuple is `(app_id, wireId, idempotency_key, user_id)` — naturally partitioned. The UUID-only constraint does not apply; any string up to 255 chars is accepted (matches Stripe).
+The gate keys off the **declared** `auth` level, not off whether the individual caller turned out to be logged in. It has to be knowable from the manifest at build time, and a rule that only bit logged-out callers would make the same key legal or illegal depending on session state. So a logged-in visitor to an `auth: "anon"` procedure gets both: their own partition *and* the UUID requirement.
+
+For `auth: "user"`/`"admin"` mutations the UUID-only constraint does not apply — the principal partition already isolates the caller — so any string up to 255 chars is accepted (matches Stripe), which keeps natural keys like an order id usable.
 
 ### RPC-on-RPC — server function calling another server function
 
