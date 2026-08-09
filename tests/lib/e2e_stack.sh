@@ -114,6 +114,15 @@ stack_up() {
   # --- signing key + free the ports ----------------------------------------
   openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
   chmod 600 "$WORK/signing-key.pem"
+  # Broker master secret. cd54028e7 ("cut end-user login to the platform OP via
+  # per-app brokered oac_ clients") made the gateway REFUSE TO START without it,
+  # and this file was not updated -- so `stack_up` has been unable to bring a
+  # gateway up since, taking every harness that sources it with it (e2e_auth_rpc,
+  # e2e_uri, e2e_s3_*, e2e_app_primitives_render, tests/e2e_browser). The 17
+  # harnesses that bring their own stack pass the flag directly and were
+  # unaffected, which is why the breakage stayed invisible.
+  openssl rand -base64 48 > "$WORK/gate-secret"
+  chmod 600 "$WORK/gate-secret"
   local p
   for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
@@ -140,6 +149,7 @@ stack_up() {
     --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
     --signing-key-file "$WORK/signing-key.pem" \
+    --gateway-broker-secret-file "$WORK/gate-secret" \
     --dev-insecure > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
