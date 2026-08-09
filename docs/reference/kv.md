@@ -118,6 +118,25 @@ do {
 } while (cursor !== null);
 ```
 
+### Key order is unspecified
+
+`list` makes no ordering guarantee, and the order genuinely differs between
+backends: the embedded store used by `pnpm dev` iterates keys in sorted order,
+while a Redis-backed deployment returns them in scan order. Code that renders or
+compares a key list will therefore see one order locally and another in
+production.
+
+Sort explicitly whenever order matters:
+
+```ts
+const page = await kv.list("session:", { limit: 100 });
+if (page.error) throw page.error;
+const keys = [...page.data.keys].sort();
+```
+
+Sorting a single page does not sort the whole keyspace. If you need a globally
+ordered result, collect every page first and sort the combined array.
+
 `namespace(prefix)` is pure SDK sugar over string prefixes:
 
 ```ts
