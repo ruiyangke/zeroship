@@ -235,6 +235,15 @@ retryable. Writes retry only when `retryWrites: true` is set or the procedure is
 marked `idempotent: true`, because idempotent writes carry a stable
 `Idempotency-Key`.
 
+What the platform does with that key: the first response your handler produces
+is stored under it and replayed verbatim to every later request carrying the
+same key and the same input, for the procedure's idempotency TTL (24h by
+default). **Server errors are the exception — a `5xx` is never stored.** A
+`5xx` means no outcome was reported (the app threw, or the platform could not
+reach it), so the key stays open and a retry re-runs the call. Rejections you
+want remembered must be `4xx`: return `400`/`409`/`422` and the retry gets that
+same answer back without re-executing.
+
 ## Streams
 
 For stream procedures, call the generated/manual function and iterate:
