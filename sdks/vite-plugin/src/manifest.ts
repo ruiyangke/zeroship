@@ -912,6 +912,53 @@ export async function computeManifestExtras(
   const appConfig = await loadDefineAppConfig(root, configPath);
   const userFlat = appConfig?.resources ? flattenAuthorTree(appConfig.resources) : {};
 
+  // 4b. Reconcile the two independent inputs. `autoResources` comes from
+  //     the transform's discovery pass, which only fires on a module
+  //     carrying the `"use server"` directive; `userFlat` comes from
+  //     `defineApp({ resources })`, which is a plain literal and asks
+  //     nothing of the module it names. Drop the directive from a
+  //     procedure module and only the first set empties: the build then
+  //     ships `rpc:` policies for procedures that are not in the worker
+  //     bundle, while the client bundle inlines and calls the handler
+  //     locally instead of over the wire. MEASURED before this gate
+  //     existed: `vite build` printed "0 modules, 0 server functions",
+  //     still emitted `rpc:getMessages` + `rpc:addMessage`, and exited 0
+  //     with no warning at all.
+  //
+  //     A declared `rpc:` key is legitimate in exactly two shapes: it
+  //     names a discovered procedure, or it is a dot-segment FAMILY
+  //     ancestor whose policy is inherited by one (`rpc:todos` above
+  //     `rpc:todos.list`). Anything else is stale or unreachable.
+  const discoveredRpcKeys = new Set(assignments.map((a) => a.resourceKey));
+  const orphanRpcKeys = Object.keys(userFlat).filter((key) => {
+    if (!key.startsWith("rpc:")) return false;
+    if (discoveredRpcKeys.has(key)) return false;
+    const familyPrefix = `${key}.`;
+    for (const discovered of discoveredRpcKeys) {
+      if (discovered.startsWith(familyPrefix)) return false;
+    }
+    return true;
+  });
+  if (orphanRpcKeys.length > 0) {
+    const lines = orphanRpcKeys
+      .sort()
+      .map(
+        (key) =>
+          `  - ${JSON.stringify(key)} is declared in \`defineApp({ resources })\` but no ` +
+          `procedure with that id was discovered.`,
+      );
+    throw new Error(
+      `[zeroship:manifest] build refused: the resource tree declares ${orphanRpcKeys.length} ` +
+        `\`rpc:\` ${orphanRpcKeys.length === 1 ? "policy" : "policies"} with no matching procedure.\n` +
+        lines.join("\n") +
+        `\n  The usual cause is a missing \`"use server"\` directive: a procedure module ` +
+        `only enters RPC discovery when its first statement is \`"use server";\`. Without it ` +
+        `the procedure is bundled into the CLIENT and never published, while this policy ` +
+        `still ships. Add the directive to the declaring module, or drop the stale entry ` +
+        `from \`src/server/config.ts\`.`,
+    );
+  }
+
   // 5. Merge: auto-derived first, user entries on top (user wins).
   const merged: Record<string, WireResource> = { ...autoResources };
   for (const [key, node] of Object.entries(userFlat)) {

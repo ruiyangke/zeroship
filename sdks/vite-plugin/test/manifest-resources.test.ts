@@ -618,3 +618,105 @@ export default defineApp({
     }
   });
 });
+
+describe("declared-vs-discovered rpc reconciliation", () => {
+  // Two independent inputs meet in `computeManifestExtras`: the
+  // procedures the transform DISCOVERED (which require a `"use server"`
+  // directive on the declaring module) and the `rpc:` policy entries the
+  // author DECLARED in `src/server/config.ts` (which require nothing).
+  // Drop the directive and the first set empties while the second does
+  // not, so the manifest ships `rpc:` policies for procedures that are
+  // not in the worker bundle and are not called by the client bundle.
+  // MEASURED before this check existed: `vite build` on such an app
+  // printed "0 modules, 0 server functions", emitted
+  // `rpc:getMessages` + `rpc:addMessage`, and exited 0 with no warning.
+
+  test("declared rpc: entry with no discovered procedure is refused", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `
+import { defineApp } from "@zeroship/server";
+export default defineApp({ resources: { "rpc:getMessages": { auth: "anon", publiclyAccessible: true } } });
+      `,
+    });
+    try {
+      await assert.rejects(
+        () =>
+          computeManifestExtras({
+            root: fix.root,
+            procedures: [],
+            mode: "production",
+          }),
+        (err: Error) => {
+          assert.match(err.message, /rpc:getMessages/);
+          assert.match(err.message, /use server/);
+          return true;
+        },
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  // CONTROL for the test above, differing in ONE variable: the same
+  // declared entry, with the matching procedure discovered. If this
+  // throws, the check rejects correct apps rather than broken ones.
+  test("declared rpc: entry backed by a discovered procedure builds", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `
+import { defineApp } from "@zeroship/server";
+export default defineApp({ resources: { "rpc:getMessages": { auth: "anon", publiclyAccessible: true } } });
+      `,
+    });
+    try {
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures: [
+          {
+            filePath: resolve(fix.root, "src/server.ts"),
+            exportName: "getMessages",
+            moduleSlug: "src-server",
+            kind: "query",
+            isStream: false,
+            config: { id: "getMessages" },
+          },
+        ],
+        mode: "production",
+      });
+      assert.ok(result.resources["rpc:getMessages"], "entry survives");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  // A dotted FAMILY key carries inherited policy for its children and
+  // never names a procedure of its own. It must not be read as a stale
+  // entry, or every namespaced app fails to build.
+  test("family key covering a discovered child is not flagged", async () => {
+    const fix = await makeFixture({
+      "src/server/config.ts": `
+import { defineApp } from "@zeroship/server";
+export default defineApp({ resources: { "rpc:todos": { auth: "user", children: { "list": {} } } } });
+      `,
+    });
+    try {
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures: [
+          {
+            filePath: resolve(fix.root, "src/server/todos.ts"),
+            exportName: "list",
+            moduleSlug: "src-server-todos",
+            kind: "query",
+            isStream: false,
+            config: { id: "todos.list" },
+          },
+        ],
+        mode: "production",
+      });
+      assert.ok(result.resources["rpc:todos"], "family key survives");
+      assert.ok(result.resources["rpc:todos.list"], "child key survives");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+});
