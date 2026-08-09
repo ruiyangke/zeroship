@@ -57,7 +57,11 @@
       "columns": [
         {
           "name": "id",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": false
         },
         {
@@ -72,12 +76,20 @@
         },
         {
           "name": "created_by",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": true
         },
         {
           "name": "updated_by",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": true
         },
         {
@@ -145,7 +157,11 @@
       "columns": [
         {
           "name": "id",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": false
         },
         {
@@ -160,12 +176,20 @@
         },
         {
           "name": "created_by",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": true
         },
         {
           "name": "updated_by",
-          "type": "text",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
           "nullable": true
         },
         {

@@ -1,6 +1,11 @@
 // op.* migration fixture — structured COMMENT ON plus closed index elements.
 // Covers expression index elements, partial-index predicates, and representative
 // comment targets through both fluent handles and the top-level closed target API.
+//
+// Like the other confined-platform fixtures, this one omits `id`: policy injects the
+// internal platform key, and an author column of that name is a collision the
+// resolver refuses. The view still selects `id` because the injected column is
+// present on the resolved table.
 import {
   comment,
   enumType,
@@ -20,7 +25,6 @@ export function up() {
 
   table("users").create({
     columns: {
-      id: t.uuid().notNull(),
       email: t.text().notNull(),
       active: t.boolean().notNull().default(true),
       status: t.enum(userStatus),

@@ -1,0 +1,2439 @@
+{
+  "alter_primary_key": {
+    "name": "alter_primary_key",
+    "ops": [
+      {
+        "op": "alterPrimaryKey",
+        "table": "orders",
+        "action": {
+          "kind": "add",
+          "columns": [
+            "legacy_id"
+          ]
+        },
+        "schema": "app"
+      },
+      {
+        "op": "alterPrimaryKey",
+        "table": "orders",
+        "action": {
+          "kind": "replace",
+          "expectedColumns": [
+            "legacy_id"
+          ],
+          "columns": [
+            "tenant_id",
+            "order_id"
+          ],
+          "dropIdentityFrom": [
+            "legacy_id"
+          ]
+        },
+        "schema": "app"
+      },
+      {
+        "op": "alterPrimaryKey",
+        "table": "orders",
+        "action": {
+          "kind": "drop",
+          "expectedColumns": [
+            "tenant_id",
+            "order_id"
+          ]
+        },
+        "schema": "app"
+      }
+    ]
+  },
+  "comments_indexes": {
+    "name": "comments_indexes",
+    "ops": [
+      {
+        "op": "createEnum",
+        "name": "user_status",
+        "values": [
+          "active",
+          "disabled"
+        ]
+      },
+      {
+        "op": "createSequence",
+        "name": "users_seq"
+      },
+      {
+        "op": "createTable",
+        "name": "users",
+        "columns": [
+          {
+            "name": "email",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "active",
+            "type": "boolean",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": true
+              }
+            }
+          },
+          {
+            "name": "status",
+            "type": {
+              "enum": {
+                "name": "user_status"
+              }
+            }
+          }
+        ],
+        "constraints": [
+          {
+            "name": "users_email_uq",
+            "kind": {
+              "kind": "unique",
+              "columns": [
+                "email"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "createIndex",
+        "table": "users",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "email"
+          },
+          {
+            "kind": "expr",
+            "expr": {
+              "node": "fnCall",
+              "fn": "lower",
+              "args": [
+                {
+                  "node": "colRef",
+                  "name": "email"
+                }
+              ]
+            }
+          }
+        ],
+        "name": "users_email_lower_idx",
+        "where": {
+          "node": "unaryOp",
+          "op": "isTrue",
+          "operand": {
+            "node": "colRef",
+            "name": "active"
+          }
+        }
+      },
+      {
+        "op": "createView",
+        "name": "active_users",
+        "columns": [
+          "id",
+          "email"
+        ],
+        "query": {
+          "kind": "structured",
+          "select": {
+            "from": {
+              "name": "users"
+            },
+            "projection": [
+              {
+                "kind": "colRef",
+                "name": "id"
+              },
+              {
+                "kind": "colRef",
+                "name": "email"
+              }
+            ],
+            "where": {
+              "node": "unaryOp",
+              "op": "isTrue",
+              "operand": {
+                "node": "colRef",
+                "name": "active"
+              }
+            }
+          }
+        }
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "table",
+          "name": "users"
+        },
+        "comment": "End-user accounts"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "column",
+          "table": "users",
+          "name": "email"
+        },
+        "comment": "Login email"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "constraint",
+          "table": "users",
+          "name": "users_email_uq"
+        },
+        "comment": "Email uniqueness"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "index",
+          "name": "users_email_lower_idx"
+        },
+        "comment": "Case-insensitive email lookup"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "view",
+          "name": "active_users"
+        },
+        "comment": "Currently active users"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "type",
+          "name": "user_status"
+        },
+        "comment": "Allowed user states"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "sequence",
+          "name": "users_seq"
+        },
+        "comment": "Synthetic user sequence"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "function",
+          "name": "normalize_email"
+        },
+        "comment": "Unambiguous function comment"
+      },
+      {
+        "op": "comment",
+        "target": {
+          "kind": "table",
+          "name": "users"
+        }
+      }
+    ]
+  },
+  "constraint_not_valid": {
+    "name": "constraint_not_valid",
+    "ops": [
+      {
+        "op": "addConstraint",
+        "table": "line_items",
+        "constraint": {
+          "name": "line_items_order_fkey",
+          "kind": {
+            "kind": "fk",
+            "columns": [
+              "order_id"
+            ],
+            "referencesTable": "orders",
+            "referencesColumns": [
+              "id"
+            ],
+            "notValid": true
+          }
+        }
+      },
+      {
+        "op": "addConstraint",
+        "table": "line_items",
+        "constraint": {
+          "name": "line_items_qty_positive",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "binOp",
+              "op": "gt",
+              "lhs": {
+                "node": "colRef",
+                "name": "qty"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 0
+              }
+            },
+            "notValid": true
+          }
+        }
+      },
+      {
+        "op": "validateConstraint",
+        "table": "line_items",
+        "name": "line_items_order_fkey"
+      },
+      {
+        "op": "validateConstraint",
+        "table": "line_items",
+        "name": "line_items_qty_positive"
+      }
+    ]
+  },
+  "ddl_addcol_constraints": {
+    "name": "ddl_addcol_constraints",
+    "ops": [
+      {
+        "op": "addColumn",
+        "table": "accounts",
+        "column": "email",
+        "type": "text",
+        "nullable": false
+      },
+      {
+        "op": "addConstraint",
+        "table": "accounts",
+        "constraint": {
+          "kind": {
+            "kind": "unique",
+            "columns": [
+              "email"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "ddl_alter": {
+    "name": "ddl_alter",
+    "ops": [
+      {
+        "op": "setColumnType",
+        "table": "orders",
+        "column": "total",
+        "toType": "bigInt"
+      },
+      {
+        "op": "setColumnNotNull",
+        "table": "orders",
+        "column": "note"
+      },
+      {
+        "op": "dropColumnNotNull",
+        "table": "orders",
+        "column": "note"
+      },
+      {
+        "op": "setColumnDefault",
+        "table": "orders",
+        "column": "note",
+        "value": {
+          "literal": {
+            "value": "memo"
+          }
+        }
+      },
+      {
+        "op": "dropColumnDefault",
+        "table": "orders",
+        "column": "note"
+      },
+      {
+        "op": "renameColumn",
+        "table": "orders",
+        "from": "note",
+        "to": "memo",
+        "type": "text"
+      },
+      {
+        "op": "addConstraint",
+        "table": "orders",
+        "constraint": {
+          "name": "orders_customer_fk",
+          "kind": {
+            "kind": "fk",
+            "columns": [
+              "customerId"
+            ],
+            "referencesTable": "customers",
+            "referencesColumns": [
+              "id"
+            ]
+          }
+        }
+      },
+      {
+        "op": "dropConstraint",
+        "table": "orders",
+        "name": "orders_legacy_chk"
+      }
+    ]
+  },
+  "ddl_create": {
+    "name": "ddl_create",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "orders",
+        "columns": [
+          {
+            "name": "total",
+            "type": "int",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": 0
+              }
+            }
+          },
+          {
+            "name": "note",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "op": "createIndex",
+        "table": "orders",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "total"
+          }
+        ],
+        "name": "orders_total_idx"
+      },
+      {
+        "op": "addColumn",
+        "table": "orders",
+        "column": "status",
+        "type": "text",
+        "nullable": false,
+        "default": {
+          "literal": {
+            "value": "new"
+          }
+        }
+      }
+    ]
+  },
+  "ddl_drop": {
+    "name": "ddl_drop",
+    "ops": [
+      {
+        "op": "dropIndex",
+        "name": "orders_total_idx",
+        "table": "orders"
+      },
+      {
+        "op": "dropColumn",
+        "table": "orders",
+        "column": "memo",
+        "schema": "reporting",
+        "existenceGuard": "ifExists"
+      },
+      {
+        "op": "dropTable",
+        "table": "scratch",
+        "cascade": true,
+        "schema": "reporting",
+        "existenceGuard": "ifExists"
+      }
+    ]
+  },
+  "ddl_rename_table": {
+    "name": "ddl_rename_table",
+    "ops": [
+      {
+        "op": "renameTable",
+        "table": "accounts",
+        "to": "members"
+      },
+      {
+        "op": "renameTable",
+        "table": "orders",
+        "to": "purchases",
+        "schema": "reporting",
+        "existenceGuard": "ifExists"
+      }
+    ]
+  },
+  "dialectal_ops": {
+    "name": "dialectal_ops",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "docs",
+        "columns": [
+          {
+            "name": "embedding",
+            "type": {
+              "vector": {
+                "vector": 3
+              }
+            },
+            "vectorMetric": "cosine"
+          }
+        ]
+      },
+      {
+        "op": "dialectal",
+        "pg": [
+          {
+            "op": "createIndex",
+            "table": "docs",
+            "columns": [
+              {
+                "kind": "column",
+                "name": "embedding"
+              }
+            ],
+            "name": "docs_embedding_hnsw_idx",
+            "using": "hnsw"
+          }
+        ]
+      }
+    ]
+  },
+  "dml": {
+    "name": "dml",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "status_codes",
+        "columns": [
+          "code",
+          "label"
+        ],
+        "rows": [
+          [
+            200,
+            "ok"
+          ],
+          [
+            404,
+            "not found"
+          ]
+        ]
+      },
+      {
+        "op": "update",
+        "table": "status_codes",
+        "set": {
+          "label": {
+            "node": "fnCall",
+            "fn": "coalesce",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              },
+              {
+                "node": "literal",
+                "value": "unknown"
+              }
+            ]
+          },
+          "marker": "fixed"
+        },
+        "where": {
+          "node": "binOp",
+          "op": "gt",
+          "lhs": {
+            "node": "colRef",
+            "name": "code"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 0
+          }
+        }
+      },
+      {
+        "op": "delete",
+        "table": "status_codes",
+        "where": {
+          "node": "unaryOp",
+          "op": "isNull",
+          "operand": {
+            "node": "colRef",
+            "name": "code"
+          }
+        },
+        "limit": 100
+      },
+      {
+        "op": "backfill",
+        "table": "status_codes",
+        "cursorColumns": [
+          "code"
+        ],
+        "cursorStability": {
+          "mode": "guardUpdates"
+        },
+        "batchSize": 500,
+        "set": {
+          "label": {
+            "node": "fnSynth",
+            "fn": "concatWs",
+            "args": [
+              {
+                "node": "literal",
+                "value": " "
+              },
+              {
+                "node": "colRef",
+                "name": "code"
+              },
+              {
+                "node": "colRef",
+                "name": "label"
+              }
+            ]
+          },
+          "marker": "backfilled"
+        },
+        "filter": {
+          "node": "binOp",
+          "op": "gt",
+          "lhs": {
+            "node": "colRef",
+            "name": "code"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 0
+          }
+        },
+        "name": "backfill_labels"
+      }
+    ]
+  },
+  "dml_upsert": {
+    "name": "dml_upsert",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "status_codes",
+        "columns": [
+          "code",
+          "label"
+        ],
+        "rows": [
+          [
+            200,
+            "ok"
+          ]
+        ],
+        "onConflict": {
+          "columns": [
+            "code"
+          ],
+          "doUpdate": {
+            "label": "dup"
+          }
+        }
+      },
+      {
+        "op": "insert",
+        "table": "status_codes",
+        "columns": [
+          "code"
+        ],
+        "rows": [
+          [
+            404
+          ]
+        ],
+        "onConflict": {
+          "columns": [
+            "code"
+          ]
+        }
+      }
+    ]
+  },
+  "edge_scalars": {
+    "name": "edge_scalars",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "edge",
+        "columns": [
+          "big",
+          "frac",
+          "uni",
+          "flag",
+          "missing"
+        ],
+        "rows": [
+          [
+            {
+              "decimal": "9007199254740993"
+            },
+            {
+              "decimal": "1.5"
+            },
+            "héllo\t\"world\" 𝟙",
+            true,
+            null
+          ]
+        ]
+      }
+    ]
+  },
+  "enums_domains": {
+    "name": "enums_domains",
+    "ops": [
+      {
+        "op": "createEnum",
+        "name": "plan_tier",
+        "values": [
+          "free",
+          "pro"
+        ]
+      },
+      {
+        "op": "createDomain",
+        "name": "billing_period",
+        "as": "int",
+        "check": {
+          "node": "binOp",
+          "op": "ge",
+          "lhs": {
+            "node": "colRef",
+            "name": "VALUE"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 1
+          }
+        },
+        "default": {
+          "literal": {
+            "value": 1
+          }
+        },
+        "notNull": true
+      },
+      {
+        "op": "createDomain",
+        "name": "account_state",
+        "as": "text",
+        "check": {
+          "node": "inList",
+          "expr": {
+            "node": "colRef",
+            "name": "VALUE"
+          },
+          "elems": [
+            "active",
+            "past_due"
+          ],
+          "negated": false
+        }
+      },
+      {
+        "op": "createTable",
+        "name": "subscriptions",
+        "columns": [
+          {
+            "name": "tier",
+            "type": {
+              "enum": {
+                "name": "plan_tier"
+              }
+            },
+            "nullable": false
+          },
+          {
+            "name": "period",
+            "type": {
+              "domain": {
+                "name": "billing_period"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "createTable",
+        "name": "pg_expr_checks",
+        "columns": [
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "data",
+            "type": "json",
+            "nullable": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "status_ne_all",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "inList",
+                "expr": {
+                  "node": "colRef",
+                  "name": "status"
+                },
+                "elems": [
+                  "x"
+                ],
+                "negated": true
+              }
+            }
+          },
+          {
+            "name": "name_shape",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "pgRegexMatch",
+                "expr": {
+                  "node": "colRef",
+                  "name": "name"
+                },
+                "pattern": "^[a-z]+$"
+              }
+            }
+          },
+          {
+            "name": "data_size",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "binOp",
+                "op": "le",
+                "lhs": {
+                  "node": "pgColumnSize",
+                  "expr": {
+                    "node": "colRef",
+                    "name": "data"
+                  }
+                },
+                "rhs": {
+                  "node": "literal",
+                  "value": 8192
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "createEnum",
+        "name": "legacy_tier",
+        "values": [
+          "legacy"
+        ]
+      },
+      {
+        "op": "dropEnum",
+        "name": "legacy_tier",
+        "existenceGuard": "ifExists"
+      },
+      {
+        "op": "dropDomain",
+        "name": "legacy_period",
+        "existenceGuard": "ifExists"
+      }
+    ]
+  },
+  "fluent_ddl": {
+    "name": "fluent_ddl",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "accounts",
+        "columns": [
+          {
+            "name": "email",
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          {
+            "name": "balance",
+            "type": {
+              "decimal": {
+                "precision": 12,
+                "scale": 2
+              }
+            },
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": {
+                  "decimal": "0.00"
+                }
+              }
+            }
+          },
+          {
+            "name": "authored_at",
+            "type": "timestamp",
+            "nullable": false,
+            "default": {
+              "expr": {
+                "node": "fnSynth",
+                "fn": "now",
+                "args": []
+              }
+            }
+          },
+          {
+            "name": "external_id",
+            "type": "uuid"
+          },
+          {
+            "name": "avatar",
+            "type": "bytes"
+          },
+          {
+            "name": "active",
+            "type": "boolean",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": true
+              }
+            }
+          },
+          {
+            "name": "profile",
+            "type": "json"
+          },
+          {
+            "name": "owner",
+            "type": "text",
+            "references": {
+              "table": "users",
+              "column": "id"
+            }
+          },
+          {
+            "name": "embedding",
+            "type": {
+              "vector": {
+                "vector": 1536
+              }
+            }
+          },
+          {
+            "name": "location",
+            "type": "geoPoint"
+          },
+          {
+            "name": "label",
+            "type": "text"
+          },
+          {
+            "name": "hits",
+            "type": "int",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": 0
+              }
+            }
+          },
+          {
+            "name": "big_hits",
+            "type": "bigInt"
+          },
+          {
+            "name": "ratio",
+            "type": "double"
+          },
+          {
+            "name": "secret",
+            "type": {
+              "encrypted": {
+                "of": "text"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "createTable",
+        "name": "memberships",
+        "columns": [
+          {
+            "name": "account_id",
+            "type": "uuid",
+            "nullable": false
+          },
+          {
+            "name": "team",
+            "type": "text",
+            "nullable": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "memberships_team_uq",
+            "kind": {
+              "kind": "unique",
+              "columns": [
+                "team"
+              ]
+            }
+          },
+          {
+            "name": "memberships_team_chk",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "unaryOp",
+                "op": "isNotNull",
+                "operand": {
+                  "node": "colRef",
+                  "name": "team"
+                }
+              }
+            }
+          },
+          {
+            "name": "memberships_account_fk",
+            "kind": {
+              "kind": "fk",
+              "columns": [
+                "account_id"
+              ],
+              "referencesTable": "accounts",
+              "referencesColumns": [
+                "id"
+              ]
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "memberships_account_idx",
+            "columns": [
+              {
+                "kind": "column",
+                "name": "account_id"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "addColumn",
+        "table": "accounts",
+        "column": "status",
+        "type": "text",
+        "nullable": false,
+        "default": {
+          "literal": {
+            "value": "new"
+          }
+        }
+      },
+      {
+        "op": "addConstraint",
+        "table": "memberships",
+        "constraint": {
+          "name": "memberships_team_fk",
+          "kind": {
+            "kind": "fk",
+            "columns": [
+              "team"
+            ],
+            "referencesTable": "teams",
+            "referencesColumns": [
+              "name"
+            ]
+          }
+        }
+      },
+      {
+        "op": "addConstraint",
+        "table": "accounts",
+        "constraint": {
+          "name": "accounts_external_uq",
+          "kind": {
+            "kind": "unique",
+            "columns": [
+              "external_id"
+            ]
+          }
+        }
+      },
+      {
+        "op": "addConstraint",
+        "table": "accounts",
+        "constraint": {
+          "name": "accounts_balance_chk",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "binOp",
+              "op": "ge",
+              "lhs": {
+                "node": "colRef",
+                "name": "balance"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "op": "dropConstraint",
+        "table": "accounts",
+        "name": "accounts_legacy_chk"
+      },
+      {
+        "op": "setColumnType",
+        "table": "accounts",
+        "column": "balance",
+        "toType": {
+          "decimal": {
+            "precision": 14,
+            "scale": 2
+          }
+        }
+      },
+      {
+        "op": "setColumnNotNull",
+        "table": "accounts",
+        "column": "profile"
+      },
+      {
+        "op": "renameColumn",
+        "table": "accounts",
+        "from": "label",
+        "to": "display_label",
+        "type": "text"
+      },
+      {
+        "op": "createIndex",
+        "table": "accounts",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "email"
+          }
+        ],
+        "name": "accounts_active_email_idx",
+        "unique": true,
+        "where": {
+          "node": "unaryOp",
+          "op": "isTrue",
+          "operand": {
+            "node": "colRef",
+            "name": "active"
+          }
+        }
+      },
+      {
+        "op": "addColumn",
+        "table": "accounts",
+        "column": "nickname",
+        "type": "text"
+      },
+      {
+        "op": "setColumnNotNull",
+        "table": "accounts",
+        "column": "nickname"
+      }
+    ]
+  },
+  "fluent_dml": {
+    "name": "fluent_dml",
+    "ops": [
+      {
+        "op": "insert",
+        "table": "status_codes",
+        "columns": [
+          "code",
+          "label"
+        ],
+        "rows": [
+          [
+            200,
+            "ok"
+          ],
+          [
+            404,
+            "not found"
+          ]
+        ]
+      },
+      {
+        "op": "update",
+        "table": "status_codes",
+        "set": {
+          "label": {
+            "node": "fnCall",
+            "fn": "coalesce",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              },
+              {
+                "node": "literal",
+                "value": "unknown"
+              }
+            ]
+          },
+          "norm": {
+            "node": "fnCall",
+            "fn": "lower",
+            "args": [
+              {
+                "node": "fnCall",
+                "fn": "trim",
+                "args": [
+                  {
+                    "node": "colRef",
+                    "name": "label"
+                  }
+                ]
+              }
+            ]
+          },
+          "shout": {
+            "node": "fnCall",
+            "fn": "upper",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              }
+            ]
+          },
+          "len": {
+            "node": "fnCall",
+            "fn": "length",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              }
+            ]
+          },
+          "mag": {
+            "node": "fnCall",
+            "fn": "abs",
+            "args": [
+              {
+                "node": "binOp",
+                "op": "sub",
+                "lhs": {
+                  "node": "colRef",
+                  "name": "code"
+                },
+                "rhs": {
+                  "node": "literal",
+                  "value": 500
+                }
+              }
+            ]
+          },
+          "canon": {
+            "node": "fnCall",
+            "fn": "nullif",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              },
+              {
+                "node": "literal",
+                "value": ""
+              }
+            ]
+          },
+          "score": {
+            "node": "binOp",
+            "op": "div",
+            "lhs": {
+              "node": "binOp",
+              "op": "sub",
+              "lhs": {
+                "node": "binOp",
+                "op": "mul",
+                "lhs": {
+                  "node": "binOp",
+                  "op": "add",
+                  "lhs": {
+                    "node": "colRef",
+                    "name": "code"
+                  },
+                  "rhs": {
+                    "node": "literal",
+                    "value": 1
+                  }
+                },
+                "rhs": {
+                  "node": "literal",
+                  "value": 2
+                }
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 3
+              }
+            },
+            "rhs": {
+              "node": "literal",
+              "value": 1
+            }
+          },
+          "joined": {
+            "node": "binOp",
+            "op": "concat",
+            "lhs": {
+              "node": "binOp",
+              "op": "concat",
+              "lhs": {
+                "node": "colRef",
+                "name": "label"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": " "
+              }
+            },
+            "rhs": {
+              "node": "cast",
+              "operand": {
+                "node": "colRef",
+                "name": "code"
+              },
+              "target": "text"
+            }
+          },
+          "code_txt": {
+            "node": "cast",
+            "operand": {
+              "node": "colRef",
+              "name": "code"
+            },
+            "target": "text"
+          }
+        },
+        "where": {
+          "node": "binOp",
+          "op": "and",
+          "lhs": {
+            "node": "binOp",
+            "op": "gt",
+            "lhs": {
+              "node": "colRef",
+              "name": "code"
+            },
+            "rhs": {
+              "node": "literal",
+              "value": 0
+            }
+          },
+          "rhs": {
+            "node": "unaryOp",
+            "op": "isNotNull",
+            "operand": {
+              "node": "colRef",
+              "name": "label"
+            }
+          }
+        }
+      },
+      {
+        "op": "delete",
+        "table": "status_codes",
+        "where": {
+          "node": "binOp",
+          "op": "and",
+          "lhs": {
+            "node": "binOp",
+            "op": "or",
+            "lhs": {
+              "node": "binOp",
+              "op": "or",
+              "lhs": {
+                "node": "binOp",
+                "op": "or",
+                "lhs": {
+                  "node": "binOp",
+                  "op": "or",
+                  "lhs": {
+                    "node": "binOp",
+                    "op": "ne",
+                    "lhs": {
+                      "node": "colRef",
+                      "name": "code"
+                    },
+                    "rhs": {
+                      "node": "literal",
+                      "value": 0
+                    }
+                  },
+                  "rhs": {
+                    "node": "binOp",
+                    "op": "le",
+                    "lhs": {
+                      "node": "colRef",
+                      "name": "code"
+                    },
+                    "rhs": {
+                      "node": "literal",
+                      "value": 0
+                    }
+                  }
+                },
+                "rhs": {
+                  "node": "binOp",
+                  "op": "ge",
+                  "lhs": {
+                    "node": "colRef",
+                    "name": "code"
+                  },
+                  "rhs": {
+                    "node": "literal",
+                    "value": 999
+                  }
+                }
+              },
+              "rhs": {
+                "node": "unaryOp",
+                "op": "isNull",
+                "operand": {
+                  "node": "colRef",
+                  "name": "label"
+                }
+              }
+            },
+            "rhs": {
+              "node": "unaryOp",
+              "op": "isFalse",
+              "operand": {
+                "node": "colRef",
+                "name": "active"
+              }
+            }
+          },
+          "rhs": {
+            "node": "unaryOp",
+            "op": "isTrue",
+            "operand": {
+              "node": "case",
+              "branches": [
+                {
+                  "when": {
+                    "node": "binOp",
+                    "op": "lt",
+                    "lhs": {
+                      "node": "colRef",
+                      "name": "code"
+                    },
+                    "rhs": {
+                      "node": "literal",
+                      "value": 100
+                    }
+                  },
+                  "then": {
+                    "node": "unaryOp",
+                    "op": "isNull",
+                    "operand": {
+                      "node": "colRef",
+                      "name": "code"
+                    }
+                  }
+                }
+              ],
+              "else": {
+                "node": "unaryOp",
+                "op": "isNull",
+                "operand": {
+                  "node": "colRef",
+                  "name": "label"
+                }
+              }
+            }
+          }
+        },
+        "limit": 100
+      },
+      {
+        "op": "backfill",
+        "table": "status_codes",
+        "cursorColumns": [
+          "code"
+        ],
+        "cursorStability": {
+          "mode": "guardUpdates"
+        },
+        "batchSize": 500,
+        "set": {
+          "full": {
+            "node": "fnSynth",
+            "fn": "concatWs",
+            "args": [
+              {
+                "node": "literal",
+                "value": " "
+              },
+              {
+                "node": "colRef",
+                "name": "label"
+              },
+              {
+                "node": "cast",
+                "operand": {
+                  "node": "colRef",
+                  "name": "code"
+                },
+                "target": "text"
+              }
+            ]
+          },
+          "first": {
+            "node": "fnSynth",
+            "fn": "splitPart",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "label"
+              },
+              {
+                "node": "literal",
+                "value": " "
+              },
+              {
+                "node": "literal",
+                "value": 1
+              }
+            ]
+          },
+          "touched": {
+            "node": "fnSynth",
+            "fn": "now",
+            "args": []
+          },
+          "token": {
+            "node": "uuidV4"
+          }
+        },
+        "filter": {
+          "node": "binOp",
+          "op": "gt",
+          "lhs": {
+            "node": "colRef",
+            "name": "code"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 0
+          }
+        },
+        "name": "fluent_backfill"
+      }
+    ]
+  },
+  "fluent_scalars": {
+    "name": "fluent_scalars",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "ledger",
+        "columns": [
+          {
+            "name": "seq",
+            "type": {
+              "decimal": {
+                "precision": 38,
+                "scale": 0
+              }
+            },
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": {
+                  "decimal": "9007199254740993"
+                }
+              }
+            }
+          },
+          {
+            "name": "salt",
+            "type": "bytes",
+            "default": {
+              "literal": {
+                "value": {
+                  "bytes": "AQID/w=="
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "insert",
+        "table": "ledger",
+        "columns": [
+          "seq",
+          "salt"
+        ],
+        "rows": [
+          [
+            {
+              "decimal": "9007199254740993"
+            },
+            {
+              "bytes": "ABAgQID/"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  "grouped_views": {
+    "name": "grouped_views",
+    "ops": [
+      {
+        "op": "createView",
+        "name": "order_totals",
+        "query": {
+          "kind": "structured",
+          "select": {
+            "from": {
+              "name": "orders"
+            },
+            "projection": [
+              {
+                "kind": "colRef",
+                "name": "customer_id"
+              },
+              {
+                "kind": "expr",
+                "expr": {
+                  "node": "agg",
+                  "func": "count"
+                },
+                "alias": "n"
+              },
+              {
+                "kind": "expr",
+                "expr": {
+                  "node": "agg",
+                  "func": "sum",
+                  "arg": {
+                    "node": "colRef",
+                    "name": "amount"
+                  }
+                },
+                "alias": "revenue"
+              }
+            ],
+            "where": {
+              "node": "binOp",
+              "op": "eq",
+              "lhs": {
+                "node": "colRef",
+                "name": "status"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": "paid"
+              }
+            },
+            "groupBy": [
+              {
+                "node": "colRef",
+                "name": "customer_id"
+              }
+            ],
+            "having": {
+              "node": "binOp",
+              "op": "gt",
+              "lhs": {
+                "node": "agg",
+                "func": "count",
+                "arg": {
+                  "node": "colRef",
+                  "name": "id"
+                }
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 5
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "in_list_scalars": {
+    "name": "in_list_scalars",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "scalar_membership",
+        "columns": [
+          {
+            "name": "http_status",
+            "type": "int",
+            "nullable": false
+          },
+          {
+            "name": "enabled",
+            "type": "boolean",
+            "nullable": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "http_status_known",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "inList",
+                "expr": {
+                  "node": "colRef",
+                  "name": "http_status"
+                },
+                "elems": [
+                  200,
+                  404,
+                  500
+                ],
+                "negated": false
+              }
+            }
+          },
+          {
+            "name": "enabled_known",
+            "kind": {
+              "kind": "check",
+              "expr": {
+                "node": "inList",
+                "expr": {
+                  "node": "colRef",
+                  "name": "enabled"
+                },
+                "elems": [
+                  true,
+                  false
+                ],
+                "negated": false
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "p2a_facets": {
+    "name": "p2a_facets",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "posts",
+        "columns": [
+          {
+            "name": "title",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "embedding",
+            "type": {
+              "vector": {
+                "vector": 1536
+              }
+            },
+            "vectorMetric": "cosine"
+          },
+          {
+            "name": "secondary_embedding",
+            "type": {
+              "vector": {
+                "vector": 768
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "partition": {
+    "name": "partition",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "events",
+        "columns": [
+          {
+            "name": "ts",
+            "type": "timestamp"
+          },
+          {
+            "name": "tenant_id",
+            "type": "text"
+          }
+        ],
+        "partitionBy": {
+          "kind": "range",
+          "columns": [
+            "ts"
+          ],
+          "collapse": false
+        }
+      },
+      {
+        "op": "createPartition",
+        "name": "events_2026_05",
+        "of": "events",
+        "bounds": {
+          "kind": "range",
+          "from": [
+            {
+              "kind": "string",
+              "value": "2026-05-01T00:00:00Z"
+            }
+          ],
+          "to": [
+            {
+              "kind": "string",
+              "value": "2026-06-01T00:00:00Z"
+            }
+          ]
+        }
+      },
+      {
+        "op": "createPartition",
+        "name": "events_default",
+        "of": "events",
+        "bounds": {
+          "kind": "default"
+        }
+      },
+      {
+        "op": "detachPartition",
+        "parent": "events",
+        "name": "events_2026_05",
+        "concurrently": true
+      },
+      {
+        "op": "dropPartition",
+        "parent": "events",
+        "name": "events_2026_05",
+        "cascade": true
+      },
+      {
+        "op": "createIndex",
+        "table": "events",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "ts"
+          }
+        ],
+        "name": "events_ts_brin_idx",
+        "using": "brin",
+        "include": [
+          "tenant_id"
+        ],
+        "with": {
+          "pagesPerRange": 32
+        },
+        "only": true
+      }
+    ]
+  },
+  "pg_aggregates": {
+    "name": "pg_aggregates",
+    "ops": [
+      {
+        "op": "createView",
+        "name": "order_rollups",
+        "query": {
+          "kind": "structured",
+          "select": {
+            "from": {
+              "name": "orders"
+            },
+            "projection": [
+              {
+                "kind": "colRef",
+                "name": "customer_id"
+              },
+              {
+                "kind": "expr",
+                "expr": {
+                  "node": "agg",
+                  "func": "stringAgg",
+                  "arg": {
+                    "node": "colRef",
+                    "name": "item_name"
+                  },
+                  "delimiter": {
+                    "node": "literal",
+                    "value": ", "
+                  }
+                },
+                "alias": "item_names"
+              },
+              {
+                "kind": "expr",
+                "expr": {
+                  "node": "agg",
+                  "func": "arrayAgg",
+                  "arg": {
+                    "node": "colRef",
+                    "name": "id"
+                  }
+                },
+                "alias": "order_ids"
+              },
+              {
+                "kind": "expr",
+                "expr": {
+                  "node": "agg",
+                  "func": "boolAnd",
+                  "arg": {
+                    "node": "colRef",
+                    "name": "fulfilled"
+                  }
+                },
+                "alias": "all_fulfilled"
+              }
+            ],
+            "groupBy": [
+              {
+                "node": "colRef",
+                "name": "customer_id"
+              }
+            ],
+            "having": {
+              "node": "binOp",
+              "op": "gt",
+              "lhs": {
+                "node": "agg",
+                "func": "count",
+                "arg": {
+                  "node": "colRef",
+                  "name": "id"
+                }
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 1
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "pg_vendor": {
+    "name": "pg_vendor",
+    "ops": [
+      {
+        "op": "createExtension",
+        "name": "citext",
+        "ifNotExists": true
+      },
+      {
+        "op": "dropExtension",
+        "name": "citext",
+        "ifExists": true
+      },
+      {
+        "op": "createSchema",
+        "name": "zero_migrate",
+        "ifNotExists": true
+      },
+      {
+        "op": "dropSchema",
+        "name": "zero_migrate",
+        "ifExists": true,
+        "cascade": true
+      },
+      {
+        "op": "createRole",
+        "name": "zero_migrate_auth",
+        "login": true,
+        "password": "zero_migrate_auth",
+        "bypassRls": true,
+        "setSearchPath": [
+          "zero_migrate",
+          "public"
+        ],
+        "ifNotExists": true
+      },
+      {
+        "op": "alterRole",
+        "name": "zero_migrate_auth",
+        "setSearchPath": [
+          "zero_migrate",
+          "public"
+        ]
+      },
+      {
+        "op": "dropRole",
+        "name": "zero_migrate_auth",
+        "ifExists": true
+      },
+      {
+        "op": "dropOwnedBy",
+        "roles": [
+          "zero_migrate_auth"
+        ]
+      },
+      {
+        "op": "grant",
+        "privileges": [
+          "select",
+          "insert",
+          "update",
+          "delete"
+        ],
+        "on": {
+          "kind": "table",
+          "names": [
+            "users"
+          ],
+          "schema": "zero_migrate"
+        },
+        "to": [
+          "zero_migrate_auth"
+        ]
+      },
+      {
+        "op": "revoke",
+        "privileges": [
+          "update",
+          "delete",
+          "truncate"
+        ],
+        "on": {
+          "kind": "table",
+          "names": [
+            "audit_events"
+          ],
+          "schema": "zero_migrate"
+        },
+        "from": [
+          "public"
+        ]
+      },
+      {
+        "op": "attachPartition",
+        "parent": "events",
+        "name": "events_2026_11",
+        "bound": {
+          "kind": "range",
+          "from": [
+            {
+              "kind": "string",
+              "value": "2026-11-01T00:00:00Z"
+            }
+          ],
+          "to": [
+            {
+              "kind": "string",
+              "value": "2026-12-01T00:00:00Z"
+            }
+          ]
+        },
+        "schema": "zero_migrate"
+      },
+      {
+        "op": "setRls",
+        "table": "app_secrets",
+        "schema": "zero_migrate",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "op": "createPolicy",
+        "name": "tenant_isolation",
+        "table": "app_secrets",
+        "schema": "zero_migrate",
+        "forCmd": "all",
+        "using": {
+          "node": "binOp",
+          "op": "eq",
+          "lhs": {
+            "node": "colRef",
+            "name": "app_id"
+          },
+          "rhs": {
+            "node": "cast",
+            "operand": {
+              "node": "fnCall",
+              "fn": "currentSetting",
+              "args": [
+                {
+                  "node": "literal",
+                  "value": "zero_migrate.tenant_app"
+                },
+                {
+                  "node": "literal",
+                  "value": true
+                }
+              ]
+            },
+            "target": "text"
+          }
+        },
+        "withCheck": {
+          "node": "binOp",
+          "op": "eq",
+          "lhs": {
+            "node": "colRef",
+            "name": "app_id"
+          },
+          "rhs": {
+            "node": "cast",
+            "operand": {
+              "node": "fnCall",
+              "fn": "currentSetting",
+              "args": [
+                {
+                  "node": "literal",
+                  "value": "zero_migrate.tenant_app"
+                },
+                {
+                  "node": "literal",
+                  "value": true
+                }
+              ]
+            },
+            "target": "text"
+          }
+        }
+      },
+      {
+        "op": "dropPolicy",
+        "name": "tenant_isolation",
+        "table": "app_secrets",
+        "schema": "zero_migrate",
+        "ifExists": true
+      },
+      {
+        "op": "setRls",
+        "table": "app_secrets",
+        "schema": "zero_migrate",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "op": "createFunction",
+        "name": "audit_events_block_tamper",
+        "schema": "zero_migrate",
+        "returns": "trigger",
+        "language": "plpgsql",
+        "replace": true,
+        "body": "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;"
+      },
+      {
+        "op": "createTrigger",
+        "name": "audit_events_block_update",
+        "table": "audit_events",
+        "schema": "zero_migrate",
+        "timing": "before",
+        "events": [
+          "update",
+          "delete"
+        ],
+        "forEach": "row",
+        "action": {
+          "kind": "executeFunction",
+          "name": "audit_events_block_tamper"
+        },
+        "when": {
+          "node": "unaryOp",
+          "op": "isNotNull",
+          "operand": {
+            "node": "colRef",
+            "name": "app_id"
+          }
+        }
+      },
+      {
+        "op": "createTrigger",
+        "name": "audit_events_append_only",
+        "table": "audit_events",
+        "schema": "zero_migrate",
+        "timing": "before",
+        "events": [
+          "update"
+        ],
+        "forEach": "row",
+        "action": {
+          "kind": "body",
+          "statements": [
+            {
+              "stmt": "raise",
+              "level": "abort",
+              "message": "append-only",
+              "errcode": "P0001"
+            }
+          ]
+        }
+      },
+      {
+        "op": "dropTrigger",
+        "name": "audit_events_block_update",
+        "table": "audit_events",
+        "schema": "zero_migrate",
+        "ifExists": true
+      },
+      {
+        "op": "dropFunction",
+        "name": "audit_events_block_tamper",
+        "schema": "zero_migrate",
+        "ifExists": true
+      },
+      {
+        "op": "pgRaw",
+        "sql": "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
+        "reason": "set tenant app GUC for pg vendor fixture"
+      }
+    ]
+  },
+  "runtime_options": {
+    "name": "runtime_options",
+    "ops": [
+      {
+        "op": "createTable",
+        "name": "posts",
+        "columns": [
+          {
+            "name": "title",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "author_id",
+            "type": "uuid",
+            "nullable": false
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "nullable": false,
+            "default": {
+              "literal": {
+                "value": "draft"
+              }
+            }
+          }
+        ],
+        "runtimeOptions": {
+          "softDelete": true,
+          "versioning": true,
+          "strictness": "lenient"
+        }
+      },
+      {
+        "op": "createIndex",
+        "table": "posts",
+        "columns": [
+          {
+            "kind": "column",
+            "name": "author_id"
+          },
+          {
+            "kind": "column",
+            "name": "status"
+          }
+        ],
+        "name": "posts_author_status_idx"
+      },
+      {
+        "op": "setTableOptions",
+        "table": "posts",
+        "options": {
+          "versioning": false
+        }
+      },
+      {
+        "op": "setTableOptions",
+        "table": "posts",
+        "options": {
+          "strictness": "off"
+        }
+      }
+    ]
+  },
+  "sequences_exclusion": {
+    "name": "sequences_exclusion",
+    "ops": [
+      {
+        "op": "createSequence",
+        "name": "invoice_seq",
+        "increment": 5,
+        "start": 100,
+        "cache": 10,
+        "cycle": true,
+        "ownedBy": {
+          "table": "invoices",
+          "column": "id"
+        }
+      },
+      {
+        "op": "alterSequence",
+        "name": "invoice_seq",
+        "increment": 7,
+        "restart": 200,
+        "minValue": 1,
+        "maxValue": 999,
+        "cache": 20,
+        "cycle": false,
+        "ownedBy": null
+      },
+      {
+        "op": "dropSequence",
+        "name": "old_invoice_seq",
+        "existenceGuard": "ifExists"
+      },
+      {
+        "op": "addConstraint",
+        "table": "bookings",
+        "constraint": {
+          "name": "bookings_no_overlap",
+          "kind": {
+            "kind": "exclusion",
+            "usingMethod": "gist",
+            "elements": [
+              {
+                "target": {
+                  "kind": "column",
+                  "name": "room"
+                },
+                "operator": "="
+              },
+              {
+                "target": {
+                  "kind": "column",
+                  "name": "during"
+                },
+                "operator": "&&"
+              }
+            ],
+            "wherePredicate": {
+              "node": "binOp",
+              "op": "eq",
+              "lhs": {
+                "node": "colRef",
+                "name": "cancelled"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": false
+              }
+            },
+            "deferrable": true
+          }
+        }
+      }
+    ]
+  },
+  "synchronize_identity": {
+    "name": "synchronize_identity",
+    "ops": [
+      {
+        "op": "synchronizeIdentity",
+        "table": "orders",
+        "column": "id",
+        "writesQuiesced": "orders_import_window",
+        "schema": "app"
+      }
+    ]
+  },
+  "views": {
+    "name": "views",
+    "ops": [
+      {
+        "op": "createView",
+        "name": "active_users",
+        "schema": "app",
+        "columns": [
+          "id",
+          "email"
+        ],
+        "query": {
+          "kind": "structured",
+          "select": {
+            "from": {
+              "name": "users"
+            },
+            "projection": [
+              {
+                "kind": "colRef",
+                "name": "id"
+              },
+              {
+                "kind": "colRef",
+                "name": "email"
+              }
+            ],
+            "where": {
+              "node": "unaryOp",
+              "op": "isNull",
+              "operand": {
+                "node": "colRef",
+                "name": "deleted_at"
+              }
+            }
+          }
+        },
+        "replace": true
+      },
+      {
+        "op": "createView",
+        "name": "recent_users",
+        "query": {
+          "kind": "raw",
+          "sql": "SELECT id, email FROM users WHERE deleted_at IS NULL"
+        }
+      },
+      {
+        "op": "dropView",
+        "name": "old_users",
+        "schema": "app",
+        "existenceGuard": "ifExists"
+      }
+    ]
+  }
+}

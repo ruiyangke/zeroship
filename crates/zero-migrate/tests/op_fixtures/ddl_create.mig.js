@@ -1,19 +1,19 @@
 // op.* migration fixture — createTable + createIndex + addColumn. Authored via the
-// fluent table() surface. Covers the IrDefault carrier (a typed-scalar literal
-// default + a synth `genRandomUuid()`). Records the byte-identical frozen wire ops.
+// fluent table() surface. Covers the IrDefault literal carrier (a typed-scalar
+// default). Records the byte-identical frozen wire ops.
 //
-// NOTE: `id` is deliberately a non-primary-key UUID, so this fixture's golden has
-// an EMPTY constraints list (it is the no-constraint createTable carrier). `note`
-// is nullable-by-default (the fluent chain OMITS the nullable key for a nullable
-// column).
-import { table, t, genRandomUuid } from "zero-migrate";
+// NOTE: this confined-platform fixture omits `id`; policy injects the internal
+// platform key and pins it as the primary key, so the golden's `primaryKey` is
+// ["id"] while its constraints list stays EMPTY (it is the no-constraint
+// createTable carrier). `note` is nullable-by-default (the fluent chain OMITS the
+// nullable key for a nullable column).
+import { table, t } from "zero-migrate";
 
 export const name = "ddl_create";
 
 export function up() {
   table("orders").create({
     columns: {
-      id: t.uuid().notNull().default(genRandomUuid()),
       total: t.int().notNull().default(0),
       note: t.text(),
     },

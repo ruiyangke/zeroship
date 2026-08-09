@@ -1023,6 +1023,25 @@ columns = [
     }
 
     #[test]
+    fn bare_author_id_without_a_prefix_or_identity_is_refused() {
+        // Only the two folding forms may reuse the injected `id` slot: an `id_prefix`
+        // declaration and an identity replacement. A bare author `id` carrying
+        // neither is a collision even when it claims no primary key, which is the
+        // case the sibling test above does not reach.
+        let mut id = text_col("id");
+        id.ty = ColType::Uuid;
+        id.nullable = Some(false);
+
+        let err = resolve_create_table_policy(&ir(vec![id], None), &confined_charter())
+            .expect_err("a bare author `id` cannot occupy the injected platform key");
+
+        assert!(matches!(
+            err,
+            TableShapeError::SystemColumnCollision { column, .. } if column == "id"
+        ));
+    }
+
+    #[test]
     fn author_primary_key_under_pinned_pk_is_forbidden() {
         // A non-`id` author PK under the confined (PK-pinning, author-PK-forbid)
         // charter is rejected.
