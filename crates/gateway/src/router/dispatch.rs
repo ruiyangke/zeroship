@@ -1541,7 +1541,15 @@ async fn execute_resource_tree(
         policy.action,
         ResolvedAction::Static { .. } | ResolvedAction::Redirect { .. }
     );
-    let mut response = match &policy.action {
+    //
+    //    Response AUTHORSHIP (`ResponseOrigin`) is tracked alongside, and is a
+    //    DIFFERENT question from `gateway_owned_egress` above: this arm is
+    //    about who wrote the bytes, that one about who is billed for them. The
+    //    gateway's own 502/302/503 inside `handle_dispatch` are gateway-
+    //    AUTHORED but not gateway-OWNED egress (an error page the platform
+    //    emits is not creator-billed traffic), so the two must not be merged.
+    //    Only `Worker` responses may enter the idempotency store at step 9.
+    let (mut response, response_origin) = match &policy.action {
         ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
             // Subscription procedures need a WebSocket-aware proxy
             // path. Idempotency is bypassed (already enforced above).
@@ -1549,15 +1557,19 @@ async fn execute_resource_tree(
             // from the same caller pin the same worker. The transparent
             // WS proxy itself is wired in `proxy::forward_subscription`.
             if matches!(policy.kind, Some(ProcedureKind::Subscription)) {
-                handle_subscription_dispatch(
-                    req,
-                    &state,
-                    app_id,
-                    &compiled_route.entry,
-                    tail,
-                    wall_start,
+                // The 501 stub is the gateway's own answer, not the app's.
+                (
+                    handle_subscription_dispatch(
+                        req,
+                        &state,
+                        app_id,
+                        &compiled_route.entry,
+                        tail,
+                        wall_start,
+                    )
+                    .await,
+                    ResponseOrigin::Gateway,
                 )
-                .await
             } else {
                 handle_dispatch(
                     req,
@@ -1576,13 +1588,16 @@ async fn execute_resource_tree(
         ResolvedAction::Redirect { to, status } => {
             let st = ntex::http::StatusCode::from_u16(*status)
                 .unwrap_or(ntex::http::StatusCode::FOUND);
-            HttpResponse::build(st)
-                .header("location", to.clone())
-                .header(
-                    "x-wall-time-ms",
-                    format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
-                )
-                .finish()
+            (
+                HttpResponse::build(st)
+                    .header("location", to.clone())
+                    .header(
+                        "x-wall-time-ms",
+                        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+                    )
+                    .finish(),
+                ResponseOrigin::Gateway,
+            )
         }
         ResolvedAction::Rewrite { to } => {
             // Unreachable through a validated manifest: `Manifest::validate`
@@ -1610,16 +1625,22 @@ async fn execute_resource_tree(
             // `runtime_assets`. The legacy walker has more
             // sophisticated `$path` / `[capture]` substitution; for the
             // resource-tree path the build emits literal templates.
-            serve_resource_tree_static(
-                &state,
-                compiled_route,
-                &req,
-                dispatch_path,
-                try_chain,
-                app_id,
-                wall_start,
+            //
+            // The gateway serves the bytes off the blob store; the worker is
+            // never involved, so this is gateway-authored.
+            (
+                serve_resource_tree_static(
+                    &state,
+                    compiled_route,
+                    &req,
+                    dispatch_path,
+                    try_chain,
+                    app_id,
+                    wall_start,
+                )
+                .await,
+                ResponseOrigin::Gateway,
             )
-            .await
         }
     };
 
@@ -1651,9 +1672,14 @@ async fn execute_resource_tree(
 
     // 9. Idempotency capture — store the worker's response under the
     //    dedupe key when we held the in-flight lock through dispatch.
+    //    `response_origin` decides whether there is anything to store at
+    //    all: a gateway-synthesised answer says nothing about whether the
+    //    app operation happened, so it is released rather than stored.
     //    Errors here are logged but never block the response.
     if let Some(handle) = idempotency_handle {
-        response = capture_response_for_idempotency(&state, app_id, handle, response).await;
+        response =
+            capture_response_for_idempotency(&state, app_id, handle, response_origin, response)
+                .await;
     }
 
     // 10. CORS injection on the response (resource-tree's flattened
@@ -2050,34 +2076,69 @@ pub(super) async fn buffer_response_body(mut resp: HttpResponse) -> (HttpRespons
     (new_resp, bytes)
 }
 
+/// Who authored the bytes of a dispatched response.
+///
+/// A dedupe entry means "this logical APP operation happened, here is its
+/// outcome", so the capture has to know whether the app spoke at all. The
+/// status code is a LOSSY proxy for that and cannot be used: an app may
+/// legitimately answer 302 or 401 itself (and those ARE outcomes worth
+/// remembering), while the gateway synthesises responses in the same
+/// status ranges about the TRANSPORT or the SESSION. So the answer is
+/// carried from the origin instead of re-derived at the capture point.
+///
+/// Every arm of the action match in [`execute_resource_tree`] and every
+/// exit of [`handle_dispatch`] must name one of these. That is the point:
+/// a new gateway-synthesised response cannot be added without the compiler
+/// asking which it is, so it is excluded by default rather than by a new
+/// special case in the capture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ResponseOrigin {
+    /// The worker produced these bytes. The gateway may have stamped
+    /// observability headers on top (`x-request-id`, `x-wall-time-ms`,
+    /// `x-zs-spend-warn`) — the STATUS and BODY are the app's.
+    Worker,
+    /// The gateway produced these bytes itself. The worker either never
+    /// spoke or its answer was replaced, so this response reports nothing
+    /// about whether the app operation happened.
+    Gateway,
+}
+
 /// Spec §8 post-dispatch hook: capture the response under the dedupe key
 /// and release the in-flight lock. Returns the response to ship back to
 /// the client (with the body intact and an `x-zs-idempotent-stored` flag
 /// for observability).
 ///
-/// **5xx is never stored.** A dedupe entry means "this logical operation
-/// reached a definitive outcome; replay it". A 5xx says the opposite —
-/// no outcome was communicated — so it is answered by releasing the lock
-/// so the next request with the same key RETRIES, exactly as
-/// [`idempotency::release_lock_without_storing`] documents.
+/// A dedupe entry means "this logical APP operation reached a definitive
+/// outcome; replay it". Two independent things can make that false, so
+/// there are two guards, on two different axes — a response is stored only
+/// if it clears BOTH.
 ///
-/// The 5xx that motivated the rule is the gateway's OWN
+/// **1. Only the WORKER's own responses are storable** (`origin`). The
+/// gateway synthesises responses of its own inside the dispatch path: the
 /// `502 {"error":"worker error: …"}` from the `Err(_)` arm of
-/// `forward_dispatch` in [`handle_dispatch`] — the worker never spoke, so
-/// storing that response caches a statement about the GATEWAY's reach
-/// under the CALLER's key. `@zeroship/rpc` retries idempotent writes with
-/// a STABLE key by design, so the retry would be served that cached 502
-/// for the full TTL (24h by default): one transient worker blip renders a
-/// logical operation permanently un-retryable.
+/// `forward_dispatch`, and — on a worker 401 that looks like an HTML
+/// navigation — either a `302` into the OP (`start_oidc_redirect`) or a
+/// `503 client_not_provisioned`. None of them is an app outcome; they
+/// describe the gateway's reach or the visitor's session. The 302 is the
+/// sharpest case because it is not merely uninformative but ACTIVELY
+/// wrong to replay: it carries a freshly minted per-request PKCE stash in
+/// a `Set-Cookie`, so a stored copy hands every retry within the TTL a
+/// verifier bound to an already-spent `code_challenge`/`state` pair.
 ///
-/// The line is drawn at 5xx rather than at "gateway-originated", which
-/// would need the 502 arm to mark itself. That narrower rule was
-/// rejected on merit, not cost:
+/// This is deliberately NOT written as `status == 302 || status == 502 ||
+/// …`. Status is a lossy proxy for authorship: an app that answers 302
+/// (post-redirect-get) or 401 itself HAS produced an outcome, and those
+/// must keep deduping. A status list would either freeze those out or
+/// need a new arm for every future gateway-synthesised status; keying on
+/// the author closes the class instead of the instance.
 ///
-/// * It fixes the reported instance and leaves the CLASS. A worker 500 is
-///   cached the same way and breaks retry identically — and the common
-///   trigger for one is a transient fault INSIDE the handler (a DB blip,
-///   an upstream timeout), the case retrying exists for.
+/// **2. A 5xx is never stored, even from the worker** (`status`). This is
+/// not implied by (1): a worker 500 is worker-authored yet still reports
+/// no outcome.
+///
+/// * The common trigger for a handler 500 is a transient fault INSIDE it
+///   (a DB blip, an upstream timeout) — exactly the case a stable retry
+///   key exists for.
 /// * At this point the code cannot tell "worker wrote then threw" from
 ///   "worker never received it": both surface as a 5xx with no committed
 ///   outcome reported. Unknown must resolve to retryable, not to
@@ -2089,6 +2150,10 @@ pub(super) async fn buffer_response_body(mut resp: HttpResponse) -> (HttpRespons
 ///   "come back later" remembered as a non-outcome already has 503;
 ///   429 stays storable for the same reason (the app chose a 4xx).
 ///
+/// Either way the lock is RELEASED rather than held, so the next request
+/// with the same key retries, exactly as
+/// [`idempotency::release_lock_without_storing`] documents.
+///
 /// The cost is that a deterministic worker 500 re-executes on every
 /// retry. That is already true of the 502 arm (the lock is released
 /// either way), and a handler that commits a write and then 500s is
@@ -2098,15 +2163,26 @@ pub(super) async fn capture_response_for_idempotency(
     state: &GateState,
     app_id: &Uuid,
     handle: InflightHandle,
+    origin: ResponseOrigin,
     response: HttpResponse,
 ) -> HttpResponse {
     let (mut buffered, body_bytes) = buffer_response_body(response).await;
     let status = buffered.status().as_u16();
 
-    if status >= 500 {
+    let skip = if origin == ResponseOrigin::Gateway {
+        Some("gateway-synthesised response: the app operation did not happen")
+    } else if status >= 500 {
+        Some("5xx: the worker reported no definitive outcome")
+    } else {
+        None
+    };
+
+    if let Some(reason) = skip {
         tracing::warn!(
             status,
-            "gateway: idempotency capture skipped for 5xx; lock released so the key can be retried"
+            ?origin,
+            reason,
+            "gateway: idempotency capture skipped; lock released so the key can be retried"
         );
         let _ = idempotency::release_lock_without_storing(
             state.idempotency_store.as_ref(),
@@ -2301,6 +2377,11 @@ fn forward_url(scheme: &str, host: &str, tail: &str, query: Option<&str>) -> Str
 /// HTTP requests. Enables streaming responses (e.g., SSE for LLM token
 /// streaming).
 #[allow(clippy::too_many_arguments)] // post-U5 arg count; refactor candidate for U6+.
+///
+/// Returns the response paired with its [`ResponseOrigin`]. Three of the four
+/// exits here are the GATEWAY's own bytes, not the app's, and the idempotency
+/// capture must be able to tell them apart from a worker response that happens
+/// to share their status code.
 async fn handle_dispatch(
     req: HttpRequest,
     state: &Arc<GateState>,
@@ -2311,7 +2392,7 @@ async fn handle_dispatch(
     body: Bytes,
     user_header_value: Option<String>,
     wall_start: std::time::Instant,
-) -> HttpResponse {
+) -> (HttpResponse, ResponseOrigin) {
     // The `Block` 402 is enforced by
     // `execute_resource_tree` (hoisted to the top, before the action match) so
     // it covers worker forward / redirect / rewrite / static uniformly — a
@@ -2363,8 +2444,12 @@ async fn handle_dispatch(
     {
         Ok(r) => r,
         Err(e) => {
-            return HttpResponse::BadGateway()
-                .json(&serde_json::json!({"error": format!("worker error: {e}")}));
+            // The worker never spoke — this envelope is the gateway's own.
+            return (
+                HttpResponse::BadGateway()
+                    .json(&serde_json::json!({"error": format!("worker error: {e}")})),
+                ResponseOrigin::Gateway,
+            );
         }
     };
 
@@ -2374,11 +2459,20 @@ async fn handle_dispatch(
     // `ZeroShip-User` header. (Resource-tree `user`/`admin` are
     // already short-circuited by `auth_satisfied` upstream, so they
     // never reach the worker.) API clients still see the 401 verbatim.
+    //
+    // Both arms REPLACE the worker's answer with the gateway's own, so both
+    // are `Gateway`-origin. That matters beyond bookkeeping for the redirect:
+    // `start_oidc_redirect` mints a FRESH per-request PKCE stash and sets it
+    // as a cookie, so storing it under an `Idempotency-Key` would replay a
+    // spent verifier to every retry for the whole TTL.
     if response.status() == ntex::http::StatusCode::UNAUTHORIZED && wants_html(&req) {
-        return match route.oauth_client_id.as_deref() {
-            Some(client_id) => start_oidc_redirect(&req, state, client_id),
-            None => client_not_provisioned_response(),
-        };
+        return (
+            match route.oauth_client_id.as_deref() {
+                Some(client_id) => start_oidc_redirect(&req, state, client_id),
+                None => client_not_provisioned_response(),
+            },
+            ResponseOrigin::Gateway,
+        );
     }
 
     // Add response headers.
@@ -2400,7 +2494,9 @@ async fn handle_dispatch(
         );
     }
 
-    response
+    // The status and body are the app's; the headers stamped above are
+    // observability only, so this stays worker-authored.
+    (response, ResponseOrigin::Worker)
 }
 
 // ---------------------------------------------------------------------------
@@ -4213,8 +4309,14 @@ mod tests {
         let worker_resp = HttpResponse::Created()
             .header("content-type", "application/json")
             .body(b"{\"id\":42}".to_vec());
-        let captured =
-            capture_response_for_idempotency(&state, &app_id, handle, worker_resp).await;
+        let captured = capture_response_for_idempotency(
+            &state,
+            &app_id,
+            handle,
+            ResponseOrigin::Worker,
+            worker_resp,
+        )
+        .await;
         let captured: HttpResponse = captured;
         assert_eq!(captured.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(
@@ -4282,7 +4384,14 @@ mod tests {
             panic!("expected Proceed");
         };
         let worker_resp = HttpResponse::Ok().body(b"first".to_vec());
-        let _ = capture_response_for_idempotency(&state, &app_id, handle, worker_resp).await;
+        let _ = capture_response_for_idempotency(
+            &state,
+            &app_id,
+            handle,
+            ResponseOrigin::Worker,
+            worker_resp,
+        )
+        .await;
 
         // Same key, different body → 409 ALREADY_EXISTS with Retry-After.
         let conflict = handle_idempotency_pre_dispatch(
@@ -5761,6 +5870,19 @@ mod tests {
     /// a replayed response is distinguishable from a re-executed one by its
     /// body alone.
     fn spawn_mock_worker(outage_on_first_connection: bool, status: u16) -> MockWorker {
+        spawn_mock_worker_with(outage_on_first_connection, status, "")
+    }
+
+    /// As [`spawn_mock_worker`], but the worker also emits `extra_headers`
+    /// (a raw, already-CRLF-terminated header block) on every response. Lets
+    /// a test author a WORKER-originated redirect that carries a real
+    /// `Location`, which is the one-variable control for the
+    /// gateway-originated redirect.
+    fn spawn_mock_worker_with(
+        outage_on_first_connection: bool,
+        status: u16,
+        extra_headers: &'static str,
+    ) -> MockWorker {
         use std::io::Write;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5784,7 +5906,7 @@ mod tests {
                     let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
                     let body = format!("{{\"id\":{n}}}");
                     let resp = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra_headers}content-length: {}\r\n\r\n{}",
                         body.len(),
                         body
                     );
@@ -5802,6 +5924,17 @@ mod tests {
     /// `todos.add`, reachable at `/__zeroship/v1/todos.add`. This is the
     /// only resource shape that reaches the step-9 idempotency capture.
     fn idempotent_mutation_route() -> zeroship_core::types::RouteEntry {
+        idempotent_mutation_route_with_oauth(None)
+    }
+
+    /// As [`idempotent_mutation_route`], but with the app's OAuth client id
+    /// set. That id is what decides which gateway-originated response the
+    /// worker-401-on-an-HTML-navigation branch emits: `Some` → the 302 into
+    /// the OP (`start_oidc_redirect`), `None` → the 503
+    /// `client_not_provisioned`.
+    fn idempotent_mutation_route_with_oauth(
+        oauth_client_id: Option<&str>,
+    ) -> zeroship_core::types::RouteEntry {
         let mut resources = std::collections::HashMap::new();
         resources.insert(
             "rpc:todos.add".to_string(),
@@ -5823,7 +5956,7 @@ mod tests {
                 resources,
                 ..zeroship_bundle::Manifest::default()
             },
-            oauth_client_id: None,
+            oauth_client_id: oauth_client_id.map(ToString::to_string),
             sector_identifier: None,
             spend_state: zeroship_core::types::SpendState::Allow,
             account_state: zeroship_core::types::AccountState::Active,
@@ -5838,11 +5971,24 @@ mod tests {
         key: &str,
         body: &'static [u8],
     ) -> HttpResponse {
+        post_idempotent_mutation_accepting(state, key, body, "application/json").await
+    }
+
+    /// As [`post_idempotent_mutation`], but with an explicit `Accept`. Only
+    /// `text/html` makes `wants_html` true, which is the gate on the
+    /// worker-401 → OIDC-redirect branch inside `handle_dispatch`.
+    async fn post_idempotent_mutation_accepting(
+        state: Arc<GateState>,
+        key: &str,
+        body: &'static [u8],
+        accept: &'static str,
+    ) -> HttpResponse {
         let req = ntex::web::test::TestRequest::default()
             .method(ntex::http::Method::POST)
             .uri("/__zeroship/v1/todos.add")
             .header("host", "idem-app.zeroship.localhost")
             .header("content-type", "application/json")
+            .header("accept", accept)
             .header("idempotency-key", key)
             .to_http_request();
         handle_request(
@@ -5860,9 +6006,21 @@ mod tests {
     /// fires — the default fixture's `burst: 1` bucket is drained by a
     /// single request, which would 429 the retry and hide the real result.
     fn idempotency_state_for(worker: &MockWorker) -> Arc<GateState> {
+        idempotency_state_for_with_oauth(worker, None)
+    }
+
+    /// As [`idempotency_state_for`], but the installed route carries
+    /// `oauth_client_id`.
+    fn idempotency_state_for_with_oauth(
+        worker: &MockWorker,
+        oauth_client_id: Option<&str>,
+    ) -> Arc<GateState> {
         let state = build_test_state_with_limits(vec![worker.url.clone()], 100, 100, 100);
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(Uuid::new_v4(), idempotent_mutation_route());
+        routes.insert(
+            Uuid::new_v4(),
+            idempotent_mutation_route_with_oauth(oauth_client_id),
+        );
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -6015,6 +6173,178 @@ mod tests {
             collect_body(second.take_body()).await,
             b"{\"id\":2}",
             "the retry must carry the worker's SECOND response, not the stored first",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Only a response the WORKER authored may be stored
+    // -----------------------------------------------------------------
+
+    /// The OAuth client the redirect tests bind their route to, so the
+    /// worker-401 branch takes `start_oidc_redirect` rather than the 503
+    /// `client_not_provisioned` arm.
+    const TEST_REDIRECT_CLIENT: &str = "oac_idem_redirect";
+
+    /// A GATEWAY-synthesised 302 into the OP must NOT be stored under the
+    /// caller's `Idempotency-Key`.
+    ///
+    /// `handle_dispatch` turns a worker 401 on an HTML navigation into its
+    /// own 302 → the OP, and that redirect carries a FRESH per-request PKCE
+    /// stash in a `Set-Cookie`. Stored, every replay within the TTL hands
+    /// the next caller the FIRST request's stash — a PKCE verifier bound to
+    /// a `code_challenge`/`state` pair that has already been spent. It is
+    /// also a lie about the app: the mutation never ran, so there is no
+    /// outcome to remember.
+    ///
+    /// The assertion is on OBSERVABLE behaviour, never on whether the
+    /// capture was entered: the second request must REACH the worker
+    /// (`served == 2`) and must come back with a redirect whose `Location`
+    /// DIFFERS from the first — i.e. a freshly minted PKCE challenge, not
+    /// the replayed one.
+    #[compio::test]
+    async fn gateway_synthesised_oidc_redirect_is_not_cached() {
+        use std::sync::atomic::Ordering;
+
+        const KEY: &str = "1a2b3c4d-0004-4111-8000-aaaabbbbcccc";
+
+        let worker = spawn_mock_worker(false, 401);
+        let state = idempotency_state_for_with_oauth(&worker, Some(TEST_REDIRECT_CLIENT));
+
+        let first =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(
+            first.status(),
+            ntex::http::StatusCode::FOUND,
+            "a worker 401 on an HTML navigation must start the OIDC dance",
+        );
+        let first_location = first
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            first_location.contains("/authorize?") && first_location.contains("code_challenge="),
+            "the 302 must be the gateway's own OP redirect; got {first_location:?}",
+        );
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let second =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            2,
+            "the retry must reach the worker, not replay the gateway's stored 302",
+        );
+        assert!(
+            second.headers().get("x-zs-idempotent-replay").is_none(),
+            "a gateway-synthesised redirect must not have been stored, so nothing can be flagged as a replay",
+        );
+        let second_location = second
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_ne!(
+            second_location, first_location,
+            "the retry must carry a FRESHLY minted PKCE challenge, not the first request's spent one",
+        );
+    }
+
+    /// One-variable control for the test above: the worker answers 302
+    /// ITSELF instead of 401, so the gateway forwards the app's redirect
+    /// rather than synthesising its own. Everything else — the route, the
+    /// `Accept: text/html`, the key, the body — is identical, and the client
+    /// sees a 302 either way. An APP-authored redirect IS an outcome, so it
+    /// must still be stored and replayed.
+    ///
+    /// This is the test that a status-based `|| status == 302` fix would
+    /// fail, and it is why the rule keys on the response's AUTHOR rather
+    /// than its status code.
+    #[compio::test]
+    async fn app_authored_302_is_still_captured_and_replayed() {
+        use std::sync::atomic::Ordering;
+
+        const KEY: &str = "1a2b3c4d-0005-4111-8000-aaaabbbbcccc";
+
+        let worker = spawn_mock_worker_with(false, 302, "location: /thanks\r\n");
+        let state = idempotency_state_for_with_oauth(&worker, Some(TEST_REDIRECT_CLIENT));
+
+        let mut first =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::FOUND);
+        assert_eq!(
+            first
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("/thanks"),
+            "the app's own redirect target must be forwarded verbatim",
+        );
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            1,
+            "an app-authored 302 is an outcome; the replay must NOT re-execute the mutation",
+        );
+        assert_eq!(second.status(), ntex::http::StatusCode::FOUND);
+        assert_eq!(
+            second
+                .headers()
+                .get("x-zs-idempotent-replay")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "the replayed app redirect must be flagged as a replay",
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("/thanks"),
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":1}",
+            "the replay must be the FIRST response verbatim",
+        );
+    }
+
+    /// The other gateway-synthesised exit from the same branch: the app has
+    /// NO `oauth_client_id`, so a worker 401 on an HTML navigation produces
+    /// the gateway's own 503 `client_not_provisioned`. Already excluded by
+    /// the `status >= 500` guard, so this pins existing behaviour rather
+    /// than new — it is here so a later narrowing of that guard cannot
+    /// silently start caching a provisioning outage under a dedupe key.
+    #[compio::test]
+    async fn gateway_synthesised_client_not_provisioned_503_is_not_cached() {
+        use std::sync::atomic::Ordering;
+
+        const KEY: &str = "1a2b3c4d-0006-4111-8000-aaaabbbbcccc";
+
+        let worker = spawn_mock_worker(false, 401);
+        let state = idempotency_state_for_with_oauth(&worker, None);
+
+        let first =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let second =
+            post_idempotent_mutation_accepting(state.clone(), KEY, b"{\"t\":1}", "text/html").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            2,
+            "a provisioning outage must stay retryable under the same key",
+        );
+        assert!(
+            second.headers().get("x-zs-idempotent-replay").is_none(),
+            "nothing was stored, so nothing can be flagged as a replay",
         );
     }
 
