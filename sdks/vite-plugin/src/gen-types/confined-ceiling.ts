@@ -33,12 +33,20 @@ mandatory = true
 primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
+  # The three NOT NULL columns carry defaults because the data plane does not
+  # send them. crud/system_fields_pass.rs omits created_at/updated_at/version
+  # from every INSERT by design and relies on the DDL to supply the canonical
+  # value; without these the first insert into any migration-created table fails
+  # with "null value in column created_at violates not-null constraint".
+  # id is deliberately defaultless - it is minted into the INSERT instead.
+  # Values match zeroship-schema's system_field_columns so the migration and
+  # plugin-db producers emit the same table.
   { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
   { name = "created_by", type = "text",        nullable = true  },
   { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
+  { name = "version",    type = "integer",     nullable = false, default = "1" },
   { name = "deleted_at", type = "timestamptz", nullable = true  },
 ]
 indexes = [
