@@ -664,7 +664,13 @@ pub(crate) async fn mint_session_from_code(
         Ok(c) => c,
         Err(resp) => return resp,
     };
-    let user = user_projection(&pws_sub, relay_email.as_deref(), claims.name.as_deref(), claims.email_verified);
+    let user = user_projection(
+        &pws_sub,
+        relay_email.as_deref(),
+        claims.name.as_deref(),
+        claims.email_verified,
+        claims.picture.as_deref(),
+    );
     let expires_at = now_secs() + crate::oidc_rp::APP_SESSION_MAX_AGE_SECS;
 
     HttpResponse::Ok()
@@ -747,6 +753,12 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                         Some(&claims.email),
                         Some(&claims.name),
                         Some(claims.email_verified),
+                        // No avatar on this path: `SessionClaims` carries
+                        // iss/app/sub/iat/exp/auth_time/amr and no picture, so
+                        // the signed session cookie does not round-trip one.
+                        // This arm therefore still reports `avatar: null` for a
+                        // user who has one; closing it means adding the claim.
+                        None,
                     );
                     return identity_projection_ok(
                         &route,
@@ -921,6 +933,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 relay_email.as_deref(),
                 rotated.name.as_deref(),
                 rotated.email_verified,
+                rotated.avatar_url.as_deref(),
             );
             let expires_at = now_secs() + crate::oidc_rp::APP_SESSION_MAX_AGE_SECS;
             identity_projection_ok(
@@ -1467,12 +1480,13 @@ fn user_projection(
     email: Option<&str>,
     name: Option<&str>,
     email_verified: Option<bool>,
+    avatar: Option<&str>,
 ) -> serde_json::Value {
     json!({
         "id": id,
         "email": email.unwrap_or(""),
         "name": name,
-        "avatar": serde_json::Value::Null,
+        "avatar": avatar,
         "email_verified": email_verified.unwrap_or(false),
     })
 }
@@ -1529,6 +1543,44 @@ pub(crate) fn db_error(e: compio_postgres::Error) -> HttpResponse {
         "db_unavailable",
         "database checkout failed",
     )
+}
+
+#[cfg(test)]
+mod user_projection_tests {
+    //! The browser identity projection has to agree with the worker one on
+    //! `avatar`. The caller already holds the value — it is passed to
+    //! `sign_session_cookie` on the line above — so hardcoding null here made
+    //! one gateway report two different avatars for the same user in the same
+    //! request: the real URL to app code, `null` to the browser.
+    //!
+    //! These pin the projection's own output. They do not pin the CALLERS, so
+    //! nothing here would catch a future call site that passes `None` when it
+    //! has a real avatar in scope — which is exactly the bug being fixed.
+    use super::user_projection;
+
+    #[test]
+    fn user_projection_carries_the_avatar_it_is_given() {
+        let v = user_projection(
+            "pws_x",
+            Some("a@b.c"),
+            Some("n"),
+            Some(true),
+            Some("https://example.test/a.png"),
+        );
+        assert_eq!(
+            v.get("avatar").and_then(serde_json::Value::as_str),
+            Some("https://example.test/a.png"),
+        );
+    }
+
+    /// One-variable control: identical call, avatar absent. The key must still
+    /// be present and null, so the fix cannot be satisfied by dropping it —
+    /// the SDK declares `avatar: string | null`.
+    #[test]
+    fn user_projection_still_emits_null_when_there_is_no_avatar() {
+        let v = user_projection("pws_x", Some("a@b.c"), Some("n"), Some(true), None);
+        assert_eq!(v.get("avatar"), Some(&serde_json::Value::Null));
+    }
 }
 
 #[cfg(test)]
