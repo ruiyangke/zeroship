@@ -59,6 +59,7 @@ scope = { include = ["app"] }
 scope = { include = ["app"] }
 mandatory = true
 primary_key = ["id"]
+author_primary_key = "allow"
 columns = [
   { name = "id",         type = "text",        nullable = false },
   { name = "created_at", type = "timestamptz", nullable = false },
@@ -349,6 +350,7 @@ scope = { include = ["app"] }
 scope = { include = ["app"] }
 mandatory = true
 primary_key = ["a", "b"]
+author_primary_key = "allow"
 columns = [
   { name = "a", type = "text", nullable = false },
   { name = "b", type = "text", nullable = false },
@@ -393,10 +395,12 @@ scope = { include = ["app"] }
 [[inject]]
 scope = { include = ["app"] }
 primary_key = ["a"]
+author_primary_key = "allow"
 columns = [ { name = "a", type = "text", nullable = false } ]
 [[inject]]
 scope = { include = ["app"] }
 primary_key = ["b"]
+author_primary_key = "allow"
 columns = [ { name = "b", type = "text", nullable = false } ]
 "#;
     let g = guard_with(charter);

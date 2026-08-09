@@ -124,6 +124,15 @@ pub enum LoadError {
     /// A Grant-kind rule has neither its own scope nor a `default_scope` — it would
     /// acquire ⊤ by omission (A3 foot-gun, II.3).
     GrantScopeUnbounded { key: String },
+    /// An `[[inject]]` rule pins a `primary_key` but omits `author_primary_key`, so it
+    /// would acquire the permissive `allow` by omission (II.4.3). Under a pin the two
+    /// readings are not symmetric: the pinned key overwrites the author's key either
+    /// way, so `allow` does nothing but suppress the rejection, and an omission would
+    /// discard an author-declared primary key with no diagnostic. A pinning rule must
+    /// state which it means: `author_primary_key = "forbid"` rejects an author-declared
+    /// key, `author_primary_key = "allow"` lets the pin override one silently. An
+    /// inject rule that pins no primary key may keep omitting the field.
+    InjectPinsPrimaryKeyWithoutAuthorPolicy { primary_key: Vec<String> },
     /// A `mandatory = true` inject rule on a non-root layer (II.4.2).
     MandatoryInjectOnNonRootLayer,
     /// A single document both injects a column X and forbids X (or forbids the
@@ -248,8 +257,12 @@ struct WireInject {
     indexes: Vec<WireIndex>,
     #[serde(default)]
     primary_key: Option<Vec<String>>,
+    /// Absence is `None`, not a default: a rule that pins a `primary_key` must state
+    /// this explicitly, and `resolve_inject` refuses the omission. Serde keeps taking
+    /// the absent field so the refusal comes from the resolve step, which can explain
+    /// itself, rather than from a bare parse error.
     #[serde(default)]
-    author_primary_key: WireAuthorPk,
+    author_primary_key: Option<WireAuthorPk>,
     #[serde(default)]
     mandatory: bool,
 }
@@ -273,10 +286,9 @@ struct WireIndex {
     columns: Vec<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WireAuthorPk {
-    #[default]
     Allow,
     Forbid,
 }
@@ -785,9 +797,20 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
             columns: i.columns,
         })
         .collect();
-    let author_primary_key = match inj.author_primary_key {
-        WireAuthorPk::Allow => AuthorPkPolicy::Allow,
-        WireAuthorPk::Forbid => AuthorPkPolicy::Forbid,
+    // A rule that pins a primary key would acquire the permissive `allow` by omission,
+    // which under a pin only suppresses the author-PK rejection while the pin discards
+    // the author's key regardless. Reject the omission rather than resolve it. A rule
+    // that pins nothing is genuinely inert here, so silence stays legal and resolves to
+    // the `Allow` it has always resolved to.
+    let author_primary_key = match (inj.author_primary_key, &inj.primary_key) {
+        (Some(WireAuthorPk::Allow), _) => AuthorPkPolicy::Allow,
+        (Some(WireAuthorPk::Forbid), _) => AuthorPkPolicy::Forbid,
+        (None, None) => AuthorPkPolicy::Allow,
+        (None, Some(pinned)) => {
+            return Err(LoadError::InjectPinsPrimaryKeyWithoutAuthorPolicy {
+                primary_key: pinned.clone(),
+            })
+        }
     };
     Ok(InjectSpec {
         columns,

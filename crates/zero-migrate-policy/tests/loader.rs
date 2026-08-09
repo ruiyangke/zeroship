@@ -4,8 +4,9 @@
 //! name-normalization cases. Composition is not exercised here.
 
 use zero_migrate_policy::{
-    Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError, LoadWarning,
-    ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RuleKind, Scope, ValidatePredicate,
+    AuthorPkPolicy, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError,
+    LoadWarning, ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RuleKind, Scope,
+    ValidatePredicate,
 };
 
 // ── registry fixtures ────────────────────────────────────────────────────────────
@@ -479,6 +480,69 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
     assert_eq!(doc.rules.len(), 1);
+}
+
+// -- gate: pinned primary key without an author-PK policy -----------------------
+
+fn author_pk_of(doc: &PolicyDoc) -> AuthorPkPolicy {
+    match &doc.rules[0].kind {
+        RuleKind::Inject { spec } => spec.author_primary_key,
+        _ => panic!("expected an inject rule"),
+    }
+}
+
+#[test]
+fn pinned_primary_key_without_author_policy_rejects() {
+    let e = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+primary_key = ["id"]
+columns = [ { name = "id", type = "text", nullable = false } ]
+"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        e,
+        LoadError::InjectPinsPrimaryKeyWithoutAuthorPolicy {
+            primary_key: vec!["id".into()]
+        }
+    );
+}
+
+#[test]
+fn pinned_primary_key_with_explicit_author_policy_accepts() {
+    for (authored, expected) in [
+        ("allow", AuthorPkPolicy::Allow),
+        ("forbid", AuthorPkPolicy::Forbid),
+    ] {
+        let doc = load_root(&format!(
+            r#"policy_version = 1
+[[inject]]
+scope = {{ include = ["app_*"] }}
+primary_key = ["id"]
+author_primary_key = "{authored}"
+columns = [ {{ name = "id", type = "text", nullable = false }} ]
+"#
+        ))
+        .unwrap();
+        assert_eq!(author_pk_of(&doc), expected);
+    }
+}
+
+#[test]
+fn unpinned_inject_without_author_policy_accepts_as_allow() {
+    // With no pinned key there is no author key to discard, so the omission stays
+    // legal and keeps resolving to `Allow`, so no sealed digest moves under it.
+    let doc = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+"#,
+    )
+    .unwrap();
+    assert_eq!(author_pk_of(&doc), AuthorPkPolicy::Allow);
 }
 
 // ── gate: self-contradictory inject + validate ───────────────────────────────────

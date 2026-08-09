@@ -804,6 +804,7 @@ mod tests {
 scope = "all"
 mandatory = true
 primary_key = ["UPDATED_AT"]
+author_primary_key = "allow"
 columns = [
   { name = "UPDATED_AT", type = "timestamptz", nullable = false },
 ]
@@ -1036,6 +1037,41 @@ columns = [
             err,
             TableShapeError::AuthorPrimaryKeyForbidden { .. }
         ));
+    }
+
+    #[test]
+    fn pinned_pk_charter_silent_on_author_primary_key_never_rewrites_the_author_key() {
+        // Under a pinned PK the two `author_primary_key` readings are not symmetric:
+        // the pin overwrites the author's key either way, so `allow` only suppresses
+        // the rejection. A charter that pins a key and says nothing must therefore not
+        // resolve to the permissive reading and discard an author-declared primary key
+        // with no diagnostic. Refusing at load and refusing at resolution both satisfy
+        // this; silently rewriting does not.
+        let silent = CONFINED_CHARTER_TOML.replace("author_primary_key = \"forbid\"\n", "");
+        assert!(
+            !silent.contains("author_primary_key"),
+            "the charter under test must be silent on author_primary_key"
+        );
+
+        let mut code = text_col("code");
+        code.nullable = Some(false);
+        let authored = ir(vec![code], Some(vec!["code".into()]));
+
+        match effective_policy_from_charter_toml(&silent) {
+            // Refused at load: the charter never reaches a resolver at all.
+            Err(_) => {}
+            // Admitted: resolution owes the author a refusal.
+            Ok(effective) => {
+                let err = resolve_create_table_policy(&authored, &effective).expect_err(
+                    "a charter that pins a primary key and omits author_primary_key must not \
+                     silently discard the author-declared primary key",
+                );
+                assert!(matches!(
+                    err,
+                    TableShapeError::AuthorPrimaryKeyForbidden { .. }
+                ));
+            }
+        }
     }
 
     fn checksum_of(ir: &MigrationIr) -> Checksum {

@@ -1272,6 +1272,7 @@ scope = { include = ["app_*"] }
 columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 indexes = [ { name = "idx_created", columns = ["created_at"] } ]
 primary_key = ["id"]
+author_primary_key = "allow"
 "#,
         &reg,
     )
