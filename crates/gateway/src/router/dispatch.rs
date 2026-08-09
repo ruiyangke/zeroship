@@ -1940,10 +1940,50 @@ pub(super) async fn buffer_response_body(mut resp: HttpResponse) -> (HttpRespons
     (new_resp, bytes)
 }
 
-/// Spec §8 post-dispatch hook: capture the worker's response under
-/// the dedupe key and release the in-flight lock. Returns the response
-/// to ship back to the client (with the body intact and an
-/// `x-zs-idempotent-stored` flag for observability).
+/// Spec §8 post-dispatch hook: capture the response under the dedupe key
+/// and release the in-flight lock. Returns the response to ship back to
+/// the client (with the body intact and an `x-zs-idempotent-stored` flag
+/// for observability).
+///
+/// **5xx is never stored.** A dedupe entry means "this logical operation
+/// reached a definitive outcome; replay it". A 5xx says the opposite —
+/// no outcome was communicated — so it is answered by releasing the lock
+/// so the next request with the same key RETRIES, exactly as
+/// [`idempotency::release_lock_without_storing`] documents.
+///
+/// The 5xx that motivated the rule is the gateway's OWN
+/// `502 {"error":"worker error: …"}` from the `Err(_)` arm of
+/// `forward_dispatch` in [`handle_dispatch`] — the worker never spoke, so
+/// storing that response caches a statement about the GATEWAY's reach
+/// under the CALLER's key. `@zeroship/rpc` retries idempotent writes with
+/// a STABLE key by design, so the retry would be served that cached 502
+/// for the full TTL (24h by default): one transient worker blip renders a
+/// logical operation permanently un-retryable.
+///
+/// The line is drawn at 5xx rather than at "gateway-originated", which
+/// would need the 502 arm to mark itself. That narrower rule was
+/// rejected on merit, not cost:
+///
+/// * It fixes the reported instance and leaves the CLASS. A worker 500 is
+///   cached the same way and breaks retry identically — and the common
+///   trigger for one is a transient fault INSIDE the handler (a DB blip,
+///   an upstream timeout), the case retrying exists for.
+/// * At this point the code cannot tell "worker wrote then threw" from
+///   "worker never received it": both surface as a 5xx with no committed
+///   outcome reported. Unknown must resolve to retryable, not to
+///   permanently-failed — storing it destroys information rather than
+///   preserving it.
+/// * It gives apps a contract they can drive. 4xx IS stored and replayed,
+///   so a deterministic rejection (400/409/422) stays cheap and stable
+///   under retry; 5xx is "unexpected, try again". An app that wants
+///   "come back later" remembered as a non-outcome already has 503;
+///   429 stays storable for the same reason (the app chose a 4xx).
+///
+/// The cost is that a deterministic worker 500 re-executes on every
+/// retry. That is already true of the 502 arm (the lock is released
+/// either way), and a handler that commits a write and then 500s is
+/// buggy in a way the gateway cannot repair by freezing its 500 for a
+/// day.
 pub(super) async fn capture_response_for_idempotency(
     state: &GateState,
     app_id: &Uuid,
@@ -1951,6 +1991,24 @@ pub(super) async fn capture_response_for_idempotency(
     response: HttpResponse,
 ) -> HttpResponse {
     let (mut buffered, body_bytes) = buffer_response_body(response).await;
+    let status = buffered.status().as_u16();
+
+    if status >= 500 {
+        tracing::warn!(
+            status,
+            "gateway: idempotency capture skipped for 5xx; lock released so the key can be retried"
+        );
+        let _ = idempotency::release_lock_without_storing(
+            state.idempotency_store.as_ref(),
+            &handle.lock_key,
+        )
+        .await;
+        buffered.headers_mut().insert(
+            ntex::http::header::HeaderName::from_static("x-zs-idempotent-stored"),
+            ntex::http::header::HeaderValue::from_static("false"),
+        );
+        return buffered;
+    }
 
     // Snapshot headers we want to replay. Drops hop-by-hop and
     // per-request stamps before storage.
@@ -1961,7 +2019,6 @@ pub(super) async fn capture_response_for_idempotency(
         }
     }
     let stored_headers = idempotency::capture_response_headers(&header_pairs);
-    let status = buffered.status().as_u16();
 
     if let Err(e) = idempotency::capture_response(
         state.idempotency_store.as_ref(),
@@ -5508,5 +5565,321 @@ mod tests {
             state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Idempotency capture must not freeze a 5xx under the dedupe key
+    // -----------------------------------------------------------------
+
+    /// A raw-TCP stand-in for a worker, so a test can produce a REAL
+    /// transport failure (accept, read the request, close without a byte of
+    /// response) that no ntex handler can express — an ntex handler always
+    /// writes a well-formed response, which is `Ok(_)` out of
+    /// `forward_dispatch`, never the `Err(_)` arm that synthesizes the
+    /// gateway's own 502.
+    struct MockWorker {
+        url: String,
+        /// Requests this worker actually READ AND ANSWERED. The dropped
+        /// outage connection is deliberately NOT counted: it never produced
+        /// an outcome, which is the whole point of the scenario.
+        served: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// Read exactly one HTTP/1.1 request off `stream` (headers, then
+    /// `Content-Length` bytes). Returns `false` on EOF/error. Framing the
+    /// read properly matters: the gateway pools connections, so one socket
+    /// carries several requests, and a naive single `read()` would
+    /// miscount a short read as an extra request.
+    fn mock_read_one_request(stream: &mut std::net::TcpStream) -> bool {
+        use std::io::Read;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p + 4;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+        let content_length = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + content_length {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        true
+    }
+
+    /// Spawn the mock worker. When `outage_on_first_connection` is set the
+    /// FIRST connection is read and then closed with no response — the
+    /// gateway sees EOF with zero response bytes consumed, which is exactly
+    /// the "worker went away" arm. Every other request is answered with
+    /// `status` and a body of `{"id":<n>}`, `n` being the served counter, so
+    /// a replayed response is distinguishable from a re-executed one by its
+    /// body alone.
+    fn spawn_mock_worker(outage_on_first_connection: bool, status: u16) -> MockWorker {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock worker");
+        let port = listener.local_addr().expect("mock worker addr").port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+
+        std::thread::spawn(move || {
+            for (conn_idx, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                if outage_on_first_connection && conn_idx == 0 {
+                    // Drain the request first so the gateway's `write_all`
+                    // completes (a write into a closed peer would take the
+                    // reconnect arm instead, which is a different failure).
+                    let _ = mock_read_one_request(&mut stream);
+                    drop(stream);
+                    continue;
+                }
+                while mock_read_one_request(&mut stream) {
+                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let body = format!("{{\"id\":{n}}}");
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    if stream.write_all(resp.as_bytes()).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        MockWorker { url: format!("http://127.0.0.1:{port}"), served }
+    }
+
+    /// A route with one `idempotent: true` mutation at wire-id
+    /// `todos.add`, reachable at `/__zeroship/v1/todos.add`. This is the
+    /// only resource shape that reaches the step-9 idempotency capture.
+    fn idempotent_mutation_route() -> zeroship_core::types::RouteEntry {
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "rpc:todos.add".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                auth: Some(AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                idempotent: Some(true),
+                ..Default::default()
+            },
+        );
+        zeroship_core::types::RouteEntry {
+            name: "idem-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest: zeroship_bundle::Manifest {
+                version: 1,
+                resources,
+                ..zeroship_bundle::Manifest::default()
+            },
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// Drive the REAL `handle_request` → `execute_resource_tree` →
+    /// `handle_dispatch` → step-9 capture path for the idempotent mutation,
+    /// carrying `key` as the `Idempotency-Key`.
+    async fn post_idempotent_mutation(
+        state: Arc<GateState>,
+        key: &str,
+        body: &'static [u8],
+    ) -> HttpResponse {
+        let req = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .uri("/__zeroship/v1/todos.add")
+            .header("host", "idem-app.zeroship.localhost")
+            .header("content-type", "application/json")
+            .header("idempotency-key", key)
+            .to_http_request();
+        handle_request(
+            req,
+            web_state(state.clone()).await,
+            "idem-app.zeroship.localhost",
+            "/__zeroship/v1/todos.add",
+            Bytes::from_static(body),
+        )
+        .await
+    }
+
+    /// Install `idempotent_mutation_route` and return the state pointed at
+    /// `worker`. Limits are lifted well above the two requests each test
+    /// fires — the default fixture's `burst: 1` bucket is drained by a
+    /// single request, which would 429 the retry and hide the real result.
+    fn idempotency_state_for(worker: &MockWorker) -> Arc<GateState> {
+        let state = build_test_state_with_limits(vec![worker.url.clone()], 100, 100, 100);
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(Uuid::new_v4(), idempotent_mutation_route());
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+        state
+    }
+
+    /// A worker outage must NOT be cached under the caller's
+    /// `Idempotency-Key`.
+    ///
+    /// The gateway's own `502 {"error":"worker error: …"}` (the `Err(_)` arm
+    /// of `forward_dispatch`) is a statement about the GATEWAY's reach, not
+    /// an outcome the app produced. Storing it under the dedupe key makes
+    /// every retry replay that 502 for the full TTL (24h by default), and
+    /// `@zeroship/rpc` retries idempotent writes with a STABLE key by
+    /// design — so a single blip would render one logical operation
+    /// permanently un-retryable.
+    ///
+    /// This drives the replay rather than inspecting the store: the second
+    /// request must actually REACH the worker (`served == 1`) and come back
+    /// with the worker's own `201 {"id":1}`. A fix that merely stored the
+    /// 502 under a different key would still fail here.
+    #[compio::test]
+    async fn worker_outage_502_is_not_cached_and_the_retry_reaches_the_worker() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(true, 201);
+        let state = idempotency_state_for(&worker);
+
+        // Request 1: the worker accepts and dies mid-request. The gateway
+        // synthesizes its own 502.
+        let mut first = post_idempotent_mutation(state.clone(), "key-outage", b"{\"t\":1}").await;
+        assert_eq!(
+            first.status(),
+            ntex::http::StatusCode::BAD_GATEWAY,
+            "an unreachable worker must surface the gateway's own 502",
+        );
+        let first_body = collect_body(first.take_body()).await;
+        let first_json: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("502 body is JSON");
+        assert!(
+            first_json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("worker error:"),
+            "the 502 must be the gateway's own envelope, got {first_json}",
+        );
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            0,
+            "the outage connection answered nothing, so nothing was served",
+        );
+
+        // Request 2: same key, same body, worker healthy again.
+        let mut second = post_idempotent_mutation(state.clone(), "key-outage", b"{\"t\":1}").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            1,
+            "the retry must reach the worker, not replay the cached 502",
+        );
+        assert_eq!(
+            second.status(),
+            ntex::http::StatusCode::CREATED,
+            "the retry must return the worker's response, not the stored 502",
+        );
+        let second_body = collect_body(second.take_body()).await;
+        assert_eq!(
+            second_body, b"{\"id\":1}",
+            "the retry must carry the worker's body",
+        );
+    }
+
+    /// Control for the test above, differing in exactly ONE variable: the
+    /// first dispatch SUCCEEDS instead of failing. The stored 201 must
+    /// still be deduped and replayed — the worker must be hit exactly once
+    /// across both requests, and the second response must carry the FIRST
+    /// response's body (`id:1`, not `id:2`).
+    ///
+    /// Without this, "never store anything" would pass the outage test.
+    #[compio::test]
+    async fn successful_response_is_still_captured_and_replayed_under_the_same_key() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let state = idempotency_state_for(&worker);
+
+        let mut first = post_idempotent_mutation(state.clone(), "key-ok", b"{\"t\":1}").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second = post_idempotent_mutation(state.clone(), "key-ok", b"{\"t\":1}").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            1,
+            "a deduped replay must NOT re-execute the mutation on the worker",
+        );
+        assert_eq!(second.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(
+            second
+                .headers()
+                .get("x-zs-idempotent-replay")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "the replayed response must be flagged as a replay",
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":1}",
+            "the replay must be the FIRST response verbatim, not a fresh one",
+        );
+    }
+
+    /// Pins the DESIGN DECISION rather than the reported instance: a
+    /// WORKER-originated 5xx is excluded too, not just the gateway's own
+    /// 502. The worker here is reachable and answers `500` — the app threw.
+    ///
+    /// This is the test that a narrower "mark and exclude only
+    /// gateway-originated failures" fix would fail. The rationale is on
+    /// `capture_response_for_idempotency`: at the capture point a 500 cannot
+    /// be told apart from "the worker committed a write and then threw", so
+    /// the outcome is unknown, and unknown must stay retryable. The common
+    /// cause of a handler 500 is a transient fault inside it, which is
+    /// precisely what the stable key exists to let the client retry.
+    ///
+    /// Both requests must reach the worker, and the second response must be
+    /// a FRESH `{"id":2}` rather than a replay of `{"id":1}`.
+    #[compio::test]
+    async fn worker_originated_5xx_is_not_cached_either() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 500);
+        let state = idempotency_state_for(&worker);
+
+        let mut first = post_idempotent_mutation(state.clone(), "key-500", b"{\"t\":1}").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second = post_idempotent_mutation(state.clone(), "key-500", b"{\"t\":1}").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            2,
+            "a retry after a worker 5xx must re-reach the worker, not replay it",
+        );
+        assert!(
+            second.headers().get("x-zs-idempotent-replay").is_none(),
+            "a 5xx must not have been stored, so nothing can be flagged as a replay",
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":2}",
+            "the retry must carry the worker's SECOND response, not the stored first",
+        );
     }
 }

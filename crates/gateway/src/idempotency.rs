@@ -447,9 +447,12 @@ pub async fn pre_dispatch(
     }
 }
 
-/// Persist the worker's response under the dedupe key and release the
-/// in-flight lock. Called after the worker responds (success or
-/// declared error). The caller passes the post-flight metadata from
+/// Persist the response under the dedupe key and release the in-flight
+/// lock. Called for a response that IS a definitive outcome — any status
+/// below 500. The 5xx screen lives at the call site
+/// (`dispatch::capture_response_for_idempotency`), which routes those to
+/// [`release_lock_without_storing`] instead; this function stores whatever
+/// status it is handed. The caller passes the post-flight metadata from
 /// the `Proceed` decision.
 // 9 independent pieces of post-flight response metadata; bundling into a
 // params struct is a real refactor touching every call site (including
@@ -482,9 +485,12 @@ pub async fn capture_response(
     Ok(stored)
 }
 
-/// Release the lock without storing a response. Called when the
-/// worker times out — subsequent requests should retry the operation
-/// rather than see a stale "completed" entry.
+/// Release the lock without storing a response, so subsequent requests
+/// with the same key RETRY the operation rather than see a stale
+/// "completed" entry. Used for every response that is not a definitive
+/// outcome: any 5xx (the worker was unreachable, timed out, or threw —
+/// including the gateway's own `502 worker error`), and a failed
+/// `capture_response` write.
 pub async fn release_lock_without_storing(
     store: &dyn IdempotencyStore,
     lock_key: &str,
