@@ -20,12 +20,14 @@
 //! changes use authoritative column types and unique-index facts. The DB-free plan
 //! helper intentionally uses an empty live schema and remains a structural preview.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use zero_migrate::apply::journal::{AppliedEntry, Phase};
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::migration::Migration;
-use zero_migrate::ops::status::{AppliedPlanStatus, PlanStatusManifest, ReconciledPlanState};
+use zero_migrate::ops::status::{
+    AppliedPlanStatus, PlanStatusManifest, PlanStatusStepState, ReconciledPlanState,
+};
 use zero_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
@@ -43,6 +45,59 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
     }
 }
 
+/// The one spelling of the refusal, so both arms below name the same condition.
+fn prefix_incomplete(version: &str) -> String {
+    format!("authored migration prefix is incomplete: net-applied journal step {version} was not supplied")
+}
+
+/// The completed journal step, if any, that the supplied prefix attests is gone.
+///
+/// A deploy hands this boundary the authored prefix ending at the migration it is
+/// applying, never the operator's whole directory, so "completed but supplied by no
+/// plan" alone cannot separate a file the operator deleted from a later file this
+/// call was simply not given. The journal's `event_seq` can: it is the only sound
+/// apply order (`MigrationId::derive` stamps a hash, so version order carries no
+/// authoring order at all), and a step recorded BEFORE the newest step this call DID
+/// supply cannot belong to a later file. Steps at or above that frontier are outside
+/// what the prefix attests, and stay unreported.
+///
+/// The orphan set itself is `status.unexpected_journal` -- the same full-manifest
+/// reconciliation `status` reports -- narrowed to the attested window. Narrowing to
+/// the SUPPLIED ids instead would be vacuous: an orphan is by definition not among
+/// them.
+fn orphan_below_supplied_frontier<'a>(
+    manifests: &[PlanStatusManifest],
+    status: &'a AppliedPlanStatus,
+    journal: &[AppliedEntry],
+) -> Option<&'a str> {
+    let supplied: BTreeSet<&str> = manifests
+        .iter()
+        .flat_map(|manifest| manifest.steps.iter())
+        .map(|step| step.version.as_str())
+        .collect();
+    let frontier = journal
+        .iter()
+        .filter(|entry| {
+            entry.phase == Phase::Completed && supplied.contains(entry.version.as_str())
+        })
+        .map(|entry| entry.event_seq)
+        .max()?;
+    let sequence: BTreeMap<&str, i64> = journal
+        .iter()
+        .map(|entry| (entry.version.as_str(), entry.event_seq))
+        .collect();
+    status
+        .unexpected_journal
+        .iter()
+        .filter(|entry| entry.state == PlanStatusStepState::Applied)
+        .find(|entry| {
+            sequence
+                .get(entry.version.as_str())
+                .is_some_and(|seq| *seq < frontier)
+        })
+        .map(|entry| entry.version.as_str())
+}
+
 /// Require every authored prefix plan to be fully, exactly applied before its IR
 /// may contribute logical column contracts to the current migration. The status
 /// fold is authoritative for net rollbacks, inflight/partial work, checksum drift,
@@ -51,6 +106,7 @@ pub(crate) fn require_applied_prefix(
     manifests: &[PlanStatusManifest],
     prior_count: usize,
     status: &AppliedPlanStatus,
+    journal: &[AppliedEntry],
 ) -> Result<(), String> {
     let prefix = manifests.get(..prior_count).ok_or_else(|| {
         format!(
@@ -73,13 +129,17 @@ pub(crate) fn require_applied_prefix(
                 current.version.as_str()
             )
         })?;
-    if current_state != ReconciledPlanState::Applied {
-        if let Some(unexpected) = status.unexpected_journal.first() {
-            return Err(format!(
-                "authored migration prefix is incomplete: net-applied journal step {} was not supplied",
-                unexpected.version
-            ));
+    if current_state == ReconciledPlanState::Applied {
+        // The current migration is already applied, so a completed step no supplied
+        // plan owns is only reportable inside the window `event_seq` attests.
+        if let Some(orphan) = orphan_below_supplied_frontier(manifests, status, journal) {
+            return Err(prefix_incomplete(orphan));
         }
+    } else if let Some(unexpected) = status.unexpected_journal.first() {
+        // The current migration is NOT applied, so under in-order deploy nothing
+        // authored after it can be applied either: the whole unexpected set is
+        // inside the window and needs no `event_seq` narrowing.
+        return Err(prefix_incomplete(&unexpected.version));
     }
     for manifest in prefix {
         let reconciled = status
@@ -3022,27 +3082,42 @@ scope = "all"
             .collect()
     }
 
+    /// Stamp the journal's monotonic order onto a fixture journal, oldest first.
+    /// `event_seq` is what separates a deleted migration from one this call was not
+    /// given, so a fixture that leaves every entry at zero can only assert the arms
+    /// that never consult it.
+    fn sequenced(entries: Vec<AppliedEntry>) -> Vec<AppliedEntry> {
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut entry)| {
+                entry.event_seq = i64::try_from(index).expect("fixture journal is small") + 1;
+                entry
+            })
+            .collect()
+    }
+
     #[test]
     fn authored_prefix_requires_exact_net_applied_plans() {
         use zero_migrate::ops::status::reconcile_applied_plans;
 
         let manifests = prefix_gate_manifests();
-        let completed = prefix_gate_entries(&manifests[0], Phase::Completed);
+        let completed = sequenced(prefix_gate_entries(&manifests[0], Phase::Completed));
         let applied =
             reconcile_applied_plans(&manifests, &completed, &[]).expect("prefix reconciles");
-        require_applied_prefix(&manifests, 1, &applied)
+        require_applied_prefix(&manifests, 1, &applied, &completed)
             .expect("an exact completed prefix is trusted");
 
         let pending =
             reconcile_applied_plans(&manifests, &[], &[]).expect("missing prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &pending)
+        let error = require_applied_prefix(&manifests, 1, &pending, &[])
             .expect_err("a missing prefix must not seed declarations");
         assert!(error.contains("not fully applied"), "got: {error}");
 
-        let inflight_entries = prefix_gate_entries(&manifests[0], Phase::Started);
+        let inflight_entries = sequenced(prefix_gate_entries(&manifests[0], Phase::Started));
         let inflight = reconcile_applied_plans(&manifests, &inflight_entries, &[])
             .expect("inflight prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &inflight)
+        let error = require_applied_prefix(&manifests, 1, &inflight, &inflight_entries)
             .expect_err("an inflight prefix must not seed declarations");
         assert!(error.contains("not fully applied"), "got: {error}");
 
@@ -3050,7 +3125,7 @@ scope = "all"
         drifted_entries[0].checksum = "0".repeat(64);
         let drifted = reconcile_applied_plans(&manifests, &drifted_entries, &[])
             .expect("drifted prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &drifted)
+        let error = require_applied_prefix(&manifests, 1, &drifted, &drifted_entries)
             .expect_err("a drifted prefix must not seed declarations");
         assert!(error.contains("not fully applied"), "got: {error}");
     }
@@ -3061,8 +3136,7 @@ scope = "all"
         use zero_migrate::ops::status::reconcile_applied_plans;
 
         let manifests = prefix_gate_manifests();
-        let mut prior_only = prefix_gate_entries(&manifests[0], Phase::Completed);
-        prior_only.push(AppliedEntry {
+        let omitted = AppliedEntry {
             version: MigrationId::derive("omitted_artifact", b"step")
                 .as_str()
                 .to_string(),
@@ -3070,18 +3144,41 @@ scope = "all"
             phase: Phase::Completed,
             kind: None,
             event_seq: 0,
-        });
+        };
+        let mut prior_only = prefix_gate_entries(&manifests[0], Phase::Completed);
+        prior_only.push(omitted.clone());
+        let prior_only = sequenced(prior_only);
         let pending_current = reconcile_applied_plans(&manifests, &prior_only, &[])
             .expect("incomplete history reconciles");
-        let error = require_applied_prefix(&manifests, 1, &pending_current)
+        let error = require_applied_prefix(&manifests, 1, &pending_current, &prior_only)
             .expect_err("a pending current cannot apply from incomplete history");
         assert!(error.contains("prefix is incomplete"), "got: {error}");
 
-        let mut replay_entries = prior_only;
-        replay_entries.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
-        let applied_current = reconcile_applied_plans(&manifests, &replay_entries, &[])
+        // The omitted step was recorded BEFORE every step the supplied set owns, so
+        // it is a migration the operator deleted. A rerun that applies nothing still
+        // names it -- this is the diagnosis the per-batch executor loop could never
+        // make, because the batch it saw was never the operator's set.
+        let mut deleted_first = vec![omitted.clone()];
+        deleted_first.extend(prefix_gate_entries(&manifests[0], Phase::Completed));
+        deleted_first.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
+        let deleted_first = sequenced(deleted_first);
+        let applied_current = reconcile_applied_plans(&manifests, &deleted_first, &[])
             .expect("applied replay reconciles");
-        require_applied_prefix(&manifests, 1, &applied_current)
+        let error = require_applied_prefix(&manifests, 1, &applied_current, &deleted_first)
+            .expect_err("a deleted migration below the supplied set is named on rerun");
+        assert!(error.contains("prefix is incomplete"), "got: {error}");
+        assert!(error.contains(&omitted.version), "got: {error}");
+
+        // The same step recorded AFTER every supplied step is a LATER migration this
+        // per-file call was simply not handed. Outside the window the prefix
+        // attests, so it stays unreported.
+        let mut not_yet_supplied = prefix_gate_entries(&manifests[0], Phase::Completed);
+        not_yet_supplied.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
+        not_yet_supplied.push(omitted);
+        let not_yet_supplied = sequenced(not_yet_supplied);
+        let applied_current = reconcile_applied_plans(&manifests, &not_yet_supplied, &[])
+            .expect("applied replay reconciles");
+        require_applied_prefix(&manifests, 1, &applied_current, &not_yet_supplied)
             .expect("an applied current remains a safe no-op during a directory rerun");
     }
 }

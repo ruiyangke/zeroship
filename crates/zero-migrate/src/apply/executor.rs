@@ -879,29 +879,15 @@ async fn apply_locked<B: MigrationBackend>(
         });
     }
 
-    // A version recorded net-applied in the journal but ABSENT from `migrations`
-    // is collected as an orphan: usually the bundle is missing a migration the
-    // database already has (a downgrade, a dropped slice). Correctness is
-    // unaffected either way, since only pending versions are applied.
-    //
-    // This warn is NOT an operator notice and must not be read as one. No tracing
-    // subscriber is installed anywhere in this workspace, so it reaches nobody.
-    // It would also be wrong if it did: `migrations` is the batch THIS call was
-    // handed, not the operator's whole set. The plan path hands one coalesced DDL
-    // batch per call, so applying the second of two migrations reports the first
-    // -- still present in the operator's directory -- as an orphan.
-    //
-    // The operator-facing diagnosis of this condition is `status`, whose
-    // `unexpected_journal` is computed against the FULL supplied manifest set,
-    // prints as "drift: unexpected journal entry <version>", and trips
-    // `status --strict`.
-    for orphan in &drift_report.orphan_journal {
-        tracing::warn!(
-            version = %orphan.version,
-            project = %cfg.project_id,
-            "zero-migrate: journal records a completed migration absent from the supplied set"
-        );
-    }
+    // `drift_report.orphan_journal` is deliberately NOT read here. It names every
+    // net-applied version absent from `migrations`, and `migrations` is the batch
+    // THIS call was handed, not the operator's whole set: the plan path hands one
+    // coalesced DDL batch per call, so applying the second of two migrations would
+    // name the first -- still present in the operator's directory. No boundary
+    // inside the executor knows the difference, so the diagnosis is made where the
+    // supplied set can be attested: `require_applied_prefix` for a host deploy,
+    // and `status`, whose `unexpected_journal` is computed against the full
+    // supplied manifest set and trips `status --strict`.
 
     // EXPAND/CONTRACT GATE — refuse a pending contract whose expand
     // is not net-applied in the journal. Run BEFORE `order_pending` so it beats

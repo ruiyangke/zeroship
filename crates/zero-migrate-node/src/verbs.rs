@@ -296,6 +296,10 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             None => Vec::new(),
         };
         let live = LiveSchema::from_catalog_snapshot(snapshot.clone(), owner_app);
+        // No priors means the caller declared NO authored prefix, not that this is the
+        // operator's first migration -- the library `apply()` surface leaves them out
+        // on every call. So there is nothing to reconcile the journal against here,
+        // and a completed step this lone envelope does not own says nothing.
         let artifact = if prior_envelope_json.is_empty() {
             match crate::lower::lower_envelope_to_plan_with_live(
                 envelope_json,
@@ -350,7 +354,14 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             )
             .await
             .map_err(|error| error.to_string())?;
-            crate::lower::require_applied_prefix(&manifests, prior_envelope_json.len(), &status)?;
+            // The journal rides along: `event_seq` is what tells a migration the
+            // operator deleted from one this per-file call was not handed yet.
+            crate::lower::require_applied_prefix(
+                &manifests,
+                prior_envelope_json.len(),
+                &status,
+                &journal_entries,
+            )?;
             artifacts.pop().ok_or_else(|| {
                 "lowering returned no plan for the current migration envelope".to_string()
             })?
