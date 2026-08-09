@@ -817,3 +817,85 @@ fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
         other => panic!("expected RenameLower (to-collision), got: {other}"),
     }
 }
+
+// TWO renameColumn ops on ONE table in ONE migration.
+//
+// Every op in an envelope lowers against the same pre-envelope live snapshot: the
+// engine re-introspects between envelopes, not between the ops inside one. The
+// second rebuild therefore builds its value-copy list from a table shape that the
+// first rebuild has already replaced, and names a column that is no longer there.
+//
+// This pins the failure as FAIL-CLOSED rather than corrupting. What it does not
+// claim is that the shape is supported: an author who renames two columns of one
+// table in a single migration gets a rebuild error naming an intermediate table,
+// with nothing telling them the repair is to split the migration.
+#[compio::test]
+async fn two_renames_of_one_table_in_one_migration_fail_closed_on_sqlite() {
+    let p = paths("sqlite_two_renames");
+    let be = backend(&p);
+
+    let v1 = vec![descriptor2("people", "nickname", "city")];
+    first_deploy(&be, &v1).await;
+
+    let mut live = live_schema_for(&v1);
+    let catalog = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect the real pre-rename table");
+    live.tables = catalog.tables.keys().cloned().collect();
+    live.table_snapshots = catalog.tables;
+
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Sqlite,
+        &support::confined_charter(),
+    );
+    let mut ir = rename_ir("people", "nickname", "handle", ColType::Text);
+    ir.ops.push(Op::RenameColumn {
+        table: "people".into(),
+        from: "city".into(),
+        to: "town".into(),
+        ty: ColType::Text,
+        schema: None,
+        existence_guard: None,
+    });
+
+    let lowered = author.lower_steps(&ir, &live);
+    let steps = match lowered {
+        Ok(steps) => steps,
+        Err(error) => {
+            // Refusing at lower is an acceptable outcome and a better one: it names
+            // the problem before anything runs. Pin whichever way it behaves so a
+            // change of answer is visible.
+            let message = error.to_string();
+            assert!(
+                message.contains("people"),
+                "a lower-time refusal must name the table it refuses: {message}"
+            );
+            return;
+        }
+    };
+
+    let engine = MigrationEngine::new();
+    let outcome = engine
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            LockMode::Acquire,
+        )
+        .await;
+
+    let error = outcome.expect_err(
+        "two renames of one table in one migration must not report success: the second \
+         rebuild copies from a table the first rebuild already replaced",
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("no such column") || message.contains("nickname"),
+        "the failure names the column the stale copy list still asks for: {message}"
+    );
+}
