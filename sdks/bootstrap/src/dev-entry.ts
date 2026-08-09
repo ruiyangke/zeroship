@@ -120,6 +120,13 @@ export interface DevEntry {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response>;
   rpc: (name: string, input: unknown, ctx: unknown) => unknown;
   /**
+   * Resolve a durable workflow class by EXPORT name. The dispatcher calls this
+   * when the entry module exposes it (`default.loadWorkflow`), which is how
+   * the dev tier reaches workflow classes that live behind Vite's module
+   * runner rather than in the entry's own namespace.
+   */
+  loadWorkflow: (name: string) => Promise<unknown>;
+  /**
    * Test/runtime hook: reset the lazy schema-install latch. Called by
    * the dev-bootstrap when Vite's dep optimizer regenerated pre-
    * bundled files (schema must be re-registered against the fresh
@@ -411,6 +418,15 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   return {
     fetch: fetchHandler,
     rpc: dispatchRpc,
+    // Async by necessity: the creator's module lives behind Vite's
+    // ModuleRunner and is fetched over HTTP, so dev cannot hand the runtime a
+    // static workflow dict the way a bundled `.zship` does. `loadNormalized()`
+    // is the same path an RPC takes, so a workflow body sees the same
+    // installed schema and the same HMR generation as a request handler.
+    loadWorkflow: async (name: string) => {
+      const normalized = await loadNormalized();
+      return normalized.workflows[name];
+    },
     resetSchemaInstalled: () => {
       schemaInstalled = false;
       schemaReady = undefined;

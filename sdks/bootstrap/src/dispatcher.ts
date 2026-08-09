@@ -1260,11 +1260,28 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     promise.catch(() => {});
   }
 
-  function resolveWorkflow(userNamespace: unknown, workflowName: string): { new(): { run?: unknown } } {
+  async function resolveWorkflow(
+    userNamespace: unknown,
+    workflowName: string,
+  ): Promise<{ new(): { run?: unknown } }> {
     const mod = (userNamespace ?? {}) as Record<string, unknown>;
     const def = mod.default && typeof mod.default === "object"
       ? mod.default as Record<string, unknown>
       : {};
+
+    // Dev: the entry module the runtime imports is the Vite plugin's
+    // dev-bootstrap, not the creator's file. The user module lives behind a
+    // Vite ModuleRunner and is fetched asynchronously, so dev cannot present a
+    // static dict here the way a bundled `.zship` can; it exposes an async
+    // resolver instead. Without this branch the dev tier can START a run and
+    // then fails every dispatch with WORKFLOW_NOT_FOUND -- which is exactly
+    // how it behaved (docs/pilot/e2e-scenarios.md, scenario 11 workflows leg).
+    const loadWorkflow = def.loadWorkflow;
+    if (typeof loadWorkflow === "function") {
+      const lazy = await (loadWorkflow as (n: string) => unknown)(workflowName);
+      if (typeof lazy === "function") return lazy as { new(): { run?: unknown } };
+    }
+
     const candidates = [
       mod[workflowName],
       (def.workflows && typeof def.workflows === "object"
@@ -1368,7 +1385,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     if (!workflowName) throw mkErr("workflowName is required", 400, "INVALID_ARGUMENT");
 
     try {
-      const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
+      const WorkflowClass = await resolveWorkflow(userNamespace, workflowName);
       const workflow = new WorkflowClass();
       const run = workflow.run;
       if (typeof run !== "function") {

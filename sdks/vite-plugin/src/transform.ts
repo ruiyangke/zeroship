@@ -28,6 +28,10 @@ const SCHEDULE_SOURCES = new Set([
 ]);
 const SCHEDULE_IMPORT_NAMES = new Set(["schedule", "every", "cronExpr"]);
 
+/** Module exporting the `Workflow` base class a durable workflow extends. */
+const WORKFLOW_BASE_SOURCES = new Set(["@zeroship/workflows"]);
+const WORKFLOW_BASE_NAME = "Workflow";
+
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
@@ -112,6 +116,19 @@ export interface TransformState {
    */
   discoveredProcedures: DiscoveredProcedureRecord[];
   discoveredSchedules: DiscoveredScheduleRecord[];
+  /**
+   * Durable workflow classes exported by server-graph modules, in EXPORT-name
+   * form. The manifest emitter turns these into `manifest.workflows`, which
+   * the control plane requires before it will start a run
+   * (`crates/control/src/workflow_instance_api.rs` `active_deploy_for_workflow`).
+   */
+  discoveredWorkflows: DiscoveredWorkflowRecord[];
+}
+
+export interface DiscoveredWorkflowRecord {
+  filePath: string;
+  /** Name the class is exported under -- what `env.workflows.<Name>` addresses. */
+  exportName: string;
 }
 
 // --- AST helpers (work with Rolldown's Oxc/ESTree AST) ---
@@ -339,6 +356,131 @@ function quickHasUseServerDirective(code: string): boolean {
 
 function quickMayHaveScheduleRegistration(code: string): boolean {
   return code.includes("@zeroship/workflows") && /\bschedule\b/.test(code);
+}
+
+function quickMayHaveWorkflowClass(code: string): boolean {
+  return code.includes("@zeroship/workflows") && /\bclass\b/.test(code);
+}
+
+/**
+ * Local identifiers bound to the `Workflow` base class.
+ *
+ *   import { Workflow } from "@zeroship/workflows";        // → {"Workflow"}
+ *   import { Workflow as Wf } from "@zeroship/workflows";  // → {"Wf"}
+ *
+ * Only a direct named import of `Workflow` from the package counts, mirroring
+ * {@link collectWrapperBindings}: the symbol table stays decidable from this
+ * file's AST alone, with no cross-module resolution.
+ */
+function collectWorkflowBaseBindings(astBody: any[]): Set<string> {
+  const bindings = new Set<string>();
+  for (const node of astBody) {
+    if (node.type !== "ImportDeclaration") continue;
+    const sourceLit = node.source;
+    if (!sourceLit || typeof sourceLit.value !== "string") continue;
+    if (!WORKFLOW_BASE_SOURCES.has(sourceLit.value)) continue;
+    for (const spec of node.specifiers || []) {
+      if (spec.type !== "ImportSpecifier") continue;
+      if (spec.imported?.name !== WORKFLOW_BASE_NAME) continue;
+      if (spec.local?.name) bindings.add(spec.local.name);
+    }
+  }
+  return bindings;
+}
+
+/**
+ * Find the durable workflow classes a module EXPORTS.
+ *
+ * Two-pass, because a subclass can be declared before the class it extends and
+ * because a creator may layer an abstract base of their own between their
+ * workflow and the SDK's:
+ *
+ *   1. Collect every top-level class declaration with its `extends` identifier.
+ *   2. Fixpoint: a class is a workflow iff it extends a `Workflow` binding, or
+ *      extends another class in this file already known to be one.
+ *
+ * Then map local names to export names, so `export { Checkout as Order }` is
+ * declared as `Order` -- the name `env.workflows.Order` addresses and the name
+ * the runtime resolves from the module namespace. A class that is a workflow
+ * but is never exported is deliberately omitted: nothing can address it.
+ *
+ * What this does NOT see, and why that is survivable: a workflow whose base
+ * class is imported from another module of the app. That class is still
+ * resolvable at runtime (the runtime collector is structural, not
+ * import-based), so it runs in dev and under a raw `zeroship serve`; only the
+ * manifest declaration is missing, and the control plane refuses the start
+ * with a named error rather than misbehaving.
+ */
+function collectWorkflowClassExports(
+  astBody: any[],
+  filePath: string,
+): DiscoveredWorkflowRecord[] {
+  const baseBindings = collectWorkflowBaseBindings(astBody);
+  if (baseBindings.size === 0) return [];
+
+  // local class name → superclass identifier name (undefined for no extends)
+  const superOf = new Map<string, string | undefined>();
+  // local class name → export name(s) it is published under
+  const exportsOf = new Map<string, string[]>();
+  const addExport = (local: string, exported: string) => {
+    const arr = exportsOf.get(local);
+    if (arr) arr.push(exported);
+    else exportsOf.set(local, [exported]);
+  };
+
+  const noteClass = (decl: any) => {
+    if (!decl || decl.type !== "ClassDeclaration" || !decl.id?.name) return;
+    const superName =
+      decl.superClass && decl.superClass.type === "Identifier"
+        ? decl.superClass.name
+        : undefined;
+    superOf.set(decl.id.name, superName);
+  };
+
+  for (const node of astBody) {
+    if (node.type === "ClassDeclaration") {
+      noteClass(node);
+      continue;
+    }
+    if (node.type === "ExportNamedDeclaration") {
+      if (node.declaration?.type === "ClassDeclaration") {
+        noteClass(node.declaration);
+        if (node.declaration.id?.name) {
+          addExport(node.declaration.id.name, node.declaration.id.name);
+        }
+      }
+      // `export { A, B as C }` -- only local re-exports, not `export ... from`,
+      // because a re-export's class body is not in this AST.
+      if (!node.source) {
+        for (const spec of node.specifiers || []) {
+          const local = spec.local?.name;
+          const exported = spec.exported?.name;
+          if (local && exported) addExport(local, exported);
+        }
+      }
+    }
+  }
+
+  const isWorkflow = new Set<string>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [name, superName] of superOf) {
+      if (isWorkflow.has(name) || !superName) continue;
+      if (baseBindings.has(superName) || isWorkflow.has(superName)) {
+        isWorkflow.add(name);
+        grew = true;
+      }
+    }
+  }
+
+  const out: DiscoveredWorkflowRecord[] = [];
+  for (const local of isWorkflow) {
+    for (const exported of exportsOf.get(local) ?? []) {
+      out.push({ filePath, exportName: exported });
+    }
+  }
+  return out;
 }
 
 /**
@@ -1091,7 +1233,15 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    source files that don't open with `"use server"`.
         const mayHaveServerDirective = quickHasUseServerDirective(code);
         const mayHaveScheduleRegistration = quickMayHaveScheduleRegistration(code);
-        if (!mayHaveServerDirective && !mayHaveScheduleRegistration) {
+        // Workflow classes are discovered independently of the `"use server"`
+        // gate: a creator may keep them in a plain module the server entry
+        // imports, and that module is just as much part of the server graph.
+        const mayHaveWorkflowClass = quickMayHaveWorkflowClass(code);
+        if (
+          !mayHaveServerDirective &&
+          !mayHaveScheduleRegistration &&
+          !mayHaveWorkflowClass
+        ) {
           // Friendly hint for code still laid out like the legacy
           // `src/server.{ts,...}` / `src/server/**` shape: a file that's
           // missing the directive is almost certainly an unmigrated
@@ -1136,6 +1286,16 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
               else state.discoveredSchedules.push(record);
             }
           }
+        }
+
+        if (isServerEnv && mayHaveWorkflowClass) {
+          const found = collectWorkflowClassExports(ast.body, id);
+          if (!state.discoveredWorkflows) state.discoveredWorkflows = [];
+          // Replace this file's whole contribution rather than merging, so a
+          // deleted or renamed class stops being declared on the next
+          // transform instead of lingering in the manifest.
+          const kept = state.discoveredWorkflows.filter((w) => w.filePath !== id);
+          state.discoveredWorkflows = kept.concat(found);
         }
 
         // 3. Server-module gate — file-level `"use server"` directive.

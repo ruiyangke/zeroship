@@ -692,10 +692,23 @@ export function buildPlugin(
           }),
         );
 
+        // Workflow names the manifest must DECLARE. Without them the control
+        // plane refuses every `env.workflows.<Name>.start(...)` with
+        // "workflow '<Name>' is not declared by the active deploy"
+        // (crates/control/src/workflow_instance_api.rs, active_deploy_for_workflow)
+        // -- an app that deploys, serves, and cannot run a single workflow.
+        // Sorted and de-duplicated so the same source always packs the same
+        // bytes; the same file can be transformed in both the `ssr` and dev
+        // `zeroship` environments.
+        const workflowNames = [
+          ...new Set((state.discoveredWorkflows ?? []).map((w) => w.exportName)),
+        ].sort();
+
         const extras = await computeManifestExtras({
           root,
           procedures,
           schedules,
+          workflowNames,
           mode: viteMode,
         });
 
@@ -709,6 +722,7 @@ export function buildPlugin(
             transformer: extras.transformer,
             net: extras.net,
             schedules: extras.schedules,
+            workflows: extras.workflows,
           },
           // Carry the generated runtime schema descriptor (`schema.runtime.json`)
           // the buildStart gen-types step emitted. Migration documents are

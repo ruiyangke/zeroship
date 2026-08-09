@@ -366,11 +366,43 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
         exports: {
           ".": "./index.js",
           "./fetch-handler": "./fetch-handler.js",
+          "./normalize": "./normalize.js",
         },
       }, null, 2),
       "utf8",
     );
     await writeFile(join(pkgDir, "index.js"), "export {};\n", "utf8");
+    // The synthetic entry lifts durable workflow classes out of the namespace
+    // walk before the RPC rollup, so the stub must provide the same two
+    // helpers the real package exports. Kept structurally identical to
+    // sdks/bootstrap/src/normalize.ts rather than re-exported from it: this
+    // stub is deliberately a separate package on disk so the entry's bare
+    // specifiers resolve without the workspace store.
+    await writeFile(
+      join(pkgDir, "normalize.js"),
+      `
+export function isWorkflowClass(value) {
+  if (typeof value !== "function") return false;
+  const proto = value.prototype;
+  if (proto == null || typeof proto !== "object") return false;
+  return typeof proto.run === "function";
+}
+export function collectWorkflowClasses(mod) {
+  const out = {};
+  for (const name of Object.keys(mod ?? {})) {
+    if (name === "default" || name === "fetch") continue;
+    const value = mod[name];
+    if (!isWorkflowClass(value)) continue;
+    if (value.name !== name) {
+      try { Object.defineProperty(value, "name", { value: name, configurable: true }); } catch {}
+    }
+    out[name] = value;
+  }
+  return out;
+}
+`,
+      "utf8",
+    );
     await writeFile(
       join(pkgDir, "fetch-handler.js"),
       `

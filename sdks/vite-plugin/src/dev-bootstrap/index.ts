@@ -204,4 +204,11 @@ function ensureHmrPollStarted() {
 // request so the dict resolves on every call. Dispatch + schema-install
 // live in `@zeroship/bootstrap`; this module only owns the runner +
 // registry + HMR poll.
-export default { fetch: entry.fetch, rpc: entry.rpc };
+//
+// `loadWorkflow` is the workflow analogue of the function-shape `rpc`: the
+// creator's Workflow classes are not in THIS module's namespace (they live
+// behind the module runner), so the runtime's workflow dispatch resolves them
+// through this async hook instead of a static dict. Omitting it is what made
+// every `pnpm dev` workflow run fail with `Workflow not found` while the same
+// class ran fine under a raw `zeroship serve`.
+export default { fetch: entry.fetch, rpc: entry.rpc, loadWorkflow: entry.loadWorkflow };

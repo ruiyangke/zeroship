@@ -75,6 +75,12 @@ export interface ManifestExtrasInput {
   root: string;
   procedures: DiscoveredProcedure[];
   schedules?: DiscoveredSchedule[];
+  /**
+   * Export names of the durable workflow classes the server graph declares.
+   * Emitted verbatim as `manifest.workflows`; the control plane matches a
+   * `start` request's workflow name against this list before creating a run.
+   */
+  workflowNames?: string[];
   /** Production: throw on validation errors. Development: warn. */
   mode: "production" | "development";
   /**
@@ -818,7 +824,7 @@ function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
 export async function computeManifestExtras(
   input: ManifestExtrasInput,
 ): Promise<ManifestExtras> {
-  const { root, procedures, schedules, mode, configPath } = input;
+  const { root, procedures, schedules, workflowNames, mode, configPath } = input;
   const onWarn = input.onWarn ?? ((msg) => console.warn(`[zeroship:manifest] ${msg}`));
 
   // 1. Resolve every procedure's wireId, building both the auto-derived
@@ -929,6 +935,9 @@ export async function computeManifestExtras(
   const compiledSchedules = await compileSchedules(schedules);
   if (compiledSchedules && compiledSchedules.length > 0) {
     extras.schedules = compiledSchedules;
+  }
+  if (workflowNames && workflowNames.length > 0) {
+    extras.workflows = [...new Set(workflowNames)].sort();
   }
   return extras;
 }

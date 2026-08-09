@@ -625,7 +625,7 @@ fn normalize_workflow_wake_at(raw: Option<&Value>) -> Option<Value> {
     if DateTime::parse_from_rfc3339(s).is_ok() {
         return Some(Value::String(s.to_string()));
     }
-    let ms = parse_iso8601_duration_ms(s)?;
+    let ms = parse_workflow_duration_ms(s)?;
     let wake_at = Utc::now() + chrono::Duration::milliseconds(ms);
     Some(Value::String(wake_at.to_rfc3339()))
 }
@@ -641,8 +641,73 @@ fn normalize_workflow_duration_ms(raw: Option<&Value>) -> Option<Value> {
         return Some(Value::Number(ms.into()));
     }
     let s = value.as_str()?;
-    let ms = parse_iso8601_duration_ms(s)?;
+    let ms = parse_workflow_duration_ms(s)?;
     Some(Value::Number(ms.into()))
+}
+
+/// Parse a workflow duration string to milliseconds.
+///
+/// Accepts BOTH forms, because both reach here from creator code:
+///
+/// - the suffix form `docs/reference/workflows.md` documents -- "Duration
+///   strings accepted by workflow sleeps and timeouts include suffixes such as
+///   `ms`, `s`, `m`, `h`, and `d`; plain positive numbers are milliseconds";
+/// - ISO-8601 (`PT1.5S`), which the journal round-trips.
+///
+/// It used to accept only ISO-8601. `step.sleep("nap", "1500ms")` -- the exact
+/// spelling the reference doc shows -- therefore produced `invalid sleep
+/// wakeAt` on the deployed path, and the control plane nacked the advance as
+/// `Invalid` and left the run wedged in `running` forever, with no terminal
+/// state and nothing surfaced to the app. `step.waitForSignal(..., { timeout:
+/// "1h" })` failed the same way through `normalize_workflow_wake_at`'s `Wait`
+/// arm.
+///
+/// The local dev engine already accepted both (`dev.rs`
+/// `parse_workflow_duration_ms`), so the documented spelling worked under
+/// `pnpm dev` and hung deployed -- found by walking both sides in
+/// `tests/e2e_dev_vs_deployed_workflows.sh`.
+fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_iso8601_duration_ms(trimmed).or_else(|| parse_suffix_duration_ms(trimmed))
+}
+
+/// Suffix durations (`500ms`, `1.5s`, `10m`, `2h`, `1d`) and bare milliseconds.
+///
+/// `ms` must be tried before `s`, and the order of the rest does not matter.
+/// `strip_suffix` only matches at the END of the string, so `"500ms"` can
+/// never be caught by `m` -- it does not end in `m`. It IS caught by `s`,
+/// leaving `"500m"`, which is not a number, and the `?` below then abandons
+/// the whole parse rather than trying another unit. The result is `None`, so
+/// the failure is a rejected duration and a run that never wakes, not a
+/// mis-scaled one.
+///
+/// Verified by mutation, because the two orderings are not equally load
+/// bearing: swapping `ms` and `m` leaves every test passing, while moving `s`
+/// ahead of `ms` fails with `1500ms did not normalize` and
+/// `left: None, right: Some(500)`.
+fn parse_suffix_duration_ms(raw: &str) -> Option<i64> {
+    const UNITS: [(&str, f64); 5] = [
+        ("ms", 1.0),
+        ("s", 1_000.0),
+        ("m", 60_000.0),
+        ("h", 3_600_000.0),
+        ("d", 86_400_000.0),
+    ];
+    for (suffix, multiplier) in UNITS {
+        let Some(number) = raw.strip_suffix(suffix) else {
+            continue;
+        };
+        let value = parse_duration_number(number)?;
+        let ms = value * multiplier;
+        if ms < 0.0 || !ms.is_finite() {
+            return None;
+        }
+        return Some(ms.ceil() as i64);
+    }
+    raw.parse::<i64>().ok().filter(|v| *v >= 0)
 }
 
 fn parse_iso8601_duration_ms(raw: &str) -> Option<i64> {
@@ -1224,5 +1289,47 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    /// The suffix durations `docs/reference/workflows.md` documents must reach
+    /// a wakeAt on the DEPLOYED path, not only in the dev engine.
+    ///
+    /// Before the fix this arm accepted ISO-8601 only, so `step.sleep("nap",
+    /// "1500ms")` normalised to `None`, the worker nacked the advance with
+    /// `invalid sleep wakeAt`, and the run sat in `running` forever. Deleting
+    /// the `parse_suffix_duration_ms` fallback fails every case below except
+    /// `PT1.5S`.
+    ///
+    /// What this does NOT catch: it exercises the parser, not the wiring. If a
+    /// caller stopped routing through `normalize_workflow_wake_at`, or the JS
+    /// side started sending a different field, this still passes. That path is
+    /// covered by `tests/e2e_dev_vs_deployed_workflows.sh`, which drives a real
+    /// `step.sleep` through a deployed app.
+    #[test]
+    fn documented_suffix_durations_normalize_to_a_wake_at() {
+        for spelling in ["1500ms", "1.5s", "2m", "1h", "1d", "PT1.5S", "750"] {
+            let wake = normalize_workflow_wake_at(Some(&serde_json::json!(spelling)));
+            let wake = wake.unwrap_or_else(|| panic!("{spelling} did not normalize"));
+            let text = wake.as_str().unwrap_or_else(|| panic!("{spelling} was not a string"));
+            DateTime::parse_from_rfc3339(text)
+                .unwrap_or_else(|e| panic!("{spelling} produced a non-RFC3339 wakeAt: {e}"));
+        }
+    }
+
+    /// `ms` must be matched before `m`, or `"500ms"` leaves a `"500"` remainder
+    /// on the `m` arm and silently becomes 500 MINUTES -- a run that sleeps for
+    /// eight hours instead of half a second, with nothing to show for it.
+    #[test]
+    fn ms_is_not_parsed_as_minutes() {
+        assert_eq!(parse_workflow_duration_ms("500ms"), Some(500));
+        assert_eq!(parse_workflow_duration_ms("500m"), Some(30_000_000));
+    }
+
+    #[test]
+    fn a_non_duration_string_is_still_rejected() {
+        assert_eq!(parse_workflow_duration_ms("soon"), None);
+        assert_eq!(parse_workflow_duration_ms(""), None);
+        assert_eq!(parse_workflow_duration_ms("ms"), None);
+        assert!(normalize_workflow_wake_at(Some(&serde_json::json!("soon"))).is_none());
     }
 }
