@@ -656,10 +656,23 @@ pub struct IndexSnapshot {
     pub expr_cascade_columns: Option<Vec<String>>,
 }
 
-impl PartialEq for IndexSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.unique == other.unique
+impl IndexSnapshot {
+    /// Every comparable attribute of two indexes EXCEPT the name.
+    ///
+    /// This is exactly the body of [`PartialEq`] with the name term removed, and
+    /// `PartialEq` is written in terms of it, so the two can never drift into
+    /// disagreeing about what makes an index the same index.
+    ///
+    /// It is a COMPARABLE shape check, not physical proof that two indexes are
+    /// interchangeable. `opclass`, `nulls_not_distinct` and `expr_cascade_columns`
+    /// are emission-only: live introspection never populates them, so they are
+    /// excluded from equality (see their field docs) and therefore invisible here
+    /// too. Two indexes this returns `true` for agree on everything the live
+    /// snapshot can observe - unique, columns, canonical elements, access method,
+    /// canonical predicate, INCLUDE, storage params, ONLY and comment - and nothing
+    /// more.
+    pub(crate) fn same_definition_except_name(&self, other: &Self) -> bool {
+        self.unique == other.unique
             && self.columns == other.columns
             && index_elements_canonically_eq(&self.elements, &other.elements)
             && self.access_method == other.access_method
@@ -671,6 +684,12 @@ impl PartialEq for IndexSnapshot {
             && self.with == other.with
             && self.only == other.only
             && self.comment == other.comment
+    }
+}
+
+impl PartialEq for IndexSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.same_definition_except_name(other)
     }
 }
 impl Eq for IndexSnapshot {}

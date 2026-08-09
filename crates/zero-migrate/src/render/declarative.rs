@@ -2920,6 +2920,14 @@ pub struct DesiredSchema {
     /// table snapshot. Emission paths use this to distinguish injected indexes
     /// and constraints without a hardcoded system-field vocabulary.
     pub resolved_injects: BTreeMap<String, ResolvedInject>,
+    /// `table name -> derived index name -> the data plane's spelling of that same
+    /// index`, from `derived_index_aliases_for`. Present only for the names where
+    /// the two derivations disagree, and only for names the author DERIVED - never
+    /// for an author-supplied [`IndexDescriptor::name`].
+    ///
+    /// Like `sqlite_schemas`, this is derived provenance rather than schema
+    /// identity, so it does not participate in `PartialEq` (see the manual impl).
+    pub derived_index_aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 // The `sqlite_schemas` side-map is a derived emission aid (it is rebuilt from the
@@ -3059,8 +3067,13 @@ pub fn desired_snapshot_for_dialect(
     // overwrite with an identical value (idempotent, like the snapshot itself).
     let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut resolved_injects: BTreeMap<String, ResolvedInject> = BTreeMap::new();
+    // The derived-name provenance, captured here beside the snapshot that carries
+    // the derived names themselves. Identical re-declarations overwrite with an
+    // identical map, like `sqlite_schemas` above.
+    let mut derived_index_aliases: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for d in descriptors {
+        derived_index_aliases.insert(d.name.clone(), derived_index_aliases_for(d));
         // Capture the full SDK schema `Value` for this table before the snapshot
         // loop consumes the descriptor. Conflicting declarations are caught on the
         // snapshot in the second pass, so storing per-descriptor here is safe —
@@ -3086,7 +3099,12 @@ pub fn desired_snapshot_for_dialect(
 
     // Second pass: for each table, detect conflicts over the FULL declarer set and
     // pick the owner — both order-independent (1b).
-    desired_snapshot_second_pass(declarations, sqlite_schemas, resolved_injects)
+    desired_snapshot_second_pass(
+        declarations,
+        sqlite_schemas,
+        resolved_injects,
+        derived_index_aliases,
+    )
 }
 
 /// The **shared, dialect-parameterized snapshot-builder**: build the
@@ -3582,6 +3600,7 @@ fn desired_snapshot_second_pass(
     declarations: BTreeMap<String, Vec<(String, TableSnapshot)>>,
     mut sqlite_schemas: BTreeMap<String, serde_json::Value>,
     mut resolved_injects: BTreeMap<String, ResolvedInject>,
+    mut derived_index_aliases: BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<DesiredSchema, DeclarativeError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut ownership: BTreeMap<String, String> = BTreeMap::new();
@@ -3631,6 +3650,7 @@ fn desired_snapshot_second_pass(
     // the snapshot.
     sqlite_schemas.retain(|table, _| tables.contains_key(table));
     resolved_injects.retain(|table, _| tables.contains_key(table));
+    derived_index_aliases.retain(|table, _| tables.contains_key(table));
 
     let snapshot = SchemaSnapshot {
         tables,
@@ -3641,6 +3661,7 @@ fn desired_snapshot_second_pass(
         ownership,
         sqlite_schemas,
         resolved_injects,
+        derived_index_aliases,
     })
 }
 
@@ -3905,6 +3926,162 @@ pub fn is_system_managed_constraint(
 /// waiting on approval rather than as silent churn.
 fn unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
+}
+
+/// For each index name this collection DERIVED, the OTHER derivation of that same
+/// `(table, column, unique)` triple - recorded only where the two disagree.
+///
+/// The two schemes agree on a natural name of 60 bytes or fewer. Above that,
+/// `cap_ident_name` keeps the natural name verbatim through 63 bytes and then
+/// applies a 10-hex tail, while `crate::schema::query::index_name` swaps the tail
+/// for an 8-char base32 hash at 61. So one index has two live-legal names, and the
+/// index diff keys on name: whichever scheme built the live index, the other
+/// scheme's spelling reads as a missing index plus an unexpected one.
+///
+/// This is PROVENANCE, captured where the desired schema is built and while the
+/// name is known to be derived. It deliberately does not cover author-supplied
+/// [`IndexDescriptor::name`]s: those are first-class, and a user renaming an index
+/// while keeping its columns must still get a CREATE of the new name and a DROP of
+/// the old one.
+///
+/// The three arms mirror the three derived sites in `build_table_snapshot_impl`
+/// one for one: the `unique: true` facet, the vector ANN index and the geoPoint
+/// spatial index. `derived_index_aliases_name_every_derived_index` pins them to
+/// that builder's actual output so the two cannot fall out of step silently.
+///
+/// The composite FTS index is absent on purpose. Both halves of the engine derive
+/// that name through the single shared `crate::schema::query::fts_index_name`, so
+/// it has no second spelling to alias. Policy-injected indexes are absent for the
+/// same reason: they are built AND recognised through
+/// `crate::schema::query::index_name` on both sides.
+fn derived_index_aliases_for(d: &CollectionDescriptor) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut record = |derived: String, column: &str, unique: bool| {
+        let data_plane = crate::schema::query::index_name(&d.name, &[column], unique);
+        if data_plane != derived {
+            out.insert(derived, data_plane);
+        }
+    };
+    for f in &d.fields {
+        if f.unique {
+            record(unique_index_name(&d.name, &f.name), &f.name, true);
+        }
+        if f.ty == "vector" || f.ty == "geoPoint" {
+            record(non_unique_index_name(&d.name, &f.name), &f.name, false);
+        }
+    }
+    out
+}
+
+/// A live index the differ accepted under the OTHER derivation of its own name.
+///
+/// Carried on the plan so an alias-accepted no-op is VISIBLE: without it, an index
+/// the differ silently stopped churning is indistinguishable from an index it
+/// silently stopped managing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedIndexAlias {
+    /// The table both indexes sit on.
+    pub table: String,
+    /// The name the desired snapshot derived.
+    pub desired_name: String,
+    /// The name the live index actually carries.
+    pub live_name: String,
+}
+
+/// The result of pairing one table's desired indexes to its live indexes.
+#[derive(Debug)]
+pub(crate) struct IndexPairing<'a> {
+    /// Desired index name to the live index it paired with, exactly or by alias.
+    pub(crate) matched: BTreeMap<&'a str, &'a IndexSnapshot>,
+    /// Live index names that a desired index claimed, so the drop pass leaves them.
+    pub(crate) consumed_live: BTreeSet<&'a str>,
+    /// The alias acceptances, for the plan diagnostic.
+    pub(crate) accepted: Vec<AcceptedIndexAlias>,
+}
+
+/// Pair a table's desired indexes to its live indexes: EXACT names first, then
+/// derived-name aliases, one-to-one.
+///
+/// Exact names are paired first so a live index that some desired index names
+/// outright is never handed to an alias claim. Only then does an unpaired desired
+/// index whose name was DERIVED look for the live index carrying the other
+/// derivation of that same name, and it accepts it only if
+/// [`IndexSnapshot::same_definition_except_name`] holds - a comparable-shape check
+/// over what live introspection can observe, not physical proof the two indexes are
+/// interchangeable.
+///
+/// Two desired indexes claiming the SAME live index is reported, never guessed at.
+pub(crate) fn pair_indexes<'a>(
+    table: &str,
+    desired: &'a [IndexSnapshot],
+    live: &'a [IndexSnapshot],
+    aliases: &BTreeMap<String, String>,
+) -> Result<IndexPairing<'a>, DeclarativeError> {
+    let live_by_name: BTreeMap<&str, &IndexSnapshot> =
+        live.iter().map(|i| (i.name.as_str(), i)).collect();
+    let mut matched: BTreeMap<&str, &IndexSnapshot> = BTreeMap::new();
+    let mut consumed_live: BTreeSet<&str> = BTreeSet::new();
+
+    for idx in desired {
+        if let Some(li) = live_by_name.get(idx.name.as_str()) {
+            matched.insert(idx.name.as_str(), *li);
+            consumed_live.insert(li.name.as_str());
+        }
+    }
+
+    // Collect every alias claim before committing any, so a live index two desired
+    // indexes both reach for is reported rather than awarded to whichever came first.
+    let mut claims: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for idx in desired {
+        if matched.contains_key(idx.name.as_str()) {
+            continue;
+        }
+        let Some(alias) = aliases.get(idx.name.as_str()) else {
+            continue;
+        };
+        if consumed_live.contains(alias.as_str()) {
+            continue;
+        }
+        let Some(li) = live_by_name.get(alias.as_str()) else {
+            continue;
+        };
+        if !idx.same_definition_except_name(li) {
+            continue;
+        }
+        claims
+            .entry(li.name.as_str())
+            .or_default()
+            .push(idx.name.as_str());
+    }
+
+    let mut accepted = Vec::new();
+    for (live_name, desired_names) in claims {
+        if desired_names.len() > 1 {
+            return Err(DeclarativeError::UnsupportedInV1(format!(
+                "index {table}.{live_name} is claimed as a derived-name alias by more \
+                 than one desired index ({desired_names:?}); rename one explicitly"
+            )));
+        }
+        let Some(desired_name) = desired_names.first().copied() else {
+            continue;
+        };
+        let Some(li) = live_by_name.get(live_name) else {
+            continue;
+        };
+        matched.insert(desired_name, *li);
+        consumed_live.insert(live_name);
+        accepted.push(AcceptedIndexAlias {
+            table: table.to_string(),
+            desired_name: desired_name.to_string(),
+            live_name: live_name.to_string(),
+        });
+    }
+
+    Ok(IndexPairing {
+        matched,
+        consumed_live,
+        accepted,
+    })
 }
 
 /// Explicit FK constraint name, or the deterministic
@@ -4770,6 +4947,10 @@ pub struct DeclarativePlan {
     /// destructive/approval gate keys on the paired migration's flags
     /// (`destructive + requires_approval`). Always empty on the PG path.
     pub rebuilds: Vec<SqliteRebuild>,
+    /// The live indexes this diff accepted under the OTHER derivation of their own
+    /// name, instead of emitting a CREATE plus a DROP for them. Reported so an
+    /// alias-accepted no-op is visible rather than silent; it drives no DDL.
+    pub accepted_index_aliases: Vec<AcceptedIndexAlias>,
 }
 
 /// one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
@@ -5159,6 +5340,10 @@ impl DeclarativeAuthor {
         // indexes, while the rest of the pass operates on the snapshot.
         let desired_full = desired;
         let desired = &desired.snapshot;
+        // The alias acceptances this diff made, collected for the plan diagnostic.
+        let mut accepted_index_aliases: Vec<AcceptedIndexAlias> = Vec::new();
+        // A table with no derived names at all borrows this instead of allocating.
+        let empty_aliases: BTreeMap<String, String> = BTreeMap::new();
 
         for table in desired.tables.keys() {
             let active = ResolvedInject::for_table(effective, &self.project_schema, table)
@@ -5491,23 +5676,40 @@ impl DeclarativeAuthor {
             }
 
             // CREATE INDEX / DROP INDEX on an existing table.
-            let live_idx: BTreeMap<&str, &IndexSnapshot> =
-                lt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
-            let desired_idx: BTreeMap<&str, &IndexSnapshot> =
-                dt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+            //
+            // Pair by name first, then let a desired index whose name the author
+            // DERIVED accept the live index carrying the other derivation of that
+            // same name. The data plane and the declarative author cap an overlong
+            // index name differently, so one index can already exist under a name
+            // this side would never spell; without the alias that reads as a missing
+            // index plus an unexpected one and emits a CREATE (a no-op, the relation
+            // is already there) plus a DROP (which really removes the index).
+            let pairing = pair_indexes(
+                table,
+                &dt.indexes,
+                &lt.indexes,
+                desired_full
+                    .derived_index_aliases
+                    .get(table.as_str())
+                    .unwrap_or(&empty_aliases),
+            )?;
+            accepted_index_aliases.extend(pairing.accepted.iter().cloned());
             for idx in &dt.indexes {
                 if is_pk_index(table, &idx.name) {
                     continue; // implicit; created by the PRIMARY KEY clause
                 }
-                match live_idx.get(idx.name.as_str()) {
+                match pairing.matched.get(idx.name.as_str()) {
                     None => out.push(self.render_create_index(table, idx, Vec::new())),
                     Some(li) => {
-                        // Same-name index on both sides: a flipped `unique` flag or
+                        // Paired index on both sides: a flipped `unique` flag or
                         // a changed column set is an in-place redefinition
                         // (DROP+CREATE), which the differ does not synthesize. Surface it
                         // EXPLICITLY (5-idx) — never silently skip (the old loop
                         // only checked name presence, so a uniqueness flip emitted
                         // 0 migrations and left the wrong index in place).
+                        // Only an EXACT-name pair can reach either check: an alias
+                        // pair is granted only when `same_definition_except_name`
+                        // holds, and that already compares `unique` and `columns`.
                         if li.unique != idx.unique {
                             return Err(DeclarativeError::UnsupportedInV1(format!(
                                 "index {}.{} uniqueness change {} → {}",
@@ -5527,7 +5729,7 @@ impl DeclarativeAuthor {
                 if is_pk_index(table, &idx.name) {
                     continue; // never drop the PK's implicit index
                 }
-                if !desired_idx.contains_key(idx.name.as_str()) {
+                if !pairing.consumed_live.contains(idx.name.as_str()) {
                     out.push(self.render_drop_index(Some(table), idx));
                 }
             }
@@ -5609,7 +5811,13 @@ impl DeclarativeAuthor {
         // refused. Driven from the structural delta (snapshot diff), not migration
         // names, so it covers CREATE/ALTER/DROP (incl. cross-app FK ALTER and the
         // rename expand/contract) uniformly and deterministically.
-        Self::enforce_ownership(&self.owner_app, desired, live, ownership)?;
+        Self::enforce_ownership(
+            &self.owner_app,
+            desired,
+            live,
+            ownership,
+            &desired_full.derived_index_aliases,
+        )?;
 
         // Total order by UUIDv7 version (stable; the executor topo-sorts on
         // depends_on within it). Only the PLAIN migrations are ordered here; each
@@ -5621,6 +5829,7 @@ impl DeclarativeAuthor {
             migrations: out,
             renames,
             rebuilds,
+            accepted_index_aliases,
         })
     }
 
@@ -5649,11 +5858,49 @@ impl DeclarativeAuthor {
         desired: &SchemaSnapshot,
         live: &SchemaSnapshot,
         ownership: &BTreeMap<String, String>,
+        index_aliases: &BTreeMap<String, BTreeMap<String, String>>,
     ) -> Result<(), DeclarativeError> {
+        let empty_aliases: BTreeMap<String, String> = BTreeMap::new();
         for (table, dt) in &desired.tables {
             // `None` ⇒ CREATE TABLE; `Some(lt)` ⇒ any ALTER iff the union shape
             // differs from live (columns/indexes/fks/rename).
-            let changed = live.tables.get(table).is_none_or(|lt| lt != dt);
+            //
+            // An index the differ pairs by derived-name alias emits no op, so it is
+            // not a structural change - but `TableSnapshot` equality compares index
+            // NAMES, so the two spellings of one index would read as one. Respell the
+            // accepted live names to the desired side's spelling before comparing, so
+            // this check asks the same question the index diff answered. The alias is
+            // granted only when `same_definition_except_name` holds, so respelling
+            // can turn a table equal ONLY when the differ emits nothing for it; every
+            // other difference still compares unequal and is still refused.
+            let changed = live.tables.get(table).is_none_or(|lt| {
+                let aliases = index_aliases.get(table).unwrap_or(&empty_aliases);
+                match pair_indexes(table, &dt.indexes, &lt.indexes, aliases) {
+                    Ok(pairing) if !pairing.accepted.is_empty() => {
+                        let respelled: BTreeMap<&str, &str> = pairing
+                            .accepted
+                            .iter()
+                            .map(|a| (a.live_name.as_str(), a.desired_name.as_str()))
+                            .collect();
+                        let mut lt = lt.clone();
+                        for idx in &mut lt.indexes {
+                            if let Some(desired_name) = respelled.get(idx.name.as_str()) {
+                                idx.name = (*desired_name).to_string();
+                            }
+                        }
+                        // Index vectors compare element-wise, and respelling a name
+                        // can move it out of the name order both sides arrive in
+                        // (`build_table_snapshot_impl` name-sorts the desired side,
+                        // so sorting it back is a no-op and cannot mask an ordering
+                        // difference; this restores that order on the live side).
+                        lt.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+                        let mut dt = dt.clone();
+                        dt.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+                        lt != dt
+                    }
+                    _ => lt != dt,
+                }
+            });
             if !changed {
                 continue;
             }
@@ -6771,6 +7018,11 @@ impl DeclarativeAuthor {
             },
             ownership,
             sqlite_schemas,
+            // This one-table desired schema is assembled from an IR rename lowering
+            // rather than the descriptor compiler, so no index name here came from
+            // `derived_index_aliases_for`. An empty map leaves index pairing on
+            // exact names, which is what this path already did.
+            derived_index_aliases: BTreeMap::new(),
             resolved_injects,
         };
 
@@ -9534,6 +9786,7 @@ mod advisory_seam_tests {
             ],
             renames: Vec::new(),
             rebuilds: Vec::new(),
+            accepted_index_aliases: Vec::new(),
         };
         let advisories = plan.advisories();
         // Only the drop produced an advisory entry (the additive create is silent).
@@ -9562,6 +9815,7 @@ mod advisory_seam_tests {
             )],
             renames: Vec::new(),
             rebuilds: Vec::new(),
+            accepted_index_aliases: Vec::new(),
         };
         assert!(plan.advisories().is_empty());
     }
@@ -9583,6 +9837,7 @@ mod advisory_seam_tests {
             ],
             renames: Vec::new(),
             rebuilds: Vec::new(),
+            accepted_index_aliases: Vec::new(),
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
@@ -9602,6 +9857,7 @@ mod advisory_seam_tests {
             )],
             renames: Vec::new(),
             rebuilds: Vec::new(),
+            accepted_index_aliases: Vec::new(),
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
@@ -9857,5 +10113,250 @@ mod mysql_storage_agreement_tests {
                 f.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod derived_index_alias_tests {
+    //! The derived-name alias, pinned at the level the live-PG suite cannot reach.
+    //!
+    //! `index_name_scheme_alias_pg` proves the end-to-end behaviour against a real
+    //! server, but only for the `unique: true` index: the vector and geoPoint arms
+    //! need pgvector and PostGIS. These pin the other two derived sites, the regime
+    //! the whole alias rests on, and the ambiguity report.
+    use super::{
+        build_table_snapshot, derived_index_aliases_for, non_unique_index_name, pair_indexes,
+        CollectionDescriptor, FieldDescriptor, IndexSnapshot, SqlDialect,
+    };
+    use std::collections::BTreeMap;
+
+    fn effective() -> zero_migrate_policy::EffectivePolicy {
+        crate::test_fixtures::no_inject("app")
+    }
+
+    /// The two derivations, EXECUTED, across the byte range that matters.
+    ///
+    /// Below 61 bytes they are the same string, so there is nothing to alias. From 61
+    /// through 63 the author keeps the natural name verbatim while the data plane has
+    /// already switched to its hash tail. From 64 up both hash, to different lengths
+    /// and different alphabets. This is the fact the alias exists for; if it ever
+    /// stops holding, the alias is either dead code or wrong.
+    #[test]
+    fn the_two_derivations_agree_only_below_61_bytes() {
+        for natural_len in 40..=76usize {
+            // `<table>_<col>_idx` with a one-byte table: 1 + 1 + col + 4.
+            let col = "c".repeat(natural_len - 6);
+            let author = non_unique_index_name("t", &col);
+            let data_plane = crate::schema::query::index_name("t", &[col.as_str()], false);
+            if natural_len <= 60 {
+                assert_eq!(
+                    author, data_plane,
+                    "at {natural_len} bytes both schemes must spell the name identically"
+                );
+            } else {
+                assert_ne!(
+                    author, data_plane,
+                    "at {natural_len} bytes the two schemes must disagree"
+                );
+                assert!(
+                    author.len() <= 63 && data_plane.len() <= 63,
+                    "at {natural_len} bytes both names must stay inside NAMEDATALEN"
+                );
+            }
+        }
+        // The shape of each regime, spelled out.
+        let sixty_one = "c".repeat(55);
+        assert_eq!(
+            non_unique_index_name("t", &sixty_one).len(),
+            61,
+            "61..=63 keeps the natural name verbatim on the author side"
+        );
+        assert_eq!(
+            crate::schema::query::index_name("t", &[sixty_one.as_str()], false).len(),
+            60,
+            "the data plane's truncated form is always 60 bytes"
+        );
+        let sixty_four = "c".repeat(58);
+        assert_eq!(
+            non_unique_index_name("t", &sixty_four).len(),
+            63,
+            "above 63 the author's own hash tail lands at 63 bytes"
+        );
+    }
+
+    fn descriptor_with_derived_indexes(field_len: usize) -> CollectionDescriptor {
+        let name = |prefix: &str| format!("{prefix}{}", "a".repeat(field_len - prefix.len()));
+        CollectionDescriptor {
+            name: "t".into(),
+            owner_app: "app".into(),
+            fields: vec![
+                FieldDescriptor {
+                    name: name("u"),
+                    ty: "string".into(),
+                    required: true,
+                    unique: true,
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: name("v"),
+                    ty: "vector".into(),
+                    vector_dims: Some(3),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: name("g"),
+                    ty: "geoPoint".into(),
+                    ..Default::default()
+                },
+            ],
+            indexes: vec![],
+            runtime_options: Default::default(),
+        }
+    }
+
+    /// Every alias key must name an index the shared builder actually produced.
+    ///
+    /// `derived_index_aliases_for` walks the descriptor's fields in parallel with
+    /// `build_table_snapshot_impl`. Nothing in the type system holds those two
+    /// together, so this pins them: an alias for a name the builder does not emit is
+    /// dead provenance, and it would silently stop covering a derived site that
+    /// changed shape.
+    #[test]
+    fn derived_index_aliases_name_every_derived_index() {
+        // 55 bytes puts every one of the three natural names in the disagreeing
+        // window (`t_<55>_idx` = 61, `t_<55>_key` = 61).
+        let d = descriptor_with_derived_indexes(55);
+        let aliases = derived_index_aliases_for(&d);
+        assert_eq!(
+            aliases.len(),
+            3,
+            "the unique, vector and geoPoint fields each derive one name: {aliases:#?}"
+        );
+        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &effective())
+            .expect("build_table_snapshot");
+        let emitted: Vec<&str> = snap.indexes.iter().map(|i| i.name.as_str()).collect();
+        for key in aliases.keys() {
+            assert!(
+                emitted.contains(&key.as_str()),
+                "alias key {key:?} names no index the builder emitted: {emitted:#?}"
+            );
+        }
+        // The three access methods prove the three distinct derived sites are covered,
+        // not the same site three times.
+        let mut methods: Vec<&str> = snap
+            .indexes
+            .iter()
+            .map(|i| i.access_method.as_str())
+            .collect();
+        methods.sort_unstable();
+        assert_eq!(methods, vec!["btree", "gist", "ivfflat"]);
+    }
+
+    /// Below the disagreement window there is nothing to alias, so no provenance is
+    /// recorded at all - the alias never fires where the two schemes already agree.
+    #[test]
+    fn derived_index_aliases_are_empty_when_the_schemes_agree() {
+        let d = descriptor_with_derived_indexes(20);
+        assert!(
+            derived_index_aliases_for(&d).is_empty(),
+            "short names need no alias"
+        );
+    }
+
+    /// An author-supplied index name never earns an alias, whatever its length.
+    #[test]
+    fn an_author_supplied_index_name_is_never_aliased() {
+        let long = format!("zz_{}", "a".repeat(58));
+        let d = CollectionDescriptor {
+            name: "t".into(),
+            owner_app: "app".into(),
+            fields: vec![FieldDescriptor {
+                name: "c".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            }],
+            indexes: vec![super::IndexDescriptor {
+                name: long,
+                columns: vec!["c".into()],
+                unique: false,
+            }],
+            runtime_options: Default::default(),
+        };
+        assert!(
+            derived_index_aliases_for(&d).is_empty(),
+            "IndexDescriptor.name is first-class; a rename of it must stay a rename"
+        );
+    }
+
+    /// A live index two desired indexes both reach for is REPORTED, not awarded to
+    /// whichever the iteration order happened to reach first.
+    #[test]
+    fn an_ambiguous_alias_claim_is_reported() {
+        let live = vec![IndexSnapshot::btree(
+            "live_shared",
+            false,
+            vec!["c".to_string()],
+        )];
+        let desired = vec![
+            IndexSnapshot::btree("desired_one", false, vec!["c".to_string()]),
+            IndexSnapshot::btree("desired_two", false, vec!["c".to_string()]),
+        ];
+        let mut aliases = BTreeMap::new();
+        aliases.insert("desired_one".to_string(), "live_shared".to_string());
+        aliases.insert("desired_two".to_string(), "live_shared".to_string());
+        let err = pair_indexes("t", &desired, &live, &aliases)
+            .expect_err("two claims on one live index must not be guessed at");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("live_shared") && msg.contains("desired_one"),
+            "the report must name the contested index and its claimants: {msg}"
+        );
+    }
+
+    /// An alias is granted only when the comparable shapes agree. A live index under
+    /// the aliased name but over DIFFERENT columns is not the same index.
+    #[test]
+    fn an_alias_is_refused_when_the_shape_differs() {
+        let live = vec![IndexSnapshot::btree(
+            "live_name",
+            false,
+            vec!["other".to_string()],
+        )];
+        let desired = vec![IndexSnapshot::btree(
+            "desired_name",
+            false,
+            vec!["c".to_string()],
+        )];
+        let mut aliases = BTreeMap::new();
+        aliases.insert("desired_name".to_string(), "live_name".to_string());
+        let pairing = pair_indexes("t", &desired, &live, &aliases).expect("no ambiguity");
+        assert!(
+            pairing.accepted.is_empty() && pairing.matched.is_empty(),
+            "a differently-shaped index must not be accepted as an alias"
+        );
+    }
+
+    /// Exact names are paired FIRST, so a live index some desired index names
+    /// outright is never handed to an alias claim.
+    #[test]
+    fn an_exact_name_wins_over_an_alias_claim() {
+        let live = vec![IndexSnapshot::btree("shared", false, vec!["c".to_string()])];
+        let desired = vec![
+            IndexSnapshot::btree("shared", false, vec!["c".to_string()]),
+            IndexSnapshot::btree("aliased", false, vec!["c".to_string()]),
+        ];
+        let mut aliases = BTreeMap::new();
+        aliases.insert("aliased".to_string(), "shared".to_string());
+        let pairing = pair_indexes("t", &desired, &live, &aliases).expect("no ambiguity");
+        assert!(
+            pairing.accepted.is_empty(),
+            "the exact match must consume the live index"
+        );
+        assert!(pairing.matched.contains_key("shared"));
+        assert!(
+            !pairing.matched.contains_key("aliased"),
+            "the aliased desired index is left unmatched, so it is still a CREATE"
+        );
     }
 }

@@ -750,6 +750,7 @@ impl MigrationEngine {
             plain,
             renames: diff.renames,
             rebuilds: diff.rebuilds,
+            accepted_index_aliases: diff.accepted_index_aliases,
             effective_policy: effective.clone(),
         })
     }
@@ -3384,6 +3385,12 @@ pub struct DeclarativeDeployPlan {
     /// destructive/approval gate (the paired migration is `destructive +
     /// requires_approval`). ALWAYS empty on the PG dialect.
     pub rebuilds: Vec<crate::render::declarative::SqliteRebuild>,
+    /// The live indexes the differ accepted under the OTHER derivation of their own
+    /// name rather than churning CREATE + DROP for
+    /// ([`AcceptedIndexAlias`](crate::render::declarative::AcceptedIndexAlias)).
+    /// Reporting only - it carries no DDL and nothing in apply reads it - so that an
+    /// alias-accepted no-op is visible instead of silent.
+    pub accepted_index_aliases: Vec<crate::render::declarative::AcceptedIndexAlias>,
     /// The exact composed policy whose inject rules shaped this plan. Apply must
     /// be given an equal policy; there is no ambient or inferred fallback.
     effective_policy: zero_migrate_policy::EffectivePolicy,
@@ -3586,6 +3593,7 @@ mod tests {
             },
             renames: Vec::new(),
             rebuilds: Vec::new(),
+            accepted_index_aliases: Vec::new(),
             effective_policy: effective.clone(),
         };
 

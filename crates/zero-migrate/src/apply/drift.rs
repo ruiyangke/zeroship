@@ -1569,9 +1569,35 @@ pub(crate) fn partition_divergences(
 /// blind spot that pure name diffing left open.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
+    diff_snapshots_with_index_aliases(expected, actual, &BTreeMap::new())
+}
+
+/// [`diff_snapshots`], plus the derived-index-name provenance that lets a live index
+/// pair with the OTHER derivation of its own name.
+///
+/// The data plane and the declarative author cap an overlong index name through
+/// different schemes, so one index can be live under a name the expected snapshot
+/// would never spell. Name-only diffing reports that index as BOTH missing and
+/// unexpected even though the database is exactly right, which is the same false
+/// drift the migration differ avoids by pairing on the same provenance. Pass
+/// [`DesiredSchema::derived_index_aliases`](crate::render::declarative::DesiredSchema::derived_index_aliases)
+/// - `table -> derived name -> the data plane's spelling` - to get the matching
+/// report; [`diff_snapshots`] passes an empty map and stays name-only.
+///
+/// An alias is honoured only for a name the author DERIVED and only when the two
+/// indexes' comparable shapes agree, so an author-supplied index rename still shows
+/// up as one missing and one unexpected object.
+#[must_use]
+pub fn diff_snapshots_with_index_aliases(
+    expected: &SchemaSnapshot,
+    actual: &SchemaSnapshot,
+    index_aliases: &BTreeMap<String, BTreeMap<String, String>>,
+) -> StructuralDrift {
     let mut missing = Vec::new();
     let mut unexpected = Vec::new();
     let mut altered = Vec::new();
+    // A table with no derived index names borrows this instead of allocating.
+    let empty_index_aliases: BTreeMap<String, String> = BTreeMap::new();
 
     // Tables present in expected but not actual → missing (whole table + its
     // children fold into the single table name; the table is the unit of
@@ -1749,19 +1775,11 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
             &mut missing,
             &mut unexpected,
         );
-        diff_named(
+        diff_indexes(
             name,
-            "index ",
-            &exp_t
-                .indexes
-                .iter()
-                .map(|i| i.name.clone())
-                .collect::<Vec<_>>(),
-            &act_t
-                .indexes
-                .iter()
-                .map(|i| i.name.clone())
-                .collect::<Vec<_>>(),
+            &exp_t.indexes,
+            &act_t.indexes,
+            index_aliases.get(name).unwrap_or(&empty_index_aliases),
             &mut missing,
             &mut unexpected,
         );
@@ -2581,6 +2599,58 @@ fn constraint_definition_is_comparable(kind: &str) -> bool {
 /// it, so the two sides agree on the field being absent rather than unread.
 fn constraint_definition_is_retained(kind: &str) -> bool {
     kind != "EXCLUDE"
+}
+
+/// Missing / unexpected indexes for one table, pairing exact names first and then
+/// derived-name aliases, one-to-one.
+///
+/// Shares [`pair_indexes`](crate::render::declarative::pair_indexes) with the
+/// migration differ, so drift and the plan cannot disagree about which live index a
+/// desired one meant. When the pairing reports an ambiguity - one live index claimed
+/// as an alias by two desired indexes - this falls back to the name-only diff, which
+/// reports the objects instead of guessing which one was intended.
+///
+/// There is no matching change to the attribute pass. An alias is only accepted when
+/// `same_definition_except_name` holds, and that predicate covers exactly the
+/// attributes the index attribute diff compares (unique, columns, elements, access
+/// method, predicate, INCLUDE, storage params, ONLY, comment), so an accepted pair
+/// has no attribute left to report as altered.
+fn diff_indexes(
+    table: &str,
+    expected: &[IndexSnapshot],
+    actual: &[IndexSnapshot],
+    aliases: &BTreeMap<String, String>,
+    missing: &mut Vec<String>,
+    unexpected: &mut Vec<String>,
+) {
+    let names = |indexes: &[IndexSnapshot]| {
+        indexes
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<String>>()
+    };
+    let Ok(pairing) = crate::render::declarative::pair_indexes(table, expected, actual, aliases)
+    else {
+        diff_named(
+            table,
+            "index ",
+            &names(expected),
+            &names(actual),
+            missing,
+            unexpected,
+        );
+        return;
+    };
+    for ei in expected {
+        if !pairing.matched.contains_key(ei.name.as_str()) {
+            missing.push(format!("{table} index {}", ei.name));
+        }
+    }
+    for ai in actual {
+        if !pairing.consumed_live.contains(ai.name.as_str()) {
+            unexpected.push(format!("{table} index {}", ai.name));
+        }
+    }
 }
 
 /// Diff two name lists belonging to one table, pushing qualified names into the

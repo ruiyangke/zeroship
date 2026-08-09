@@ -146,8 +146,8 @@ pub use analysis::classify::{
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use apply::drift::{
-    diff_snapshots, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError, DriftReport,
-    OrphanJournal, StructuralDrift,
+    diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,
+    ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
 pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
 #[cfg(pg_seam)]
@@ -162,8 +162,8 @@ pub use plan::author::{
 };
 pub use render::declarative::{
     desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, sqlite_canonical_type,
-    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema,
-    FieldDescriptor, IndexDescriptor, RenameHint, SqliteRebuild,
+    AcceptedIndexAlias, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan,
+    DesiredSchema, FieldDescriptor, IndexDescriptor, RenameHint, SqliteRebuild,
 };
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
