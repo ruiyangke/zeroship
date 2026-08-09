@@ -290,10 +290,9 @@ impl GuardConfig {
     /// `Global` resolves differently at different objects, so reading it at ONE
     /// witness erases the rule's scope.
     ///
-    /// `schema.create_schema`, `access.policy` and `access.rls` are object-scoped and
-    /// are still read at a witness; they go through
-    /// [`Self::witness_pending_object_resolution`] instead, which makes that the
-    /// visible exception rather than a silent one.
+    /// `schema.create_schema`, `access.policy` and `access.rls` are object-scoped;
+    /// they go through [`Self::grants_object_bool`] with the object their statement
+    /// names.
     fn global_witness_for(&self, key: &str) -> ObjectName {
         debug_assert!(
             self.knob_object_model(key) == Some(ObjectModel::Global),
@@ -302,12 +301,30 @@ impl GuardConfig {
         global_witness()
     }
 
-    /// The witness object for an OBJECT-SCOPED knob the guard has not yet taught to
-    /// resolve per object. Reading here answers "is this granted at `zsg`", which is
-    /// not the question the caller means to ask; every use is a known-open scope
-    /// erasure kept at today's behaviour on purpose.
-    fn witness_pending_object_resolution(&self, key: &str) -> bool {
-        self.grants_bool_at(key, &global_witness())
+    /// Does the effective policy grant the OBJECT-SCOPED Bool `key` for a statement
+    /// targeting `object`?
+    ///
+    /// `None` is a statement whose target the guard cannot name: an unqualified
+    /// relation under a charter with no unique owned schema, a `CREATE SCHEMA
+    /// AUTHORIZATION` form carrying no schema name. Such a target is not provably
+    /// inside any narrower scope, so only a whole-universe grant reaches it.
+    fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool {
+        match object {
+            Some(object) => self.grants_bool_at(key, object),
+            None => self.grants_bool_everywhere(key),
+        }
+    }
+
+    /// Does the effective policy grant Bool `key` at EVERY object - a whole-universe
+    /// ([`GrantRegion::Top`]) rule? Such a grant resolves the same everywhere, so one
+    /// witness decides it; any narrower region answers `false`, because the caller
+    /// holds no object to test a narrower rule against.
+    fn grants_bool_everywhere(&self, key: &str) -> bool {
+        let Some(k) = KnobKey::parse(key).ok() else {
+            return false;
+        };
+        matches!(self.effective.grant_region(&k), GrantRegion::Top)
+            && self.grants_bool_at(key, &global_witness())
     }
 
     /// The registered [`ObjectModel`] of `key`, or `None` for a key this policy's
@@ -334,16 +351,20 @@ impl GuardConfig {
     /// [`is_safe_drop_object`] (the `.down.sql`-only reverses: schema/extension/
     /// policy — DROP ROLE is handled by its own arm). Reproduces
     /// `platform_drop_object_allowed` via the PDP.
-    fn grants_drop_object(&self, remove_type: i32) -> bool {
+    ///
+    /// `object` is the concrete target the statement names, resolved by
+    /// [`drop_object_targets`]: the schema for `DROP SCHEMA`, the policy's table for
+    /// `DROP POLICY`. Both knobs are object-scoped, so a charter that grants them on
+    /// one schema/table must not decide a drop of another.
+    fn grants_drop_object(&self, remove_type: i32, object: Option<&ObjectName>) -> bool {
         if remove_type == ObjectType::ObjectSchema as i32 {
-            return self
-                .witness_pending_object_resolution(policy_registry::KEY_SCHEMA_CREATE_SCHEMA);
+            return self.grants_object_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, object);
         }
         if remove_type == ObjectType::ObjectExtension as i32 {
             return self.grants_extension_capability();
         }
         if remove_type == ObjectType::ObjectPolicy as i32 {
-            return self.witness_pending_object_resolution(policy_registry::KEY_ACCESS_POLICY);
+            return self.grants_object_bool(policy_registry::KEY_ACCESS_POLICY, object);
         }
         if remove_type == ObjectType::ObjectRole as i32 {
             return self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
@@ -524,10 +545,102 @@ impl GuardConfig {
 ///
 /// The soundness condition, that the knob really is `ObjectModel::Global`, is checked
 /// against the registry by [`GuardConfig::global_witness_for`], which is how every
-/// Global read reaches this. Call this directly only from
-/// [`GuardConfig::witness_pending_object_resolution`], the named exception.
+/// Global read reaches this. [`GuardConfig::grants_bool_everywhere`] also reaches it
+/// directly, having established the same "resolves identically everywhere" condition
+/// a different way: from the rule's whole-universe grant region rather than from the
+/// knob's object model.
 fn global_witness() -> ObjectName {
     ObjectName::schema(b"zsg".to_vec())
+}
+
+/// The concrete object a raw `RangeVar` names, or `None` when the parse names no
+/// relation the guard can attribute to one object. Same attribution rule as
+/// [`raw_relation_target`]; the two failure arms collapse to `None` because an
+/// object-scoped grant treats "cannot name the target" the same way whichever way the
+/// name failed.
+fn optional_relation_target<D: GuardDecisions + ?Sized>(
+    cfg: &D,
+    rel: Option<&protobuf::RangeVar>,
+) -> Option<ObjectName> {
+    let (schemaname, relname) = match rel {
+        Some(rel) => (rel.schemaname.as_str(), rel.relname.as_str()),
+        None => ("", ""),
+    };
+    named_relation_target(cfg, schemaname, relname)
+}
+
+/// [`raw_relation_target`] with both failure arms collapsed to `None`.
+fn named_relation_target<D: GuardDecisions + ?Sized>(
+    cfg: &D,
+    schemaname: &str,
+    relname: &str,
+) -> Option<ObjectName> {
+    match raw_relation_target(cfg, schemaname, relname) {
+        RawRelationTarget::Resolved(object) => Some(object),
+        RawRelationTarget::UnpinnedSchema | RawRelationTarget::Unattributable => None,
+    }
+}
+
+/// The concrete objects a `DROP` names, for the object-scoped members of the extra
+/// drop set: the schema of each `DROP SCHEMA` name, and the TABLE each `DROP POLICY`
+/// names (the knob is `PerTable`, so a policy is decided at the table it protects).
+///
+/// Every other remove type is decided by a Global knob that ignores the object, so
+/// they answer with a single `None`. The result is never empty: an empty list would
+/// make the caller's "every target is granted" vacuously true.
+fn drop_object_targets<D: GuardDecisions + ?Sized>(
+    cfg: &D,
+    drop: &protobuf::DropStmt,
+) -> Vec<Option<ObjectName>> {
+    let targets: Vec<Option<ObjectName>> = if drop.remove_type == ObjectType::ObjectSchema as i32 {
+        drop.objects
+            .iter()
+            .map(|item| match item.node.as_ref() {
+                Some(NodeEnum::String(s)) => normalize_pg_identifier(s.sval.trim()),
+                _ => None,
+            })
+            .collect()
+    } else if drop.remove_type == ObjectType::ObjectPolicy as i32 {
+        drop.objects
+            .iter()
+            .map(|item| policy_relation_target(cfg, item))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if targets.is_empty() {
+        return vec![None];
+    }
+    targets
+}
+
+/// The table one `DROP POLICY` list entry protects. The grammar appends the policy
+/// name to the relation's own name parts, so the relation is everything before the
+/// last element: `[policy]`, `[table, policy]` or `[schema, table, policy]`.
+fn policy_relation_target<D: GuardDecisions + ?Sized>(
+    cfg: &D,
+    item: &protobuf::Node,
+) -> Option<ObjectName> {
+    let Some(NodeEnum::List(list)) = item.node.as_ref() else {
+        return None;
+    };
+    let parts: Vec<&str> = list
+        .items
+        .iter()
+        .filter_map(|part| match part.node.as_ref() {
+            Some(NodeEnum::String(s)) => Some(s.sval.as_str()),
+            _ => None,
+        })
+        .collect();
+    if parts.len() != list.items.len() {
+        return None;
+    }
+    let (schemaname, relname) = match parts.split_last().map(|(_, rest)| rest)? {
+        [relname] => ("", *relname),
+        [schemaname, relname] => (*schemaname, *relname),
+        _ => return None,
+    };
+    named_relation_target(cfg, schemaname, relname)
 }
 
 /// What a raw statement's `RangeVar` attributes to.
@@ -858,8 +971,8 @@ trait GuardDecisions {
     fn injects_cover(&self, object: &ObjectName) -> bool;
     fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape>;
     fn grants_global_bool(&self, key: &str) -> bool;
-    fn witness_pending_object_resolution(&self, key: &str) -> bool;
-    fn grants_drop_object(&self, remove_type: i32) -> bool;
+    fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool;
+    fn grants_drop_object(&self, remove_type: i32, object: Option<&ObjectName>) -> bool;
     fn granted_extension_allowlist(&self) -> Vec<String>;
     fn grants_cross_schema(&self, schema: &str) -> bool;
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool;
@@ -891,12 +1004,12 @@ impl GuardDecisions for GuardConfig {
         Self::grants_global_bool(self, key)
     }
 
-    fn witness_pending_object_resolution(&self, key: &str) -> bool {
-        Self::witness_pending_object_resolution(self, key)
+    fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool {
+        Self::grants_object_bool(self, key, object)
     }
 
-    fn grants_drop_object(&self, remove_type: i32) -> bool {
-        Self::grants_drop_object(self, remove_type)
+    fn grants_drop_object(&self, remove_type: i32, object: Option<&ObjectName>) -> bool {
+        Self::grants_drop_object(self, remove_type, object)
     }
 
     fn granted_extension_allowlist(&self) -> Vec<String> {
@@ -975,11 +1088,11 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
         false
     }
 
-    fn witness_pending_object_resolution(&self, _key: &str) -> bool {
+    fn grants_object_bool(&self, _key: &str, _object: Option<&ObjectName>) -> bool {
         false
     }
 
-    fn grants_drop_object(&self, _remove_type: i32) -> bool {
+    fn grants_drop_object(&self, _remove_type: i32, _object: Option<&ObjectName>) -> bool {
         false
     }
 
@@ -1937,19 +2050,24 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // DROP is safe only for the enumerated object types. Under
                 // Platform the extra set (schema/extension/policy — the
                 // `.down.sql`-only reverses) is also admitted.
+                //
+                // The schema/policy members of that set are object-scoped, so each
+                // named target is decided at itself and EVERY target must be granted:
+                // `DROP SCHEMA owned, other` is not a drop the `owned` grant covers.
                 let drop_allowed = is_safe_drop_object(d.remove_type)
-                    || self.cfg.grants_drop_object(d.remove_type);
+                    || drop_object_targets(self.cfg, d)
+                        .iter()
+                        .all(|target| self.cfg.grants_drop_object(d.remove_type, target.as_ref()));
                 if !drop_allowed {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
                 // DROP SCHEMA additionally has to be CONFINED, not merely granted.
                 //
-                // `grants_drop_object` answers `ObjectSchema` with a GLOBAL
-                // `schema.create_schema` query that never looks at which schema is
-                // being dropped, while `CreateSchemaStmt` below checks the name at
-                // its target. So a charter granting `create_schema` over `all` with
-                // `cross_schema` scoped to the owned set - the shape this engine's own
-                // operator fixture builds - could DROP a schema it could not CREATE:
+                // `grants_drop_object` answers `ObjectSchema` from the
+                // `schema.create_schema` grant alone, which a charter may hold over
+                // `all` while `cross_schema` stays scoped to the owned set - the shape
+                // this engine's own operator fixture builds. Without the check below
+                // such a charter could DROP a schema it could not CREATE:
                 //
                 //     CREATE SCHEMA control        -> CrossSchema
                 //     DROP SCHEMA control CASCADE  -> admitted
@@ -1975,16 +2093,30 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // (platform migrations create platform schemas). When
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
-            NodeEnum::CreateSchemaStmt(_) => {
-                if !self.cfg.witness_pending_object_resolution(policy_registry::KEY_SCHEMA_CREATE_SCHEMA) {
+            NodeEnum::CreateSchemaStmt(cs) => {
+                // Decided at the schema being created, the same object
+                // `check_namespace_structural` resolves. A `CREATE SCHEMA
+                // AUTHORIZATION joe` names no schema; that target is unattributable
+                // here and the namespace gate owns its refusal.
+                let target = normalize_pg_identifier(cs.schemaname.trim());
+                if !self.cfg.grants_object_bool(
+                    policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
+                    target.as_ref(),
+                ) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
             // CREATE POLICY (RLS) — deny-by-default for Confined; ALLOW iff
             // Platform (0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
-            NodeEnum::CreatePolicyStmt(_) => {
-                if !self.cfg.witness_pending_object_resolution(policy_registry::KEY_ACCESS_POLICY) {
+            NodeEnum::CreatePolicyStmt(p) => {
+                // `access.policy` is PerTable, so the policy is decided at the table
+                // it protects - the relation the statement's `ON` clause names.
+                let target = optional_relation_target(self.cfg, p.table.as_ref());
+                if !self
+                    .cfg
+                    .grants_object_bool(policy_registry::KEY_ACCESS_POLICY, target.as_ref())
+                {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
@@ -2112,9 +2244,12 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
+        // `access.rls` is PerTable, so the four RLS subtypes are decided at the table
+        // this ALTER TABLE names, not at a fixed witness.
+        let target = optional_relation_target(self.cfg, at.relation.as_ref());
         let allow_rls = self
             .cfg
-            .witness_pending_object_resolution(policy_registry::KEY_ACCESS_RLS);
+            .grants_object_bool(policy_registry::KEY_ACCESS_RLS, target.as_ref());
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
                 let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
