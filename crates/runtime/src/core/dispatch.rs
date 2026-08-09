@@ -106,10 +106,17 @@ pub struct ErrorExtras<'a> {
 /// throw produces the same body whether the kernel's RPC fast path
 /// caught the exception or the slow path's JS handler did.
 ///
-/// 5xx errors are a public boundary: production clients get a fixed
-/// response body while raw diagnostics are emitted to server logs with the
-/// request id. `AUTH_INSECURE_DEV=true` (or `1`) preserves the old verbose
-/// body for local debugging.
+/// Two independent rails, both client-visible boundaries:
+///
+/// 1. **5xx body sanitization.** Production clients get a fixed response
+///    body while raw diagnostics go to the server logs with the request
+///    id. `is_public_error_code` codes are exempt from the blanking.
+/// 2. **`stack` is never emitted, at ANY status.** Not at 4xx (which
+///    skips rail 1 entirely) and not via rail 1's code exemption. See the
+///    inline note at the strip for what was measured leaking.
+///
+/// `AUTH_INSECURE_DEV=true` (or `1`) disables BOTH rails for local
+/// debugging — it is the only way to get a stack back on the wire.
 #[inline]
 pub fn build_error_body(
     status: u16,
@@ -133,13 +140,58 @@ pub fn build_error_body(
         // Public error codes are platform-generated, secret-free,
         // developer-facing errors (e.g. `capability_violation`). They
         // are safe to surface verbatim even at a 5xx boundary — the
-        // platform owns the message string and there is no stack or
-        // user-supplied content. Still logged above. Everything else is
-        // blanked unless the dev escape hatch is set.
+        // platform owns the message string. Still logged above.
+        // Everything else is blanked unless the dev escape hatch is set.
+        //
+        // "and there is no stack" USED TO BE ASSERTED HERE. It was not
+        // true: this arm skips the blanking, so whatever stack was on the
+        // thrown error rode straight out at 500, measured reaching an
+        // anonymous caller. The stack strip below is what makes the claim
+        // true now; it is not a property of the codes. Do not restore the
+        // assertion in place of the enforcement.
         if !extras.code.is_some_and(is_public_error_code) && !expose_internal_dispatch_errors() {
             return build_internal_error_body(request_id);
         }
+    } else if extras.stack.is_some() {
+        // 4xx never reached the `tracing::error!` above, so stripping the
+        // stack below would otherwise discard it entirely. `debug` keeps it
+        // available to an operator without logging a stack on every 404.
+        tracing::debug!(
+            request_id,
+            status,
+            error.name = %name,
+            error.message = %message,
+            error.stack = ?extras.stack,
+            "creator app dispatch error (4xx)"
+        );
     }
+
+    // THE STACK NEVER GOES ON THE WIRE. Both paths that reach the verbose
+    // serializer are client-visible boundaries:
+    //
+    //   - 4xx, which skips the sanitization rail entirely and is the status
+    //     class an ANONYMOUS caller reaches most easily — `requireUser()`'s
+    //     401 and `__zsDispatchRpc`'s own 404 `NOT_FOUND` / 400
+    //     `INVALID_ARGUMENT` are all platform-minted 4xx, so "the creator
+    //     chose to throw it" is not true of the common cases;
+    //   - the 5xx whitelist exemption, which was written to keep a
+    //     developer-facing `code` on the wire and, being implemented as
+    //     "skip the blanking arm", dragged the stack through with it.
+    //
+    // Measured leaking to an anonymous caller through a real gateway before
+    // this strip (tests/e2e_dev_vs_deployed_errors.sh): the app's internal
+    // module layout, the dispatcher frame names, and the
+    // `__zs_kind_bridge_<hash>` build fingerprint plus byte offsets into the
+    // minified server bundle.
+    //
+    // Only `stack` is removed. `message`, `code`, `details` and `retryable`
+    // still ride at 4xx on purpose — creators throw intentional 401/403
+    // messages and the SDKs branch on `code`.
+    let extras = if expose_internal_dispatch_errors() {
+        extras
+    } else {
+        ErrorExtras { stack: None, ..extras }
+    };
 
     build_verbose_error_body(message, name, extras)
 }
@@ -591,5 +643,101 @@ mod tests {
         let body = build_error_body(400, 1, "bad request", "Error", extras_with_code("whatever"));
         assert!(body.contains("bad request"));
         assert!(body.contains(r#""code":"whatever""#));
+    }
+
+    fn extras_with_stack<'a>(stack: &'a str, code: Option<&'a str>) -> ErrorExtras<'a> {
+        ErrorExtras {
+            stack: Some(stack),
+            code,
+            ..Default::default()
+        }
+    }
+
+    /// THE ONE-VARIABLE CONTROL for the two regressions below.
+    ///
+    /// `build_verbose_error_body` is the serializer both of them reach. Given
+    /// the IDENTICAL `ErrorExtras`, it emits the stack. So when
+    /// `build_error_body` does not, the difference is the gate — not a
+    /// serializer that never had the stack, not an empty body, not a typo in
+    /// the assertion string.
+    #[test]
+    fn the_serializer_itself_can_emit_a_stack() {
+        let body = build_verbose_error_body(
+            "boom",
+            "Error",
+            extras_with_stack("Error: boom\n    at handler (app.js:1:1)", None),
+        );
+        assert!(
+            body.contains(r#""stack":"#),
+            "the serializer must be able to emit a stack, else the gate tests below are vacuous: {body}"
+        );
+    }
+
+    /// Regression for the measured production stack leak
+    /// (`tests/e2e_dev_vs_deployed_errors.sh`, row `err.status4xx`).
+    ///
+    /// A 4xx skips the 5xx sanitization rail entirely, so before the fix the
+    /// thrown `Error.stack` went verbatim to whoever made the request — and
+    /// 4xx is the status class an ANONYMOUS caller can reach most easily
+    /// (`requireUser()`'s 401, `__zsDispatchRpc`'s own 404 `NOT_FOUND` and
+    /// 400 `INVALID_ARGUMENT`). The measured deployed body carried the
+    /// internal module layout, the dispatcher frame names, and the
+    /// `__zs_kind_bridge_<hash>` build fingerprint.
+    ///
+    /// WHAT THIS TEST DOES NOT CATCH: it pins the `stack` key only. It says
+    /// nothing about `message`, which is deliberately still forwarded at 4xx
+    /// (creators throw intentional 401/403 messages and the SDK branches on
+    /// `code`), so a future change that widens what rides along at 4xx would
+    /// pass this test.
+    #[test]
+    fn four_xx_never_ships_a_stack_to_the_client() {
+        let body = build_error_body(
+            403,
+            1,
+            "boom",
+            "Error",
+            extras_with_stack("Error: boom\n    at ei (__user__.js:6:83399)", None),
+        );
+        assert!(
+            !body.contains(r#""stack""#),
+            "a 4xx body must not carry a stack, got: {body}"
+        );
+        // Paired assertion: the body is still the real error, not a blank
+        // envelope. Without this, deleting the whole body would pass.
+        assert!(body.contains(r#""message":"boom""#), "4xx must keep its message, got: {body}");
+    }
+
+    /// Regression for the same leak on its SECOND path — the one the 5xx
+    /// rail's own whitelist opened.
+    ///
+    /// `is_public_error_code` exists so a developer-facing DB/CAS code
+    /// (`version_mismatch`, …) survives to the SDK at 500. It is implemented
+    /// as "skip the blanking arm", so before the fix everything else in the
+    /// envelope survived too — including the stack, at a status the same
+    /// module's own comment calls "a public boundary". The exemption's
+    /// existing test (`validation_cas_codes_survive_the_5xx_sanitization_rail`)
+    /// builds its extras with no stack at all, so it cannot observe this.
+    #[test]
+    fn whitelisted_5xx_code_exemption_does_not_carry_the_stack() {
+        let body = build_error_body(
+            500,
+            1,
+            "boom",
+            "Error",
+            extras_with_stack(
+                "Error: boom\n    at ei (__user__.js:6:83399)",
+                Some("version_mismatch"),
+            ),
+        );
+        assert!(
+            !body.contains(r#""stack""#),
+            "the 5xx whitelist exemption must not drag the stack through, got: {body}"
+        );
+        // The exemption must still do its job — otherwise this "fix" would be
+        // indistinguishable from deleting the whitelist.
+        assert!(
+            body.contains(r#""code":"version_mismatch""#),
+            "the whitelisted code must still survive, got: {body}"
+        );
     }
 }

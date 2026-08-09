@@ -153,11 +153,21 @@ probe() {
   # Blank only what a clock or a random id makes volatile. request ids leak into
   # some error envelopes; timestamps into the session projection.
   #
-  # `stack` collapses to a PLACEHOLDER, not to nothing: the dev side's frames are
-  # this machine's absolute source paths and the deployed side's are bundle
-  # offsets, so the CONTENT can never match and is not a contract. Whether the
-  # error envelope carries a `stack` key AT ALL is a contract, and `<STACK>`
-  # keeps exactly that in the diff -- present on one side only still diverges.
+  # `stack` collapses to a PLACEHOLDER, not to nothing. Whether the error
+  # envelope carries a `stack` key AT ALL is a contract, and `<STACK>` keeps
+  # exactly that in the diff -- present on one side only still diverges.
+  #
+  # AS OF THE STACK STRIP in crates/runtime/src/core/dispatch.rs, no tier emits
+  # a `stack` in an RPC error body at all (unless AUTH_INSECURE_DEV is set), so
+  # this substitution is now a TRIPWIRE rather than a normaliser.
+  #
+  # DO NOT READ IT AS EVIDENCE ABOUT LEAKS EITHER WAY. Because the scrub runs on
+  # BOTH sides, this diff goes GREEN when both tiers emit a stack just as
+  # readily as when neither does -- which is exactly how a real 4xx stack leak
+  # to anonymous callers survived here unnoticed until it was measured
+  # absolutely. `tests/e2e_dev_vs_deployed_errors.sh` is the harness that
+  # asserts the absolute property against the raw deployed bytes; this one
+  # cannot, by construction.
   scrub() {
     sed -E \
       -e 's/"(expires_at|exp|iat|auth_time)":[0-9]+/"\1":<V>/g' \
