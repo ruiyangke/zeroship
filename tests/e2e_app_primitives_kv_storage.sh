@@ -169,9 +169,16 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv+storage configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
+# Broker master secret. cd54028e7 made the gateway refuse to start without one,
+# and this harness was never updated, so it has been unable to get past "gateway
+# healthy" since.
+openssl rand -base64 48 > "$WORK/gate-secret"
+chmod 600 "$WORK/gate-secret"
+
 "$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --gateway-broker-secret-file "$WORK/gate-secret" \
   --dev-insecure > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
