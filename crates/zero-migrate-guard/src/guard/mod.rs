@@ -760,7 +760,6 @@ trait GuardDecisions {
     fn grants_namespace_bool(&self, key: &str, object: &ObjectName) -> bool;
     fn injects_cover(&self, object: &ObjectName) -> bool;
     fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape>;
-    fn effective_destructive_ops(&self) -> DestructiveOps;
     fn grants_global_bool(&self, key: &str) -> bool;
     fn grants_drop_object(&self, remove_type: i32) -> bool;
     fn granted_extension_allowlist(&self) -> Vec<String>;
@@ -788,10 +787,6 @@ impl GuardDecisions for GuardConfig {
 
     fn covering_inject_shapes(&self, object: &ObjectName) -> Vec<InjectedCreateShape> {
         Self::covering_inject_shapes(self, object)
-    }
-
-    fn effective_destructive_ops(&self) -> DestructiveOps {
-        Self::effective_destructive_ops(self)
     }
 
     fn grants_global_bool(&self, key: &str) -> bool {
@@ -872,10 +867,6 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
 
     fn covering_inject_shapes(&self, _object: &ObjectName) -> Vec<InjectedCreateShape> {
         Vec::new()
-    }
-
-    fn effective_destructive_ops(&self) -> DestructiveOps {
-        DestructiveOps::Allow
     }
 
     fn grants_global_bool(&self, _key: &str) -> bool {
@@ -1636,44 +1627,6 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
         }
         Ok(())
-    }
-
-    fn check_sql_data_security_policy(
-        &self,
-        class: &StatementClass,
-        raw: &str,
-        advisories: &mut Vec<Advisory>,
-    ) -> Result<(), GuardError> {
-        // The destructive posture now rides in the effective policy (the
-        // `safety.destructive_ops` grant); query it rather than the field.
-        match self.cfg.effective_destructive_ops() {
-            DestructiveOps::Forbid => match class.data_security {
-                DataSecurityClass::NonDestructive => Ok(()),
-                DataSecurityClass::Destructive(operation) => Err(GuardError::DataSecurityPolicy {
-                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
-                    statement: format!("{operation}: {raw}"),
-                }),
-                DataSecurityClass::Unknown => Err(GuardError::DataSecurityPolicy {
-                    rule: data_security_rule::UNCLASSIFIED_OP_DENIED_UNDER_FORBID,
-                    statement: format!(
-                        "unclassified operation denied under destructive_ops=forbid: {raw}"
-                    ),
-                }),
-            },
-            DestructiveOps::Warn => {
-                match class.data_security {
-                    DataSecurityClass::NonDestructive => {}
-                    DataSecurityClass::Destructive(operation) => {
-                        advisories.push(Advisory::destructive_ops_warn(operation, raw));
-                    }
-                    DataSecurityClass::Unknown => {
-                        advisories.push(Advisory::destructive_ops_unknown_warn(raw));
-                    }
-                }
-                Ok(())
-            }
-            DestructiveOps::Allow => Ok(()),
-        }
     }
 
     /// Raw-island variant of [`Self::check_node`]. It preserves the deny-list and
@@ -2462,6 +2415,54 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             });
         }
         Ok(())
+    }
+}
+
+/// The destructive-op gate, scoped to the walker that carries a real policy.
+///
+/// It reads the effective `safety.destructive_ops` posture, so it belongs where
+/// that posture exists rather than on every `GuardDecisions` implementor. Keeping
+/// it generic forced the trait to demand a posture from decision types that have
+/// no policy to answer with, and the only answer available to them was a literal.
+/// `GuardConfig` resolves it from the effective policy; nothing else has to
+/// invent one.
+impl GuardWalker<'_, GuardConfig> {
+    fn check_sql_data_security_policy(
+        &self,
+        class: &StatementClass,
+        raw: &str,
+        advisories: &mut Vec<Advisory>,
+    ) -> Result<(), GuardError> {
+        // The destructive posture now rides in the effective policy (the
+        // `safety.destructive_ops` grant); query it rather than the field.
+        match self.cfg.effective_destructive_ops() {
+            DestructiveOps::Forbid => match class.data_security {
+                DataSecurityClass::NonDestructive => Ok(()),
+                DataSecurityClass::Destructive(operation) => Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    statement: format!("{operation}: {raw}"),
+                }),
+                DataSecurityClass::Unknown => Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::UNCLASSIFIED_OP_DENIED_UNDER_FORBID,
+                    statement: format!(
+                        "unclassified operation denied under destructive_ops=forbid: {raw}"
+                    ),
+                }),
+            },
+            DestructiveOps::Warn => {
+                match class.data_security {
+                    DataSecurityClass::NonDestructive => {}
+                    DataSecurityClass::Destructive(operation) => {
+                        advisories.push(Advisory::destructive_ops_warn(operation, raw));
+                    }
+                    DataSecurityClass::Unknown => {
+                        advisories.push(Advisory::destructive_ops_unknown_warn(raw));
+                    }
+                }
+                Ok(())
+            }
+            DestructiveOps::Allow => Ok(()),
+        }
     }
 }
 
