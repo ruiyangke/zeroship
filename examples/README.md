@@ -53,3 +53,6 @@ Platform SDK examples:
 | [`db-todos/`](./db-todos/) | `@zeroship/db` schema discovery, relations, RPC procedures, and live snapshots |
 | [`db-chat/`](./db-chat/) | reactive DB queries and broker-driven updates |
 | [`workflows-order/`](./workflows-order/) | `@zeroship/workflows` steps, sleeps, signals, child calls, and compensation |
+| [`auth-uploads-kv/`](./auth-uploads-kv/) | `env.auth` + `env.storage` + `env.kv` together: per-user object scoping where a by-key read refuses another user's key, a KV rate limit that blocks rather than counts, and counter compensation when an upload fails after its slot is reserved |
+| [`auth-notes-db/`](./auth-notes-db/) | `env.auth` + `env.db` + RPC. Committed deliberately BROKEN: it 500s under `pnpm dev` and is the reproduction case for the descriptor collision that stops any migration-first `env.db` app running in dev |
+| [`stream-probe/`](./stream-probe/) | an RPC `stream` procedure emitting paced chunks with no external provider, so `tests/e2e_dev_vs_deployed_stream.sh` can prove chunk boundaries survive the gateway |
