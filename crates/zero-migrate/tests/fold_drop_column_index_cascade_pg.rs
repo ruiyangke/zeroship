@@ -291,12 +291,14 @@ async fn drop_column_cascades_an_index_keyed_on_an_expression_over_it() {
 /// Measured on PostgreSQL 18.4, `DROP COLUMN a` leaves the index standing - so a
 /// cascade that greps the rendered text would delete an index the database KEPT.
 ///
-/// Asserts SURVIVAL rather than full drift cleanliness. PostgreSQL deparses a bare
-/// string literal with its inferred cast (`'a'` comes back as `'a'::text`), so the
-/// rendered predicate text differs from the offline rendering on every partial index
-/// carrying one. Measured to be present with NO `dropColumn` in the history at all,
-/// so it is independent of the cascade under test - the same rendered-text
-/// divergence `ConstraintSnapshot::definition` already carries for a CHECK.
+/// Asserts full drift cleanliness. It used to assert index SURVIVAL alone, because
+/// PostgreSQL deparses a bare string literal with its inferred cast (`'a'` comes back
+/// as `'a'::text`) and the differ byte-compared that against the offline rendering, so
+/// every partial index carrying a literal reported drift with no `dropColumn` in the
+/// history at all. The differ no longer compares two present predicate BODIES
+/// (`apply::drift::index_expression_bodies_are_comparable`) and compares the
+/// referenced-column set from `pg_depend` instead, so the unrelated divergence is gone
+/// and this arm can demand what it always meant to.
 #[compio::test]
 async fn drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_literal() {
     let source = r#"{
@@ -321,7 +323,7 @@ async fn drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_l
         return;
     };
     assert!(
-        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        drift.is_clean(),
         "a predicate that merely SPELLS the dropped column inside a string literal \
          references no such column; PostgreSQL keeps the index and so must the fold: \
          {drift:#?}"
@@ -330,8 +332,9 @@ async fn drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_l
 
 /// The same guard for the expression key: `(note || 'a')` reads `note` only. The
 /// index survives `DROP COLUMN a` in PostgreSQL and must survive the fold. Asserts
-/// survival for the same reason as the predicate guard above: PostgreSQL deparses
-/// the literal as `'a'::text`, a rendered-text divergence unrelated to the cascade.
+/// full drift cleanliness for the same reason as the predicate guard above: the
+/// differ no longer compares two present expression-key BODIES, so the `'a'::text`
+/// deparse divergence that forced a survival-only assertion is gone.
 #[compio::test]
 async fn drop_column_keeps_an_expression_index_whose_literal_spells_it() {
     let source = r#"{
@@ -357,7 +360,7 @@ async fn drop_column_keeps_an_expression_index_whose_literal_spells_it() {
         return;
     };
     assert!(
-        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        drift.is_clean(),
         "an expression key that merely SPELLS the dropped column inside a string \
          literal references no such column; PostgreSQL keeps the index and so must \
          the fold: {drift:#?}"

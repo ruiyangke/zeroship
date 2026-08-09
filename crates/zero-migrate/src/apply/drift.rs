@@ -1077,7 +1077,19 @@ pub async fn snapshot_schema<D: SqlSession>(
                         ON att.attrelid = x.indrelid AND att.attnum = k.attnum \
                       WHERE k.ord > x.indnkeyatts AND k.attnum <> 0 \
                     ) AS include, \
-                    ic.reloptions AS reloptions \
+                    ic.reloptions AS reloptions, \
+                    (x.indexprs IS NOT NULL OR x.indpred IS NOT NULL) AS has_expr_site, \
+                    ( \
+                      SELECT coalesce(array_agg(DISTINCT att.attname ORDER BY att.attname), '{}') \
+                      FROM pg_depend d \
+                      JOIN pg_attribute att \
+                        ON att.attrelid = d.refobjid AND att.attnum = d.refobjsubid \
+                      WHERE d.classid = 'pg_class'::regclass \
+                        AND d.objid = x.indexrelid \
+                        AND d.refclassid = 'pg_class'::regclass \
+                        AND d.refobjid = x.indrelid \
+                        AND d.refobjsubid > 0 \
+                    ) AS referenced_columns \
              FROM pg_index x \
              JOIN pg_class c ON c.oid = x.indrelid \
              JOIN pg_class ic ON ic.oid = x.indexrelid \
@@ -1100,6 +1112,7 @@ pub async fn snapshot_schema<D: SqlSession>(
             let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
             let include: Vec<String> = r.try_get("include").unwrap_or_default();
             let reloptions: Option<Vec<String>> = r.try_get("reloptions").ok().flatten();
+            let has_expr_site: bool = r.try_get("has_expr_site").unwrap_or(false);
             let element_tokens: Vec<String> = r.try_get("elements").unwrap_or_default();
             let elements = if element_tokens.is_empty() {
                 columns
@@ -1137,11 +1150,23 @@ pub async fn snapshot_schema<D: SqlSession>(
                 opclass: None,
                 nulls_not_distinct: false,
                 comment: r.try_get("comment").ok().flatten(),
-                // Provenance-only. Recovering the column set behind `indexprs` /
-                // `indpred` would mean re-parsing the deparsed SQL, which is exactly
-                // what the provenance exists to avoid; the offline producer is its
-                // authority and the cascade falls back to the exact names here.
-                expr_cascade_columns: None,
+                // The referenced-column set behind `indexprs` / `indpred`, recovered
+                // STRUCTURALLY from `pg_depend` rather than by re-parsing the deparsed
+                // SQL: PostgreSQL records one dependency row per attribute an index
+                // reads, so `refobjsubid > 0` yields the names directly and a string
+                // literal that merely spells a column contributes nothing. Measured on
+                // PostgreSQL 18.4: `(id) WHERE (a > 0)` yields `{a,id}` and follows
+                // `RENAME COLUMN a TO b` to `{b,id}`, while `(note) WHERE (note <> 'a')`
+                // yields `{note}` alone.
+                //
+                // `Some` exactly when the index HAS an expression site, matching what
+                // `create_index_snapshot` records offline, so the two producers agree on
+                // when the field is absent. The catalog set is a SUPERSET of the offline
+                // one - it also names the key and INCLUDE attributes, which the offline
+                // producer leaves to the exact-name lists - which is why every consumer
+                // unions it with those lists rather than reading it alone.
+                expr_cascade_columns: has_expr_site
+                    .then(|| r.try_get("referenced_columns").unwrap_or_default()),
             });
         }
     }
@@ -2477,7 +2502,13 @@ fn diff_attrs(
                 &ei.columns.join(","),
                 &ai.columns.join(","),
             );
-            if !index_elements_canonically_eq(&ei.elements, &ai.elements) {
+            let bodies_comparable = index_expression_bodies_are_comparable(ai);
+            let elements_eq = if bodies_comparable {
+                index_elements_canonically_eq(&ei.elements, &ai.elements)
+            } else {
+                index_element_shapes_eq(&ei.elements, &ai.elements)
+            };
+            if !elements_eq {
                 push(
                     &obj,
                     "elements",
@@ -2495,12 +2526,31 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
-            if !index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref()) {
+            let predicates_eq = if bodies_comparable {
+                index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref())
+            } else {
+                ei.predicate.is_some() == ai.predicate.is_some()
+            };
+            if !predicates_eq {
                 push(
                     &obj,
                     "predicate",
                     ei.predicate.as_deref().unwrap_or(""),
                     ai.predicate.as_deref().unwrap_or(""),
+                );
+            }
+            // The structural replacement for the exempted bodies: WHICH table columns
+            // the index reads. Compared whenever both producers recorded it, which is
+            // exactly where a body was exempted, so the exemption never leaves a site
+            // uncovered by anything.
+            if let (Some(expected_refs), Some(actual_refs)) =
+                (index_referenced_columns(ei), index_referenced_columns(ai))
+            {
+                push(
+                    &obj,
+                    "referenced_columns",
+                    &expected_refs.join(","),
+                    &actual_refs.join(","),
                 );
             }
             push(
@@ -2555,6 +2605,90 @@ fn diff_attrs(
             );
         }
     }
+}
+
+/// Whether an index's rendered EXPRESSION BODIES - the partial-index `predicate` and
+/// the text inside an [`IndexElementSnapshot::Expr`] key - are meaningful to compare
+/// across an offline-rendered snapshot and a live catalog read.
+///
+/// The same problem `constraint_definition_is_comparable` answers for a CHECK, at the
+/// two other sites that hold rendered SQL. PostgreSQL stores neither body as written:
+/// `pg_get_expr` / `pg_get_indexdef` deparse from the parsed tree, so they re-quote
+/// only the identifiers that need it and inject the casts parse analysis inferred.
+/// Verified on PostgreSQL 18.4: `WHERE (note <> 'a')` reads back as
+/// `(note <> 'a'::text)`, and `WHERE (true)` is dropped entirely. An offline renderer
+/// quotes every column unconditionally and knows no column types, so it cannot
+/// reproduce that - the comparison reported drift on partial indexes that had never
+/// been touched, which is why `fold_drop_column_index_cascade_pg` had to weaken two of
+/// its assertions to index SURVIVAL.
+///
+/// A column rename makes it permanent rather than merely noisy. `pg_index.indpred` and
+/// `indexprs` are parse trees over attribute NUMBERS, so PostgreSQL deparses the NEW
+/// name the instant a rename commits while the fold keeps the old rendering; no apply
+/// can ever reconcile the two.
+///
+/// The exemption is keyed on the ACTUAL side having recorded
+/// [`IndexSnapshot::expr_cascade_columns`], which is the PostgreSQL introspector and
+/// nothing else. That is deliberate: it drops the text comparison exactly where the
+/// structural replacement - the referenced-column set from `pg_depend`, compared via
+/// [`index_referenced_columns`] - is available to take its place. MySQL has no partial
+/// indexes and the SQLite introspector recovers no such set, so both keep comparing
+/// text exactly as before.
+///
+/// What this gives up: two expressions over the SAME columns with DIFFERENT logic
+/// compare equal. `WHERE (qty > 0)` and `WHERE (qty > -2147483648)` are
+/// indistinguishable, and so are `(a + 1)` and `(a * 1000)` as expression keys. That
+/// is a real loss, the same one the CHECK exemption already takes. Recovering it needs
+/// the treatment foreign keys get: parse the catalog text back to the closed AST and
+/// compare structurally, rather than comparing spellings.
+///
+/// Presence is NOT exempted, and neither is any other facet: `None` against `Some` on
+/// the predicate, element count and order, `Column`-vs-`Expr` element kind, plain
+/// column names and sort orders all still compare.
+fn index_expression_bodies_are_comparable(actual: &IndexSnapshot) -> bool {
+    actual.expr_cascade_columns.is_none()
+}
+
+/// [`index_elements_canonically_eq`] with the `Expr` BODIES exempted - element count,
+/// order, `Column`-vs-`Expr` kind, plain column names and canonical sort orders all
+/// still have to agree, and only the rendered text inside an expression key is skipped.
+///
+/// Deliberately NOT a change to `index_elements_canonically_eq` itself: that predicate
+/// backs `IndexSnapshot`'s `PartialEq` / `Hash` and the declarative index pairing,
+/// where a refusal is a human-readable stop rather than a silently wrong answer. This
+/// exemption is drift-local.
+fn index_element_shapes_eq(left: &[IndexElementSnapshot], right: &[IndexElementSnapshot]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| match (a, b) {
+            (IndexElementSnapshot::Expr(_), IndexElementSnapshot::Expr(_)) => true,
+            _ => index_elements_canonically_eq(std::slice::from_ref(a), std::slice::from_ref(b)),
+        })
+}
+
+/// Every table column an index READS, or `None` when this producer recorded no
+/// expression-site provenance.
+///
+/// The union of the exact-name lists an index carries - the key `columns` and the
+/// `INCLUDE` payload - with [`IndexSnapshot::expr_cascade_columns`]. The union is what
+/// makes the two producers comparable: the offline one records the expression sites
+/// ALONE (the key and INCLUDE columns are already exact names it would only repeat),
+/// while `pg_depend` reports every attribute the index depends on, key and INCLUDE
+/// included. Unioning both sides lands them on the same set without either having to
+/// change what it stores.
+///
+/// `None` on an index with no expression site and on any producer that cannot record
+/// one, which is what keeps a constraint-backed index out of the comparison:
+/// `<table>_pkey` depends on its `pg_constraint`, not on the attributes, so `pg_depend`
+/// reports no columns for it at all. Such an index has no expression site either, so
+/// both sides answer `None` and the compare is skipped rather than reporting an empty
+/// set against a populated one.
+fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
+    let expression_columns = index.expr_cascade_columns.as_ref()?;
+    let mut out: std::collections::BTreeSet<&str> =
+        index.columns.iter().map(String::as_str).collect();
+    out.extend(index.include.iter().map(String::as_str));
+    out.extend(expression_columns.iter().map(String::as_str));
+    Some(out.into_iter().collect())
 }
 
 /// Whether a constraint's `definition` text is meaningful to compare across an

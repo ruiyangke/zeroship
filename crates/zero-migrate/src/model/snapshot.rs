@@ -645,10 +645,19 @@ pub struct IndexSnapshot {
     /// dialect selects, exactly as `ConstraintSnapshot::cascade_columns` does for a
     /// CHECK.
     ///
-    /// `None` on an index that HAS no such site (every plain column-list index) and
-    /// on any producer that cannot record it - live introspection, which would have
-    /// to re-parse the deparsed SQL to recover the set. Both mean the same thing to a
-    /// consumer: cascade on the exact names alone.
+    /// `None` on an index that HAS no such site (every plain column-list index) and on
+    /// any producer that cannot record one - the MySQL and SQLite introspectors. Both
+    /// mean the same thing to a consumer: cascade on the exact names alone.
+    ///
+    /// The PostgreSQL introspector DOES record it, from `pg_depend`: PostgreSQL keeps
+    /// one dependency row per attribute an index reads, so `refobjsubid > 0` yields the
+    /// set structurally with no parsing, follows a rename by construction, and gives a
+    /// string literal that merely spells a column no weight. What it CANNOT do is
+    /// separate the expression sites from the key and INCLUDE attributes, so the
+    /// catalog set is a SUPERSET of what the offline producer records. That costs the
+    /// cascade nothing - the extra names are the exact ones a cascade already matches -
+    /// and the drift comparison unions both sides before comparing
+    /// (`apply::drift::index_referenced_columns`).
     ///
     /// EXCLUDED from equality / hashing for the same reason as `opclass` and
     /// `nulls_not_distinct`: it is provenance rather than identity, and comparing a
