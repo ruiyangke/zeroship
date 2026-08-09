@@ -5,12 +5,19 @@
 # Single source of truth for the full local stack the gateway-level E2E
 # harnesses need:
 #
-#   stack_up        ephemeral Postgres (docker) + the FULL platform migration
-#                   set from db/migrations-ts applied from scratch
-#                   via the `zeroship-platform-migrate` bin (Platform profile), then
-#                   control + worker + gateway booted with --dev-insecure and
+#   stack_workspace $WORK scratch dir + PIDFILE + $DBURL + the ed25519
+#                   signing key `mint_admin_pat` signs with + the gateway
+#                   broker master secret.
+#   stack_pg_up     ephemeral Postgres (docker) + the FULL platform migration
+#                   set from db/migrations-ts applied from scratch via the
+#                   `zeroship-platform-migrate` bin (Platform profile).
+#   stack_up        stack_workspace + stack_pg_up, then control + worker +
+#                   gateway booted with --dev-insecure and
 #                   health-polled. Non-blocking: binaries run in the background;
 #                   the function returns once all three are health-green.
+#                   A harness whose topology differs (e.g. e2e_platform.sh's
+#                   three workers) calls stack_workspace + stack_pg_up +
+#                   mint_admin_pat and starts its own binaries.
 #   mint_admin_pat  OFFLINE-mints a platform-admin PAT (inserts users +
 #                   platform_admin_roles + permission_tokens rows, signs an
 #                   EdDSA pat+jwt with the workspace `jose`). Exports $PAT.
@@ -72,48 +79,26 @@ stack_preflight() {
   return 0
 }
 
-# --- stack_up: PG + migrations + control/worker/gateway, non-blocking -------
-stack_up() {
-  stack_preflight || return $?
-
+# --- stack_workspace: $WORK dir + signing key + broker secret + $DBURL ------
+#
+# Split out of stack_up so a harness with a NON-standard topology (e.g.
+# tests/e2e_platform.sh, which runs THREE workers to exercise CHWBL routing
+# and cross-worker isolation) can reuse the workspace + PG + PAT halves
+# without inheriting stack_up's single-worker bring-up.
+stack_workspace() {
   WORK="$(mktemp -d -t zs-e2e-stack-XXXXXX)"
   mkdir -p "$WORK/blobs" "$WORK/blob-cache"
   PIDFILE="$WORK/pids"
   : > "$PIDFILE"
   DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-  export WORK PIDFILE DBURL CONTROL_PORT WORKER_PORT GATE_PORT PG_CONTAINER
 
-  # --- ephemeral Postgres ---------------------------------------------------
-  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
-    -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-    postgres:16 -c max_connections=300 >/dev/null || { _stk_bad "docker run postgres failed"; return 1; }
-  local i
-  for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-  if docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
-    _stk_ok "ephemeral PG ready on :$PG_PORT"
-  else
-    _stk_bad "PG never became ready"; return 1
-  fi
-
-  if [ -f "$E2E_ROOT/deploy/ops/postgres-init.sql" ]; then
-    docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$E2E_ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
-      && _stk_ok "applied deploy/ops/postgres-init.sql" || _stk_bad "postgres-init.sql failed"
-  fi
-
-  local mig_log="$WORK/migrate.log"
-  if "$E2E_BIN/zeroship-platform-migrate" \
-      --migrations-dir "$E2E_ROOT/db/migrations-ts" \
-      --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-      --project-schema zeroship --project-id zeroship > "$mig_log" 2>&1; then
-    _stk_ok "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
-  else
-    _stk_bad "zeroship-platform-migrate FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
-  fi
-
-  # --- signing key + free the ports ----------------------------------------
+  # Control/gateway PAT + session signing key. `mint_admin_pat` signs the
+  # harness PAT with THIS key, so a harness that starts its own control MUST
+  # pass `--signing-key-file "$WORK/signing-key.pem"` or every admin call
+  # comes back 401 "platform token verification failed".
   openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
   chmod 600 "$WORK/signing-key.pem"
+
   # Broker master secret. cd54028e7 ("cut end-user login to the platform OP via
   # per-app brokered oac_ clients") made the gateway REFUSE TO START without it,
   # and this file was not updated -- so `stack_up` has been unable to bring a
@@ -128,10 +113,82 @@ stack_up() {
   # is what surfaced it - it dies at "gateway unhealthy" before reaching a single
   # env.db assertion, so its header's "env.db GREEN" describes a run that has not
   # happened since cd54028e7. The three app_primitives ones now generate their
-  # own secret; the rest are tracked separately.
+  # own secret; e2e_platform now takes it from here.
   openssl rand -base64 48 > "$WORK/gate-secret"
   chmod 600 "$WORK/gate-secret"
-  local p
+
+  export WORK PIDFILE DBURL PG_CONTAINER
+  return 0
+}
+
+# --- stack_pg_up: ephemeral Postgres + the FULL platform migration set ------
+# Requires $WORK (for the migrate log) — call stack_workspace first.
+stack_pg_up() {
+  # --- ephemeral Postgres ---------------------------------------------------
+  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+  docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
+    -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
+    postgres:16 -c max_connections=300 >/dev/null || { _stk_bad "docker run postgres failed"; return 1; }
+  # Readiness = three CONSECUTIVE successful queries, not one pg_isready.
+  # Measured 2026-08-09 by sampling both probes ~30x/s against a fresh
+  # postgres:16: there is a window in which `pg_isready` reports ready and
+  # `psql -c 'select 1'` still fails (the entrypoint's initdb-phase server is
+  # torn down and restarted). A single pg_isready let a run through that
+  # window and the migration step then died with
+  # "connect: error communicating with the server" — the harness reporting a
+  # broken database rather than a slow one.
+  local i ready=0
+  for i in $(seq 1 90); do
+    if docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+      ready=$((ready + 1))
+      [ "$ready" -ge 3 ] && break
+    else
+      ready=0
+    fi
+    sleep 1
+  done
+  if [ "$ready" -ge 3 ]; then
+    _stk_ok "ephemeral PG ready on :$PG_PORT"
+  else
+    _stk_bad "PG never became query-able on :$PG_PORT"
+    docker logs --tail 20 "$PG_CONTAINER" 2>&1 | sed 's/^/      /'
+    return 1
+  fi
+
+  if [ -f "$E2E_ROOT/deploy/ops/postgres-init.sql" ]; then
+    local init_out
+    if init_out="$(docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 \
+        < "$E2E_ROOT/deploy/ops/postgres-init.sql" 2>&1)"; then
+      _stk_ok "applied deploy/ops/postgres-init.sql"
+    else
+      # Was mute: the previous form sent both streams to /dev/null, so a
+      # failure here printed "postgres-init.sql failed" and nothing else.
+      _stk_bad "postgres-init.sql failed"
+      printf '%s\n' "$init_out" | tail -10 | sed 's/^/      /'
+    fi
+  fi
+
+  local mig_log="$WORK/migrate.log"
+  if "$E2E_BIN/zeroship-platform-migrate" \
+      --migrations-dir "$E2E_ROOT/db/migrations-ts" \
+      --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+      --project-schema zeroship --project-id zeroship > "$mig_log" 2>&1; then
+    _stk_ok "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
+  else
+    _stk_bad "zeroship-platform-migrate FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
+  fi
+  return 0
+}
+
+# --- stack_up: PG + migrations + control/worker/gateway, non-blocking -------
+stack_up() {
+  stack_preflight || return $?
+  stack_workspace || return 1
+  export CONTROL_PORT WORKER_PORT GATE_PORT
+  stack_pg_up || return 1
+
+  # --- free the ports -------------------------------------------------------
+  local i p
   for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
   # --- control --------------------------------------------------------------
