@@ -955,8 +955,9 @@ mod declared_only_gate_tests {
 
     const KEY: &str = "meta.declared_flag";
 
-    // A consumer-registered DeclaredOnly Grant knob (no builtin knob is DeclaredOnly;
-    // the registry is consumer-extensible, which is exactly the II.6 exposure).
+    // A consumer-registered DeclaredOnly Grant knob. This crate is content-free, so
+    // the gate is exercised on a knob declared here; the engine's builtin registry
+    // carries its own DeclaredOnly knobs and pins them in its own tests.
     fn declared_only_registry() -> PolicyRegistry {
         PolicyRegistry::empty()
             .with([KnobDef {

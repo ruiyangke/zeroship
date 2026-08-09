@@ -230,6 +230,17 @@ fn obligations_union_and_do_not_depend_on_narrowing_layer_order() {
     );
 }
 
+// This test used to narrow `runtime.lock_timeout_ms` at 30000/10000/5000 alongside the
+// posture, covering a UintCharter meet through the engine's own front door. That knob
+// is now `DeclaredOnly` - the engine applies no timeout from it - so a charter carrying
+// 30000 is refused at load, and BOTH builtin UintCharter knobs are in that class. The
+// coverage cannot be rebuilt from builtins, so it is not rebuilt here. It is not lost
+// outright: `zero-migrate-policy/tests/compose_oracle.rs` declares the same key in its
+// OWN registry and brute-forces the UintCharter meet, including the layered
+// narrow-a-region override this test only sampled. What this file no longer proves is
+// that a UintCharter meets correctly through `effective_policy_from_charter_layers`
+// specifically - and that entry point runs one composer for every kind, so the gap is
+// the front door, not the algebra.
 #[test]
 fn three_layers_meet_each_grant_down_the_stack() {
     let platform = r#"policy_version = 1
@@ -238,11 +249,6 @@ fn three_layers_meet_each_grant_down_the_stack() {
 key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
-
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 30000
-scope = "all"
 "#;
     let org = r#"policy_version = 1
 
@@ -250,22 +256,12 @@ scope = "all"
 key = "safety.destructive_ops"
 value = "warn"
 scope = "all"
-
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 10000
-scope = "all"
 "#;
     let app = r#"policy_version = 1
 
 [[grant]]
 key = "safety.destructive_ops"
 value = "forbid"
-scope = "all"
-
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 5000
 scope = "all"
 "#;
 
@@ -276,10 +272,5 @@ scope = "all"
         grant(&effective, "safety.destructive_ops"),
         KnobValue::Str("forbid".to_string()),
         "meet(allow, warn, forbid) must be forbid"
-    );
-    assert_eq!(
-        grant(&effective, "runtime.lock_timeout_ms"),
-        KnobValue::Uint(5_000),
-        "meet(30000, 10000, 5000) must be 5000"
     );
 }

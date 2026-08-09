@@ -54,6 +54,29 @@
 //! `safety.no_hard_delete` obligations are `Require` (compose UP, un-droppable).
 //! `safety.destructive_ops` is a rank-ordered `Grant` (forbid ⊑ warn ⊑ allow — the
 //! tighter posture is the default).
+//!
+//! # Enforcement, and the knobs the engine does not implement
+//!
+//! Most knobs here are [`Enforcement::Enforced`] - a guard, executor or validator path
+//! reads them and they do what they say. Five are NOT, and are registered
+//! [`Enforcement::DeclaredOnly`] to say so: the four `runtime` knobs
+//! (`lock_timeout_ms`, `statement_timeout_ms`, `index_creation`, `table_rewrite`) and
+//! the `safety.no_hard_delete` obligation. Nothing in the workspace resolves any of
+//! them.
+//!
+//! `DeclaredOnly` here means the engine does not implement the control, so a
+//! non-default value is REFUSED AT LOAD (`LoadError::DeclaredOnlyNonDefault`) rather
+//! than silently accepted. Without that classification an operator could author,
+//! compose and SEAL `safety.no_hard_delete = true` and hold a sealed policy advertising
+//! a control that never runs - a policy document whose text is stricter than the
+//! engine behind it. Stating the default is still legal; it advertises nothing.
+//!
+//! `safety.require_approval` is the third class, [`Enforcement::HostEnforced`]: the
+//! ENGINE does not read it either, but a HOST does, so it may be sealed above its
+//! default (M-2, II.6). That is the whole difference between the two classes.
+//!
+//! Wiring one of the five into the guard or executor is what promotes it to
+//! `Enforced`; the classification tracks the implementation, not the key.
 
 use zero_migrate_policy::{
     Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity, PolicyRegistry,
@@ -133,15 +156,25 @@ pub const KEY_CODE_FUNCTION: &str = "code.function";
 pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
 
 // ── runtime — execution & resource behavior ─────────────────────────────────────
+//
+// Every knob in this domain is `Enforcement::DeclaredOnly`: no execution path applies
+// any of them, so each may be stated at its default and nowhere above it.
 
 /// Per-op `lock_timeout` upper bound in ms (UintCharter, hard floor 1 — the
-/// no-indefinite-lock invariant, II.5).
+/// no-indefinite-lock invariant, II.5). **`DeclaredOnly`** - no execution path sets a
+/// lock timeout from this knob, so a charter raising it is refused at load.
 pub const KEY_RUNTIME_LOCK_TIMEOUT_MS: &str = "runtime.lock_timeout_ms";
 /// Per-op `statement_timeout` upper bound in ms (UintCharter, hard floor 1).
+/// **`DeclaredOnly`** - no execution path sets a statement timeout from this knob, so
+/// a charter raising it is refused at load.
 pub const KEY_RUNTIME_STATEMENT_TIMEOUT_MS: &str = "runtime.statement_timeout_ms";
 /// Index-creation posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
+/// **`DeclaredOnly`** - no guard or executor path gates index creation on it, so a
+/// charter loosening it is refused at load.
 pub const KEY_RUNTIME_INDEX_CREATION: &str = "runtime.index_creation";
 /// Table-rewrite posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
+/// **`DeclaredOnly`** - no guard or executor path gates a table rewrite on it, so a
+/// charter loosening it is refused at load.
 pub const KEY_RUNTIME_TABLE_REWRITE: &str = "runtime.table_rewrite";
 
 // ── safety — data protection (limits AND obligations) ───────────────────────────
@@ -151,6 +184,9 @@ pub const KEY_SAFETY_DESTRUCTIVE_OPS: &str = "safety.destructive_ops";
 /// Data-security: every created table must end RLS-enabled (Require Bool obligation).
 pub const KEY_SAFETY_REQUIRE_RLS: &str = "safety.require_rls";
 /// Data-security: no hard `DELETE`/`TRUNCATE`/`DROP` (Require Bool obligation).
+/// **`DeclaredOnly`** - no guard path consults this obligation, so a charter requiring
+/// it is refused at load rather than sealed into a policy that advertises it. The
+/// enforced neighbour is `safety.destructive_ops`, which the guard does read.
 pub const KEY_SAFETY_NO_HARD_DELETE: &str = "safety.no_hard_delete";
 /// Data-security approval OBLIGATION: `never` ⊑ `on_destructive` ⊑ `always`
 /// (OrderedEnum, `Require` polarity — composes UP, un-lowerable). This is a SEALED
@@ -279,6 +315,28 @@ fn posture_grant(key: &str, docs: &str) -> KnobDef {
     }
 }
 
+/// Reclassify a knob def as [`Enforcement::DeclaredOnly`]: the engine does NOT
+/// implement the control the knob names, so a rule raising it above its default is
+/// refused at load (`LoadError::DeclaredOnlyNonDefault`) rather than silently accepted,
+/// composed and sealed into a policy advertising authority the engine lacks (II.6).
+///
+/// This wraps a knob at its REGISTRATION site rather than changing a constructor,
+/// because the constructors are shared: `posture_grant` builds both a declared-only
+/// posture and the enforced `safety.destructive_ops`, and `bool_require` builds both
+/// a declared-only obligation and the enforced `safety.require_rls`. Demoting a
+/// constructor would reclassify a LIVE control by accident - the same defect this
+/// classification exists to remove. Every use of this wrapper is one knob, and the
+/// registry's unit tests pin the resulting partition.
+///
+/// Wiring a knob into the guard/executor is what removes the wrapper; it is not a
+/// permanent property of the key.
+fn declared_only(def: KnobDef) -> KnobDef {
+    KnobDef {
+        enforcement: Enforcement::DeclaredOnly,
+        ..def
+    }
+}
+
 /// The `safety.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
 /// OrderedEnum, `Require` polarity (composes UP), **`HostEnforced`** enforcement,
 /// default `never` (no obligation). Object-scoped so an operator can require approval
@@ -373,13 +431,15 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
             bool_grant(KEY_SQL_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
             // ── runtime — op-timeout upper bounds + index/rewrite postures ──────
-            uint_charter(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout upper bound (ms; no indefinite lock)."),
-            uint_charter(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout upper bound (ms)."),
-            posture_grant(KEY_RUNTIME_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow."),
-            posture_grant(KEY_RUNTIME_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow."),
+            // Every `runtime` knob is DECLARED ONLY: no guard, executor or validator
+            // path reads one, so raising one is refused at load rather than sealed.
+            declared_only(uint_charter(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout upper bound (ms; no indefinite lock). Declared only - no execution path applies it.")),
+            declared_only(uint_charter(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout upper bound (ms). Declared only - no execution path applies it.")),
+            declared_only(posture_grant(KEY_RUNTIME_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow. Declared only - no execution path applies it.")),
+            declared_only(posture_grant(KEY_RUNTIME_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow. Declared only - no execution path applies it.")),
             // ── safety — data protection (limits AND obligations) ───────────────
             bool_require(KEY_SAFETY_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled."),
-            bool_require(KEY_SAFETY_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP."),
+            declared_only(bool_require(KEY_SAFETY_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP. Declared only - no guard path enforces it.")),
             posture_grant(KEY_SAFETY_DESTRUCTIVE_OPS, "Destructive-op posture: forbid ⊑ warn ⊑ allow."),
             // The approval obligation — DECLARED by the engine, ENFORCED by the host.
             require_approval_knob(
@@ -392,6 +452,10 @@ pub fn builtin_registry() -> PolicyRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use zero_migrate_policy::{LoadError, RootCharter};
+
     use super::*;
 
     #[test]
@@ -507,6 +571,128 @@ mod tests {
             assert_eq!(def.polarity, Polarity::Require);
             assert_eq!(def.default, KnobValue::Bool(false));
         }
+    }
+
+    #[test]
+    fn the_knobs_no_engine_path_reads_are_declared_only() {
+        // Five knobs are registered and queried by nothing - no guard, executor or
+        // validator resolves them. `DeclaredOnly` is the classification that says so,
+        // and it is what makes the loader refuse a charter raising one above its
+        // default instead of sealing a control the engine never applies.
+        let reg = builtin_registry();
+        for k in [
+            KEY_RUNTIME_LOCK_TIMEOUT_MS,
+            KEY_RUNTIME_STATEMENT_TIMEOUT_MS,
+            KEY_RUNTIME_INDEX_CREATION,
+            KEY_RUNTIME_TABLE_REWRITE,
+            KEY_SAFETY_NO_HARD_DELETE,
+        ] {
+            let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
+            assert_eq!(
+                def.enforcement,
+                Enforcement::DeclaredOnly,
+                "{k} reaches no engine path, so it must be DeclaredOnly"
+            );
+            assert!(
+                def.enforcement.forbids_nondefault_on_enforced_path(),
+                "{k} must be refused above its default at load"
+            );
+        }
+    }
+
+    #[test]
+    fn no_knob_an_engine_path_reads_is_declared_only() {
+        // The guard for the test above, and it is not optional. `posture_grant` builds
+        // BOTH `runtime.index_creation` (read by nothing) and `safety.destructive_ops`
+        // (read at guard/mod.rs), and `bool_require` builds BOTH
+        // `safety.no_hard_delete` (read by nothing) and `safety.require_rls` (read at
+        // guard/mod.rs). Demoting a shared constructor rather than the knob would
+        // silently reclassify a LIVE control - the same defect this classification
+        // exists to remove, reintroduced by its own fix. Pinning the whole partition,
+        // not just the five, is what makes that visible.
+        let reg = builtin_registry();
+        let by_class = |want: Enforcement| {
+            reg.iter()
+                .filter(|d| d.enforcement == want)
+                .map(|d| d.key.as_str().to_string())
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            by_class(Enforcement::DeclaredOnly),
+            [
+                KEY_RUNTIME_INDEX_CREATION,
+                KEY_RUNTIME_LOCK_TIMEOUT_MS,
+                KEY_RUNTIME_STATEMENT_TIMEOUT_MS,
+                KEY_RUNTIME_TABLE_REWRITE,
+                KEY_SAFETY_NO_HARD_DELETE,
+            ]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect::<BTreeSet<_>>(),
+            "exactly five knobs are DeclaredOnly"
+        );
+        // The two knobs the shared constructors also build stay Enforced.
+        for k in [KEY_SAFETY_REQUIRE_RLS, KEY_SAFETY_DESTRUCTIVE_OPS] {
+            let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
+            assert_eq!(
+                def.enforcement,
+                Enforcement::Enforced,
+                "{k} is read at guard/mod.rs and must stay Enforced"
+            );
+        }
+        // And the approval obligation stays HostEnforced - a host enforces it, so it
+        // MAY be sealed above its default (M-2, II.6).
+        assert_eq!(
+            by_class(Enforcement::HostEnforced),
+            BTreeSet::from([KEY_SAFETY_REQUIRE_APPROVAL.to_string()]),
+            "safety.require_approval is the sole HostEnforced knob"
+        );
+    }
+
+    #[test]
+    fn a_charter_raising_a_declared_only_knob_is_refused_at_load() {
+        // The classification is not decoration: the loader's II.6 gate turns it into a
+        // refusal, so an operator cannot author, compose and SEAL a policy advertising
+        // a control the engine does not implement. Driven through the real loader over
+        // the real builtin registry - a fixture registry would prove the gate works,
+        // not that these knobs are behind it.
+        let reg = builtin_registry();
+        let e = RootCharter::parse_toml(
+            r#"policy_version = 1
+
+[[require]]
+key = "safety.no_hard_delete"
+value = true
+scope = "all"
+"#,
+            &reg,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            LoadError::DeclaredOnlyNonDefault {
+                key: KEY_SAFETY_NO_HARD_DELETE.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_charter_stating_a_declared_only_default_still_loads() {
+        // The control for the refusal above: the gate refuses a knob RAISED above its
+        // default, not every mention of the key. Without this the refusal test cannot
+        // distinguish "refused the right thing" from "refused everything".
+        let reg = builtin_registry();
+        RootCharter::parse_toml(
+            r#"policy_version = 1
+
+[[require]]
+key = "safety.no_hard_delete"
+value = false
+scope = "all"
+"#,
+            &reg,
+        )
+        .expect("a declared-only knob stated at its own default advertises nothing");
     }
 
     #[test]
