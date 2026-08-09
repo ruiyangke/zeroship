@@ -2178,6 +2178,389 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// Is an inflight `started` marker armed for `version`?
+///
+/// Read straight off the side-table rather than through `applied`, because these
+/// tests care about the marker's presence on its own, separately from whatever the
+/// journal says about the version.
+async fn inflight_marker_armed(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+    version: &str,
+) -> bool {
+    use zero_migrate::driver::SqlSession;
+    let row = session
+        .query_one(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM \"{}\".schema_migrations_inflight \
+                 WHERE version = $1) AS armed",
+                cfg.pg.meta_schema
+            ),
+            &[version.into()],
+        )
+        .await
+        .expect("inflight marker probe");
+    row.try_get::<_, bool>("armed").expect("decode armed")
+}
+
+/// A non-transactional `CREATE TABLE` whose `up` committed before the crash must
+/// be REFUSED on replay, with the marker left armed for an operator repair.
+///
+/// The two-phase recovery path re-runs the `up` verbatim, which is only sound for
+/// an `up` it can prove replay-safe. A `CREATE TABLE` is not, and replaying it
+/// anyway is what this measures the alternative to: the object is already there,
+/// so the replay dies on `already exists`, re-arms the marker it just cleared, and
+/// every later deploy repeats that exact failure. The version never lands and no
+/// amount of re-deploying moves it.
+#[compio::test]
+async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_kept() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v1 = MigrationId::generate();
+    let create = mig_nontxn(
+        v1.clone(),
+        "wedge_table",
+        &format!(
+            "CREATE TABLE \"{}\".wedged (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+
+    // Crash after the `up` auto-committed and before the completed row landed.
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        0,
+    );
+    let crashed = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&create),
+        Approval::None,
+        "app_test",
+    )
+    .await;
+    zero_migrate::fault::disarm_all();
+    assert!(
+        crashed.is_err(),
+        "the injected crash must abort the apply: {crashed:?}"
+    );
+    assert!(
+        table_exists(&session, &cfg.project_schema, "wedged").await,
+        "a non-txn up auto-commits, so the table survives the crash"
+    );
+    assert!(
+        inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the crash leaves the marker armed"
+    );
+
+    // The replay must refuse in a way an operator can act on.
+    let err = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&create),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect_err("replaying a committed non-txn CREATE TABLE must fail closed");
+    let text = err.to_string();
+    match &err {
+        ApplyError::NonTxnRecoveryUnsafe {
+            version,
+            reason,
+            meta_schema,
+        } => {
+            assert_eq!(version, v1.as_str());
+            assert_eq!(meta_schema, &cfg.pg.meta_schema);
+            assert!(
+                reason.contains("not one of the statements recovery can re-run"),
+                "the reason names why the up was not admitted: {reason}"
+            );
+        }
+        other => panic!("expected NonTxnRecoveryUnsafe, got {other:?}"),
+    }
+    assert!(
+        text.contains("schema_migrations_inflight"),
+        "the refusal must name the repair the operator can perform: {text}"
+    );
+    assert!(
+        !text.contains("already exists"),
+        "the refusal must not be the raw server error from a blind replay: {text}"
+    );
+    assert!(
+        inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the refusal preserves the marker as the evidence of a half-applied version"
+    );
+
+    // Stable across replays: the same refusal, never a different failure and never
+    // a silent success.
+    let again = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&create),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect_err("the refusal is the steady state until an operator resolves it");
+    assert_eq!(
+        again.to_string(),
+        text,
+        "a second replay reports the identical refusal"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// CONTROL: the replay-safe non-txn shape still recovers on its own.
+///
+/// `CREATE INDEX CONCURRENTLY IF NOT EXISTS` with an explicit name is exactly what
+/// the two-phase path was built for, and a crash after it committed must still
+/// converge without an operator.
+#[compio::test]
+async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v0 = MigrationId::generate();
+    let base = mig(
+        v0.clone(),
+        "base_items",
+        &format!(
+            "CREATE TABLE \"{}\".items (id bigint PRIMARY KEY, tag text)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply base");
+
+    let v1 = MigrationId::generate();
+    let idx = mig_nontxn(
+        v1.clone(),
+        "idx_items_tag",
+        &format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS items_tag_idx ON \"{}\".items (tag)",
+            cfg.project_schema
+        ),
+    );
+
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        0,
+    );
+    let crashed = apply(
+        &session,
+        &cfg,
+        &[base.clone(), idx.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await;
+    zero_migrate::fault::disarm_all();
+    assert!(
+        crashed.is_err(),
+        "the injected crash must abort the apply: {crashed:?}"
+    );
+    assert!(
+        inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the crash leaves the marker armed"
+    );
+
+    let out = apply(
+        &session,
+        &cfg,
+        &[base.clone(), idx.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the replay-safe shape recovers without an operator");
+    assert!(
+        out.recovered.contains(&v1.as_str().to_string()),
+        "the replay is reported as a recovery: {out:?}"
+    );
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
+    assert!(
+        applied.iter().any(|e| e.version == v1.as_str()),
+        "the recovered version is net-applied"
+    );
+    assert!(
+        !inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "a completed recovery clears the marker"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// CONTROL: the same `CREATE TABLE` body in the TRANSACTIONAL shape rolls back at
+/// the same crash boundary and replays cleanly.
+///
+/// This is why the fix belongs at recovery rather than at the fresh-apply gate:
+/// the body is fine, it is `transaction:false` that removes the rollback.
+#[compio::test]
+async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replays() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v1 = MigrationId::generate();
+    let create = mig(
+        v1.clone(),
+        "txn_table",
+        &format!(
+            "CREATE TABLE \"{}\".recoverable (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        0,
+    );
+    let crashed = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&create),
+        Approval::None,
+        "app_test",
+    )
+    .await;
+    zero_migrate::fault::disarm_all();
+    assert!(
+        crashed.is_err(),
+        "the injected crash must abort the apply: {crashed:?}"
+    );
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "recoverable").await,
+        "the transactional shape rolls the up back with the journal row"
+    );
+    assert!(
+        !inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the transactional shape never arms a marker"
+    );
+
+    let out = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&create),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the transactional shape replays cleanly");
+    assert!(
+        out.applied.contains(&v1.as_str().to_string()),
+        "the replay applies the migration: {out:?}"
+    );
+    assert!(table_exists(&session, &cfg.project_schema, "recoverable").await);
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// An armed marker outranks an `OnUnmet::Skip` precondition.
+///
+/// The half-applied `up` is exactly what makes such a precondition stop holding,
+/// so the skip arm fires precisely on the versions that most need attention. A
+/// skipped version is reported as a clean deploy with nothing applied, so the
+/// deploy goes green forever while the migration never lands - quieter, and worse,
+/// than the halt arm.
+#[compio::test]
+async fn an_armed_marker_outranks_a_skip_precondition() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let v1 = MigrationId::generate();
+    let mut gated = mig_nontxn(
+        v1.clone(),
+        "gated_table",
+        &format!(
+            "CREATE TABLE \"{}\".gated (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    // "Run this once the table is still absent" - met on the first attempt, unmet
+    // the moment the crashed `up` has created it.
+    gated.preconditions = vec![zero_migrate::PreconditionCheck::skip(
+        zero_migrate::Precondition::TableNotExists {
+            table: "gated".to_string(),
+        },
+    )];
+    gated.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&gated));
+
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        0,
+    );
+    let crashed = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&gated),
+        Approval::None,
+        "app_test",
+    )
+    .await;
+    zero_migrate::fault::disarm_all();
+    assert!(
+        crashed.is_err(),
+        "the injected crash must abort the apply: {crashed:?}"
+    );
+    assert!(
+        inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the crash leaves the marker armed"
+    );
+
+    let replay = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&gated),
+        Approval::None,
+        "app_test",
+    )
+    .await;
+    let err = replay.expect_err(
+        "a version holding an armed marker must never be reported as a successful deploy",
+    );
+    assert!(
+        matches!(err, ApplyError::NonTxnRecoveryUnsafe { .. }),
+        "the marker's refusal is what the operator sees, not a skip: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("schema_migrations_inflight"),
+        "the refusal names the repair: {err}"
+    );
+    assert!(
+        inflight_marker_armed(&session, &cfg, v1.as_str()).await,
+        "the marker survives the refusal"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 3 — journal ensure / record / read
 // ---------------------------------------------------------------------------

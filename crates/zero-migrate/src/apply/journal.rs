@@ -2091,8 +2091,13 @@ async fn record_baseline_inner<D: SqlSession>(
     Ok(())
 }
 
-/// Drop a stale inflight marker (recovery path cleanup) without recording a
-/// completed row — used when recovery decides the partial work was undone.
+/// Drop a stale inflight marker without recording a completed row.
+///
+/// No apply path calls this. Recovery keeps the marker armed from the crash until
+/// the `completed` row deletes it in the same transaction, and refuses rather than
+/// clearing a marker it cannot converge. This is the primitive behind the repair
+/// the refusal names: an operator who has restored and verified the pre-migration
+/// shape drops the marker so the next apply runs the version fresh.
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.

@@ -23,6 +23,7 @@
 use std::time::Instant;
 
 use pg_query::protobuf::node::Node as NodeEnum;
+use pg_query::protobuf::ObjectType;
 
 use crate::apply::backend::{PgSessionSnapshot, ProjectLockHolder};
 use crate::apply::executor::{ApplyError, RollbackError};
@@ -445,7 +446,8 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
 /// Per-migration timeout override applied.
 ///
 /// Runs as the **admin** role (no `SET ROLE` here): the non-txn journal I/O
-/// (`record_started` / `record_completed` / `clear_inflight`) runs as admin, and
+/// (`record_started` / `record_completed`, which also deletes the inflight marker)
+/// runs as admin, and
 /// only the `<up>` is bracketed by an explicit `SET ROLE migrator` / `RESET ROLE`
 /// in [`apply_non_transactional`]. `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
@@ -466,18 +468,26 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     Ok(())
 }
 
-/// Validate that a non-transactional migration's `up` is **idempotent**.
+/// Refuse the non-transactional `up` shapes that are known to be un-re-runnable.
 ///
-/// The two-phase non-txn recovery path re-runs `<up>` verbatim after a crash, so
-/// every statement that cannot run in a transaction must tolerate already having
-/// run. We enforce this statically, before any execution:
+/// This is a DENY list over three statement groups, not a proof of idempotency,
+/// and it runs on the FRESH path before any execution. An `up` it does not
+/// recognize is accepted - a `transaction:false` `CREATE TABLE` passes here and
+/// applies fine, because nothing crashed. What such an `up` does NOT get is
+/// automatic crash recovery: an interrupted apply leaves an armed marker, and
+/// [`check_non_txn_up_replayable`] refuses to replay anything it cannot prove safe,
+/// preserving the marker and handing the operator the repair. Deciding whether the
+/// fresh path should ALSO refuse these shapes is a separate compatibility
+/// question; it would reject migrations that work today.
+///
+/// What is refused here:
 ///
 /// - `CREATE INDEX CONCURRENTLY …` MUST be `CREATE INDEX CONCURRENTLY IF NOT
 ///   EXISTS …`.
 /// - `ALTER TYPE … ADD VALUE …` MUST be `… ADD VALUE IF NOT EXISTS …`.
 ///
-/// (Other non-txn ops the classifier recognizes — `DROP INDEX CONCURRENTLY`,
-/// `VACUUM` — are themselves naturally re-runnable.)
+/// (`DROP INDEX CONCURRENTLY` and `VACUUM`, the other non-txn ops the classifier
+/// recognizes, are themselves naturally re-runnable.)
 ///
 /// Bare DML — `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `TRUNCATE` — is
 /// **forbidden** on the non-txn path. The guard admits DML (it is safe data
@@ -706,6 +716,17 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
                 let _ = conn.batch("ROLLBACK").await;
                 return Err(ApplyError::Db(e.into()));
             }
+        }
+
+        // The `up` has run and the `completed` row has not landed - the boundary a
+        // crash test arms to compare the two apply shapes. Here it is still inside
+        // the open transaction, so the ROLLBACK undoes the `up` too and the next
+        // apply sees a migration that never ran.
+        if let Err(e) = crate::fault::trip(crate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED) {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an injected crash");
+            }
+            return Err(e);
         }
     }
 
@@ -972,47 +993,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
             crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
                 let exec_ms =
                     i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
-                if supersedes.is_empty() {
-                    journal::record_completed(
-                        conn,
-                        cfg,
-                        journal::CompletedRecord {
-                            version,
-                            name: &m.name,
-                            checksum: m.checksum.as_str(),
-                            applied_by,
-                            exec_ms,
-                            kind: "apply",
-                        },
-                    )
-                    .await?;
-                } else {
-                    conn.batch("BEGIN").await?;
-                    let finalize = async {
-                        journal::record_completed(
-                            conn,
-                            cfg,
-                            journal::CompletedRecord {
-                                version,
-                                name: &m.name,
-                                checksum: m.checksum.as_str(),
-                                applied_by,
-                                exec_ms,
-                                kind: "squash",
-                            },
-                        )
-                        .await?;
-                        insert_supersedes_edges(conn, cfg, version, supersedes).await
-                    }
-                    .await;
-                    if let Err(e) = finalize {
-                        if let Err(rb) = conn.batch("ROLLBACK").await {
-                            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a guarded non-txn satisfied-noop finalize error");
-                        }
-                        return Err(ApplyError::Journal(e));
-                    }
-                    conn.batch("COMMIT").await?;
-                }
+                finalize_non_txn(conn, cfg, m, applied_by, exec_ms, supersedes).await?;
                 return Ok(false);
             }
             crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
@@ -1028,32 +1009,38 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     }
 
     // Journal / inflight I/O runs as the ADMIN: the migrator's grant on the
-    // meta schema is revoked, so `record_started` / `recover_non_transactional`
-    // (which clears the marker) / `record_completed` must NOT run under
-    // `SET ROLE migrator`. Only the `<up>` (and the recovery `DROP INDEX`, which
-    // the migrator owns) runs as the migrator.
+    // meta schema is revoked, so `record_started` and the `finalize_non_txn`
+    // transaction that deletes the marker must NOT run under `SET ROLE migrator`.
+    // Only the `<up>` (and the recovery `DROP INDEX`, which the migrator owns)
+    // runs as the migrator.
     if had_inflight {
         // Recovery path: a prior run wrote `started` then crashed before
-        // `completed`. Inspect the real state and make the apply idempotent.
-        // `recover_non_transactional` runs entirely as the ADMIN (it is called
-        // BEFORE the `<up>`'s `SET ROLE`): both the INVALID-index DROP and the
-        // inflight `clear` run as admin (the admin is privileged over the project
-        // schema, so it can DROP the index without the migrator role). See
-        // `recover_non_transactional`. It CLEARS the inflight marker; the
-        // `record_started` below then RE-ARMS it before the `<up>` re-runs.
+        // `completed`, so the `up` may or may not have committed and the journal
+        // cannot say which. Re-running it verbatim is only sound for the `up`s
+        // `check_non_txn_up_replayable` admits; for every other one, refuse with the
+        // marker left exactly where it is. The marker is the evidence that this
+        // version half-ran, so a refusal that consumed it would cost the operator
+        // the one thing telling them to look.
+        if let Err(reason) = check_non_txn_up_replayable(&m.up) {
+            return Err(ApplyError::NonTxnRecoveryUnsafe {
+                version: version.to_string(),
+                reason,
+                meta_schema: cfg.pg.meta_schema.clone(),
+            });
+        }
+        // Runs entirely as the ADMIN (called BEFORE the `<up>`'s `SET ROLE`): the
+        // admin is privileged over the project schema, so the INVALID-index DROP
+        // needs no migrator role.
         recover_non_transactional(conn, cfg, m).await?;
     }
-    // Write (fresh path) or RE-WRITE (post-recovery) the `started` marker
-    // BEFORE the `<up>` runs. The re-arm matters on the recovery path:
-    // `recover_non_transactional` cleared the marker, but the re-run below can
-    // itself crash before `record_completed`. Without a fresh `started` marker a
-    // SECOND crash would observe `had_inflight = false` and treat the next attempt
-    // as a FRESH apply — skipping the INVALID-index cleanup, so an interrupted
+    // Arm the `started` marker BEFORE the `<up>` runs. `ON CONFLICT DO NOTHING`,
+    // so on the recovery path - where the marker is still armed from the attempt
+    // that crashed - this writes nothing and the original marker survives. Keeping
+    // one continuously-armed marker rather than clearing and re-arming it removes
+    // the window where a crash between the two left the version looking fresh:
+    // the next apply would then skip the INVALID-index cleanup, and an interrupted
     // `CREATE INDEX CONCURRENTLY` left INVALID would satisfy `IF NOT EXISTS` and
-    // never be rebuilt. Re-writing `started` here keeps every subsequent crash
-    // re-entering recovery until a `completed` row lands. Runs as admin (still
-    // before the `SET ROLE`). `record_started` is `ON CONFLICT DO NOTHING`, so on
-    // the fresh path (where recovery did not run) it is the original single write.
+    // never be rebuilt. Runs as admin (still before the `SET ROLE`).
     journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by).await?;
 
     let started = Instant::now();
@@ -1084,15 +1071,52 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Phase 2: immutable completed row + clear the marker (as admin). For a
-    // fresh-DB squash, the supersession edges must commit ATOMICALLY with the
-    // `completed` row, else a crash between leaves `S` net-applied with edges missing
-    // → `v1..vN` re-enter pending and re-run on top of `S` (double-apply). The non-txn
-    // `<up>` already committed (that is the nature of a non-txn migration), but the
-    // JOURNAL writes — the completed row, the inflight clear, and the edges — are
-    // bracketed in one transaction so they land together. No surrounding txn for a
-    // non-squash: keep the original single-statement finalize.
-    if supersedes.is_empty() {
+    // The same boundary as the transactional path, with the opposite consequence:
+    // the `up` auto-committed, so an abort here leaves the schema changed, no
+    // `completed` row, and the inflight marker armed. That is the exact state the
+    // next apply's recovery has to converge from.
+    crate::fault::trip(crate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED)?;
+
+    // Phase 2: the completed row, the marker's deletion, and any squash edges.
+    finalize_non_txn(conn, cfg, m, applied_by, exec_ms, supersedes).await?;
+
+    Ok(had_inflight)
+}
+
+/// Land a two-phase apply's journal state: the immutable `completed` row, the
+/// inflight marker's deletion, and any fresh-path squash edges, in ONE transaction.
+///
+/// The `<up>` has already auto-committed - that is what `transaction:false` means -
+/// so the journal writes are the only part of the migration that can still be made
+/// atomic, and each pair of them has a failure mode when it is not.
+///
+/// A `completed` row that outlives its marker deletion sends the NEXT apply into
+/// recovery for a version the journal already reports as landed, which for an `up`
+/// outside the replay-safe set is a refusal on a migration that is actually
+/// finished. A `completed` row that outlives its edges leaves a squash net-applied
+/// with `v1..vN` back in pending, re-running on top of the squash that replaced
+/// them.
+///
+/// Runs as the admin: the migrator's meta-schema grant is revoked.
+#[cfg(pg_seam)]
+async fn finalize_non_txn<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+    exec_ms: i64,
+    supersedes: &[&str],
+) -> Result<(), ApplyError> {
+    let version = m.version.as_str();
+    // A fresh-path squash is stamped `kind='squash'` so its edges are honored by
+    // `superseded_versions`, which filters on that kind.
+    let kind = if supersedes.is_empty() {
+        "apply"
+    } else {
+        "squash"
+    };
+    conn.batch("BEGIN").await?;
+    let finalize = async {
         journal::record_completed(
             conn,
             cfg,
@@ -1102,66 +1126,47 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
                 checksum: m.checksum.as_str(),
                 applied_by,
                 exec_ms,
-                kind: "apply",
+                kind,
             },
         )
         .await?;
-    } else {
-        conn.batch("BEGIN").await?;
-        let finalize = async {
-            // A fresh-path squash is stamped `kind='squash'` so its edges are honored
-            // by `superseded_versions` (which filters on `kind='squash'`).
-            journal::record_completed(
-                conn,
-                cfg,
-                journal::CompletedRecord {
-                    version,
-                    name: &m.name,
-                    checksum: m.checksum.as_str(),
-                    applied_by,
-                    exec_ms,
-                    kind: "squash",
-                },
-            )
-            .await?;
-            insert_supersedes_edges(conn, cfg, version, supersedes).await
-        }
-        .await;
-        if let Err(e) = finalize {
-            if let Err(rb) = conn.batch("ROLLBACK").await {
-                tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a non-txn squash finalize error");
-            }
-            return Err(ApplyError::Journal(e));
-        }
-        conn.batch("COMMIT").await?;
+        insert_supersedes_edges(conn, cfg, version, supersedes).await
     }
-
-    Ok(had_inflight)
+    .await;
+    if let Err(e) = finalize {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a non-txn journal finalize error");
+        }
+        return Err(ApplyError::Journal(e));
+    }
+    conn.batch("COMMIT").await?;
+    Ok(())
 }
 
-/// Idempotent recovery for a crashed non-transactional migration.
+/// Prepare a crashed non-transactional migration for the caller's verbatim re-run
+/// of its `<up>`.
 ///
 /// A `started` marker with no `completed` row means the prior attempt may have
 /// (a) failed mid-DDL, or (b) **succeeded then crashed** before recording
-/// `completed`. The old recovery reasoned per-op-type and blindly re-ran a
-/// possibly-non-idempotent `<up>`, which permanently wedged case (b)
-/// (`CREATE INDEX CONCURRENTLY` → `already exists`; `ALTER TYPE … ADD VALUE` →
-/// `label already exists`).
+/// `completed`, and nothing in the journal distinguishes them. Reaching here at
+/// all means [`check_non_txn_up_replayable`] has already admitted the `up`, so
+/// both cases converge on a second run of it. An `up` it could not admit never
+/// gets here - the caller refuses with the marker intact rather than re-running
+/// a statement that may already have committed.
 ///
-/// The robust model: non-txn `up`s are **required to be idempotent**
-/// (enforced up-front by [`validate_non_txn_idempotent`] — every non-txn
-/// statement uses `IF NOT EXISTS`), so recovery does not need per-op reasoning.
-/// It performs ONE cleanup that `IF NOT EXISTS` cannot itself do — dropping the
-/// `INVALID` index residue of an interrupted CONCURRENTLY build (an INVALID
-/// index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt) —
-/// then clears the marker. The caller then **re-runs the idempotent `<up>`**,
-/// which is safe in both case (a) and case (b).
+/// This performs the ONE cleanup an admitted `up` cannot do for itself: dropping
+/// the `INVALID` index residue of an interrupted CONCURRENTLY build, which
+/// satisfies `IF NOT EXISTS` and would otherwise never be rebuilt.
 ///
-/// Runs as the **admin**: it is called BEFORE the `<up>`'s `SET ROLE` and
-/// clears the inflight marker (`clear_inflight`), which is meta-schema I/O the
-/// migrator has no grant for. The admin owns the meta schema and is privileged
-/// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
-/// without needing the migrator role.
+/// It deliberately does NOT clear the marker. Clearing it here and re-arming it
+/// after the re-run opened a window where a crash in between erased the only
+/// record that the version half-ran, and the next apply would then treat it as a
+/// fresh one and skip this cleanup. The marker stays armed from the first attempt
+/// until the `completed` row deletes it in the same transaction.
+///
+/// Runs as the **admin**: it is called BEFORE the `<up>`'s `SET ROLE`, and the
+/// admin is privileged over the project schema, so the `DROP INDEX` succeeds
+/// without the migrator role.
 #[cfg(pg_seam)]
 async fn recover_non_transactional<D: SqlSession>(
     conn: &D,
@@ -1209,9 +1214,107 @@ async fn recover_non_transactional<D: SqlSession>(
         }
     }
 
-    // Clear the stale marker; the caller re-runs `<up>` and re-records.
-    journal::clear_inflight(conn, cfg, m.version.as_str()).await?;
     Ok(())
+}
+
+/// May recovery re-run this non-transactional `up` verbatim after a crash, and if
+/// not, what does the operator need to be told?
+///
+/// Recovery re-issues the WHOLE `up` batch through one `conn.batch`, which is
+/// simple-query on every shipped host, so an `up` is admitted on two counts rather
+/// than one.
+///
+/// The statement must tolerate having already run. That is what an interrupted
+/// two-phase apply leaves behind: the DDL auto-committed and the `completed` row
+/// did not, and no journal state tells the two apart.
+///
+/// And the batch must hold exactly one substantive statement, because statements
+/// that are individually re-runnable are not re-runnable in composition:
+/// `DROP TABLE IF EXISTS t; CREATE TABLE IF NOT EXISTS t (...)` runs clean the first
+/// time and deletes every row written since the migration landed on the second.
+///
+/// The single-statement rule costs almost nothing measured against a live server:
+/// PostgreSQL runs a multi-statement simple query inside one implicit transaction
+/// block, and `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` and `VACUUM`
+/// all refuse to run in one, so three of the four shapes below cannot reach a
+/// multi-statement `up` in the first place. `ALTER TYPE ... ADD VALUE` is the
+/// exception: several of them in one `up` do apply, and after a crash they are
+/// refused here rather than replayed.
+///
+/// The admitted set is small on purpose and is NOT the set the non-txn path
+/// accepts - an `up` outside it applies normally and only loses AUTOMATIC
+/// recovery. Adding to it means arguing that specific statement's replay case:
+///
+/// - `CREATE INDEX CONCURRENTLY IF NOT EXISTS <name>`, with an explicit name.
+///   [`index_names_in_up`] skips an unnamed index, so recovery could not drop the
+///   INVALID residue of one and the rebuild would silently never happen.
+/// - `DROP INDEX CONCURRENTLY IF EXISTS`. The bare form errors on the second run.
+/// - `ALTER TYPE ... ADD VALUE IF NOT EXISTS <label>`.
+/// - `VACUUM`.
+///
+/// # Errors
+/// The operator-facing reason, for [`ApplyError::NonTxnRecoveryUnsafe`].
+fn check_non_txn_up_replayable(up: &str) -> Result<(), String> {
+    let parsed = pg_query::parse(up).map_err(|e| format!("its `up` SQL does not parse: {e}"))?;
+    let mut statements = parsed
+        .protobuf
+        .stmts
+        .iter()
+        .filter_map(|raw| raw.stmt.as_ref().and_then(|stmt| stmt.node.as_ref()));
+    let Some(node) = statements.next() else {
+        return Err("its `up` carries no statement to classify".to_string());
+    };
+    if statements.next().is_some() {
+        return Err(
+            "its `up` carries more than one statement and recovery re-runs the whole batch, \
+             where statements that are each re-runnable alone need not be together"
+                .to_string(),
+        );
+    }
+    match node {
+        NodeEnum::IndexStmt(idx)
+            if idx.concurrent && idx.if_not_exists && !idx.idxname.is_empty() =>
+        {
+            Ok(())
+        }
+        NodeEnum::IndexStmt(idx) if idx.concurrent && idx.if_not_exists => Err(
+            "`CREATE INDEX CONCURRENTLY IF NOT EXISTS` without an explicit index name leaves \
+             recovery unable to name the INVALID residue it would have to drop"
+                .to_string(),
+        ),
+        NodeEnum::IndexStmt(idx) if idx.concurrent => {
+            Err("`CREATE INDEX CONCURRENTLY` without `IF NOT EXISTS`".to_string())
+        }
+        NodeEnum::DropStmt(drop)
+            if drop.remove_type == ObjectType::ObjectIndex as i32
+                && drop.concurrent
+                && drop.missing_ok =>
+        {
+            Ok(())
+        }
+        NodeEnum::DropStmt(drop)
+            if drop.remove_type == ObjectType::ObjectIndex as i32 && drop.concurrent =>
+        {
+            Err("`DROP INDEX CONCURRENTLY` without `IF EXISTS`".to_string())
+        }
+        NodeEnum::AlterEnumStmt(alter)
+            if !alter.new_val.is_empty() && alter.skip_if_new_val_exists =>
+        {
+            Ok(())
+        }
+        NodeEnum::AlterEnumStmt(alter) if !alter.new_val.is_empty() => Err(format!(
+            "`ALTER TYPE ... ADD VALUE '{}'` without `IF NOT EXISTS`",
+            alter.new_val
+        )),
+        NodeEnum::VacuumStmt(_) => Ok(()),
+        _ => Err(
+            "its `up` is not one of the statements recovery can re-run: \
+             CREATE INDEX CONCURRENTLY IF NOT EXISTS <name>, \
+             DROP INDEX CONCURRENTLY IF EXISTS, \
+             ALTER TYPE ... ADD VALUE IF NOT EXISTS, VACUUM"
+                .to_string(),
+        ),
+    }
 }
 
 /// Parse the index name(s) created by `CREATE INDEX … name … ON …` statements in
@@ -1609,5 +1712,85 @@ mod non_txn_idempotency_tests {
                 "idempotent non-txn op must pass: {sql}"
             );
         }
+    }
+
+    // The shapes recovery may re-run verbatim after a crash. Each one tolerates
+    // having already run, and each is a single statement.
+    #[test]
+    fn the_replay_safe_set_is_admitted_for_recovery() {
+        for sql in [
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (x)",
+            "DROP INDEX CONCURRENTLY IF EXISTS i",
+            "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'excited'",
+            "VACUUM ANALYZE t",
+            // Trailing semicolons and comments carry no statement of their own.
+            "-- rebuild the tag index\nVACUUM t;",
+        ] {
+            assert!(
+                check_non_txn_up_replayable(sql).is_ok(),
+                "recovery must be able to re-run: {sql}"
+            );
+        }
+    }
+
+    // The near-misses of the admitted set. Each errors or double-applies on a
+    // second run, so recovery refuses rather than replaying it.
+    #[test]
+    fn the_near_misses_of_the_replay_safe_set_are_refused() {
+        for sql in [
+            // Errors with `already exists` on the second run.
+            "CREATE INDEX CONCURRENTLY i ON t (x)",
+            // `index_names_in_up` skips an unnamed index, so recovery could not
+            // drop the INVALID residue and the rebuild would never happen.
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ON t (x)",
+            // Errors with `does not exist` on the second run.
+            "DROP INDEX CONCURRENTLY i",
+            // Errors with `already exists` on the second run, and the message must
+            // not accuse it of a missing CONCURRENTLY it never claimed.
+            "CREATE INDEX i ON t (x)",
+            // Errors with `label already exists` on the second run.
+            "ALTER TYPE mood ADD VALUE 'excited'",
+        ] {
+            assert!(
+                check_non_txn_up_replayable(sql).is_err(),
+                "recovery must refuse to re-run: {sql}"
+            );
+        }
+    }
+
+    // Recovery re-issues the WHOLE `up` batch, so admitting it statement by
+    // statement is not enough: the second run of a batch can undo what the first
+    // run's later statements produced, or what the application wrote afterwards.
+    #[test]
+    fn a_multi_statement_up_is_refused_for_recovery() {
+        let reason = check_non_txn_up_replayable(
+            "DROP TABLE IF EXISTS t; CREATE TABLE IF NOT EXISTS t (id bigint PRIMARY KEY);",
+        )
+        .expect_err("a batch whose replay deletes post-migration data must be refused");
+        assert!(
+            reason.contains("more than one statement"),
+            "the reason names the composition, not one of the statements: {reason}"
+        );
+        // Including a batch of statements that are each individually admitted.
+        assert!(check_non_txn_up_replayable(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS a ON t (x); \
+             CREATE INDEX CONCURRENTLY IF NOT EXISTS b ON t (y);"
+        )
+        .is_err());
+    }
+
+    // The `up` that measured the defect: it applies fine, and recovery must not
+    // replay it. Refusing it at apply instead would reject a migration that works.
+    #[test]
+    fn a_non_txn_create_table_applies_but_is_not_replayable() {
+        let m = nontxn("CREATE TABLE t (id bigint PRIMARY KEY)");
+        assert!(
+            validate_non_txn_idempotent(&m).is_ok(),
+            "the fresh path accepts it, as it does today"
+        );
+        assert!(
+            check_non_txn_up_replayable(&m.up).is_err(),
+            "recovery must refuse to re-run a CREATE TABLE that may already have committed"
+        );
     }
 }

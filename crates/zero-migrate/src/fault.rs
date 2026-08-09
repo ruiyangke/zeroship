@@ -78,7 +78,7 @@ thread_local! {
 /// `arm` checks nothing about the build profile, the environment, or the caller.
 /// A Rust embedder that drives the engine future on a thread it also controls
 /// inherits a LIVE crash-injection seam: arm and apply on one thread and the
-/// eight executor trip points fire for real.
+/// ten executor trip points fire for real.
 pub fn arm(point: &str, skip: u32) {
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -172,6 +172,18 @@ pub mod points {
     /// In the online expand: BETWEEN the E1+E2 apply and the E3 backfill (a crash
     /// here leaves E1/E2 journaled but E3 not — resume re-runs the backfill).
     pub const EXPAND_BETWEEN_E2_AND_BACKFILL: &str = "expand.between_e2_and_backfill";
+    /// In the apply of ONE migration: AFTER its `up` ran, BEFORE the `completed`
+    /// journal row lands.
+    ///
+    /// BOTH apply shapes trip it, so a crash test can compare them at the same
+    /// boundary. The transactional apply is still inside its `BEGIN`, so the abort
+    /// rolls the `up` back along with the journal row it never wrote. The two-phase
+    /// apply has already committed the `up` (that is what `transaction:false`
+    /// means) and leaves the armed inflight marker behind - the state the next
+    /// apply's recovery has to converge from. Before this point existed the second
+    /// shape could only be reached by killing the process or writing the marker
+    /// database-side, so no in-repo test could measure what recovery does with it.
+    pub const APPLY_AFTER_UP_BEFORE_COMPLETED: &str = "apply.after_up.before_completed";
     // Two deploy-scoped points were declared here and never wired: nothing tripped
     // them and no test ever armed them, while their docs claimed a crash-fuzz test
     // did. They described a deploy-recovery loop this crate does not drive - see

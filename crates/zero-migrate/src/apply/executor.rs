@@ -11,11 +11,13 @@
 //!    hard abort (drift / tamper);
 //! 5. **first pass (static, all-up-front):** runs the dialect-selected
 //!    **[`MigrationGuard`](crate::guard::MigrationGuard)** over the
-//!    `up` SQL of EVERY pending migration, and validates that every
-//!    non-transactional `up` is **idempotent** (each non-txn statement uses the
-//!    `IF NOT EXISTS` form). A denial / non-idempotent op aborts the whole apply
-//!    before ANY migration executes — a denied batch applies *nothing* (no
-//!    earlier migration half-commits);
+//!    `up` SQL of EVERY pending migration, and runs the backend's non-txn scan
+//!    over every `up` taking the two-phase path. That scan is a DENY list of
+//!    shapes known to break on a second run (`CREATE INDEX CONCURRENTLY` without
+//!    `IF NOT EXISTS`, bare DML) - it is not a proof that what it accepts is
+//!    idempotent, and an `up` it does not recognize is admitted. A denial aborts
+//!    the whole apply before ANY migration executes - a denied batch applies
+//!    *nothing* (no earlier migration half-commits);
 //! 6. **second pass (execute):** for each pending migration, applies either:
 //!    - **transactionally** (default): `BEGIN; SET LOCAL …; <up>; INSERT
 //!      journal; COMMIT` — DDL + journal atomic, so a crash leaves
@@ -23,11 +25,14 @@
 //!      transaction-scoped, so they never leak onto the session;
 //!    - **non-transactionally** (opt-in, e.g. `CREATE INDEX CONCURRENTLY IF NOT
 //!      EXISTS`): two-phase `started` marker → run `<up>` → `completed` row +
-//!      clear marker. A lone `started` marker on a re-run triggers the recovery
-//!      path, which (because the `up` is required to be idempotent) simply drops
-//!      any INVALID-index residue and **re-runs `<up>`** — safe whether the
-//!      prior attempt failed mid-build OR succeeded then crashed before
-//!      recording `completed`.
+//!      marker deletion, the last two in one transaction. A lone `started` marker
+//!      on a re-run means the `up` may or may not have committed, and the journal
+//!      cannot say which. The backend then classifies the `up`: the shapes it can
+//!      prove converge on a second run have their INVALID-index residue dropped
+//!      and are **re-run**, and every other one is REFUSED with the marker left
+//!      armed and the repair named, rather than replayed on the chance it works.
+//!      An armed marker also outranks an `OnUnmet::Skip` precondition, so a
+//!      half-run version is never reported as a clean deploy.
 //! 7. restores the session GUCs it touched and releases the lock.
 //!
 //! Runs out-of-band at deploy. The apply futures are driven by the host
@@ -235,6 +240,39 @@ pub enum ApplyError {
         version: String,
         /// What specifically is not idempotent.
         reason: String,
+    },
+    /// A non-transactional migration left an armed inflight marker behind, and
+    /// recovery cannot prove its `up` is safe to re-run verbatim. Nothing is
+    /// replayed, the marker is preserved, and the operator is handed the repair.
+    ///
+    /// This is the fail-closed arm of the two-phase recovery path. The alternative,
+    /// measured against a live server: a non-transactional `CREATE TABLE` whose
+    /// `up` committed before the crash replays into `relation ... already exists`,
+    /// re-arms the marker it just cleared, and reports the identical failure on
+    /// every deploy from then on. The version never lands and nothing about
+    /// re-running the deploy changes that.
+    ///
+    /// The refusal is deliberately NOT a fresh-apply gate: an `up` outside the
+    /// replay-safe set still applies, and only a crash that interrupted it lands
+    /// here.
+    #[error(
+        "migration {version} has an inflight marker from an interrupted non-transactional \
+         apply, and zero-migrate cannot prove its `up` is safe to re-run ({reason}), so it \
+         will not replay statements that may already have committed. Inspect the live schema \
+         against the migration SQL, restore and verify the complete pre-migration shape \
+         yourself, clear the marker with DELETE FROM \"{meta_schema}\".schema_migrations_inflight \
+         WHERE version = '{version}', then run apply again. Clearing the marker inspects \
+         nothing: it records your assertion about the shape. Do not hand-write a completed \
+         event into the append-only journal"
+    )]
+    NonTxnRecoveryUnsafe {
+        /// The version whose marker is preserved.
+        version: String,
+        /// Why the `up` is not provably re-runnable.
+        reason: String,
+        /// The meta schema holding the inflight side-table, so the repair the
+        /// message spells out is the one this deploy would actually read.
+        meta_schema: String,
     },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort.
@@ -966,13 +1004,13 @@ async fn apply_locked<B: MigrationBackend>(
             version: version.to_string(),
             source,
         })?;
-        // A migration taking the two-phase path must be idempotent
-        // (re-runnable by crash recovery). Reject the non-idempotent form with a
-        // clear error. Behind the seam: PG parses with `pg_query`; SQLite rejects
-        // `transaction:false` at the dialect boundary. The gate
-        // mirrors the backend-owned apply-path decision: a `transaction:false`
-        // migration, or any migration on a non-transactional-DDL backend, must be
-        // idempotent (re-runnable by crash recovery).
+        // The backend's own scan over an `up` taking the two-phase path. Behind the
+        // seam: PG denies the shapes it knows break on a second run and admits the
+        // rest; SQLite rejects `transaction:false` at the dialect boundary; MySQL
+        // accepts everything, because auto-committing DDL puts EVERY MySQL
+        // migration on this path and its recovery refuses to replay instead. What
+        // an admitted `up` gets is an apply, not a guarantee that crash recovery
+        // can replay it - the backend decides that when a marker is actually armed.
         if backend.uses_two_phase_path(m) {
             backend.validate_non_txn(m)?;
         }
@@ -1090,11 +1128,28 @@ async fn execute_pending<B: MigrationBackend>(
         // Evaluate preconditions (read-only) BEFORE the `up`, under the advisory
         // lock so the checked state is stable. Skipped-by-dependency short-circuits
         // evaluation (we already know this won't run).
-        let skip = dep_skipped
-            || matches!(
-                backend.evaluate_preconditions(cfg, m).await?,
-                PreconditionVerdict::Skip
-            );
+        //
+        // An armed inflight marker outranks every route to a skip. The half-run
+        // `up` is itself what stops such a precondition holding - "run this while
+        // the table is absent" goes unmet the moment the crashed attempt created
+        // it - so the Skip arm fires precisely on the versions that most need an
+        // operator. And a skipped version is reported as a clean deploy with
+        // nothing applied, so the deploy goes green on every run from then on
+        // while the migration never lands: quieter than the Halt arm, and worse.
+        // The marker sends the version to `apply_one` instead, which either
+        // recovers it or refuses loudly. Preconditions are still evaluated under a
+        // marker, so an unmet Halt check aborts from the `?` exactly as it would
+        // without one.
+        let skip = if had_inflight {
+            let _ = backend.evaluate_preconditions(cfg, m).await?;
+            false
+        } else {
+            dep_skipped
+                || matches!(
+                    backend.evaluate_preconditions(cfg, m).await?,
+                    PreconditionVerdict::Skip
+                )
+        };
         if skip {
             skipped_this_run.insert(version);
             outcome.skipped.push(version.to_string());
