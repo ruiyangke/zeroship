@@ -80,6 +80,12 @@ required-features = ["platform-cli"]
 [dev-dependencies]
 compio = { workspace = true }
 tempfile = { workspace = true }
+# Every PG-backed proof in tests/ returns early when ZERO_MIGRATE_TEST_PG_URL is
+# unset, which is the normal state in this repo's CI. The announcement has to go
+# through `skip` rather than `eprintln!`: the harness replays captured output
+# only for a FAILING test, so an eprintln on an early return is invisible on the
+# green run that is exactly when it matters.
+zeroship-test-support = { workspace = true }
 # The smoke test authors an IR envelope as JSON, then parses + re-serializes it
 # through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
 serde_json = { workspace = true }

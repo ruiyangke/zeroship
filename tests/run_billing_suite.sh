@@ -78,6 +78,14 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
+# Counts the tests that announced they did nothing, so "ALL GROUPS PASSED"
+# cannot hide one; `tests/lib_skip_census_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/skip_census.sh"
+
+# Skips this gate reports but does not fail on. Empty means "report every skip":
+# the census treats an empty allowlist as matching NOTHING, never as matching
+# everything, which is the one way this could fail open.
+BILLING_SKIP_ALLOWLIST="${BILLING_SKIP_ALLOWLIST:-}"
 
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
@@ -254,6 +262,23 @@ else
 fi
 
 echo "=================================================================="
+# A test that returned early because its backend was absent still counts as
+# PASSED, so it is inside the ${passed} total below and inside "ALL GROUPS
+# PASSED". The per-group ran-count above cannot see it either: that check catches
+# a filter matching nothing (`running 0 tests`), and a skipping test genuinely
+# runs - it just does not test anything. Only the announcement distinguishes
+# them, so count it and print it next to the tally.
+#
+# REPORTED, NOT FAILED, and that is a deliberate boundary. This gate provisions
+# Postgres and Redpanda but not every backend the control suite can reach, and
+# deciding which of the remainder CI should stand up is an operator call, not
+# something to smuggle in as a gate change. To turn the report into a gate once
+# that decision is made, drop the `|| true` and set `fail=1` - or export
+# ZEROSHIP_REQUIRE_LIVE_BACKENDS=1, which makes each skip fail at its own call
+# site with the missing variable named.
+zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" || true
+billing_skips="$ZS_SKIP_COUNT"
+
 if [ "$fail" -ne 0 ]; then
   echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
   exit 1
@@ -285,5 +310,8 @@ if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
 fi
 
 # Printed on SUCCESS, not only inside a failure message: a count nobody sees
-# until the gate has already failed cannot warn anyone.
-echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED})"
+# until the gate has already failed cannot warn anyone. The skip count rides in
+# the same line for the same reason - "ALL GROUPS PASSED (713 tests)" is exactly
+# the sentence that made a skipping test invisible, so the qualifier belongs
+# where that sentence is read, not 40 lines earlier in the scrollback.
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED}, ${billing_skips} skipped)"

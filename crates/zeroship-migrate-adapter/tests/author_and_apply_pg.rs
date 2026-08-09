@@ -328,7 +328,7 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
     let Some(url) = pg_url() else {
-        eprintln!(
+        zeroship_test_support::skip(
             "skipping Phase F Stage 2 apply: ZERO_MIGRATE_TEST_PG_URL unset \
              (set it to a DSN on :5440 to run)"
         );

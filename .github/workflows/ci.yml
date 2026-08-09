@@ -17,7 +17,16 @@ jobs:
       # unit test can hide every integration suite behind it. The verdict is
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
-      - run: cargo test --workspace --no-fail-fast
+      #
+      # Tee'd into a log so the skip census at the end of this job can read it.
+      # `set -o pipefail` is load-bearing: GitHub's default shell is `bash -e`
+      # WITHOUT pipefail, so `cargo test | tee` would report tee's status, which
+      # is 0 whenever tee could write - and every failing test in the workspace
+      # would sail through as a pass. The billing gate hit this exact trap and
+      # solved it with PIPESTATUS; pipefail is the same fix in one line.
+      - run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
       # --no-fail-fast fixes the STOPPING; this fixes the COUNTING. Nothing
       # anywhere records how many test targets there are supposed to be, so a
       # suite that quietly stops being built - a new `required-features` gate, a
@@ -229,7 +238,10 @@ jobs:
       # two siblings (`integration`, `native_transaction`) need a live
       # PostgreSQL that this job does not provision, and they belong with the
       # other live-database gates rather than here.
-      - run: cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
+      - run: |
+          set -o pipefail
+          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
+            | tee -a "$RUNNER_TEMP/rust-tests.log"
       # Same shape one level down: the platform-migrate suite is a single
       # `#[cfg(feature = "platform-cli")]` module, so without the feature it
       # compiled away and the target ran empty - "running 0 tests ... ok".
@@ -237,7 +249,37 @@ jobs:
       # rather than reporting a pass it did not earn, and this step is what
       # actually runs it. The tests needing a live server skip internally; the
       # rest do not.
-      - run: cargo test -p zeroship-migrate-adapter --features platform-cli --test platform_migrate
+      - run: |
+          set -o pipefail
+          cargo test -p zeroship-migrate-adapter --features platform-cli --test platform_migrate 2>&1 \
+            | tee -a "$RUNNER_TEMP/rust-tests.log"
+      # Every test above that returned early because its backend was absent is
+      # inside the "N passed" totals and inside this job's green tick. Nothing
+      # said so until this step: Rust cannot mark a test ignored at RUNTIME, so
+      # the harness has already committed to counting it by the time the body
+      # discovers the variable is unset.
+      #
+      # This job provisions NO backend at all, so a census here is expected to be
+      # non-zero - the 9 PG-gated proofs in the platform-migrate step above
+      # always skip, because ZERO_MIGRATE_TEST_PG_URL is set nowhere in this
+      # repo. It REPORTS and does not fail, on purpose. Failing a job that
+      # deliberately stands up no services would make the only honest outcome a
+      # red tick, and the fix people would reach for is deleting the check.
+      # Whether CI should provision any of these is an operator decision; this
+      # step exists so that decision is made against a number instead of a
+      # silence.
+      #
+      # `if: always()` so the census still prints when a test above failed. A
+      # skip and a failure are different problems and the run should surface
+      # both, not let the first one seen hide the other.
+      - name: Skip census (tests that ran but exercised nothing)
+        if: always()
+        run: |
+          . tests/lib/skip_census.sh
+          zs_skip_census "$RUNNER_TEMP/rust-tests.log" || true
+          if [ "${ZS_SKIP_COUNT:-0}" -gt 0 ]; then
+            echo "::notice title=Skipped live-backend tests::${ZS_SKIP_COUNT} test(s) passed without exercising anything; see the Skip census step."
+          fi
       # The lint policy lives in the root Cargo.toml `[workspace.lints]` table:
       # `clippy::all` is deny, `pedantic` and `nursery` are warn. Passing
       # `-D warnings` here would flatten that grading and promote every pedantic

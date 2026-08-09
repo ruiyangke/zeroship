@@ -11,6 +11,25 @@ use std::io::Write;
 
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
+/// Opt-in strictness, kept identical to `crates/test-support` for the same
+/// reason the marker text is: a run that declares its backends are provisioned
+/// must be held to that on BOTH sides of the standalone/workspace line, or the
+/// strict gate silently exempts whichever crates copied the helper.
+pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
+
+pub fn require_live_backends() -> bool {
+    matches!(
+        std::env::var(REQUIRE_LIVE_BACKENDS_ENV).ok().as_deref(),
+        Some("1")
+    )
+}
+
 pub fn skip(reason: &str) {
     let _ = std::io::stderr().write_all(format!("{SKIP_MARKER}: {reason}\n").as_bytes());
+    if require_live_backends() {
+        panic!(
+            "{REQUIRE_LIVE_BACKENDS_ENV}=1 declares the live backends are provisioned, \
+             but this test skipped: {reason}"
+        );
+    }
 }

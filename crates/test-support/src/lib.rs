@@ -26,6 +26,32 @@ use std::io::Write;
 /// zero occurrences before it was introduced here.
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
+/// Set to `1` in a context that DECLARES the live backends are present. Then a
+/// skip is a misconfiguration rather than an expected absence, and [`skip`]
+/// turns it into a test failure instead of a silent pass.
+///
+/// This generalises the shape `crates/plugin-kv/tests/redis_backend.rs` already
+/// used for one variable (`KV_REQUIRE_REDIS=1` panics when `REDIS_TEST_URL` is
+/// unset) to every announcement site at once, without touching any call site:
+/// the check lives in the announcer, so every existing `skip()` caller inherits
+/// it.
+///
+/// Deliberately opt-in and deliberately not the default. An optional live
+/// backend is legitimate, and a suite that hard-fails on a developer laptop
+/// with no Redis is worse than one that skips: it trains people to ignore the
+/// failure, which is the same disease one stage later. The default stays a
+/// visible announcement; only an environment that claims to have provisioned
+/// the backend asks to be held to it.
+pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
+
+/// `true` when the environment declares every live backend should be reachable.
+pub fn require_live_backends() -> bool {
+    matches!(
+        std::env::var(REQUIRE_LIVE_BACKENDS_ENV).ok().as_deref(),
+        Some("1")
+    )
+}
+
 /// Announce that a test did nothing because the backend it needs is absent.
 ///
 /// `reason` is carried through verbatim after the marker and should name what
@@ -44,6 +70,17 @@ pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 /// The write is best-effort. A test that cannot reach stderr is not a test
 /// worth failing over, and a panicking announcer would turn a skip into a
 /// failure with a misleading cause.
+/// Under [`REQUIRE_LIVE_BACKENDS_ENV`]`=1` this PANICS rather than returning,
+/// so the skip lands in the harness's failure list instead of its pass count.
+/// The announcement is written FIRST and the panic raised second, on purpose: a
+/// gate that counts markers still sees the line, so the strict run and the
+/// permissive run produce the same census and differ only in the verdict.
 pub fn skip(reason: &str) {
     let _ = std::io::stderr().write_all(format!("{SKIP_MARKER}: {reason}\n").as_bytes());
+    if require_live_backends() {
+        panic!(
+            "{REQUIRE_LIVE_BACKENDS_ENV}=1 declares the live backends are provisioned, \
+             but this test skipped: {reason}"
+        );
+    }
 }

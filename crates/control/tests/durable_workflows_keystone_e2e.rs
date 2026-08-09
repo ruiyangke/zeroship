@@ -1039,7 +1039,7 @@ fn dw23_workflow_engine_load_bench() {
     let rt = compio::runtime::Runtime::new().expect("compio runtime");
     rt.block_on(async {
         if !enabled() {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skip: run via tests/e2e_durable_workflows.sh with ZEROSHIP_DW23_BENCH_ONLY=1"
             );
             return;

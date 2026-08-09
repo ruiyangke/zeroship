@@ -294,7 +294,7 @@ fn npm_deserialize_accepts_our_bytes() {
     if !std::path::Path::new(&format!("{tmp}/node_modules/superjson/package.json"))
         .exists()
     {
-        eprintln!(
+        zeroship_test_support::skip(
             "skipping: /tmp/sj-fixture/node_modules/superjson/package.json missing \
              (fixture absent or incomplete)"
         );

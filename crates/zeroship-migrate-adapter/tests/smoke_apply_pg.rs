@@ -176,7 +176,7 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 #[compio::test]
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     let Some(url) = pg_url() else {
-        eprintln!(
+        zeroship_test_support::skip(
             "skipping Phase F smoke: ZERO_MIGRATE_TEST_PG_URL unset \
              (set it to a DSN on :5440 to run)"
         );

@@ -385,7 +385,7 @@ mod platform_cli {
     #[compio::test]
     async fn apply_all_platform_migrations_to_fresh_db() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping the full-apply proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -623,7 +623,7 @@ mod platform_cli {
     #[compio::test]
     async fn ordered_runner_retains_authored_fk_formats_across_catalog_refresh() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping logical-column retention regression: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -722,7 +722,7 @@ mod platform_cli {
     #[compio::test]
     async fn platform_migrate_is_idempotent_on_rerun() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping idempotency proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -937,7 +937,7 @@ export function down() {}
     #[compio::test]
     async fn platform_migrate_applies_only_newly_appended_file() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping appended-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -1042,7 +1042,7 @@ export function down() {}
     #[compio::test]
     async fn platform_migrate_resumes_partially_applied_corpus() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping corpus-prefix resume proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -1158,7 +1158,7 @@ export function down() {}
     #[compio::test]
     async fn platform_migrate_resumes_a_partially_applied_file() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping partial-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
@@ -1263,7 +1263,7 @@ export function down() {}
     #[compio::test]
     async fn platform_migrate_rejects_an_edited_applied_file() {
         let Some(url) = pg_url() else {
-            eprintln!(
+            zeroship_test_support::skip(
                 "skipping edited-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
                  (set it to a DSN on :5440 to run)"
             );
