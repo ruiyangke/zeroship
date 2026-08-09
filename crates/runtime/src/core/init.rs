@@ -1399,9 +1399,20 @@ function wfSuppressUnhandledRejection(promise) {
     promise.catch(() => {});
 }
 
-function resolveWorkflow(userNamespace, workflowName) {
+async function resolveWorkflow(userNamespace, workflowName) {
     const mod = userNamespace ?? {};
     const def = mod.default && typeof mod.default === "object" ? mod.default : {};
+    // Dev: the module the runtime imports is the Vite plugin's dev-bootstrap,
+    // not the creator's file, and the creator's module is fetched over HTTP
+    // through Vite's ModuleRunner. Dev therefore cannot present a static
+    // workflow dict the way a bundled .zship can, and exposes an async
+    // resolver instead. Without this branch `pnpm dev` starts a run and then
+    // fails every dispatch with WORKFLOW_NOT_FOUND -- which is how it behaved
+    // (docs/pilot/e2e-scenarios.md, scenario 11 workflows leg).
+    if (typeof def.loadWorkflow === "function") {
+        const lazy = await def.loadWorkflow(workflowName);
+        if (typeof lazy === "function") return lazy;
+    }
     const candidates = [
         mod[workflowName],
         def.workflows && typeof def.workflows === "object" ? def.workflows[workflowName] : undefined,
@@ -1491,7 +1502,7 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
     const ContinueAsNewSignal = ZsWorkflowContinueAsNewSignal;
     const SuspendSignal = ZsWorkflowSuspendSignal;
     try {
-        const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
+        const WorkflowClass = await resolveWorkflow(userNamespace, workflowName);
         const workflow = new WorkflowClass();
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");

@@ -99,6 +99,7 @@ export function buildServerEntrySource(opts: {
 // \`@zeroship/bootstrap/install-schema\` at module-eval time.
 import "@zeroship/bootstrap";
 import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
+import { collectWorkflowClasses, isWorkflowClass } from "@zeroship/bootstrap/normalize";
 
 import * as _zsUser from ${userImport};
 
@@ -119,10 +120,20 @@ const _zsUserDefaultThis = (_zsUserDefaultExport && typeof _zsUserDefaultExport 
 const _zsRpc = (typeof _zsUserDefault.rpc === "object" && _zsUserDefault.rpc != null)
   ? { ..._zsUserDefault.rpc }
   : {};
+// Durable workflow classes, keyed by EXPORT name. They must be lifted out
+// BEFORE the rpc rollup: a class is a function, so without this it would be
+// published as an RPC procedure named after the class -- one that is not in
+// \`manifest.resources\` and would be invoked without \`new\`. The collector also
+// pins each class's \`.name\` to its export name, because production minifies
+// \`class DoubleChild\` to \`var Pi = class ...\` and \`step.call\` addresses a
+// child by \`Class.name\`.
+const _zsWorkflows = collectWorkflowClasses(_zsUser);
+
 for (const _zsName of Object.keys(_zsUser)) {
   if (_zsName === "default" || _zsName === "fetch") continue;
   const _zsFn = _zsUser[_zsName];
   if (typeof _zsFn !== "function") continue;
+  if (isWorkflowClass(_zsFn)) continue;
   const _zsId = (_zsFn.config && typeof _zsFn.config.id === "string" && _zsFn.config.id) || _zsName;
   _zsRpc[_zsId] = _zsFn;
 }
@@ -142,6 +153,7 @@ const _zsFetchHandler = createFetchHandler(async () => ({
 export default {
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
+  workflows: _zsWorkflows,
 };
 `;
 }
@@ -222,6 +234,7 @@ function buildPhase2Entry(
 import "@zeroship/bootstrap/install-schema";
 import "@zeroship/db/internal";
 import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
+import { collectWorkflowClasses } from "@zeroship/bootstrap/normalize";
 
 import * as _zsUser from ${userImport};
 ${importLines}
@@ -245,6 +258,11 @@ Object.assign(_zsRpc, {
 ${tableEntries.join("\n")}
 });
 
+// Workflow classes come from the user entry's namespace, not the binding map:
+// bindings enumerate RPC procedures only. Same collector as the namespace-walk
+// entry, so both build shapes expose the same \`default.workflows\`.
+const _zsWorkflows = collectWorkflowClasses(_zsUser);
+
 const _zsTopLevelFetch = Reflect.get(_zsUser, "fetch");
 const _zsFetch = (typeof _zsUserDefault.fetch === "function")
   ? _zsUserDefault.fetch
@@ -259,6 +277,7 @@ const _zsFetchHandler = createFetchHandler(async () => ({
 export default {
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
+  workflows: _zsWorkflows,
 };
 `;
 }

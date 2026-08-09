@@ -137,6 +137,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
     discoveredSchedules: [],
+    discoveredWorkflows: [],
   };
 
   return [
