@@ -54,7 +54,7 @@ use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
 
 use super::{
     validate_list_coords, validate_object_coords, Backend, BoxByteStream, BoxChunkSource,
-    ChunkResult, ChunkSource, ListEntry, ObjectMeta, DEFAULT_CONTENT_TYPE,
+    ChunkResult, ChunkSource, ListEntry, ListPage, ListRequest, ObjectMeta, DEFAULT_CONTENT_TYPE,
 };
 
 /// Bytes read per `get_stream` chunk. 256 KiB balances syscall count
@@ -419,17 +419,26 @@ impl Backend for LocalFs {
         &self,
         app_id: &str,
         bucket: &str,
-        prefix: &str,
-    ) -> Result<Vec<ListEntry>, String> {
+        req: ListRequest<'_>,
+    ) -> Result<ListPage, String> {
         validate_list_coords(app_id, bucket)?;
         // Walks the `o/` subtree only. Metadata lives in a sibling subtree, so
         // it is not merely filtered out of the listing — it is not reachable
         // from the walk at all.
         let dir = self.objects_dir(app_id, bucket);
-        let mut results = Vec::new();
-        walk(&dir, &dir, prefix, &mut results).await?;
-        results.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(results)
+        // A page of at least one entry, so a page can never be "empty but
+        // truncated" — a state this API cannot express (there would be no last
+        // key to hand back as the cursor).
+        let limit = req.limit.max(1);
+        let prefix = req.prefix.to_string();
+        let cursor = req.cursor.map(str::to_string);
+
+        // Off the calling thread — see `list_page_blocking`.
+        compio::runtime::spawn_blocking(move || {
+            list_page_blocking(&dir, &prefix, cursor.as_deref(), limit)
+        })
+        .await
+        .map_err(|_| "storage: list walk task panicked".to_string())?
     }
 }
 
@@ -487,67 +496,207 @@ fn temp_sibling(full: &Path) -> PathBuf {
     }
 }
 
-// Directory walk is sync, and that is a known defect rather than a design
-// choice: `list` is a registered native op (`lib.rs`, `r.add("list", ...)`)
-// that app code calls per request through `env.storage.list`, so this
-// blocking `std::fs::read_dir` runs on the thread that also drives V8 and
-// every co-resident app's requests. A worker thread multiplexes many app
-// isolates, so one app's walk over a large bucket stalls the others.
-//
-// It is also unbounded: no pagination, no max-keys, and the caller
-// serialises the whole result into a single JSON string, so the cost scales
-// with the bucket rather than with what the app asked for.
-//
-// `std::fs::read_dir` was chosen because compio's read_dir API churned
-// across versions. That is a real constraint on the fix, not a reason the
-// blocking call is acceptable - the options are compio's own filesystem
-// API, an explicit blocking-task offload, or a bounded incremental walk.
-async fn walk(
+/// Test-only probe recording which OS thread the most recent directory walk
+/// ran on. Exists so the blocking-offload can be pinned STRUCTURALLY (see
+/// `the_directory_walk_runs_off_the_calling_thread`) instead of by timing.
+/// Neither the static nor the store below is compiled into a release build.
+#[cfg(test)]
+static LAST_WALK_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+
+/// One page of a listing, walked synchronously.
+///
+/// **Why this is sync, and why the caller runs it on a blocking thread.**
+/// `list` is a registered native op (`lib.rs`, `r.add("list", ...)`) that app
+/// code reaches per request through `env.storage.list`, and a worker thread
+/// multiplexes many apps' V8 isolates — so a `std::fs` walk on the calling
+/// thread stalls every co-resident app. compio offers no alternative: as of
+/// `compio-fs` 0.11.0 (the version behind workspace `compio` 0.18) the crate
+/// exposes `File`, `OpenOptions`, `metadata`, pipes and stdio, and **no
+/// directory-iteration API at all** — there is no `read_dir`, no `ReadDir`, no
+/// `DirEntry` to call. So the walk stays on `std::fs` and
+/// `LocalFs::list` hands it to `compio::runtime::spawn_blocking`, which
+/// dispatches it to the proactor's `AsyncifyPool` — the same offload
+/// `plugin-db` uses for `rusqlite` opens and mask-policy persistence.
+///
+/// **Why it is a page and not a listing.** The RESULT is bounded by `limit`,
+/// not by the bucket: the walk stops the moment it has `limit + 1` matching
+/// keys (the extra one is what proves the listing is truncated), and it prunes
+/// any subtree that cannot contain a key matching `prefix` or ordering after
+/// `cursor`.
+///
+/// **What is still NOT bounded by `limit`.** Ordered iteration needs an
+/// ordered index, and a POSIX directory has none — `read_dir` yields entries
+/// in arbitrary order, so producing even the FIRST key in order means reading
+/// and sorting every entry of each directory on the path. A bucket with a
+/// million keys in one flat directory therefore reads and sorts a million
+/// `dirent`s *per page*; only nesting (or a prefix that prunes to a narrow
+/// subtree) makes that cheap. This is a property of the filesystem, not of the
+/// walk: S3 keeps a sorted key index and pages server-side, so the S3 backend
+/// has no equivalent cost. It is bounded work on a pool thread rather than
+/// unbounded work on the V8 thread, which is the defect this addressed — but
+/// `LocalFs` is the dev/local default for a reason, and a flat multi-million-
+/// key bucket wants the S3 backend.
+///
+/// **Ordering.** Children are visited in *full-key* lexicographic order, which
+/// is NOT the order of their bare names: a directory's keys are all prefixed
+/// with its name plus `/`, and `/` (0x2F) sorts above characters like `-`
+/// (0x2D) and `.` (0x2E). Sorting each directory's children by their name with
+/// `/` appended for directories makes a depth-first walk emit exactly the
+/// order `keys.sort()` would produce — which is also the order S3 lists in, so
+/// a cursor means the same thing on both backends.
+fn list_page_blocking(
     base: &Path,
-    dir: &Path,
     prefix: &str,
-    out: &mut Vec<ListEntry>,
-) -> Result<(), String> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("storage: readdir '{}': {e}", dir.display())),
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ListPage, String> {
+    #[cfg(test)]
+    {
+        *LAST_WALK_THREAD.lock().unwrap() = Some(std::thread::current().id());
+    }
+
+    let mut walk = PageWalk { prefix, cursor, limit, out: Vec::new() };
+    walk.dir(base, "")?;
+
+    let mut entries = walk.out;
+    // The (limit + 1)-th entry is never returned; it exists only to prove
+    // there is more, and its presence is what turns the cursor on.
+    let cursor = if entries.len() > limit {
+        entries.truncate(limit);
+        entries.last().map(|e| e.key.clone())
+    } else {
+        None
     };
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("storage: readdir entry: {e}"))?;
-        let path = entry.path();
-        // Skip in-flight temp files so a concurrent streaming put isn't
-        // surfaced as a phantom listed object.
-        if path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|n| n.starts_with('.') && n.contains(".tmp."))
-        {
-            continue;
-        }
-        let meta = entry
-            .metadata()
-            .map_err(|e| format!("storage: stat entry: {e}"))?;
-        if meta.is_dir() {
-            Box::pin(walk(base, &path, prefix, out)).await?;
-        } else if meta.is_file() {
-            let rel = path.strip_prefix(base).unwrap_or(&path);
-            let key = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            if !prefix.is_empty() && !key.starts_with(prefix) {
+    Ok(ListPage { entries, cursor })
+}
+
+/// Depth-first, key-ordered, early-terminating walk state.
+struct PageWalk<'a> {
+    prefix: &'a str,
+    cursor: Option<&'a str>,
+    limit: usize,
+    out: Vec<ListEntry>,
+}
+
+impl PageWalk<'_> {
+    /// True once we hold one more entry than the page can return — every
+    /// remaining directory can be abandoned unread.
+    fn full(&self) -> bool {
+        self.out.len() > self.limit
+    }
+
+    /// Walk `dir`, whose objects have keys beginning with `rel` (`""` at the
+    /// root, otherwise `a/b/`).
+    fn dir(&mut self, dir: &Path, rel: &str) -> Result<(), String> {
+        let read = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            // An app-bucket that has never been written to has no directory.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("storage: readdir '{}': {e}", dir.display())),
+        };
+
+        // Collect this directory's children so they can be ordered before
+        // descending. Bounded by ONE directory's width, not the subtree.
+        let mut children: Vec<Child> = Vec::new();
+        for entry in read {
+            let entry = entry.map_err(|e| format!("storage: readdir entry: {e}"))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                // A non-UTF-8 filename cannot be a key we wrote (keys arrive
+                // as JS strings), so it is not ours to report.
+                continue;
+            };
+            // Skip in-flight temp files so a concurrent streaming put isn't
+            // surfaced as a phantom listed object.
+            if name.starts_with('.') && name.contains(".tmp.") {
                 continue;
             }
-            out.push(ListEntry {
-                key,
-                size: meta.len(),
-                modified_at: meta.modified().unwrap_or_else(|_| SystemTime::now()),
-            });
+            // `DirEntry::metadata` does not traverse symlinks, so a symlink is
+            // neither dir nor file here and is skipped — matching the previous
+            // walk's behaviour.
+            let meta = entry
+                .metadata()
+                .map_err(|e| format!("storage: stat entry: {e}"))?;
+            let is_dir = meta.is_dir();
+            if !is_dir && !meta.is_file() {
+                continue;
+            }
+            children.push(Child::new(name, is_dir, meta));
         }
+        // Directories sort by their key prefix (`name/`), files by their key —
+        // this is what makes the depth-first order equal full-key order.
+        children.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
+        for child in children {
+            if self.full() {
+                return Ok(());
+            }
+            if child.is_dir {
+                let sub_rel = format!("{rel}{}/", child.name);
+                if !self.subtree_can_match(&sub_rel) {
+                    continue;
+                }
+                self.dir(&dir.join(&child.name), &sub_rel)?;
+            } else {
+                let key = format!("{rel}{}", child.name);
+                if !self.prefix.is_empty() && !key.starts_with(self.prefix) {
+                    continue;
+                }
+                // The cursor is exclusive: it is the last key already returned.
+                if self.cursor.is_some_and(|c| key.as_str() <= c) {
+                    continue;
+                }
+                self.out.push(ListEntry {
+                    key,
+                    size: child.meta.len(),
+                    modified_at: child.meta.modified().unwrap_or_else(|_| SystemTime::now()),
+                });
+            }
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Can a subtree whose keys all start with `sub_rel` contain anything this
+    /// page still wants? Pruning here is what keeps the walk proportional to
+    /// the page rather than to the bucket.
+    fn subtree_can_match(&self, sub_rel: &str) -> bool {
+        // Prefix: either every key below matches (`sub_rel` extends `prefix`)
+        // or some might (`prefix` extends `sub_rel`). Otherwise none can.
+        if !self.prefix.is_empty()
+            && !sub_rel.starts_with(self.prefix)
+            && !self.prefix.starts_with(sub_rel)
+        {
+            return false;
+        }
+        // Cursor: every key below starts with `sub_rel`. If the cursor sorts
+        // after `sub_rel` without being one of those keys, they all sort
+        // before the cursor and were all returned by an earlier page.
+        if let Some(c) = self.cursor {
+            if c > sub_rel && !c.starts_with(sub_rel) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// One directory child, kept only long enough to order its siblings.
+struct Child {
+    name: String,
+    is_dir: bool,
+    /// The child's position in full-key order: a directory contributes the
+    /// key prefix `name/`, a file the key `name`. Precomputed because the
+    /// sort compares it O(n log n) times.
+    sort_key: String,
+    /// `std::fs`, not `compio::fs`: this is the blocking walk's own stat.
+    meta: std::fs::Metadata,
+}
+
+impl Child {
+    fn new(name: String, is_dir: bool, meta: std::fs::Metadata) -> Self {
+        let sort_key = if is_dir { format!("{name}/") } else { name.clone() };
+        Self { name, is_dir, sort_key, meta }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +742,24 @@ mod tests {
         be.put(APP, BUCKET, key, body, ct)
             .await
             .unwrap_or_else(|e| panic!("put {key}: {e}"));
+    }
+
+    /// Every key under `prefix`, obtained by paging to exhaustion. Tests that
+    /// care about *which* keys exist (not about paging) use this.
+    async fn list_keys(be: &LocalFs, prefix: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = be
+                .list(APP, BUCKET, ListRequest { prefix, cursor: cursor.as_deref(), limit: 1000 })
+                .await
+                .expect("list page");
+            keys.extend(page.entries.into_iter().map(|e| e.key));
+            match page.cursor {
+                Some(c) => cursor = Some(c),
+                None => return keys,
+            }
+        }
     }
 
     async fn content_type_of(be: &LocalFs, key: &str) -> Option<String> {
@@ -740,9 +907,121 @@ mod tests {
                 Some("image/png")
             );
 
-            let keys: Vec<String> =
-                be.list(APP, BUCKET, "").await.unwrap().into_iter().map(|e| e.key).collect();
+            let keys: Vec<String> = list_keys(&be, "").await;
             assert_eq!(keys, vec![".avatar.png.meta".to_string(), "avatar.png".to_string()]);
+        });
+    }
+
+    // -- pagination ---------------------------------------------------------
+
+    /// A listing larger than the requested page MUST report itself as
+    /// incomplete, and resuming from the reported cursor MUST yield every
+    /// remaining key exactly once, in order.
+    ///
+    /// Does NOT catch: anything about the cost of producing a page (the walk
+    /// could still read the whole subtree and this would pass), nor concurrent
+    /// mutation between pages.
+    #[test]
+    fn a_listing_larger_than_the_page_reports_itself_incomplete() {
+        let root = TempRoot::new("paginate");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            let all: Vec<String> = (0..7).map(|i| format!("k{i}.txt")).collect();
+            for k in &all {
+                put_bytes(&be, k, b"x", None).await;
+            }
+
+            let mut seen: Vec<String> = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut pages = 0;
+            loop {
+                let page = be
+                    .list(APP, BUCKET, ListRequest { prefix: "", cursor: cursor.as_deref(), limit: 3 })
+                    .await
+                    .expect("list page");
+                assert!(page.entries.len() <= 3, "page overran the requested limit");
+                pages += 1;
+                seen.extend(page.entries.iter().map(|e| e.key.clone()));
+                match page.cursor {
+                    Some(c) => cursor = Some(c),
+                    None => break,
+                }
+                assert!(pages < 10, "pagination did not terminate");
+            }
+            assert_eq!(pages, 3, "7 keys at limit 3 must take exactly 3 pages");
+            assert_eq!(seen, all, "paging must yield every key exactly once, in order");
+        });
+    }
+
+    /// Paged order must be the FULL-KEY lexicographic order, which is not the
+    /// same as walking sorted directory entries naively: `/` (0x2F) sorts
+    /// above `-` (0x2D), so `a-c` precedes `a/b` even though the directory
+    /// entry `a` precedes the file `a-c`.
+    ///
+    /// Does NOT catch: ordering across a backend boundary (that is the parity
+    /// test's job).
+    #[test]
+    fn paged_order_is_full_key_order_not_directory_order() {
+        let root = TempRoot::new("order");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            let keys = ["a/b", "a/z", "a-c", "ab", "a.d"];
+            for k in keys {
+                put_bytes(&be, k, b"x", None).await;
+            }
+            let mut expected: Vec<String> = keys.iter().map(|s| (*s).to_string()).collect();
+            expected.sort();
+
+            let mut seen: Vec<String> = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let page = be
+                    .list(APP, BUCKET, ListRequest { prefix: "", cursor: cursor.as_deref(), limit: 2 })
+                    .await
+                    .expect("list page");
+                seen.extend(page.entries.iter().map(|e| e.key.clone()));
+                match page.cursor {
+                    Some(c) => cursor = Some(c),
+                    None => break,
+                }
+            }
+            assert_eq!(seen, expected);
+        });
+    }
+
+    /// The blocking-IO fix, pinned STRUCTURALLY: the directory walk must not
+    /// execute on the thread that called `list` — that thread drives V8 and
+    /// every co-resident app's requests on a worker.
+    ///
+    /// Deliberately NOT a wall-clock assertion. It asserts only where the walk
+    /// ran, which `spawn_blocking` decides deterministically (an `Asyncify` op
+    /// is always dispatched to a pool thread, never run inline).
+    ///
+    /// Does NOT catch: how long the walk takes, whether the page is bounded,
+    /// or any OTHER blocking syscall this file might make on the caller thread.
+    #[test]
+    fn the_directory_walk_runs_off_the_calling_thread() {
+        let root = TempRoot::new("offthread");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            put_bytes(&be, "only.txt", b"x", None).await;
+            *LAST_WALK_THREAD.lock().unwrap() = None;
+
+            let caller = std::thread::current().id();
+            let page = be
+                .list(APP, BUCKET, ListRequest { prefix: "", cursor: None, limit: 10 })
+                .await
+                .expect("list");
+            assert_eq!(page.entries.len(), 1);
+
+            let walked = LAST_WALK_THREAD
+                .lock()
+                .unwrap()
+                .expect("the walk must have recorded the thread it ran on");
+            assert_ne!(
+                walked, caller,
+                "the directory walk ran on the calling (V8 + event-loop) thread"
+            );
         });
     }
 
@@ -758,8 +1037,7 @@ mod tests {
                 content_type_of(&be, "a/b/c.svg").await.as_deref(),
                 Some("image/svg+xml")
             );
-            let keys: Vec<String> =
-                be.list(APP, BUCKET, "").await.unwrap().into_iter().map(|e| e.key).collect();
+            let keys: Vec<String> = list_keys(&be, "").await;
             assert_eq!(keys, vec!["a/b/c.svg".to_string()]);
 
             // A key that names an intermediate DIRECTORY is not an object.

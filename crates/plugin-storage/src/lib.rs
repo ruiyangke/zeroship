@@ -10,7 +10,9 @@
 //! - `zeroship.storage.put(bucket, key, bytesBase64, contentType?)` → Promise<{ bucket, key, size }>
 //! - `zeroship.storage.get(bucket, key)` → Promise<{ bytesBase64, contentType, size } | null>
 //! - `zeroship.storage.delete(bucket, key)` → Promise<{ deleted: bool }>
-//! - `zeroship.storage.list(bucket, prefix)` → Promise<[{ key, size, modifiedAt }]>
+//! - `zeroship.storage.list(bucket, prefix?, { cursor?, limit? })` →
+//!   Promise<{ entries: [{ key, size, modifiedAt }], cursor: string | null }>
+//!   — paginated; `cursor` is non-null iff more keys remain.
 //!
 //! Streaming (no whole-object buffering — see `callbacks` and the proposal's
 //! "env.storage streaming through V8" section):

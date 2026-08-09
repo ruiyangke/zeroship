@@ -70,6 +70,43 @@ pub struct ListEntry {
     pub modified_at: SystemTime,
 }
 
+/// One page request for [`Backend::list`].
+///
+/// `list` is paginated on every backend because the alternative — hand back
+/// whatever the bucket happens to hold — makes the cost of a single app
+/// request scale with that app's stored-object count, on a thread shared with
+/// every co-resident app.
+#[derive(Debug, Clone, Copy)]
+pub struct ListRequest<'a> {
+    /// Literal key prefix (not a glob). Empty lists the whole app-bucket.
+    pub prefix: &'a str,
+    /// Resume strictly AFTER this key. `None` starts at the beginning.
+    /// Always a key a previous page returned as [`ListPage::cursor`].
+    pub cursor: Option<&'a str>,
+    /// Maximum entries this page may contain. Backends MUST NOT exceed it.
+    /// Resolved from the caller's request by [`crate::limits::resolve_list_limit`].
+    pub limit: usize,
+}
+
+/// One page of a listing.
+///
+/// The `cursor` is what makes a truncated listing distinguishable from a
+/// complete one. A silent cap would be worse than the unbounded listing it
+/// replaced: it looks like a complete answer.
+#[derive(Debug, Clone)]
+pub struct ListPage {
+    /// Entries in ascending key order, at most `ListRequest::limit` of them.
+    pub entries: Vec<ListEntry>,
+    /// `Some(key)` iff MORE entries exist beyond this page — pass it back as
+    /// [`ListRequest::cursor`]. `None` means the listing is COMPLETE.
+    ///
+    /// It is the last key of this page rather than an opaque token so that
+    /// both backends can resume from it natively (a lexicographic walk
+    /// position on `LocalFs`, S3's `start-after` on the S3 leg) and so paging
+    /// is not tied to one backend's continuation format.
+    pub cursor: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Chunk streams — the dyn-compatible streaming seam
 // ---------------------------------------------------------------------------
@@ -172,12 +209,16 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         key: &str,
     ) -> Result<bool, String>;
 
+    /// List one page of keys. Entries come back in ascending key order, and
+    /// never more than `req.limit` of them; [`ListPage::cursor`] tells the
+    /// caller whether more remain. There is deliberately no "list everything"
+    /// entry point — see [`ListRequest`].
     async fn list(
         &self,
         app_id: &str,
         bucket: &str,
-        prefix: &str,
-    ) -> Result<Vec<ListEntry>, String>;
+        req: ListRequest<'_>,
+    ) -> Result<ListPage, String>;
 
     // -- Buffered conveniences, built on the streaming path ----------------
 

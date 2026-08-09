@@ -15,7 +15,11 @@ interface NativeStorage {
   put(bucket: string, key: string, bytesBase64: string, contentType?: string): Promise<string>;
   get(bucket: string, key: string): Promise<string>;
   delete(bucket: string, key: string): Promise<string>;
-  list(bucket: string, prefix?: string): Promise<string>;
+  list(
+    bucket: string,
+    prefix?: string,
+    opts?: { cursor?: string; limit?: number },
+  ): Promise<string>;
   putStream(
     bucket: string,
     key: string,
@@ -81,7 +85,7 @@ function mockNative(): { native: NativeStorage; cancels: number[] } {
       return JSON.stringify({ deleted: true });
     },
     async list() {
-      return JSON.stringify([]);
+      return JSON.stringify({ entries: [], cursor: null });
     },
     async putStream(_b, key, body, _ct) {
       const bytes = await drainStream(body);
@@ -182,5 +186,80 @@ describe("@zeroship/storage streaming", () => {
     const b = new Bucket("uploads", wrapped);
     await b.put("small.txt", "hello");
     assert.equal(putStreamCalls, 0, "string body must go through buffered put, not putStream");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// list pagination
+// ---------------------------------------------------------------------------
+
+// A native `list` over a fixed key set that honours `cursor` + `limit` the
+// way both Rust backends do: ascending key order, resume strictly after the
+// cursor, `cursor: null` iff the listing is complete.
+function pagingNative(keys: string[]): NativeStorage & { calls: number } {
+  const sorted = [...keys].sort();
+  const stub = {
+    calls: 0,
+    async list(_b: string, prefix = "", opts: { cursor?: string; limit?: number } = {}) {
+      stub.calls++;
+      const limit = opts.limit ?? 1000;
+      const matching = sorted.filter(
+        (k) => k.startsWith(prefix) && (opts.cursor === undefined || k > opts.cursor),
+      );
+      const entries = matching.slice(0, limit).map((k) => ({ key: k, size: 1, modifiedAt: 0 }));
+      const more = matching.length > limit;
+      return JSON.stringify({
+        entries,
+        cursor: more ? entries[entries.length - 1]!.key : null,
+      });
+    },
+  } as unknown as NativeStorage & { calls: number };
+  return stub;
+}
+
+describe("@zeroship/storage list pagination", () => {
+  test("a truncated page reports a cursor and a complete one reports null", async () => {
+    const native = pagingNative(["a", "b", "c"]);
+    const b = new Bucket("uploads", native);
+
+    const first = await b.list("", { limit: 2 });
+    assert.deepEqual(first.data!.entries.map((e) => e.key), ["a", "b"]);
+    assert.equal(first.data!.cursor, "b", "a truncated listing must say so");
+
+    const second = await b.list("", { limit: 2, cursor: first.data!.cursor! });
+    assert.deepEqual(second.data!.entries.map((e) => e.key), ["c"]);
+    assert.equal(second.data!.cursor, null, "an exhausted listing must report cursor null");
+  });
+
+  test("listAll pages lazily and stops fetching when the caller breaks", async () => {
+    const native = pagingNative(["k1", "k2", "k3", "k4", "k5", "k6"]);
+    const b = new Bucket("uploads", native);
+
+    const all: string[] = [];
+    for await (const e of b.listAll("", { limit: 2 })) all.push(e.key);
+    assert.deepEqual(all, ["k1", "k2", "k3", "k4", "k5", "k6"]);
+    // 3 full pages + 1 that reports the end.
+    assert.equal(native.calls, 3, "listAll must page, not re-list");
+
+    native.calls = 0;
+    const firstTwo: string[] = [];
+    for await (const e of b.listAll("", { limit: 2 })) {
+      firstTwo.push(e.key);
+      if (firstTwo.length === 2) break;
+    }
+    assert.deepEqual(firstTwo, ["k1", "k2"]);
+    assert.equal(native.calls, 1, "breaking out must not fetch the remaining pages");
+  });
+
+  test("listAll throws rather than ending the iteration on a failed page", async () => {
+    const native = {
+      async list() {
+        throw new Error("backend exploded");
+      },
+    } as unknown as NativeStorage;
+    const b = new Bucket("uploads", native);
+    await assert.rejects(async () => {
+      for await (const _ of b.listAll()) { /* unreachable */ }
+    }, /backend exploded/);
   });
 });

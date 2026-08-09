@@ -8,7 +8,8 @@
 //   • bucket.put(key, body) — store bytes / text (+ optional contentType)
 //   • bucket.get(key)       — read an object back (bytes + contentType + size)
 //   • bucket.getText(key)   — convenience UTF-8 read
-//   • bucket.list(prefix)   — enumerate keys (+ size + modifiedAt)
+//   • bucket.list(prefix, {cursor, limit}) — one PAGE of keys (+ size +
+//                             modifiedAt) plus a cursor when more remain
 //   • bucket.delete(key)    — remove an object
 //
 // Wire IDs are explicit and dotted: each export becomes an RPC procedure
@@ -65,6 +66,12 @@ export type ListEntryDto = {
   key: string;
   size: number;
   modifiedAt: number;
+};
+
+export type ListPageDto = {
+  entries: ListEntryDto[];
+  /** Non-null iff more keys remain — pass it back as `cursor` for the next page. */
+  cursor: string | null;
 };
 
 export type DeleteResult = {
@@ -131,16 +138,33 @@ export const get = query(
 );
 
 // ---------------------------------------------------------------------------
-// list — enumerate keys (optionally filtered by prefix).
+// list — one page of keys (optionally filtered by prefix).
+//
+// `list` is paginated on purpose: an "enumerate everything" call would make
+// one request cost whatever the bucket happens to hold. The returned `cursor`
+// is the truncation signal — non-null means more keys remain, so a client that
+// wants them all loops until it comes back null. (`store().listAll(prefix)` is
+// the SDK's lazy async-iterator over exactly that loop.)
 // ---------------------------------------------------------------------------
 export const list = query(
-  async ({ prefix = "" }: { prefix?: string }): Promise<ListEntryDto[]> => {
-    const entries = must(await store().list(prefix));
-    return entries.map((e) => ({
-      key: e.key,
-      size: e.size,
-      modifiedAt: e.modifiedAt.getTime(),
-    }));
+  async ({
+    prefix = "",
+    cursor,
+    limit,
+  }: {
+    prefix?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<ListPageDto> => {
+    const page = must(await store().list(prefix, { cursor, limit }));
+    return {
+      entries: page.entries.map((e) => ({
+        key: e.key,
+        size: e.size,
+        modifiedAt: e.modifiedAt.getTime(),
+      })),
+      cursor: page.cursor,
+    };
   },
   { id: "gallery.list" },
 );
