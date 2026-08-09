@@ -79,7 +79,17 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
   wait 2>/dev/null || true
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  [ -n "$WORK" ] && rm -rf "$WORK"
+  # Keep the logs when anything failed. This trap used to remove $WORK
+  # unconditionally, so a run destroyed worker.log in the same breath as the
+  # failure it recorded - the response body is the generic production error, so
+  # the only copy of the real cause went with it.
+  if [ -n "$WORK" ]; then
+    if [ "${FAIL:-0}" -gt 0 ] || [ "${KNOWN:-0}" -gt 0 ] || [ "${KEEP_LOGS:-0}" = "1" ]; then
+      echo "  logs kept at $WORK (control.log/worker.log/gate.log)"
+    else
+      rm -rf "$WORK"
+    fi
+  fi
   echo "  stack down, ephemeral PG removed"
 }
 trap cleanup EXIT
