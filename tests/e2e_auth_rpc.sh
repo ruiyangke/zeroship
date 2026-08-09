@@ -57,23 +57,48 @@ ZSHIP="$ROOT/examples/auth-notes/dist/app.zship"
 APP_ID="$(deploy_zship "auth-notes-ax" "$ZSHIP")" || { fail "deploy auth-notes"; exit 1; }
 pass "deployed auth-notes ($APP_ID)"
 HOST="auth-notes-ax.localhost"
-OAC="oac_e2e_authrpc"
 SECTOR="https://$HOST"
 
-# --- Provision the app's per-app OAuth client (what control's OAuth-client
-# provisioning does). resolve_auth needs route.oauth_client_id + sector_identifier
-# (else 503/401); the gateway picks these up from control's LEFT JOIN on
-# app_oauth_clients.
-docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+# --- The app's per-app OAuth client. resolve_auth needs route.oauth_client_id +
+# sector_identifier (else 503/401), and the session cookie's `app` claim must
+# match that client_id.
+#
+# Since cd54028e7 ("cut end-user login to the platform OP via per-app brokered
+# oac_ clients") CONTROL brokers the client at app-create time, so this harness
+# must READ what control provisioned rather than insert its own. It used to
+# insert `oac_e2e_authrpc`, which after that change lost the race with the
+# brokered row and produced `app mismatch: token "oac_e2e_authrpc" != expected
+# "oac_<brokered>"` on every authed call -- measured 2026-08-09 as 12 passed /
+# 4 failed, with all four failures the authenticated assertions.
+OAC=""
+for _ in $(seq 1 20); do
+  OAC="$(docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc \
+    "SELECT client_id FROM zeroship.app_oauth_clients WHERE app_id = '$APP_ID';" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$OAC" ] && break
+  sleep 1
+done
+if [ -n "$OAC" ]; then
+  pass "control brokered the app's OAuth client ($OAC)"
+else
+  OAC="oac_e2e_authrpc"
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes)
 VALUES ('$OAC', 'e2e auth-rpc', ARRAY['https://$HOST/__zeroship/auth/callback'],
         ARRAY['openid','email','profile'])
 ON CONFLICT (client_id) DO NOTHING;
 INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier)
-VALUES ('$APP_ID', '$OAC', '$SECTOR')
-ON CONFLICT (app_id) DO UPDATE SET client_id = EXCLUDED.client_id, sector_identifier = EXCLUDED.sector_identifier;
+VALUES ('$APP_ID', '$OAC', '$SECTOR');
 SQL
-[ $? -eq 0 ] && pass "provisioned app_oauth_clients ($OAC)" || fail "provision failed"
+  [ $? -eq 0 ] && pass "control brokered nothing; harness provisioned app_oauth_clients ($OAC)" \
+    || fail "provision failed"
+fi
+# The gateway fails CLOSED with 503 client_not_provisioned when the route has no
+# sector_identifier (it cannot derive the pairwise subject). Fill it if control
+# left it null.
+docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship >/dev/null 2>&1 <<SQL
+UPDATE zeroship.app_oauth_clients SET sector_identifier = '$SECTOR'
+WHERE app_id = '$APP_ID' AND (sector_identifier IS NULL OR sector_identifier = '');
+SQL
 
 # --- Mint an app session cookie (offline, gateway Ed25519 key). Same kid format
 # as the gateway's RFC-7638 thumbprint (sha256 of canonical OKP JWK → base64url).
