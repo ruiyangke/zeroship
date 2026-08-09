@@ -75,14 +75,20 @@ impl SchemaScope {
 
 /// Destructive operation posture. Ordered from more restrictive to less
 /// restrictive: `forbid` ⊑ `warn` ⊑ `allow`. This is the enforceable
-/// `sec.destructive_ops` guard posture ONLY — the guard denies/warns/allows a
+/// `safety.destructive_ops` guard posture ONLY — the guard denies/warns/allows a
 /// destructive statement by it.
 ///
 /// Approval is NOT one of these states. It is the separate, host-enforced
 /// `safety.require_approval` obligation (`never`/`on_destructive`/`always`) the engine
 /// only DECLARES (see [`crate::policy_registry::KEY_SAFETY_REQUIRE_APPROVAL`] +
 /// [`crate::policy_approval`]); it composes independently of this posture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// No `Default`: the authoritative default is the knob registry's `forbid`, and a
+/// derived one here could only disagree with it. The two sibling postures that
+/// carried a `#[default]` on their loosest variant went with the struct that read
+/// them; the three that survive (`TrustProfile`, `SchemaScope`, `AuthorPkPolicy`)
+/// all state their posture explicitly. Callers that need a value ask the effective
+/// policy for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestructiveOps {
     /// Forbid destructive operations.
@@ -90,7 +96,6 @@ pub enum DestructiveOps {
     /// Allow destructive operations and surface a structured warning.
     Warn,
     /// Allow destructive operations silently.
-    #[default]
     Allow,
 }
 
