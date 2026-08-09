@@ -20,6 +20,23 @@ import { randomUUID } from "node:crypto";
 
 import { computeManifestExtras } from "../src/manifest.js";
 
+// A declared `rpc:` leaf must be backed by a discovered procedure — the
+// manifest emitter refuses a policy that names nothing, which is what a
+// procedure module missing its `"use server"` directive produces. These
+// fixtures exist to exercise policy INHERITANCE, so they supply the
+// matching procedure explicitly rather than leaning on the emitter
+// tolerating an orphan key.
+function procFor(root: string, id: string) {
+  return {
+    filePath: resolve(root, "src/server.ts"),
+    exportName: id.split(".").pop() as string,
+    moduleSlug: "src-server",
+    kind: "mutation" as const,
+    isStream: false,
+    config: { id },
+  };
+}
+
 async function makeConfigFixture(source: string): Promise<{
   root: string;
   cleanup: () => Promise<void>;
@@ -106,7 +123,7 @@ export default defineApp({
     try {
       const r = await computeManifestExtras({
         root: fx.root,
-        procedures: [],
+        procedures: [procFor(fx.root, "todos.delete")],
         mode: "production",
       });
       assert.equal(r.resources["rpc:todos.delete"].auth, "admin");
@@ -130,7 +147,7 @@ export default defineApp({
     try {
       const r = await computeManifestExtras({
         root: fx.root,
-        procedures: [],
+        procedures: [procFor(fx.root, "todos.add")],
         mode: "production",
       });
       assert.equal(r.resources["rpc:todos.add"].idempotent, true);

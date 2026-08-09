@@ -46,9 +46,22 @@ export default defineApp({
 });
 `);
     try {
+      // Each declared `rpc:` leaf is backed by a discovered procedure.
+      // The emitter refuses a leaf that names no procedure (the case a
+      // module missing its `"use server"` directive produces), and this
+      // test is about flattening, not about that gate.
       const r = await computeManifestExtras({
         root: fx.root,
-        procedures: [],
+        procedures: (["todos.list", "todos.add", "todos.delete"] as const).map(
+          (id) => ({
+            filePath: resolve(fx.root, "src/server.ts"),
+            exportName: id.split(".")[1],
+            moduleSlug: "src-server",
+            kind: "mutation" as const,
+            isStream: false,
+            config: { id },
+          }),
+        ),
         mode: "production",
       });
       assert.ok(r.resources["rpc:todos"], "parent retained");
