@@ -70,6 +70,11 @@ explicitly by the comparison script rather than papered over:
 
 - **`step.call` does not work under `pnpm dev`.** The local mini-engine rejects
   every child checkpoint with `WorkflowUnsupportedError`. Deployed it works.
-- **Compensators never run under `pnpm dev`.** The local engine has no
-  compensating phase, so a compensable step that fails is left un-rolled-back
-  with no error and no warning. Deployed the compensator runs.
+- **Compensators never run under `pnpm dev`, and the failure says so.** The
+  local engine has no compensating phase, so a compensable step that fails is
+  left un-rolled-back -- `wf.trail` shows `do:reserve` with no `undo:reserve`.
+  What it does NOT do is stay quiet: the run's error carries
+  `compensation: { supported: false, outcome: "not-attempted", type:
+  "WorkflowUnsupportedError", steps: ["reserve"] }`. Deployed, the compensator
+  runs and that same field carries `outcome: "completed"`. `wf.status` projects
+  `error.compensation` precisely so this pair is visible on both sides.

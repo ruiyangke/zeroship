@@ -22,5 +22,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 v8 = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
