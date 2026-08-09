@@ -291,8 +291,37 @@ echo "=== Stage 5c: db-todos RPC DIRECT to worker /dispatch (no auth gate) ==="
 # Bypasses the gateway auth gate (empty worker_key ⇒ loopback dispatch is
 # unauthenticated). This is the cleanest proof env.db works on the runtime —
 # IF schema-init succeeds.
-ENVELOPE="$(node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://db-todos-e2e.localhost/__zeroship/v1/users.public",headers:[["content-type","application/json"]],body:JSON.stringify({json:{}})}))')"
-WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/json' -d "$ENVELOPE")"
+# zs_frame <out> <method> <url> <body> — write the dispatch frame the worker
+# actually decodes.
+#
+# /dispatch takes a BINARY frame (crates/core/src/dispatch_frame.rs
+# encode_dispatch_frame): a 4-byte little-endian metadata length, then the
+# {method,url,headers} JSON, then the raw body bytes. The body is NOT a field
+# of the metadata.
+#
+# This harness used to POST a single JSON object with the body inline. The
+# decoder read its first four bytes — `{"me` — as the length prefix, which is
+# 1,701,651,067 against a 64 KiB cap, and answered
+# `invalid envelope: dispatch metadata too large`. Every Stage 5c run failed
+# there, and the failure was reported as "schema-init fails => env.db
+# unreachable", which is a label this script prints regardless of cause. env.db
+# was never reached, so nothing below has ever been evidence about it either way.
+zs_frame() {
+  node -e '
+const fs = require("fs");
+const [out, method, url, body] = process.argv.slice(1);
+const meta = Buffer.from(JSON.stringify({
+  method, url, headers: [["content-type", "application/json"]],
+}), "utf8");
+const len = Buffer.alloc(4);
+len.writeUInt32LE(meta.length, 0);
+fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
+' "$@"
+}
+
+zs_frame "$WORK/frame-users.bin" POST \
+  "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
+WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
 WK_CODE="$(echo "$WK_RESP" | tail -1)"
 WK_BODY="$(echo "$WK_RESP" | head -1)"
 if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
@@ -300,11 +329,13 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
   # Follow up: a mutation + query to fully exercise env.db CRUD.
   UID_VAL="$(echo "$WK_BODY" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json.id)||"")}catch(e){console.log("")}})')"
   if [ -n "$UID_VAL" ]; then
-    CRE="$(node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/todos.create",headers:[["content-type","application/json"]],body:JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}})}))' "$UID_VAL")"
-    C_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/json' -d "$CRE")"
+    zs_frame "$WORK/frame-create.bin" POST "http://x/__zeroship/v1/todos.create" \
+      "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}}))' "$UID_VAL")"
+    C_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
     echo "$C_RESP" | grep -q '"json"' && pass "env.db mutation todos.create over worker" || fail "todos.create failed: $C_RESP"
-    LST="$(node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/todos.list",headers:[["content-type","application/json"]],body:JSON.stringify({json:{userId:process.argv[1]}})}))' "$UID_VAL")"
-    L_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/json' -d "$LST")"
+    zs_frame "$WORK/frame-list.bin" POST "http://x/__zeroship/v1/todos.list" \
+      "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1]}}))' "$UID_VAL")"
+    L_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else
