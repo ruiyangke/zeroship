@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use zeroship_bundle::AuthLevel;
+
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
 use super::auth::{
@@ -1504,6 +1506,7 @@ async fn execute_resource_tree(
             app_id,
             dispatch_path,
             policy,
+            user_header_from_gate.as_deref(),
             &body,
             wall_start,
         )
@@ -1806,15 +1809,106 @@ fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
     }
 }
 
-/// Pre-dispatch idempotency hook: extract `Idempotency-Key`, hash the
-/// body, consult the store, and decide. Only called for
-/// `idempotent: true` mutations; the caller filters by policy.
+/// Resolve who owns this request's dedupe namespace.
+///
+/// `Ok(Some(sub))` is an authenticated caller keyed on their per-app
+/// pairwise subject; `Ok(None)` is the shared anonymous namespace;
+/// `Err(outcome)` refuses the request.
+///
+/// The subject is recovered from the VERIFIED `ZeroShip-User` header, so
+/// the partition is the same identity the worker will act under and is
+/// never a client-supplied value. It keys off the RESOLVED identity, not
+/// the declared auth level: an `auth: "anon"` procedure still resolves a
+/// session for a logged-in visitor, and that visitor gets their own
+/// partition rather than sharing the anonymous one.
+///
+/// A `user`/`admin` procedure with no readable principal is REFUSED. Only
+/// a gateway-side invariant break reaches that arm — `resolve_auth` 401s
+/// an unauthenticated caller long before dispatch, and the header is
+/// minted and MAC'd by this same process moments earlier — but falling
+/// back to the shared anonymous namespace there would be exactly the
+/// cross-user leak the partition exists to prevent.
+fn resolve_dedupe_principal(
+    state: &Arc<GateState>,
+    policy: &crate::compiled::EffectivePolicy,
+    user_header: Option<&str>,
+    wire_id: &str,
+    wall_start: std::time::Instant,
+) -> Result<Option<String>, IdempotencyOutcome> {
+    let principal_sub = user_header.and_then(|h| super::auth::user_header_subject(state, h));
+    match (principal_sub, policy.auth) {
+        (Some(sub), _) => Ok(Some(sub)),
+        (None, AuthLevel::Anon) => Ok(None),
+        (None, AuthLevel::User | AuthLevel::Admin) => {
+            tracing::error!(
+                wire_id = %wire_id,
+                "gateway: idempotent authenticated procedure without a readable principal; \
+                 refusing rather than sharing the anonymous dedupe namespace"
+            );
+            Err(IdempotencyOutcome::ReturnNow(build_zs_error_response(
+                ntex::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                "could not resolve the caller identity for idempotency dedupe",
+                serde_json::json!({ "reason": "idempotency_principal_unavailable" }),
+                false,
+                None,
+                wall_start,
+            )))
+        }
+    }
+}
+
+/// Entropy gate for the SHARED anonymous namespace (spec §8): reject an
+/// `auth: "anon"` procedure's `Idempotency-Key` unless it is a UUIDv4/v7.
+///
+/// Keyed on the DECLARED auth level, not on whether this particular caller
+/// happened to be logged in. The constraint has to be knowable from the
+/// manifest at build time, and a rule that only bit logged-out callers
+/// would make the same key legal or illegal depending on session state.
+///
+/// An empty/absent key returns `None` here so it falls through to
+/// `pre_dispatch`'s `MissingHeader` arm and keeps that more specific error.
+fn reject_low_entropy_anon_key(
+    policy: &crate::compiled::EffectivePolicy,
+    idem_key: Option<&str>,
+    wall_start: std::time::Instant,
+) -> Option<IdempotencyOutcome> {
+    if !matches!(policy.auth, AuthLevel::Anon) {
+        return None;
+    }
+    let key = idem_key.filter(|s| !s.is_empty())?;
+    if idempotency::is_high_entropy_key(key) {
+        return None;
+    }
+    Some(IdempotencyOutcome::ReturnNow(build_zs_error_response(
+        ntex::http::StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        "Idempotency-Key for an anonymous procedure must be a UUIDv4 or UUIDv7",
+        serde_json::json!({ "reason": "anonymous_idempotency_key_must_be_uuid_v4_or_v7" }),
+        false,
+        None,
+        wall_start,
+    )))
+}
+
+/// Pre-dispatch idempotency hook: extract `Idempotency-Key`, resolve the
+/// dedupe namespace's owner, hash the body, consult the store, and
+/// decide. Only called for `idempotent: true` mutations; the caller
+/// filters by policy.
+///
+/// `user_header` is the `ZeroShip-User` header the auth gate resolved for
+/// this request (step 3), or `None` when no identity was resolved. It is
+/// NOT optional bookkeeping: a dedupe hit replays a stored body verbatim,
+/// so the entry key must name the caller it was stored for, or user B
+/// sending user A's `Idempotency-Key` is handed A's response.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_idempotency_pre_dispatch(
     req: &HttpRequest,
-    state: &GateState,
+    state: &Arc<GateState>,
     app_id: &Uuid,
     dispatch_path: &str,
     policy: &crate::compiled::EffectivePolicy,
+    user_header: Option<&str>,
     body: &Bytes,
     wall_start: std::time::Instant,
 ) -> IdempotencyOutcome {
@@ -1835,12 +1929,28 @@ pub(super) async fn handle_idempotency_pre_dispatch(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // Who owns this dedupe namespace, and — for the shared anonymous
+    // namespace — whether this key is allowed into it at all.
+    let principal_sub =
+        match resolve_dedupe_principal(state, policy, user_header, wire_id, wall_start) {
+            Ok(sub) => sub,
+            Err(outcome) => return outcome,
+        };
+    let principal = match principal_sub.as_deref() {
+        Some(sub) => idempotency::Principal::User(sub),
+        None => idempotency::Principal::Anon,
+    };
+    if let Some(outcome) = reject_low_entropy_anon_key(policy, idem_key.as_deref(), wall_start) {
+        return outcome;
+    }
+
     let ttl_hours = idempotency::clamp_ttl_hours(policy.idempotency_ttl_hours);
 
     let decision = idempotency::pre_dispatch(
         state.idempotency_store.as_ref(),
         app_id,
         wire_id,
+        principal,
         idem_key.as_deref(),
         body,
         ttl_hours,
@@ -2842,6 +2952,19 @@ mod tests {
         burst: u32,
         concurrency: u32,
     ) -> Arc<GateState> {
+        build_test_state_inner(worker_urls, rate, burst, concurrency, None)
+    }
+
+    /// As [`build_test_state_with_limits`], but with the signed-session-cookie
+    /// verifier wired in so a test can authenticate a request through the real
+    /// cookie arm of `resolve_auth`.
+    fn build_test_state_inner(
+        worker_urls: Vec<String>,
+        rate: u32,
+        burst: u32,
+        concurrency: u32,
+        session_verifier: Option<Arc<crate::session_token::Verifier>>,
+    ) -> Arc<GateState> {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -2877,7 +3000,7 @@ mod tests {
             signing_key: None,
             prev_signing_key: None,
             session_issuer: None,
-            session_verifier: None,
+            session_verifier,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
             meter: Arc::new(zeroship_metering::Meter::new()),
@@ -3998,6 +4121,7 @@ mod tests {
             &uuid::Uuid::new_v4(),
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &body,
             std::time::Instant::now(),
         )
@@ -4026,7 +4150,7 @@ mod tests {
         let state = make_minimal_state();
         let app_id = uuid::Uuid::new_v4();
         let req = ntex::web::test::TestRequest::default()
-            .header("idempotency-key", "test-key-123")
+            .header("idempotency-key", "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60")
             .to_http_request();
         let policy = idempotent_mutation_policy();
 
@@ -4036,6 +4160,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &Bytes::from_static(b"{\"text\":\"hi\"}"),
             std::time::Instant::now(),
         )
@@ -4045,7 +4170,12 @@ mod tests {
             IdempotencyOutcome::Proceed(handle) => {
                 assert_eq!(
                     handle.entry_key,
-                    crate::idempotency::entry_key(&app_id, "todos.add", "test-key-123")
+                    crate::idempotency::entry_key(
+                        &app_id,
+                        "todos.add",
+                        crate::idempotency::Principal::Anon,
+                        "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60",
+                    )
                 );
                 assert_eq!(handle.ttl_hours, crate::idempotency::DEFAULT_TTL_HOURS);
             }
@@ -4058,7 +4188,7 @@ mod tests {
         let state = make_minimal_state();
         let app_id = uuid::Uuid::new_v4();
         let req = ntex::web::test::TestRequest::default()
-            .header("idempotency-key", "k")
+            .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
         let policy = idempotent_mutation_policy();
         let body = Bytes::from_static(b"{\"x\":1}");
@@ -4070,6 +4200,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &body,
             std::time::Instant::now(),
         )
@@ -4101,6 +4232,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &body,
             std::time::Instant::now(),
         )
@@ -4128,7 +4260,7 @@ mod tests {
         let app_id = uuid::Uuid::new_v4();
         let req_with_key = |body_label: &str| {
             ntex::web::test::TestRequest::default()
-                .header("idempotency-key", "shared-key")
+                .header("idempotency-key", "0e3c5a91-77bd-4d2f-b418-6c9a0f5e2d31")
                 .header("x-test-label", body_label)
                 .to_http_request()
         };
@@ -4141,6 +4273,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &Bytes::from_static(b"{\"a\":1}"),
             std::time::Instant::now(),
         )
@@ -4158,6 +4291,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &Bytes::from_static(b"{\"b\":2}"),
             std::time::Instant::now(),
         )
@@ -4200,7 +4334,7 @@ mod tests {
         let state = make_minimal_state();
         let app_id = uuid::Uuid::new_v4();
         let req = ntex::web::test::TestRequest::default()
-            .header("idempotency-key", "k")
+            .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
         let mut policy = idempotent_mutation_policy();
         policy.idempotency_ttl_hours = Some(48);
@@ -4211,6 +4345,7 @@ mod tests {
             &app_id,
             "/__zeroship/v1/todos.add",
             &policy,
+            None,
             &Bytes::from_static(b"{}"),
             std::time::Instant::now(),
         )
@@ -5758,7 +5893,7 @@ mod tests {
 
         // Request 1: the worker accepts and dies mid-request. The gateway
         // synthesizes its own 502.
-        let mut first = post_idempotent_mutation(state.clone(), "key-outage", b"{\"t\":1}").await;
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             first.status(),
             ntex::http::StatusCode::BAD_GATEWAY,
@@ -5781,7 +5916,7 @@ mod tests {
         );
 
         // Request 2: same key, same body, worker healthy again.
-        let mut second = post_idempotent_mutation(state.clone(), "key-outage", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -5813,12 +5948,12 @@ mod tests {
         let worker = spawn_mock_worker(false, 201);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(state.clone(), "key-ok", b"{\"t\":1}").await;
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(state.clone(), "key-ok", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -5861,12 +5996,12 @@ mod tests {
         let worker = spawn_mock_worker(false, 500);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(state.clone(), "key-500", b"{\"t\":1}").await;
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(first.status(), ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(state.clone(), "key-500", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
@@ -5881,5 +6016,415 @@ mod tests {
             b"{\"id\":2}",
             "the retry must carry the worker's SECOND response, not the stored first",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The dedupe namespace must be partitioned by principal
+    // -----------------------------------------------------------------
+    //
+    // A stored response is replayed VERBATIM to whoever lands on the same
+    // dedupe key. If the key carries no identity, user B sending user A's
+    // `Idempotency-Key` on the same procedure receives A's response body.
+    // The tests below drive that through the REAL cookie auth arm and a
+    // real mock worker, so the assertion is on the BODY the second caller
+    // receives and on whether the worker was reached — never on the key
+    // string's spelling.
+
+    /// Issuer + verifier `iss` for the signed session cookies these tests
+    /// mint. Both sides are under test control, so the value only has to
+    /// agree with itself.
+    const TEST_SESSION_ISS: &str = "https://gate.test";
+
+    /// The per-app OAuth client the authenticated route is bound to. The
+    /// cookie's `app` claim must match it or the cookie arm rejects.
+    const TEST_OAUTH_CLIENT: &str = "oac_idem_test_client";
+
+    const TEST_AUTH_HOST: &str = "idem-auth.zeroship.localhost";
+
+    /// Same shape as [`TEST_AUTH_HOST`] but the procedure is declared
+    /// `auth: "anon"`. A logged-in visitor can still reach it, which is
+    /// why the partition must not key off the declared auth level.
+    const TEST_ANON_HOST: &str = "idem-anon.zeroship.localhost";
+
+    /// A route whose `todos.add` mutation is `auth: "user"` and
+    /// `idempotent: true`, bound to [`TEST_OAUTH_CLIENT`] so the signed
+    /// session cookie can bind to it.
+    fn authenticated_idempotent_route(
+        host: &str,
+        auth: AuthLevel,
+    ) -> zeroship_core::types::RouteEntry {
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "rpc:todos.add".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                auth: Some(auth),
+                publicly_accessible: Some(matches!(auth, AuthLevel::Anon)),
+                idempotent: Some(true),
+                ..Default::default()
+            },
+        );
+        zeroship_core::types::RouteEntry {
+            name: host.to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest: zeroship_bundle::Manifest {
+                version: 1,
+                resources,
+                ..zeroship_bundle::Manifest::default()
+            },
+            oauth_client_id: Some(TEST_OAUTH_CLIENT.to_string()),
+            sector_identifier: Some("https://idem-auth.test".to_string()),
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// State + cookie issuer for the authenticated idempotency tests. The
+    /// gateway verifies the cookie LOCALLY (no DB configured ⇒ the
+    /// revocation gate is skipped), so this is the full production cookie
+    /// arm minus the revocation round-trip.
+    fn authenticated_idempotency_state(
+        worker: &MockWorker,
+    ) -> (Arc<GateState>, crate::session_token::Issuer) {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let verifier = Arc::new(crate::session_token::Verifier::new(
+            &signing.verifying_key(),
+            TEST_SESSION_ISS.to_string(),
+        ));
+        let issuer = crate::session_token::Issuer::new(&signing, TEST_SESSION_ISS.to_string())
+            .expect("session issuer");
+        let state =
+            build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(
+            Uuid::new_v4(),
+            authenticated_idempotent_route(TEST_AUTH_HOST, AuthLevel::User),
+        );
+        routes.insert(
+            Uuid::new_v4(),
+            authenticated_idempotent_route(TEST_ANON_HOST, AuthLevel::Anon),
+        );
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+        (state, issuer)
+    }
+
+    /// Mint a signed session cookie for a distinct end user. `seed` picks
+    /// the global user id, so two different seeds are two different people
+    /// with two different per-app `pws_…` subjects.
+    fn session_cookie_for(issuer: &crate::session_token::Issuer, seed: u128) -> String {
+        let global = Uuid::from_u128(seed).to_string();
+        let sub = zeroship_core::auth::derive_pairwise(
+            &[0u8; 32],
+            &global,
+            "https://idem-auth.test",
+        );
+        issuer
+            .issue(&crate::session_token::SessionMint {
+                app: TEST_OAUTH_CLIENT,
+                sub: &sub,
+                auth_time: None,
+                amr: &[],
+                email: "u@test.invalid",
+                email_verified: true,
+                name: "U",
+                avatar: None,
+                scopes: &[],
+            })
+            .expect("issue session cookie")
+    }
+
+    /// Drive the REAL `handle_request` path for the authenticated mutation
+    /// as the holder of `cookie`, carrying `key` as the `Idempotency-Key`.
+    async fn post_authenticated_mutation(
+        state: Arc<GateState>,
+        host: &str,
+        cookie: &str,
+        key: &str,
+        body: &'static [u8],
+    ) -> HttpResponse {
+        let req = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .uri("/__zeroship/v1/todos.add")
+            .header("host", host)
+            .header("origin", format!("http://{host}"))
+            .header("content-type", "application/json")
+            .header("cookie", format!("zeroship_app_session={cookie}"))
+            .header("idempotency-key", key)
+            .to_http_request();
+        handle_request(
+            req,
+            web_state(state.clone()).await,
+            host,
+            "/__zeroship/v1/todos.add",
+            Bytes::from_static(body),
+        )
+        .await
+    }
+
+    /// THE DEFECT. Two DIFFERENT authenticated users send the SAME
+    /// `Idempotency-Key` on the same procedure with the same body. User B
+    /// must reach the worker and get their OWN response; receiving user A's
+    /// stored body is a cross-user response disclosure.
+    ///
+    /// Asserted on observable behaviour only: the mock worker's served
+    /// counter, and the body bytes B receives (`{"id":2}` is B's own
+    /// execution, `{"id":1}` is A's replayed response).
+    #[compio::test]
+    async fn same_idempotency_key_from_a_different_user_does_not_replay_the_first_users_response() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let (state, issuer) = authenticated_idempotency_state(&worker);
+        let cookie_a = session_cookie_for(&issuer, 1);
+        let cookie_b = session_cookie_for(&issuer, 2);
+        let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+        let mut first =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        assert_eq!(
+            first.status(),
+            ntex::http::StatusCode::CREATED,
+            "user A's mutation must reach the worker",
+        );
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_b, shared_key, b"{\"t\":1}").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            2,
+            "user B's request must REACH the worker — a dedupe hit here means \
+             B was served out of A's cache slot",
+        );
+        assert!(
+            second.headers().get("x-zs-idempotent-replay").is_none(),
+            "B's request is not a replay of anything B sent",
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":2}",
+            "user B must receive their OWN response body, never user A's",
+        );
+    }
+
+    /// CONTROL for the test above, differing in EXACTLY ONE variable: the
+    /// second request carries user A's cookie instead of user B's.
+    /// Everything else — route, key, body, worker — is identical.
+    ///
+    /// The same principal repeating the same key MUST still dedupe: the
+    /// worker is hit once and the second caller gets A's stored body back,
+    /// flagged as a replay. Without this arm, simply switching the
+    /// idempotency cache off would pass the defect test above.
+    #[compio::test]
+    async fn same_idempotency_key_from_the_same_user_still_dedupes_and_replays() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let (state, issuer) = authenticated_idempotency_state(&worker);
+        let cookie_a = session_cookie_for(&issuer, 1);
+        let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+        let mut first =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            1,
+            "the SAME user retrying the SAME key must not re-execute the mutation",
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("x-zs-idempotent-replay")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":1}",
+            "the same user must get their own first response replayed",
+        );
+    }
+
+    /// The partition keys off the RESOLVED identity, not the DECLARED auth
+    /// level. An `auth: "anon"` procedure still resolves a session when the
+    /// visitor happens to be logged in, and two such visitors sharing a key
+    /// must not share a stored response.
+    ///
+    /// This is the arm a spec-literal fix — "partition only `auth:
+    /// user`/`admin`" — would leave open. The key here is a valid UUIDv7,
+    /// so the anonymous entropy gate cannot be what saves it.
+    #[compio::test]
+    async fn logged_in_visitors_to_an_anon_procedure_are_partitioned_too() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let (state, issuer) = authenticated_idempotency_state(&worker);
+        let cookie_a = session_cookie_for(&issuer, 11);
+        let cookie_b = session_cookie_for(&issuer, 12);
+        let shared_key = "018f9a1c-3d2b-7c4e-8f01-2a3b4c5d6e7f";
+
+        let mut first = post_authenticated_mutation(
+            state.clone(),
+            TEST_ANON_HOST,
+            &cookie_a,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
+        assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second = post_authenticated_mutation(
+            state.clone(),
+            TEST_ANON_HOST,
+            &cookie_b,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            2,
+            "a second logged-in visitor must reach the worker even on an anon procedure",
+        );
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":2}",
+            "a logged-in visitor must never be served another visitor's stored body",
+        );
+    }
+
+    /// The anonymous namespace has no principal to partition on, so the
+    /// spec's compensating control is that the key must be unguessable:
+    /// `docs/proposals/rpc.md` §8 requires a UUIDv4/v7 for `auth: "anon"`
+    /// mutations. A guessable key ("checkout-1") is exactly how two
+    /// unrelated anonymous clients collide, so it must be rejected BEFORE
+    /// the worker runs.
+    #[compio::test]
+    async fn anonymous_idempotency_key_must_be_a_uuid() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let state = idempotency_state_for(&worker);
+
+        let mut resp = post_idempotent_mutation(state.clone(), "checkout-1", b"{\"t\":1}").await;
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::BAD_REQUEST,
+            "a low-entropy anonymous idempotency key must be rejected",
+        );
+        assert_eq!(
+            worker.served.load(Ordering::SeqCst),
+            0,
+            "the rejection must happen before the worker is dispatched",
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&collect_body(resp.take_body()).await).expect("error json");
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["details"]["reason"],
+            "anonymous_idempotency_key_must_be_uuid_v4_or_v7",
+        );
+    }
+
+    /// CONTROL for the test above, differing in EXACTLY ONE variable: the
+    /// key is a UUIDv4 instead of "checkout-1". It must be ACCEPTED and
+    /// still dedupe normally — otherwise "reject every anonymous key"
+    /// would pass the test above.
+    #[compio::test]
+    async fn anonymous_uuid_idempotency_key_is_accepted_and_dedupes() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let state = idempotency_state_for(&worker);
+        let key = "9a7f1c2e-5d3b-4a6f-8c1d-2e3f4a5b6c7d";
+
+        let mut first = post_idempotent_mutation(state.clone(), key, b"{\"t\":1}").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+
+        let mut second = post_idempotent_mutation(state.clone(), key, b"{\"t\":1}").await;
+        assert_eq!(worker.served.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            collect_body(second.take_body()).await,
+            b"{\"id\":1}",
+            "a well-formed anonymous key must still dedupe",
+        );
+    }
+
+    /// Defence-in-depth arm, driven directly because it is UNREACHABLE
+    /// end-to-end: on an `auth: "user"` procedure `resolve_auth` 401s a
+    /// caller with no identity long before dispatch, and the
+    /// `ZeroShip-User` header is minted and MAC'd by this same process. If
+    /// that invariant ever breaks, the request must be refused — silently
+    /// falling back to `Principal::Anon` would put an authenticated
+    /// procedure's responses in the namespace every anonymous caller
+    /// shares, which is the leak the partition exists to prevent.
+    #[compio::test]
+    async fn authenticated_procedure_without_a_readable_principal_is_refused() {
+        let state = make_minimal_state();
+        let req = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .header("idempotency-key", "3f2504e0-4f89-41d3-9a0c-0305e82c3301")
+            .to_http_request();
+        let mut policy = idempotent_mutation_policy();
+        policy.auth = AuthLevel::User;
+
+        let outcome = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &uuid::Uuid::new_v4(),
+            "/__zeroship/v1/todos.add",
+            &policy,
+            // The gate said "allowed" but handed over no header — the
+            // invariant break this arm exists for.
+            None,
+            &Bytes::from_static(b"{}"),
+            std::time::Instant::now(),
+        )
+        .await;
+
+        match outcome {
+            IdempotencyOutcome::ReturnNow(mut resp) => {
+                assert_eq!(resp.status(), ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let v: serde_json::Value =
+                    serde_json::from_slice(&collect_body(resp.take_body()).await)
+                        .expect("error json");
+                assert_eq!(v["details"]["reason"], "idempotency_principal_unavailable");
+            }
+            IdempotencyOutcome::Proceed(_) => {
+                panic!("must not dedupe an authenticated procedure under the anonymous namespace")
+            }
+        }
+    }
+
+    /// A UUIDv1 is a timestamp + MAC address: structurally a UUID, but not
+    /// unguessable. The gate is about ENTROPY, not about `Uuid::parse_str`
+    /// succeeding, so v1 must be rejected on the anonymous path.
+    #[compio::test]
+    async fn anonymous_idempotency_key_rejects_a_low_entropy_uuid_version() {
+        use std::sync::atomic::Ordering;
+
+        let worker = spawn_mock_worker(false, 201);
+        let state = idempotency_state_for(&worker);
+        // Version nibble = 1 (time-based), RFC 4122 variant.
+        let v1 = "d9428888-122b-11e1-b85c-61cd3cbb3210";
+
+        let resp = post_idempotent_mutation(state.clone(), v1, b"{\"t\":1}").await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::BAD_REQUEST);
+        assert_eq!(worker.served.load(Ordering::SeqCst), 0);
     }
 }
