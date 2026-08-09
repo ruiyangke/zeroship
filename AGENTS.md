@@ -211,7 +211,7 @@ per-app injection vehicle the plugins stamp from the server-injected `app_id`).
 ```javascript
 import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
-import { storage } from "@zeroship/storage";
+import { bucket } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
 import { Workflow } from "@zeroship/workflows";
 import { query, mutation } from "@zeroship/rpc/server";
