@@ -56,6 +56,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Are both sides the same BUILD? dev runs vite, which spawns `zeroship serve`;
+# the deployed side runs separate server binaries. A partial rebuild leaves
+# them at different commits and this harness would report the version skew as
+# a dev-vs-deployed divergence. That already happened once, in the storage
+# walk, where a worker predating 3e7e5e387 produced an error that read exactly
+# like an S3 list defect. See tests/lib/binary_freshness.sh.
+# shellcheck source=lib/binary_freshness.sh
+source "$ROOT/tests/lib/binary_freshness.sh"
+zs_check_binary_freshness "$ROOT" "$BIN" \
+  "crates/plugin-kv/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src sdks/kv/src" \
+  "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
+  || { [ "$?" -eq 2 ] && exit 2; }
+
 echo "=== dev vs deployed (kv-dashboard) ==="
 
 # --- the probe: one deterministic sequence, printed as RESULTS ---
