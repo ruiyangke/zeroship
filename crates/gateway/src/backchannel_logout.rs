@@ -126,7 +126,20 @@ pub async fn handle(
     }
 
     // Revoke. The verifier guarantees at least one of sub/sid is present.
-    // Prefer sid when present; sub is the all-sessions fallback.
+    //
+    // Prefer sid; sub is the all-sessions fallback. Read that precisely, because
+    // the fallback is WIDER than "sid was absent": it also fires when a sid WAS
+    // supplied and matched ZERO sessions (see the `users.is_empty()` arm below).
+    // So a logout_token carrying both a stale sid and a sub escalates a
+    // single-session signal into "revoke every session this user has at this
+    // app" - one device's signout logs out all of them.
+    //
+    // That escalation is deliberate, not an oversight: if our session table has
+    // drifted from the OP's, over-revoking is the safe direction for a logout.
+    // It is recorded here because the widening is invisible at the call site and
+    // the blast radius is much larger than the token appears to ask for. Whether
+    // an unmatched sid should instead be a no-op is a contract decision, not
+    // something to change from this comment.
     // Check out ONE pooled connection for the whole revocation block.
     // Every DB touch below (session revoke, wrapper-subject revoke, audit
     // insert) runs sequentially with no outbound HTTP in between — the
