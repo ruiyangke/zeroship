@@ -435,11 +435,7 @@ fn project_lock_path(app_path: &Path) -> Result<PathBuf, SqliteActorError> {
             ))
         })?;
         let parent = canonical.parent().unwrap_or_else(|| Path::new("."));
-        Ok(parent.join(format!(
-            ".zero-migrate-{}-{}.lock",
-            meta.dev(),
-            meta.ino()
-        )))
+        Ok(parent.join(format!(".zero-migrate-{}-{}.lock", meta.dev(), meta.ino())))
     }
     #[cfg(not(unix))]
     {
