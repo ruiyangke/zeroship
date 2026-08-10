@@ -57,6 +57,10 @@ more are real and measured, and they all point the same way: **the dev tier
 accepts requests the deployed gateway refuses.** Code that works locally can be
 rejected in production; nothing here fails in the other direction.
 
+This table covers guards that are *weaker* in dev. A flow that is **absent** in
+dev is a different shape and is below, after the table — do not read the three
+rows as the complete list of dev/deployed differences.
+
 | Guard | `pnpm dev` | Deployed |
 | --- | --- | --- |
 | `X-ZS-Auth` header required on `POST /__zeroship/auth/{session,signout}` | not required — the string does not appear in the dev provider at all | required; a request without it is `400 invalid_request` |
@@ -73,9 +77,34 @@ What this means when you build:
   signout actually invalidating access — an admin revoking a device, say —
   that behaviour has no local equivalent to test against.
 
-Both differences are consequences of the dev tier being a single same-origin
-process with no gateway and no server-side session store, not choices made
-against these specific guards.
+All three differences are consequences of the dev tier being a single
+same-origin process with no gateway and no server-side session store, not
+choices made against these specific guards.
+
+### And one thing the dev tier does not have at all: signup
+
+The three guards above are all the same shape — dev is laxer than deployed on a
+flow both tiers run. **Signup is not that shape, which is why it is not in the
+table.** It does not run locally at all.
+
+The dev provider serves exactly four routes (`dev-auth.ts`, the `path ===`
+arms): `/__zeroship/auth/` `authorize`, `popup-callback`, `session`, `signout`.
+The string `signup` does not appear in the file. Deployed, `POST /signup` is a
+real route (`crates/auth/src/server.rs`). Dev users come from **configuration** —
+a `users` list, a `defaultUserId`, and a `passwords` map — never from a creation
+flow.
+
+What this means when you build:
+
+- **Signup has no local execution.** Not "a weaker version locally" — none. The
+  first time your signup path runs is against the deployed platform.
+- **It is therefore uncomparable, not merely uncompared.** The dev-vs-deployed
+  harnesses can diff login, session and signout because both tiers answer them.
+  There is no dev result for signup to diff against, so no comparison test can
+  cover it and none does.
+- Login *is* comparable and is covered: dev's `/authorize` renders a form and
+  checks `passwords[def.id]`, so both tiers take a credential and return a
+  session. `tests/e2e_dev_vs_deployed_login.sh` walks it end to end.
 
 ## The contract (prod tier — unchanged)
 
