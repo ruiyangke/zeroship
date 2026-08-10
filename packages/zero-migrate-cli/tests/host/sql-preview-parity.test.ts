@@ -54,7 +54,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -66,16 +66,8 @@ import { currentIrVersion, previewSql } from "zero-migrate-cli";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = resolve(HERE, "../../../../crates/zero-migrate");
 
-// Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
-// already set an explicit path (mirrors `authoring.test.ts`).
-if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
-  const { platform, arch } = process;
-  const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZERO_MIGRATE_ADDON_PATH = join(
-    HERE,
-    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
-  );
-}
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 // The label `render_ir_envelope_sql` prints for an op it refuses to render offline
 // (`zero_migrate::render::sql_preview::RUNTIME_RESOLVED`).

@@ -21,25 +21,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-cli";
 import { byteValue, decimal, ids, lit, table, t, uuidV4 } from "zero-migrate";
 import { noInjectPolicy } from "./policy.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
-// already set an explicit path (matches `authoring.test.ts`).
-if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
-  const { platform, arch } = process;
-  const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZERO_MIGRATE_ADDON_PATH = join(
-    HERE,
-    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
-  );
-}
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 

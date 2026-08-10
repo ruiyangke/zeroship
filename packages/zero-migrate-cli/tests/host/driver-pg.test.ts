@@ -18,8 +18,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 import type { JsCell, JsReply, JsRequest } from "../../src/addon.js";
 import {
@@ -32,18 +30,9 @@ import { apply } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
-// already set an explicit path (napi's Linux triple spelling is `<plat>-<arch>-gnu`).
-if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
-  const { platform, arch } = process;
-  const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZERO_MIGRATE_ADDON_PATH = join(
-    HERE,
-    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
-  );
-}
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 const PG_URL = pgUrl();
 

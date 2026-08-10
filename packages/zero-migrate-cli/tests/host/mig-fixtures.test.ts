@@ -26,16 +26,8 @@ import { validate } from "zero-migrate-cli";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
-// already set an explicit path (matches `authoring.test.ts`).
-if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
-  const { platform, arch } = process;
-  const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZERO_MIGRATE_ADDON_PATH = join(
-    HERE,
-    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
-  );
-}
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 /** Every dialect the engine lowers for. A fixture must be valid for all of them. */
 const DIALECTS = ["postgres", "mysql", "sqlite"] as const;

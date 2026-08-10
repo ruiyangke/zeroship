@@ -23,8 +23,6 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   apply,
@@ -35,16 +33,9 @@ import {
 import { ids, table, t } from "zero-migrate";
 import { noInjectPolicy } from "./policy.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 
-if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
-  const { platform, arch } = process;
-  const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZERO_MIGRATE_ADDON_PATH = join(
-    HERE,
-    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
-  );
-}
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
