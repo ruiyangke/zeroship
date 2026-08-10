@@ -134,7 +134,14 @@ echo "[check 5] action + runQuery — shareToWebhook composes a query"
 
 # Spin up a one-shot Node HTTP stub that 200s; the action's
 # runQuery(getTodo) reads the row and then fetches the stub.
-SHARE_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();})')
+# `process.stdout.write(String(...))`, NOT `console.log(port)`. console.log
+# routes a non-string through util.inspect, which colourises numbers — the
+# escape codes then land inside SHARE_PORT and get interpolated into the script
+# below as source text, so node dies with:
+#   srv.listen(\u{1b}[33m35411\u{1b}[39m, '127.0.0.1');
+#   SyntaxError: Invalid or unexpected token
+# Same defect class as the 15 JSON-extractor sites fixed in cee243ec4.
+SHARE_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close();})')
 node -e "
 const http = require('http');
 const srv = http.createServer((req, res) => {

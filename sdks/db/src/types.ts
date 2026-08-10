@@ -833,7 +833,20 @@ export interface FieldDef {
   max?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
-  /** Target table name for `t.ref()`. Present iff `type === "ref"`. */
+  /**
+   * Target table name for a foreign key.
+   *
+   * Set by `t.ref()` (which also sets `type: "ref"`), and by the
+   * migration-first pipeline for a column declared
+   * `t.text().references(target, column)` — there the engine descriptor
+   * reports `type: "string"` with `refTarget` alongside it, because the
+   * column's storage really is text. This field is the authoritative marker
+   * that a field IS a reference; `type` describes storage, not relationship.
+   *
+   * The doc here previously read "Present iff `type === \"ref\"`", and
+   * `loadRelations` gated on exactly that, which made `with:` unusable for
+   * every migration-declared foreign key — see `collection/relations.ts`.
+   */
   refTarget?: string;
   /** ON DELETE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
