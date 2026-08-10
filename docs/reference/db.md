@@ -890,8 +890,18 @@ const { data, error } = await db.transaction(async (tx) => {
   error — there is no Result envelope.
 - The transaction is rolled back automatically when the callback throws
   or when the runtime drops the wrapper without commit/rollback.
-- `isolationLevel` accepts `"readCommitted"` (default), `"repeatableRead"`,
-  or `"serializable"`.
+- `isolationLevel` accepts `"read uncommitted"`, `"read committed"` (default),
+  `"repeatable read"` or `"serializable"` — the SQL spellings, with a space.
+  This page documented `"readCommitted"` / `"repeatableRead"` until 2026-08-10;
+  those are the spellings the runtime happens to accept, but they are NOT in the
+  published type (`ZeroshipIsolationLevel`), so a TypeScript caller writing what
+  this page said got `TS2820: Type '"repeatableRead"' is not assignable ... Did
+  you mean '"repeatable read"'?` The type is the contract a creator hits first,
+  so the page now matches it.
+  Note the level only affects the deployed tier: SQLite validates the value and
+  then runs a plain `BEGIN`. See
+  [sqlite-divergences.md](./sqlite-divergences.md#current-differences), which
+  also records what that divergence has and has not been measured under.
 - Outside the callback the result is again a `Result<R>` — the surrounding
   `transaction()` call doesn't throw.
 
