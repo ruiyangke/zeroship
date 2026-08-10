@@ -118,7 +118,31 @@ PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
-  for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  # Kill the CHILD before the subshell. `PIDS` holds SUBSHELL pids, and killing a
+  # subshell does not reap the `vite` it launched: the child is reparented to
+  # init and survives. Measured 2026-08-10 -- three orphaned `node vite.js`
+  # accumulated across consecutive runs (`PPID 1`, each still holding its own
+  # run's `DATABASE_URL`), competed for DEV_PORT, and a later run's race probe
+  # was OOM-killed mid-measurement:
+  #     line 507: 3285383 Killed  RACE_BASE=... node --input-type=module -
+  # which the harness then reported as `dev race produced no runs` plus 96 red
+  # verdicts -- a resource failure wearing a platform failure's clothes.
+  for p in "${PIDS[@]:-}"; do
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+  done
+  # Backstop for a child that re-execs or double-forks past `pkill -P`. Scoped by
+  # THIS run's state dir, read out of the process's own environment, so a
+  # CONCURRENT run's dev server can never be caught by it -- a pid pattern alone
+  # would make two runs of this leg kill each other.
+  # `/proc`-based, so it is a silent no-op off Linux -- there it degrades to the
+  # DEV_PORT sweep below, which is what this harness had before.
+  if [ -n "${DEVSTATE:-}" ]; then
+    for p in $(pgrep -f 'vite' 2>/dev/null); do
+      [ "$p" = "$$" ] && continue   # pgrep -f matches this shell's own cmdline
+      grep -aqs -- "$DEVSTATE" "/proc/$p/environ" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    done
+  fi
   lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
   docker rm -f "$PGC" >/dev/null 2>&1 || true
   [ "${KEEP_WORK:-0}" = "1" ] && { echo "  work dir kept: $WORK"; return; }
