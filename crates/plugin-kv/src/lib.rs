@@ -33,6 +33,7 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 pub mod backend;
 pub mod dispatch;
 pub mod error;
+pub mod holders;
 pub mod limits;
 pub mod v8_class;
 
@@ -42,6 +43,7 @@ pub use backend::RedbBackend;
 #[cfg(feature = "redis")]
 pub use backend::Redis;
 pub use error::KvError;
+pub use holders::{describe_holders, holders_of, Holder};
 pub use v8_class::mint_kv;
 
 // ---------------------------------------------------------------------------
