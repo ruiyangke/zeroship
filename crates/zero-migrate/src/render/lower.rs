@@ -1910,7 +1910,13 @@ pub(crate) fn render_ir_default(
             crate::render::dml::inline_literal(value, dialect).map_err(IrLowerError::DmlAssemble)
         }
         IrDefault::Expr { expr } => {
-            crate::render::dml::render_expr_inline(expr, dialect).map_err(IrLowerError::DmlAssemble)
+            let sql = crate::render::dml::render_expr_inline(expr, dialect)
+                .map_err(IrLowerError::DmlAssemble)?;
+            if dialect == SqlDialect::Mysql && mysql_default_needs_parens(expr) {
+                Ok(format!("({sql})"))
+            } else {
+                Ok(sql)
+            }
         }
         IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
             "container defaults require a column type at render",
@@ -1927,6 +1933,47 @@ pub(crate) fn render_ir_default(
             Ok(crate::render::declarative::nextval_default_expr(sequence))
         }
     }
+}
+
+/// Whether a MySQL `DEFAULT` clause must wrap this expression in parentheses.
+///
+/// MySQL accepts a bare `DEFAULT` body only for a literal and for the
+/// `CURRENT_TIMESTAMP` family; every other expression is a syntax error unless
+/// parenthesised. MEASURED against MySQL 8.4.11:
+///
+/// ```text
+/// DEFAULT UPPER('x')          ERROR 1064    DEFAULT ('x')                ok
+/// DEFAULT 1+1                 ERROR 1064    DEFAULT (1+1)                ok
+/// DEFAULT now()               ok            DEFAULT (now())              ok
+/// DEFAULT CURRENT_TIMESTAMP   ok            DEFAULT (CURRENT_TIMESTAMP)  ok
+/// ```
+///
+/// The decision is made on the IR node rather than on the rendered string so it
+/// never has to classify a rendered literal's spelling.
+///
+/// Two shapes are deliberately left bare even though MySQL would accept them
+/// wrapped, because wrapping them would change SQL that already applies:
+///
+///   - [`Expr::UuidV4`] renders its own parentheses at the leaf
+///     ([`crate::render::renderer`]'s MySQL `uuid_v4`), so wrapping again would
+///     nest a second redundant pair.
+///   - [`SynthFn::Now`] renders as `CURRENT_TIMESTAMP(6)`, which MySQL accepts
+///     bare. Wrapping it is accepted too, so this is not a correctness choice: it
+///     would simply rewrite the DDL every existing MySQL timestamp default emits,
+///     for no gain. Note this is NOT a drift argument - an ordinary default's raw
+///     text is emission metadata that [`crate::model::snapshot::ColumnSnapshot`]
+///     equality deliberately omits, so the stored spelling could differ without
+///     drift noticing either way.
+fn mysql_default_needs_parens(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Literal { .. }
+            | Expr::UuidV4
+            | Expr::FnSynth {
+                r#fn: crate::model::expr::SynthFn::Now,
+                ..
+            }
+    )
 }
 
 pub(crate) fn render_ir_default_for_type(

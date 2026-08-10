@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-cli";
-import { byteValue, decimal, ids, table, t, uuidV4 } from "zero-migrate";
+import { byteValue, decimal, ids, lit, table, t, uuidV4 } from "zero-migrate";
 import { noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -667,6 +667,134 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
       (journal as Array<unknown>).length,
       1,
       "only the seed insert is journaled; the unproven target step never runs",
+    );
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+// An expression column default authored through the public DSL and applied to a
+// real MySQL server.
+//
+// `lower` is one of the scalar functions a default is allowed to call, so this
+// shape is reachable from user-facing authoring rather than from a hand-built IR.
+// MySQL requires a non-literal DEFAULT to be parenthesised: `DEFAULT lower('X')`
+// is a syntax error, `DEFAULT (lower('X'))` is accepted. Measured against the
+// container this suite runs on (8.4.11), by issuing the statements directly:
+//
+//     ADD COLUMN `label` VARCHAR(64) ... DEFAULT lower(_utf8mb4 X'58')
+//       ERROR 1064 (42000): You have an error in your SQL syntax
+//     ADD COLUMN `label` VARCHAR(64) ... DEFAULT 'plain'
+//       accepted
+//
+// The literal migration below is the CONTROL and it applies first. It differs
+// from the expression migration in exactly one variable - the default - so a
+// failure on the second apply while the first succeeds attributes the failure to
+// the default and not to the harness, the database, or the authoring shape.
+test("Live MySQL applies an expression column default, with a literal default as the control", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL expression-default test skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+  });
+  const database = uniqueDatabase("mysql_expr_default");
+  const meta = `${database}_migrations`;
+  const ownerApp = "app_mysql_expr_default";
+
+  const literalDefault = {
+    name: "mysql_literal_default_control",
+    default: {
+      up() {
+        table("literal_labels").create({
+          columns: {
+            label: t.string({ length: 64 }).notNull().default("plain"),
+          },
+        });
+      },
+    },
+  };
+  const expressionDefault = {
+    name: "mysql_expression_default",
+    default: {
+      up() {
+        table("expr_labels").create({
+          columns: {
+            label: t
+              .string({ length: 64 })
+              .notNull()
+              .default(lit("X").lower()),
+          },
+        });
+      },
+    },
+  };
+
+  const deploy = (migration: { name: string }) =>
+    apply({
+      migration,
+      ownerApp,
+      projectSchema: database,
+      driver: { kind: "mysql", url: MYSQL_URL },
+      registry: {},
+      policy: [noInjectPolicy(database)],
+      approved: false,
+      appliedBy: "expression-default-test",
+      nameFallback: migration.name,
+    });
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+
+    await deploy(literalDefault);
+    await admin.query(`INSERT INTO \`${database}\`.\`literal_labels\` () VALUES ()`);
+    const [controlRows] = await admin.query(
+      `SELECT label FROM \`${database}\`.\`literal_labels\``,
+    );
+    assert.deepEqual(
+      (controlRows as Array<Record<string, unknown>>).map((row) =>
+        String(row.label ?? row.LABEL),
+      ),
+      ["plain"],
+      "the control applies and its literal default populates, so the harness reaches MySQL",
+    );
+
+    await deploy(expressionDefault);
+    await admin.query(`INSERT INTO \`${database}\`.\`expr_labels\` () VALUES ()`);
+    const [rows] = await admin.query(`SELECT label FROM \`${database}\`.\`expr_labels\``);
+    assert.deepEqual(
+      (rows as Array<Record<string, unknown>>).map((row) => String(row.label ?? row.LABEL)),
+      ["x"],
+      "the expression default evaluates on insert rather than storing the unevaluated text",
+    );
+
+    // MySQL records a parenthesised default as an expression and reports its own
+    // normalised spelling, so assert on the flag and the function it names rather
+    // than on an exact string this server is free to reformat.
+    const [catalog] = await admin.query(
+      `SELECT COLUMN_DEFAULT AS d, EXTRA AS e
+         FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = '${database}' AND TABLE_NAME = 'expr_labels'
+          AND COLUMN_NAME = 'label'`,
+    );
+    const column = (catalog as Array<{ d: string | null; e: string | null }>)[0];
+    assert.ok(column, "the applied column is in the catalog");
+    assert.equal(
+      column.e,
+      "DEFAULT_GENERATED",
+      "MySQL classes the applied default as an expression, not a literal",
+    );
+    assert.match(
+      String(column.d ?? ""),
+      /lower\(/i,
+      `the stored default is the authored function: ${column.d}`,
     );
   } finally {
     await admin
