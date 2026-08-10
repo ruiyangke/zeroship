@@ -61,6 +61,8 @@ known() { KNOWN=$((KNOWN+1)); echo "  ⚠ $1"; if [ "$STRICT" = "1" ]; then FAIL
 # defined above. (Stages 1–3 + deploy_app below are now thin wrappers over it.)
 # shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"
+# shellcheck source=tests/lib/dispatch_frame.sh
+source "$ROOT/tests/lib/dispatch_frame.sh"
 
 cleanup() {
   echo ""
@@ -270,9 +272,16 @@ fi
 if [ -z "$CSR_APP_ID" ]; then
   known "SKIP RPC stream — csr-todo not deployed / app id not resolvable"
 else
-  ENVELOPE="$(node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://csr-todo-e2e.localhost/__zeroship/v1/searchTodos",headers:[["content-type","application/json"],["accept","text/event-stream"]],body:JSON.stringify({json:{query:"build"}})}))')"
+  # /dispatch decodes a length-prefixed binary frame, not a JSON envelope with
+  # the body inline; the accept header belongs in the frame metadata, not on
+  # the outer POST. See tests/lib/dispatch_frame.sh.
+  zs_write_frame "$WORK/stream-frame.bin" POST \
+    "http://csr-todo-e2e.localhost/__zeroship/v1/searchTodos" \
+    '{"json":{"query":"build"}}' \
+    '[["content-type","application/json"],["accept","text/event-stream"]]'
   curl -s -N -D "$WORK/stream.hdr" -X POST "http://localhost:$WORKER_PORT/dispatch/$CSR_APP_ID" \
-    -H 'content-type: application/json' -d "$ENVELOPE" > "$WORK/stream.body" 2>/dev/null
+    -H 'content-type: application/octet-stream' \
+    --data-binary @"$WORK/stream-frame.bin" > "$WORK/stream.body" 2>/dev/null
   S_CODE="$(awk 'NR==1{print $2}' "$WORK/stream.hdr")"
   S_CT="$(grep -i '^content-type:' "$WORK/stream.hdr" | head -1 | tr -d '\r')"
   # frames: at least one 2:[...] data lane + the d:{} terminator
@@ -384,9 +393,11 @@ else
 
       # node-compat probe: ping over /dispatch (the server bundle w/ openai SDK
       # must init in V8). Drive over worker /dispatch (rpc: is gateway-gated).
-      OAI_ENV="$(node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://openai-demo-e2e.localhost/__zeroship/v1/ping",headers:[["content-type","application/json"]],body:JSON.stringify({json:null})}))')"
+      zs_write_frame "$WORK/oai-frame.bin" POST \
+        "http://openai-demo-e2e.localhost/__zeroship/v1/ping" '{"json":null}'
       OAI_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$OAI_ID" \
-                   -H 'content-type: application/json' -d "$OAI_ENV" 2>/dev/null)"
+                   -H 'content-type: application/octet-stream' \
+                   --data-binary @"$WORK/oai-frame.bin" 2>/dev/null)"
       OAI_CODE="$(echo "$OAI_RESP" | tail -1)"; OAI_BODY="$(echo "$OAI_RESP" | head -1)"
       # Cross-check: node-compat in isolation. Serve the SAME extracted worker
       # bundle under `zeroship serve` with OPENAI_API_KEY in the OS env — if
