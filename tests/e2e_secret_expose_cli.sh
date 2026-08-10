@@ -121,7 +121,7 @@ source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
   "crates/cli/src crates/control/src crates/worker/src crates/gateway/src crates/runtime/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
-  || { [ "$?" -eq 2 ] && exit 2; }
+  || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 # PRECONDITION: the binary under test must actually HAVE these subcommands.
 # `zeroship secret <unrecognised>` prints usage and exits 1, so a `zeroship`

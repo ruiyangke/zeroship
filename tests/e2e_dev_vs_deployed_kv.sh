@@ -113,7 +113,7 @@ source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
   "crates/plugin-kv/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src sdks/kv/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
-  || { [ "$?" -eq 2 ] && exit 2; }
+  || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 echo "=== dev vs deployed (kv-dashboard) ==="
 echo "  mutation: $MUTATE"

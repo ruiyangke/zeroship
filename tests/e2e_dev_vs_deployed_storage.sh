@@ -139,7 +139,7 @@ source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
   "crates/plugin-storage/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src libs/compio-s3/src sdks/storage/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
-  || { [ "$?" -eq 2 ] && exit 2; }
+  || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 # --- the probe: one deterministic sequence, printed as RESULTS -------------
 #
