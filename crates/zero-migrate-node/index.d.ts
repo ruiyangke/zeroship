@@ -296,6 +296,20 @@ export interface GenArtifactsReply {
  * cannot be a Rust enum with data, so the two arms are optional fields; exactly one
  * must be populated. Both arms funnel through the SAME Rust renderer, so their
  * output is byte-identical for equivalent schemas.
+ *
+ * `dialect` and `charterLayers` are both REQUIRED. A caller that goes through these
+ * types never has to think about that, because omitting either is a compile error
+ * that names every one it missed. A caller that skips them learns it one field at a
+ * time: the object is deserialized field by field in the order declared below, so an
+ * absent field reports "Missing field `dialect`" and stops, naming neither this
+ * interface nor the verb, and a second absent field is never reached. A field that is
+ * PRESENT but wrong-typed reports better - that path names the interface and the
+ * field, as in "on GenArtifactsSource.dialect".
+ *
+ * Nothing on this side can improve the absent-field message. The object is
+ * deserialized before `gen_artifacts` is entered, so no check the body performs can
+ * see the raw object, and the absent-field error is never handed the interface name
+ * to begin with.
  */
 export interface GenArtifactsSource {
   /**
