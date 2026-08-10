@@ -171,9 +171,36 @@ impl DialectBuilder for SqliteDialect {
         .to_string()
     }
 
-    /// SQLite's "now" function. Returns the same ISO-8601-shaped string
-    /// the SDK uses on the wire (`YYYY-MM-DD HH:MM:SS`). PG returns
-    /// `NOW()` (timestamp with tz).
+    /// SQLite's "now" function, and the source of a MEASURED tier
+    /// divergence rather than a neutral spelling of PG's `NOW()`.
+    ///
+    /// `CURRENT_TIMESTAMP` renders at WHOLE-SECOND resolution
+    /// (`2026-08-10 16:08:32`), so every row written inside the same second
+    /// shares one `created_at`. Measured standalone: six back-to-back
+    /// inserts into a table defaulting to `CURRENT_TIMESTAMP` gave **1
+    /// distinct value of 6**, against 6 of 6 on the deployed Postgres tier
+    /// (`tests/e2e_dev_vs_deployed_db.sh`, the `tsres` row). SQLite offers
+    /// millisecond forms — `strftime('%Y-%m-%d %H:%M:%f','now')` and
+    /// `unixepoch('now','subsec')` — so this is a resolution the injected
+    /// DDL gives up, not one the engine lacks.
+    ///
+    /// This doc comment previously justified the choice by claiming the
+    /// returned string is "the same ISO-8601-shaped string the SDK uses on
+    /// the wire (`YYYY-MM-DD HH:MM:SS`)". That is FALSE and was the reason
+    /// the resolution loss read as intentional: `created_at` crosses the
+    /// wire as NUMERIC epoch milliseconds on BOTH tiers. Measured over a
+    /// full dev-vs-deployed capture, every `created_at` in every response
+    /// body was numeric and NOT ONE was an ISO string. The shape returned
+    /// here is an internal storage detail that something downstream
+    /// converts; it is not the creator-facing contract, so matching it was
+    /// never an argument for second resolution.
+    ///
+    /// Do not raise the resolution here without tracing that conversion
+    /// first — this function's output is parsed downstream, and adding a
+    /// fractional part is only safe once that path is known to accept one.
+    /// The divergence and its creator-facing consequences are recorded in
+    /// `docs/reference/sqlite-divergences.md` ("System timestamp
+    /// resolution").
     fn now_fn(&self) -> &'static str {
         "CURRENT_TIMESTAMP"
     }
