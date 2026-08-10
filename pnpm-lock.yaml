@@ -71,6 +71,8 @@ catalogs:
       specifier: ^18.3.1
       version: 18.3.1
 
+packageExtensionsChecksum: sha256-vXTUDBZ8J3QwCeSkX5WZJXGEJnUT2ZxrJzdVDN0VpWU=
+
 importers:
 
   .: {}
@@ -125,7 +127,7 @@ importers:
         version: link:../../sdks/ui
       lucide-react:
         specifier: ^1.8.0
-        version: 1.14.0(react@19.2.5)
+        version: 1.14.0(@types/react@19.2.14)(react@19.2.5)
       react:
         specifier: 'catalog:'
         version: 19.2.5
@@ -595,7 +597,7 @@ importers:
         version: 4.1.0
       lucide-react:
         specifier: ^1.8.0
-        version: 1.14.0(react@18.3.1)
+        version: 1.14.0(@types/react@18.3.28)(react@18.3.1)
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -1402,7 +1404,7 @@ importers:
         version: 2.1.1
       lucide-react:
         specifier: ^1.8.0
-        version: 1.14.0(react@19.2.5)
+        version: 1.14.0(@types/react@19.2.14)(react@19.2.5)
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.11.0
@@ -6712,7 +6714,11 @@ packages:
   lucide-react@1.14.0:
     resolution: {integrity: sha512-+1mdWcfSJVUsaTIjN9zoezmUhfXo5l0vP7ekBMPo3jcS/aIkxHnXqAPsByszMZx/Y8oQBRJxJx5xg+RH3urzxA==}
     peerDependencies:
+      '@types/react': '*'
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
 
   lz-string@1.5.0:
     resolution: {integrity: sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==}
@@ -13662,13 +13668,17 @@ snapshots:
   lru.min@1.1.4:
     optional: true
 
-  lucide-react@1.14.0(react@18.3.1):
+  lucide-react@1.14.0(@types/react@18.3.28)(react@18.3.1):
     dependencies:
       react: 18.3.1
+    optionalDependencies:
+      '@types/react': 18.3.28
 
-  lucide-react@1.14.0(react@19.2.5):
+  lucide-react@1.14.0(@types/react@19.2.14)(react@19.2.5):
     dependencies:
       react: 19.2.5
+    optionalDependencies:
+      '@types/react': 19.2.14
 
   lz-string@1.5.0: {}
 

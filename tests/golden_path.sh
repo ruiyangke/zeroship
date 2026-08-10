@@ -61,6 +61,54 @@ DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT"
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
+
+# --- The gate must not be able to pass over zero assertions ----------------
+#
+# Exit status alone cannot tell "everything passed" from "nothing was checked".
+# Every branch below that DETECTS a problem calls fail(), which makes FAIL>0 and
+# turns the final verdict red - so failures are covered. What is NOT covered by
+# the exit status is an assertion that stops FIRING: it emits no pass and no
+# fail, the total silently shrinks, and the run is green about less than it used
+# to be.
+#
+# That is not hypothetical here. Step 4's asset probe is guarded by
+# `if [ -n "$ASSET" ]`, and $ASSET is scraped out of index.html - so the day the
+# starter's index stops referencing a hashed /assets/*.js, the "client JS asset
+# served" proof disappears with no output of any kind. Same shape for a step
+# deleted wholesale in a refactor.
+#
+# Two independent guards, because they catch different things:
+#
+#   1. A TOTAL-PASSED FLOOR. Catches assertions disappearing anywhere.
+#   2. A PER-STEP ran-something check against a DECLARED step list. The floor
+#      cannot see one small step vanish - step 3 is 1 outcome in 24, so losing
+#      it costs 4 percent and any floor loose enough to survive a normal edit
+#      survives that too. The per-step check catches it immediately, and
+#      declaring the ids (rather than counting the steps that happened to run)
+#      is what makes a DELETED step visible rather than merely absent.
+#
+# THE FLOOR NUMBER IS MEASURED, NOT GUESSED. See the block at the bottom of this
+# script for the run it came from and why it sits where it does.
+#
+# BASH ONLY: GP_EXPECTED_STEPS relies on word splitting of an unquoted
+# expansion, which zsh does not do. Under zsh the list collapses to one bogus
+# id and the check reports every step missing - loud, not silently green, which
+# is the intended direction for a check that cannot run.
+GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9"
+declare -A GP_STEP_OUTCOMES=()
+GP_CUR_STEP=""; GP_STEP_BASE=0
+# step <id> <title...>  - prints the banner AND opens an accounting window.
+step() {
+  gp_close_step
+  GP_CUR_STEP="$1"; shift
+  GP_STEP_BASE=$((PASS + FAIL))
+  echo "=== $GP_CUR_STEP. $* ==="
+}
+gp_close_step() {
+  [ -n "$GP_CUR_STEP" ] || return 0
+  GP_STEP_OUTCOMES["$GP_CUR_STEP"]=$((PASS + FAIL - GP_STEP_BASE))
+  GP_CUR_STEP=""
+}
 # `-sTCP:LISTEN` is load-bearing. Plain `lsof -ti :$PORT` matches every socket
 # with that port on EITHER end, so freeing the worker's port also killed the
 # GATEWAY, which merely held a client connection to it -- and the gateway dying
@@ -146,7 +194,7 @@ zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
 # is a separate change rather than an oversight to fix silently.
 
 # --- 1. Build the starter (real vite-plugin → .zship) ---
-echo "=== 1. Build examples/starter (pnpm build → dist/app.zship) ==="
+step 1 "Build examples/starter (pnpm build → dist/app.zship)"
 ( cd "$STARTER" && pnpm build ) >/tmp/gp-build.log 2>&1
 [ -f "$ZSHIP" ] && pass "built $(basename "$ZSHIP") ($(du -k "$ZSHIP" | cut -f1)KB)" || { fail "build produced no app.zship"; tail -20 /tmp/gp-build.log; exit 1; }
 
@@ -192,7 +240,7 @@ else
 fi
 
 # --- 2. Bring up the stack (control + worker + gateway) ---
-echo "=== 2. Bring up the stack ==="
+step 2 "Bring up the stack"
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 rm -rf /tmp/gp-bundles
 
@@ -232,7 +280,7 @@ curl -sf "http://localhost:$WORKER_PORT/health"  >/dev/null && pass "worker heal
 curl -sf "http://localhost:$GATE_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
 
 # --- 3. Create app + deploy the real .zship ---
-echo "=== 3. Create app + deploy ==="
+step 3 "Create app + deploy"
 TOKEN="${ZEROSHIP_TOKEN:-}"
 if [ -n "$TOKEN" ]; then
   APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
@@ -251,7 +299,7 @@ fi
 sleep 4  # gateway route-sync poll
 
 # --- 4. The chain works: gateway serves the deployed app ---
-echo "=== 4. Live: gateway serves the deployed app ==="
+step 4 "Live: gateway serves the deployed app"
 INDEX=$(curl -sf "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
 echo "$INDEX" | grep -qi "<!doctype html" && pass "GET / serves the app index.html" || fail "index.html not served (got: ${INDEX:0:80})"
 
@@ -266,7 +314,7 @@ fi
 # vite-app RPCs are at /__zeroship/v1/<wireId> (GET ?input= for queries), the
 # same path the browser client uses; through the path-routed gateway that's
 # /apps/<name>/__zeroship/v1/<wireId>. getMessages takes no input.
-echo "=== 5. RPC round-trip (server function executes) ==="
+step 5 "RPC round-trip (server function executes)"
 RPC=$(curl -s "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
   -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
 # Assert the SHAPE, not one substring. `grep -q "Build locally"` passed on any
@@ -321,7 +369,7 @@ fi
 # `vite` is spawned directly rather than via `pnpm dev` so the PID is the dev
 # server itself and cleanup cannot leave an orphan behind a package-manager
 # wrapper.
-echo "=== 6. Dev server: pnpm dev serves the same app, and agrees with deployed ==="
+step 6 "Dev server: pnpm dev serves the same app, and agrees with deployed"
 # STARTER_API_PORT is PINNED rather than left at the 3001 default. Several
 # examples share that default, so an unpinned run here inherits whatever else
 # happens to be on 3001 -- and since the runtime port is not vite's, the old
@@ -405,7 +453,7 @@ fi
 # your app. Two instances of the same example are worse: HTTP 200 carrying the
 # other instance's data, indistinguishable from working. So this step asserts
 # the runtime's failure is REFUSED at the proxy, not merely logged.
-echo "=== 7. Dev-runtime supervisor: never-starts is terminal + visible at request time ==="
+step 7 "Dev-runtime supervisor: never-starts is terminal + visible at request time"
 # Step 6's dev server MUST be gone first, and the reason is a second collision
 # that is not the one under test: two dev servers rooted in the SAME project
 # directory also contend for `.zeroship/kv.redb`, and the loser dies with
@@ -538,7 +586,7 @@ fi
 # it is fine, which is what left the dev side opaque for as long as it was.
 #
 # Runs LAST because it stops the worker.
-echo "=== 8. Deployed tier: the same RPC when the app's runtime is unavailable ==="
+step 8 "Deployed tier: the same RPC when the app's runtime is unavailable"
 DEP_URL="http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
 DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL" -H "X-Api-Key: $API_KEY")
 # Kill the worker BY PID. Freeing the port by listener is the safer idiom for
@@ -602,7 +650,7 @@ fi
 # schema to query -- asserting against it would test the absence of a migration,
 # not the presence of a column. Extending step 3 to apply creator migrations is
 # what would let this become a dev-vs-deployed comparison.
-echo "=== 9. Data plane: migration field names survive to the database ==="
+step 9 "Data plane: migration field names survive to the database"
 TODOS="$ROOT/examples/db-todos"
 free_ports "$DB_V" "$DB_RT"
 ( cd "$TODOS" && DB_TODOS_API_PORT="$DB_RT" ./node_modules/.bin/vite --port "$DB_V" --strictPort ) \
@@ -670,9 +718,83 @@ else
   fi
 fi
 
+gp_close_step
+
+# --- The verdict, and the two guards against a green run over nothing -------
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified against the compose Postgres on :5440:
+#
+#     golden path: 24 passed, 0 failed        (exit 0)
+#
+# Per step: 1->2  2->4  3->1  4->2  5->1  6->2  7->7  8->2  9->3  = 24.
+#
+# CROSS-CHECKED against a second, independent instrument, because a count read
+# out of the run it is meant to guard proves only that the run was self-
+# consistent. `grep -c 'pass "'` finds 26 call sites in this file. Two of them
+# (`created app`, `deployed real vite .zship`) live in step 3's ZEROSHIP_TOKEN
+# arm and one (`dev-provisioned app`) in its else arm, so exactly one arm ever
+# fires: 26 - 2 = 24 without a token, 26 - 1 = 25 with one. The dynamic 24 and
+# the static 24 agree, and they disagree for different reasons if either is
+# wrong.
+#
+# 24 IS THEREFORE THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where
+# a floor has to sit - the same reasoning run_billing_suite.sh applies to its
+# REDPANDA_BROKERS measurement. CI runs the no-token arm, so CI sits exactly on
+# the floor.
+#
+# NO HEADROOM, deliberately, and this differs from the cargo-based gates. Their
+# totals are DISCOVERED (feature resolution, optional deps, host capabilities)
+# so a tight floor there fails honest runs. This total is not discovered: it is
+# the number of pass()/fail() call sites this file reaches, fixed by the source.
+# Every legitimate way to change it is an edit to this file, so a floor equal to
+# the measurement costs nothing to raise when assertions are ADDED (25 >= 24
+# passes untouched) and costs a deliberate edit when one is REMOVED. That
+# asymmetry is the whole point.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
+# an easier one keeps the total at 24. Nothing here can see that; review can.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-24}"
+
+# Guard 2: every DECLARED step must have run and asserted something. See the
+# reasoning beside GP_EXPECTED_STEPS at the top of this file.
+gp_silent=0
+for _s in $GP_EXPECTED_STEPS; do
+  _n="${GP_STEP_OUTCOMES[$_s]-MISSING}"
+  if [ "$_n" = "MISSING" ]; then
+    echo "  ✗ step $_s never ran - it was declared in GP_EXPECTED_STEPS and produced no banner"
+    gp_silent=$((gp_silent + 1))
+  elif [ "$_n" -eq 0 ]; then
+    echo "  ✗ step $_s ran but asserted NOTHING - every check inside it was skipped in silence"
+    gp_silent=$((gp_silent + 1))
+  fi
+done
+
 echo ""
 echo "============================================"
-echo "  golden path: $PASS passed, $FAIL failed"
+echo "  golden path: $PASS passed, $FAIL failed (floor $GOLDEN_MIN_PASSED)"
+for _s in $GP_EXPECTED_STEPS; do
+  printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"
+done
 echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
 echo "============================================"
-[ "$FAIL" -eq 0 ]
+
+# Printed on SUCCESS as well as failure: a number nobody sees until the gate has
+# already failed cannot warn anyone.
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$gp_silent" -gt 0 ]; then
+  echo "FAIL: $gp_silent declared step(s) asserted nothing. A step that checks nothing" >&2
+  echo "      is indistinguishable from a step that passed, and this script would" >&2
+  echo "      otherwise have exited 0 over it." >&2
+  rc=1
+fi
+if [ "$PASS" -lt "$GOLDEN_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $GOLDEN_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: either a check stopped firing" >&2
+  echo "      (step 4's asset probe is the one guarded by a conditional) or one was" >&2
+  echo "      removed. If the removal was deliberate, lower GOLDEN_MIN_PASSED in the" >&2
+  echo "      same change and say why; do not treat the gap as slack." >&2
+  rc=1
+fi
+exit "$rc"
