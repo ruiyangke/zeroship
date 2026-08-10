@@ -121,6 +121,30 @@ echo "============================================"
 echo "  zeroship golden path (build-local → deploy)"
 echo "============================================"
 
+# Step 1 runs `pnpm build` inside the EXAMPLE, which consumes whatever
+# `sdks/vite-plugin/dist/` is already on disk. It never rebuilds the plugin. So
+# an edit to the plugin's own source can be silently untested: the run is green
+# about a dist that predates the change, and nothing in the output says so.
+#
+# Every other dev-vs-deployed harness in this directory sources
+# `tests/lib/binary_freshness.sh`; this script was the only one with no
+# freshness check of any kind. WARNS by default (mtime is a weak proxy for
+# provenance -- a rebase touches a file without changing it); set
+# ZS_FRESHNESS_STRICT=1 to refuse, which is what CI wants.
+# shellcheck source=lib/binary_freshness.sh
+source "$ROOT/tests/lib/binary_freshness.sh"
+zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
+  "sdks/vite-plugin/src" || {
+    rc=$?
+    [ "$rc" = "2" ] && { fail "vite-plugin freshness check could not run"; exit 2; }
+    fail "sdks/vite-plugin/dist is stale (ZS_FRESHNESS_STRICT=1)"; exit 1;
+  }
+
+# NOT covered here, and worth knowing: the RUST binaries this script starts are
+# unchecked. `zs_check_binary_freshness` is the function for that and takes the
+# binary directory plus names; wiring it needs this script's binary list, which
+# is a separate change rather than an oversight to fix silently.
+
 # --- 1. Build the starter (real vite-plugin → .zship) ---
 echo "=== 1. Build examples/starter (pnpm build → dist/app.zship) ==="
 ( cd "$STARTER" && pnpm build ) >/tmp/gp-build.log 2>&1

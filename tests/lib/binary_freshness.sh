@@ -102,3 +102,63 @@ zs_check_binary_freshness() {
   echo "  ok   both sides built after the newest source under $crate"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# The same question for a BUILT JS ARTEFACT rather than a Rust binary.
+#
+# `zs_check_binary_freshness` tests `-x`, which is right for binaries and wrong
+# here: `sdks/vite-plugin/dist/index.js` is not executable, so passing it to
+# that function reports it MISSING and returns 2. Rather than relax the `-x`
+# (it is load-bearing there) or copy the logic, this is a companion sharing the
+# same severity contract: WARN by default, refuse under ZS_FRESHNESS_STRICT=1,
+# and return 2 for cannot-answer rather than passing quietly.
+#
+# The gap this closes: `tests/golden_path.sh` runs `pnpm build` inside an
+# EXAMPLE, which consumes whatever `sdks/vite-plugin/dist/` is already on disk.
+# It never rebuilds the plugin, so a change to the plugin's own source can be
+# silently untested -- the run is green about a dist that predates the edit.
+#
+# Usage:
+#   zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
+#     "sdks/vite-plugin/src"
+zs_check_artifact_freshness() {
+  local root="$1" artifact="$2" srcdirs="$3"
+  local strict="${ZS_FRESHNESS_STRICT:-0}"
+
+  local existing=() d
+  for d in $srcdirs; do
+    [ -d "$root/$d" ] && existing+=("$root/$d")
+  done
+  if [ "${#existing[@]}" -eq 0 ]; then
+    echo "  FRESHNESS: none of the named source directories exist: $srcdirs" >&2
+    echo "             The check cannot run, which is not the same as passing." >&2
+    return 2
+  fi
+
+  if [ ! -e "$root/$artifact" ]; then
+    echo "  FRESHNESS: missing $artifact -- run pnpm build" >&2
+    echo "             The check cannot run, which is not the same as passing." >&2
+    return 2
+  fi
+
+  local newest_src
+  newest_src=$(find "${existing[@]}" \( -name '*.ts' -o -name '*.tsx' \) \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+  if [ -z "$newest_src" ]; then
+    echo "  FRESHNESS: matched no .ts or .tsx files under: $srcdirs" >&2
+    echo "             The check cannot run, which is not the same as passing." >&2
+    return 2
+  fi
+
+  if [ "$newest_src" -nt "$root/$artifact" ]; then
+    echo "  WARN $artifact is OLDER than $(printf '%s' "${newest_src#"$root"/}" | cut -d/ -f1-2)"
+    echo "       ($(basename "$newest_src")). This run tests the dist on disk, not"
+    echo "       your source change. Rebuild it, or a green result says nothing"
+    echo "       about the edit you are trying to verify."
+    [ "$strict" = "1" ] && return 1
+    return 0
+  fi
+
+  echo "  ok   $artifact is newer than its source"
+  return 0
+}
