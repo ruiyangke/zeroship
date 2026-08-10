@@ -63,8 +63,8 @@ STRICT="${STRICT:-0}"
 CONTROL_PORT=9099
 WORKER_PORT=8087
 GATE_PORT=8003
-PG_PORT=5445
-REDIS_PORT=6395
+PG_PORT="${PG_PORT:-5445}"
+REDIS_PORT="${REDIS_PORT:-6395}"
 PG_CONTAINER="zs-e2e-auth-pg"
 REDIS_CONTAINER="zs-e2e-auth-redis"
 
@@ -92,13 +92,16 @@ trap cleanup EXIT
 
 jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
-# Build a worker /dispatch request envelope for an RPC procedure `id`,
-# carrying `{json: <args>}` as the body. The worker maps the URL path
+# Build a worker /dispatch request for an RPC procedure `id`, carrying
+# `{json: <args>}` as the body. The worker maps the URL path
 # /__zeroship/v1/<id> to the procedure by its declared `{ id }`.
-envelope() {
-  local id="$1" args="$2"
-  node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/"+process.argv[1],headers:[["content-type","application/json"]],body:JSON.stringify({json:JSON.parse(process.argv[2])})}))' "$id" "$args"
-}
+# The worker decodes a length-prefixed binary frame, not a JSON envelope with
+# the body inline. This used to build the latter, so every dispatch below was
+# refused with "dispatch metadata too large" and env.auth was never exercised
+# over the edge. The ZeroShip-User and x-request-id headers below ride on the
+# OUTER request to /dispatch, not inside the frame, and are unaffected.
+# shellcheck source=tests/lib/dispatch_frame.sh
+. "$ROOT/tests/lib/dispatch_frame.sh"
 
 # Mint a FRESH request id (UUID) on stdout.
 new_request_id() { node -e 'console.log(require("crypto").randomUUID())'; }
@@ -127,18 +130,19 @@ sign_user_header() {
 dispatch() {
   local app="$1" id="$2" args="$3" user_json="${4:-}"
   local rid; rid="$(new_request_id)"
-  local body; body="$(envelope "$id" "$args")"
+  local frame="$WORK/frame-auth-$$.bin"
+  zs_rpc_frame "$frame" "$id" "$args"
   if [ -n "$user_json" ]; then
     local hdr; hdr="$(sign_user_header "$user_json" "$rid")"
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
-      -H 'content-type: application/json' \
+      -H 'content-type: application/octet-stream' \
       -H "x-request-id: $rid" \
       -H "zeroship-user: $hdr" \
-      -d "$body"
+      --data-binary @"$frame"
   else
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
-      -H 'content-type: application/json' \
-      -d "$body"
+      -H 'content-type: application/octet-stream' \
+      --data-binary @"$frame"
   fi
 }
 
@@ -167,11 +171,34 @@ USER_B='{"id":"pws_bob00000000000000b","email":null,"emailVerified":false,"name"
 echo ""
 echo "=== Stage 1: ephemeral Postgres + Redis + migrations ==="
 docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
-  -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-  postgres:16 -c max_connections=300 >/dev/null
-for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
+# Report a failed `docker run` as itself. Previously the exit status was
+# discarded, so a port already bound by some other container produced no
+# container at all and then thirty fruitless pg_isready attempts reported "PG
+# never became ready" - which names the wrong thing and sends you looking at
+# Postgres startup instead of at the port. PG_PORT is overridable for exactly
+# that case.
+if ! docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
+    -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
+    postgres:16 -c max_connections=300 >/dev/null 2>"$WORK/pg-run.err"; then
+  fail "could not start $PG_CONTAINER on :$PG_PORT"
+  sed 's/^/    /' "$WORK/pg-run.err"
+  echo "    another container may hold the port; re-run with PG_PORT=<free port>:"
+  docker ps --format '      {{.Names}}  {{.Ports}}' | grep -F ":$PG_PORT" || true
+  exit 1
+fi
+# Readiness = three CONSECUTIVE successful queries, not one pg_isready: there is
+# a window where pg_isready reports ready and a query still fails, because the
+# entrypoint restarts its initdb-phase server. Same fix as stack_pg_up.
+PG_OK=0
+for i in $(seq 1 60); do
+  if docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+    PG_OK=$((PG_OK + 1)); [ "$PG_OK" -ge 3 ] && break
+  else
+    PG_OK=0
+  fi
+  sleep 1
+done
+[ "$PG_OK" -ge 3 ] && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; docker logs "$PG_CONTAINER" 2>&1 | tail -20; exit 1; }
 
 docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/dev/null
