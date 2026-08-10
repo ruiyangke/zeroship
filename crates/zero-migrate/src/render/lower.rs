@@ -1381,9 +1381,15 @@ pub enum IrLowerError {
     /// live table snapshot (or is a non-FK constraint shape this IR path does not
     /// rebuild). Named FK add/drop changes do lower to the structured 12-step
     /// rebuild when full live structure is available.
+    /// The message states the two reasons as alternatives because they ARE
+    /// alternatives, and only one of them holds on any given refusal. The
+    /// capability route reaches this without inspecting the snapshot at all, so a
+    /// caller who supplied a complete one used to be told it was missing and went
+    /// looking for introspection data it already had.
     #[error(
-        "IrAuthor::lower of SQLite op {0:?} requires a full live table snapshot \
-         and a supported rebuild shape; refusing to emit a partial table rebuild"
+        "IrAuthor::lower of SQLite op {0:?} needs the 12-step table rebuild, which this \
+         path cannot emit: either the op shape is one it does not rebuild, or the live \
+         table snapshot is incomplete. Refusing rather than emitting a partial rebuild"
     )]
     SqliteRebuildOnly(&'static str),
     /// a guarded op whose shape cannot produce a verifiable
@@ -10314,6 +10320,59 @@ mod tests {
             generated: None,
             identity: None,
         }
+    }
+
+    /// The SQLite rebuild refusal does not blame a missing live snapshot when one
+    /// was supplied in full.
+    ///
+    /// One error carries two reasons: this render path does not rebuild the op shape,
+    /// and the live snapshot is absent. The capability gate reaches it without
+    /// inspecting the snapshot at all, so a message asserting both conditions sends a
+    /// reader after introspection data they already have.
+    #[test]
+    fn the_sqlite_rebuild_refusal_does_not_blame_a_snapshot_that_was_supplied() {
+        let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "sqlite_default",
+            "ops": [{
+                "op": "setColumnDefault",
+                "table": "carts",
+                "column": "tags",
+                "value": { "container": "array" }
+            }]
+        }))
+        .expect("IR parses");
+
+        // A COMPLETE snapshot, including the target column and its type.
+        let mut live = LiveSchema::default();
+        live.tables.insert("carts".into());
+        live.table_snapshots.insert(
+            "carts".into(),
+            cursor_test_table(
+                vec![ColumnSnapshot {
+                    name: "tags".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    ..Default::default()
+                }],
+                vec![],
+                vec![],
+            ),
+        );
+
+        let author = test_ir_author("app", "app_a", SqlDialect::Sqlite);
+        let error = author
+            .lower_steps(&ir, &live)
+            .expect_err("SQLite still refuses a default it cannot rebuild");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains("requires a full live table snapshot"),
+            "the refusal must not demand a snapshot the caller supplied: {rendered}"
+        );
+        assert!(
+            rendered.contains("rebuild"),
+            "the refusal must still name the rebuild it declined: {rendered}"
+        );
     }
 
     #[test]
