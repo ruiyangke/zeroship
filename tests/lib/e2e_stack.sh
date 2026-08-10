@@ -63,6 +63,48 @@ E2E_JOSE_JS="$E2E_ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/weba
 _stk_ok()   { if declare -F pass >/dev/null 2>&1; then pass "$1"; else echo "  ✓ $1"; fi; }
 _stk_bad()  { if declare -F fail >/dev/null 2>&1; then fail "$1"; else echo "  ✗ $1"; fi; }
 
+# --- run accounting: four outcomes, not one ---------------------------------
+# These harnesses funnelled four incompatible meanings into a single `known()`
+# counter that does not fail at the default STRICT=0 (audited 2026-08-10, task
+# #256): a real open defect, a missing prerequisite, behaviour that is
+# explicitly NOT a defect, and a branch not reached this run. A counter that
+# means all four cannot be read, and one of the four is not a soft failure at
+# all -- it is the absence of evidence.
+#
+#   pass     the check ran and held
+#   fail     the check ran and did not hold
+#   known    a real, open defect (name a ticket)
+#   skipped  the check DID NOT RUN
+#
+# `skipped` is the one that matters. A harness that could not run a check has
+# produced NO evidence about it, so a run carrying skips must not exit 0 --
+# otherwise a fresh checkout with no built `dist/*.zship` exits green having
+# exercised nothing. Set ALLOW_SKIP=1 to opt out deliberately, which is a
+# choice someone has to type rather than the default.
+e2e_skipped() {
+  SKIPPED=$(( ${SKIPPED:-0} + 1 ))
+  echo "  ⊘ SKIPPED (did not run): $1"
+}
+
+# Print the four counts and return the run's verdict. Callers: `e2e_verdict`
+# as the last statement, or `e2e_verdict || exit 1`.
+e2e_verdict() {
+  local p="${PASS:-0}" f="${FAIL:-0}" k="${KNOWN:-0}" s="${SKIPPED:-0}"
+  echo ""
+  echo "============================================"
+  echo "  Results: $p passed, $f failed, $k known-fail, $s skipped"
+  echo "============================================"
+  if [ "$f" -gt 0 ]; then
+    return 1
+  fi
+  if [ "$s" -gt 0 ] && [ "${ALLOW_SKIP:-0}" != "1" ]; then
+    echo "  FAIL: $s check(s) never ran, so this run is not evidence about them." >&2
+    echo "        Build the missing artifacts, or set ALLOW_SKIP=1 to accept the gap." >&2
+    return 1
+  fi
+  return 0
+}
+
 # node helper: read a JSON field from stdin (e.g. `... | _stk_jget '.id'`)
 _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
