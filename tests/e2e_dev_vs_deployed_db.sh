@@ -972,6 +972,19 @@ reject orphan 'the orphan insert did not succeed' '"json":{"id":"todo_'
 want   orphan 'the FK violation carries its canonical code' '"code":"FOREIGN_KEY_VIOLATION"'
 want   orphanN 'no orphan row exists for the dangling FK' '{"json":0}'
 want   dupEmail 'the duplicate email is refused' '"message"'
+# THE ONE-VARIABLE PARTNER to the FK code assertion above. That one proves a
+# constraint code SURVIVES the deployed rail; it cannot prove the codes
+# DISCRIMINATE, because every class in `is_code_only_public_error` rides the
+# same `matches!` arm -- a rail that collapsed them all to a single code would
+# keep it green. This is the pair: two different constraints must carry two
+# DIFFERENT codes, so a collapse turns one of them red.
+#
+# The row above asserts only '"message"', which is the narrowest projection
+# available on a body that was already carrying the code. Measured on my own
+# run before this line was written:
+#   dupEmail {"message":"internal error","name":"Error",
+#             "code":"UNIQUE_VIOLATION","request_id":"6"}
+want   dupEmail 'the unique violation carries its OWN distinct code' '"code":"UNIQUE_VIOLATION"'
 
 # The relation eager-load replaces the bare FK with the joined row.
 wantre withUser 'userId carries the joined user object' '"userId":\{[^}]*"email":'
@@ -1348,12 +1361,20 @@ fi
 #
 #     27 `pass` call sites outside the helper definitions,
 #        of which 3 sit inside the `for tier in dev deployed` loop      27 + 3
-#     80 `want`/`reject`/`wantre` invocations,
-#        of which 1 sits inside the six-element system-column loop      80 + 5
+#     81 `want`/`reject`/`wantre` invocations,
+#        of which 1 sits inside the six-element system-column loop      81 + 5
+#        (the recount must be INDENT-TOLERANT. That one loop invocation
+#         at ~line 926 is indented; a column-anchored `grep -cE
+#         '^(want|reject|wantre) '` returns 80 and looks like drift when
+#         nothing has drifted. Re-derive with:
+#           grep -v '^[[:space:]]*#' FILE | grep -cE '^[[:space:]]*(want|reject|wantre) '
+#         Checked 2026-08-10: both spellings moved by exactly +1 when this
+#         assertion was added, which is the property that matters -- the
+#         ABSOLUTE values differ by convention, the DELTA does not.)
 #      6 `pgwant` invocations                                                + 6
-#                                                                        = 121
+#                                                                        = 122
 #
-# 121 verdicts emitted, 120 of which pass. The two derivations agree, and they
+# 122 verdicts emitted, 121 of which pass. The two derivations agree, and they
 # fail differently: the dynamic count moves when a tier stops answering or a
 # capture is lost, the static one when an assertion leaves the file.
 #
@@ -1362,7 +1383,7 @@ fi
 # deliberate edit here.
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
-# easier one keeps the total at 121. Nothing here can see that; review can.
+# easier one keeps the total at 122. Nothing here can see that; review can.
 #
 # AND WHAT IT OVER-REPORTS, measured rather than predicted: with no headroom
 # over a standing FAIL, any ADDITIONAL red also drops PASS below the floor, so
@@ -1370,10 +1391,10 @@ fi
 # run where nothing vanished. Observed on the FK mutation runs (119 passed, 2
 # failed). That is noise, not a wrong verdict -- $FAIL had already set exit 1 --
 # and it is the price of the floor being a PASS count. A verdicts-EMITTED floor
-# (PASS+FAIL) would read 121 either way and so would not notice the hazard this
+# (PASS+FAIL) would read 122 either way and so would not notice the hazard this
 # guard exists for: a lost capture leaves every verdict emitted, turning the
 # `reject`s green and the `want`s red.
-DB_MIN_PASSED="${DB_MIN_PASSED:-120}"
+DB_MIN_PASSED="${DB_MIN_PASSED:-121}"
 
 echo ""
 echo "  dev vs deployed (env.db): $PASS passed, $FAIL failed  (floor $DB_MIN_PASSED)"
