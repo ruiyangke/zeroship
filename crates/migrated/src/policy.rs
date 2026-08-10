@@ -698,13 +698,18 @@ mod tests {
             ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
         let foreign_table = ObjectName::table(b"other_app".to_vec(), b"widgets".to_vec());
         let objects = [&owned_schema, &owned_table, &foreign_table];
+        // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` used to be in
+        // this list. Both charters now grant NEITHER -- the engine registers every
+        // `runtime.*` knob `DeclaredOnly` and refuses a document that raises one
+        // above its default, which is what stopped `zeroship-migrated` from
+        // starting at all (see the note in policies/confined.policy.toml). Keeping
+        // them here would compare "not granted" against "not granted": a row that
+        // passes because neither side has the knob, not because they agree on it.
         for key_name in [
             KEY_SCHEMA_CREATE_TABLE,
             KEY_SCHEMA_RENAME,
             KEY_SCHEMA_CROSS_SCHEMA,
             KEY_SAFETY_DESTRUCTIVE_OPS,
-            "runtime.lock_timeout_ms",
-            "runtime.statement_timeout_ms",
         ] {
             let knob = key(key_name);
             for object in objects {
@@ -765,17 +770,21 @@ scope = "all"
     fn tighter_draft_composes_to_the_draft() {
         let cfg = config();
         let app_id = Uuid::new_v4();
-        // A draft that only TIGHTENS: forbid destructive ops + a tighter lock timeout.
+        // A draft that only TIGHTENS: forbid destructive ops.
+        //
+        // This draft also carried `runtime.lock_timeout_ms = 1000` as a second,
+        // "tighter timeout" tightening. It cannot: the engine registers every
+        // `runtime.*` knob `DeclaredOnly` with default 1, and the load gate refuses
+        // ANY value above the default -- in an operator ceiling OR a creator draft.
+        // So 1000 is not a tightening the creator is allowed to author, it is a
+        // document the loader rejects, and the only admissible value (1) is a no-op.
+        // A creator cannot bound migration lock/statement timeouts at all today.
+        // See policies/confined.policy.toml.
         let draft_toml = r#"policy_version = 1
 
 [[grant]]
 key = "safety.destructive_ops"
 value = "forbid"
-scope = "all"
-
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 1000
 scope = "all"
 "#;
         let draft = cfg
