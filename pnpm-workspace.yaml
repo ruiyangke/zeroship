@@ -64,3 +64,18 @@ onlyBuiltDependencies:
   - "@playwright/browser-chromium"
   - "@playwright/browser-firefox"
   - "@playwright/browser-webkit"
+
+# lucide-react ships .d.ts that `import ... from "react"` but declares only a
+# `react` peer, not an `@types/react` one. Without this, pnpm leaves its
+# private dir with no @types/react, TypeScript walks up to the hoisted
+# node_modules/.pnpm/node_modules/@types/react (which resolves to the React 18
+# copy the `react18` catalog pulls in), and every consumer on React 19 types
+# gets a two-copies-of-ReactNode error. Declaring the type peer as optional
+# makes pnpm pick the @types/react of whichever importer pulls lucide-react in.
+packageExtensions:
+  lucide-react:
+    peerDependencies:
+      "@types/react": "*"
+    peerDependenciesMeta:
+      "@types/react":
+        optional: true

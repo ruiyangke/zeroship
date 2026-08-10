@@ -510,3 +510,144 @@ jobs:
       # catch.
       - name: JavaScript suites
         run: tests/run_js_suite.sh
+
+  # The creator path, end to end, and until now nothing in CI touched it.
+  #
+  # MEASURED 2026-08-10: `tests/` holds 61 shell harnesses. Exactly 7 are named
+  # by this file. Of the 40 `e2e_*.sh` + `golden_path.sh` harnesses, ZERO ran in
+  # CI - so every scenario in docs/pilot/e2e-scenarios.md, all four
+  # dev-vs-deployed harnesses, and every seam fix landed against them were
+  # ungated. (Careful re-deriving that number: run_billing_suite.sh contains the
+  # literal string `tests/e2e_durable_workflows.sh` at line 142, inside a comment
+  # explaining a --test-threads=1 rationale. It is not a call.)
+  #
+  # This job closes the first and largest of them. tests/golden_path.sh walks
+  # `pnpm build` -> .zship -> provision -> gateway serve -> RPC round-trip ->
+  # `pnpm dev` -> dev-vs-deployed diff -> dev-runtime supervisor -> env.db data
+  # plane. It is the only harness that drives BOTH tiers and diffs the RESULTS,
+  # which is the class of defect a crate suite cannot see by construction: both
+  # backends read correctly alone.
+  #
+  # WHAT THIS JOB DOES NOT GATE, and it is worth knowing before trusting it.
+  # golden_path.sh runs `zeroship deploy` only when ZEROSHIP_TOKEN is set; with
+  # it unset (the case here) step 3 takes the `dev-provision` arm instead, which
+  # writes to the database and blob store directly and whose own header says it
+  # "deliberately bypasses the PAT/OAuth flow". So the deploy CLI - the command
+  # the golden path is named after - is NOT exercised here. Minting a PAT needs
+  # zeroship-control started with `--signing-key-file`, which golden_path.sh does
+  # not do (it runs under ZEROSHIP_DEV_INSECURE with an ephemeral key nothing can
+  # sign against). Closing that is a change to the harness, not to this file.
+  golden-path:
+    runs-on: ubuntu-latest
+    # A bound, because one of the seven local runs taken while wiring this up
+    # HUNG rather than failed: step 9's `users.seed` got no bytes back within
+    # its own 10s curl timeout, and the db-todos dev runtime logged nothing
+    # after `creator app dispatch error` on the readiness probe. The harness
+    # recovered and reported it as a failed assertion that time, but a hang one
+    # layer up (a service that never binds, a `pnpm build` that stalls) has no
+    # such bound and would otherwise burn the 6h default. 60 minutes is well
+    # clear of the ~25 min this job needs from a cold Rust cache.
+    #
+    # NOT a retry, deliberately. A flaky step is a defect to diagnose; making
+    # CI re-run it until green is how a real intermittent failure becomes
+    # invisible. This turns a hang into a red tick, nothing more.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      # lsof is not optional decoration here. golden_path.sh frees its ports with
+      # `lsof -ti :$PORT -sTCP:LISTEN` and, in step 7c, FINDS the live dev runtime
+      # the same way in order to SIGABRT it. Without lsof every one of those calls
+      # returns empty, step 7c takes its `could not find the healthy runtime` arm
+      # and fails - loudly, which is the right direction, but the reason would be
+      # a missing package rather than a defect.
+      # zstd because step 1b reads the manifest out of the artifact with
+      # `tar --zstd -xOf`, which shells out to the zstd binary.
+      - name: Install harness prerequisites
+        run: sudo apt-get update && sudo apt-get install -y lsof zstd postgresql-client
+      # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
+      # container NAME is the reason. golden_path.sh creates and drops its own
+      # dedicated database through `docker exec "$PG_CONTAINER" psql` (default
+      # `compose-postgres-1`, matching the dev compose stack) and verifies the
+      # migration landed the same way. GitHub generates the name of a `services:`
+      # container, so `docker exec` by name cannot reach it. This is the same
+      # reason billing-gate launches Redpanda as a step rather than a service.
+      #
+      # postgres:17 to match billing-gate and auth-gate. The measurement quoted
+      # in golden_path.sh was taken against the dev compose stack's postgres:16;
+      # the harness asserts on `to_regclass` and on app behaviour, neither of
+      # which is version-sensitive between 16 and 17.
+      - name: Start Postgres
+        run: |
+          docker run -d --name compose-postgres-1 -p 5440:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
+            postgres:17
+          for i in $(seq 1 40); do
+            if docker exec compose-postgres-1 pg_isready -U postgres; then exit 0; fi
+            sleep 3
+          done
+          echo "postgres failed to become ready" >&2; docker logs compose-postgres-1; exit 1
+      - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/ and the vite-plugin imports it, so it
+      # has to be built before the SDKs. Same ordering as the `sdk` job.
+      - run: pnpm --filter zero-migrate build
+      # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
+      # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      - run: pnpm build
+      # Exactly the prereq list in golden_path.sh's own header (lines 14-18).
+      # `-p zeroship-control --bins` is what produces `dev-provision`, which step
+      # 3 uses; `-p zeroship` produces the `zeroship` binary that `pnpm dev`
+      # spawns as the dev runtime in steps 6, 7 and 9.
+      - name: Build the release binaries the harness starts
+        run: |
+          cargo build --release -p zeroship-control -p zeroship-worker \
+            -p zeroship-gateway -p zeroship --bins
+          cargo build --release -p zeroship-migrate-adapter \
+            --features platform-cli --bin zeroship-platform-migrate
+      # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
+      # step 1 runs `pnpm build` inside the example and consumes whatever
+      # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is
+      # green about a build that predates the change under test. It WARNS by
+      # default (mtime is a weak proxy for provenance on a developer's machine);
+      # in CI the dist is built two steps above, so a stale one means the build
+      # did not happen and refusing is correct.
+      #
+      # `set -o pipefail` before the tee for the reason the rust job documents:
+      # GitHub's default shell is `bash -e` WITHOUT pipefail, so `script | tee`
+      # reports tee's status - 0 whenever tee could write - and a failing harness
+      # would sail through as a pass.
+      #
+      # The harness carries its own anti-hollow-gate guards (a MEASURED
+      # total-passed floor of 24, plus a per-step ran-something check against a
+      # declared step list) and exits non-zero if either fires, so a run that
+      # asserted nothing cannot be reported as a pass. See the block at the
+      # bottom of tests/golden_path.sh for the run the floor was measured from.
+      - name: Golden path (build locally -> deploy -> serve, dev vs deployed)
+        run: |
+          set -o pipefail
+          tests/golden_path.sh 2>&1 | tee "$RUNNER_TEMP/golden-path.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+          PG_CONTAINER: compose-postgres-1
+          PG_USER: postgres
+      # The service logs the harness leaves in /tmp are where a failure is
+      # actually diagnosable; without them a red run reports only which assertion
+      # went red. `if: failure()` so a green run stays quiet.
+      - name: Harness logs
+        if: failure()
+        run: |
+          for f in /tmp/gp-build.log /tmp/gp-migrate.log /tmp/gp-control.log \
+                   /tmp/gp-worker.log /tmp/gp-gate.log /tmp/gp-dev.log \
+                   /tmp/gp-sup-a.log /tmp/gp-sup-b.log /tmp/gp-dbtodos.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            tail -60 "$f"
+            echo "::endgroup::"
+          done
