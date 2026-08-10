@@ -1,0 +1,660 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Dev vs deployed: env.db. Run ONE identical operation sequence against
+# `pnpm dev` (SQLite) and against the same app deployed behind the gateway
+# (PostgreSQL), then (a) diff the RESULTS and (b) assert ABSOLUTE properties
+# of the DEPLOYED answers.
+#
+# This is the db leg of scenario 11 (docs/pilot/e2e-scenarios.md). It is the
+# last of the dev-vs-deployed legs to be walked; kv, storage, auth, workflows,
+# streaming and the starter's RPC came first. It was blocked until 2026-08-10
+# on #176 (dev generated types from the migrations and never APPLIED them, so
+# `.zeroship/dev.sqlite` held 0 tables) and #162 (a creator-declared
+# `created_at` collided with the injected policy column). Both are fixed; this
+# script is what turns "unblocked" into a measured result.
+#
+# WHY db-todos AND NOT db-hitcounter. `tests/e2e_db_app_end_to_end.sh` already
+# proves the deployed data plane down to rows landing in Postgres, but it
+# drives `examples/db-hitcounter`, whose only creator column is `path` -- one
+# lowercase word, no case boundary, no foreign key, no relation, one row shape.
+# It is blind BY CONSTRUCTION to the defect class that was live until today:
+# a camelCase column (`todos.userId`) has to survive the migration DDL, the
+# generated descriptor, and the data plane's SELECT list, on two different
+# backends, spelled the same way each time. db-todos has that column, a
+# migration-declared foreign key, a relation eager-load, and cursor
+# pagination.
+#
+# WHAT IS NORMALISED, and what that makes invisible. Only two classes:
+#
+#   minted ids   `user_…`/`todo_…` are UUIDv7-derived, so they cannot agree
+#                across two databases. They are replaced by <IDn> aliases
+#                assigned in ORDER OF FIRST APPEARANCE over the whole capture,
+#                which preserves REFERENTIAL identity: a todo whose `userId`
+#                points at the seeded user still reads `<ID1>` on both tiers,
+#                so an FK that pointed at the wrong row would still diverge.
+#                What this hides: the id FORMAT beyond its prefix -- alphabet,
+#                length, monotonicity. Section 4 asserts those absolutely on
+#                the deployed bodies.
+#
+#   timestamps   `created_at`/`updated_at`/`deleted_at` are wall-clock. The
+#                scrub replaces the DIGITS only (`"created_at":<TS>`), so a
+#                tier answering an ISO STRING rather than epoch millis does
+#                NOT match `<TS>` and still shows up as a divergence. What it
+#                hides: the MAGNITUDE (seconds vs millis), and whether
+#                `updated_at` moved on insert. The `tsrel` row below is
+#                computed BEFORE the scrub and carries the digit count plus
+#                `created_at == updated_at`, so both of those stay comparable;
+#                section 4 pins the magnitude absolutely.
+#
+#   Also scrubbed: `request_id` (a per-process counter, so it encodes how many
+#   requests the tier had served, not what env.db did) and the opaque
+#   `continueCursor` blob (it base64-embeds the minted ids). The cursor is NOT
+#   dropped -- it is decoded into its own `p1cur`/`p2cur` rows, which ARE
+#   compared, so its structure and its bound orderBy stay in the diff.
+#
+# WHAT IS DELIBERATELY NOT PROBED:
+#   todos.shareToWebhook  action + runQuery + outbound fetch. The db-specific
+#                         part (runQuery reading the row) is already covered by
+#                         todos.get; the rest is the fetch seam, which
+#                         tests/e2e_dev_vs_deployed_env.sh and the stream leg
+#                         own. Adding a one-shot HTTP stub here would test
+#                         networking, not env.db.
+#   todos.subscribe       `db.live` SSE. Real db surface, but its rerun trigger
+#                         is backend-specific and time-dependent, and the
+#                         streaming TRANSPORT is already walked by
+#                         tests/e2e_dev_vs_deployed_stream.sh. Comparing it
+#                         here would mix a timing seam into a data seam. Named
+#                         as a gap rather than silently omitted.
+#   tags (json column)    exercised only as `[]`, because createTodo hardcodes
+#                         it. The empty-array round-trip IS compared; a
+#                         populated JSON document is NOT, and no procedure in
+#                         db-todos accepts one.
+#
+# Prereqs (docs/runbooks/local-dev.md):
+#   pnpm build
+#   cargo build --release -p zeroship-control -p zeroship-worker \
+#       -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
+#   cargo build --release -p zeroship-migrate-adapter --features platform-cli \
+#       --bin zeroship-platform-migrate
+#   docker (this script starts and destroys its own ephemeral Postgres)
+#   pnpm install in examples/db-todos
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$ROOT/target/release"
+APP="$ROOT/examples/db-todos"
+ZSHIP="$APP/dist/app.zship"
+WORK="$(mktemp -d -t zs-devdeploy-db-XXXXXX)"
+
+# Ports distinct from golden_path.sh (9390/8390/8300) and the kv leg
+# (9392/8392/8302/3011) so the suites can run concurrently.
+CONTROL_PORT="${CONTROL_PORT:-9393}"
+WORKER_PORT="${WORKER_PORT:-8393}"
+GATE_PORT="${GATE_PORT:-8303}"
+MIGRATED_PORT="${MIGRATED_PORT:-9493}"
+DEV_PORT="${DEV_PORT:-3021}"
+PG_PORT="${PG_PORT:-5487}"
+PGC="zs-devdeploy-db-pg"
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
+CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
+export ZEROSHIP_DEV_INSECURE=1
+export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
+APP_NAME="dbtodos"
+
+# One identity per RUN, used VERBATIM on both tiers. `users.email` and
+# `users.handle` are UNIQUE, so a fixed literal passes once per database and
+# fails forever after; a per-tier random one would make the two captures
+# differ by construction and the diff meaningless.
+RUN="${RUN_ID:-$(date +%s)}"
+
+PASS=0; FAIL=0; PIDS=()
+pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
+cleanup() {
+  for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  docker rm -f "$PGC" >/dev/null 2>&1 || true
+  [ "${KEEP_WORK:-0}" = "1" ] && { echo "  work dir kept: $WORK"; return; }
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || {
+  echo "  docker unavailable -- this leg needs a real Postgres for the deployed tier."
+  echo "  NOT skipped-as-pass: exiting 2 so a missing prereq cannot read as a green run."
+  exit 2
+}
+for b in zeroship zeroship-control zeroship-gate zeroship-worker \
+         zeroship-platform-migrate zeroship-migrated dev-provision; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b -- see the prereqs in this file's header"; exit 2; }
+done
+JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
+[ -f "$JOSE" ] || { echo "missing jose at $JOSE"; exit 2; }
+RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
+[ -f "$RECORDER" ] || { echo "missing $RECORDER -- run pnpm build"; exit 2; }
+
+# Same BUILD on both sides? `pnpm dev` runs target/release/zeroship; the
+# deployed side runs separate binaries. A partial rebuild reports version skew
+# as a backend divergence -- see tests/lib/binary_freshness.sh.
+# shellcheck source=lib/binary_freshness.sh
+source "$ROOT/tests/lib/binary_freshness.sh"
+zs_check_binary_freshness "$ROOT" "$BIN" \
+  "crates/plugin-db/src crates/zeroship-schema/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src crates/migrated/src sdks/db/src" \
+  "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrated dev-provision" \
+  || { [ "$?" -eq 2 ] && exit 2; }
+
+echo "=== dev vs deployed (db-todos, env.db) ==="
+echo "  run identity: $RUN"
+
+jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
+
+# ---------------------------------------------------------------------------
+# The probe. TWO outputs off the same calls:
+#   $RAWFILE   the body VERBATIM, one line per label. Feeds section 4's
+#              absolute verdicts, which must not read scrubbed text.
+#   stdout     nothing -- the comparable rendering is produced afterwards by
+#              `render`, because the id aliasing needs the WHOLE capture to
+#              assign stable numbers.
+#
+# Every operation below is here because it can DIVERGE between SQLite and
+# Postgres, and the comment says how.
+# ---------------------------------------------------------------------------
+probe() {
+  local base="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
+  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  call() {
+    curl -sS -m 30 -X POST -H 'content-type: application/json' "${h[@]}" \
+      "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
+  }
+  row() { printf '%-10s %s\n' "$1" "$(call "$2" "${3:-}")" >> "$RAWFILE"; }
+
+  # --- insert, and read the row back off the insert response --------------
+  # Round-trip of every declared column plus the seven injected system
+  # columns. SQLite has no boolean and no timestamptz; Postgres has both, so
+  # `done`/`archived` and `created_at` are the two most likely places for the
+  # two tiers to answer different JSON for the same write.
+  row seedA users.seed "{\"email\":\"alice-$RUN@probe.test\",\"name\":\"Alice\",\"handle\":\"alice_$RUN\"}"
+  row seedB users.seed "{\"email\":\"bob-$RUN@probe.test\",\"name\":\"Bob\",\"handle\":\"bob_$RUN\"}"
+  local aid bid
+  aid="$(grep -m1 '^seedA ' "$RAWFILE" | grep -oE '"id":"user_[^"]+"' | head -1 | cut -d'"' -f4)"
+  bid="$(grep -m1 '^seedB ' "$RAWFILE" | grep -oE '"id":"user_[^"]+"' | head -1 | cut -d'"' -f4)"
+  if [ -z "$aid" ] || [ -z "$bid" ]; then
+    printf '%-10s SEED FAILED, probe aborted\n' abort >> "$RAWFILE"
+    return 1
+  fi
+
+  # --- the camelCase seam --------------------------------------------------
+  # `todos.userId` is the column that was broken until today. The migration
+  # creates it quoted, the descriptor carries the name, and the data plane has
+  # to ask for the SAME spelling. Postgres folds unquoted identifiers to lower
+  # case and SQLite does not, so a single missing quote diverges here and
+  # nowhere else in this app.
+  # FIVE todos for alice, not three: `todos.listPage` is probed at
+  # numItems=2, and three rows make page 2 the last page, so the third hop
+  # would be a call past the end rather than a page. The first version of this
+  # probe did exactly that and both tiers answered an opaque error -- agreeing,
+  # and proving nothing about a multi-page walk. `mkT4` belongs to BOB so the
+  # `userId` filter has something to exclude.
+  row mkT1 todos.create "{\"userId\":\"$aid\",\"title\":\"buy milk\",\"priority\":\"low\"}"
+  row mkT2 todos.create "{\"userId\":\"$aid\",\"title\":\"walk dog\"}"
+  row mkT3 todos.create "{\"userId\":\"$aid\",\"title\":\"ship it\",\"priority\":\"high\"}"
+  row mkT4 todos.create "{\"userId\":\"$bid\",\"title\":\"bob task\"}"
+  row mkT5 todos.create "{\"userId\":\"$aid\",\"title\":\"read book\"}"
+  row mkT6 todos.create "{\"userId\":\"$aid\",\"title\":\"pay bills\",\"priority\":\"high\"}"
+  local t1
+  t1="$(grep -m1 '^mkT1 ' "$RAWFILE" | grep -oE '"id":"todo_[^"]+"' | head -1 | cut -d'"' -f4)"
+
+  # --- the migration-declared foreign key, enforcement half ---------------
+  # `t.text().references("users","id")`. SQLite enforces FKs only with
+  # `PRAGMA foreign_keys=ON`; Postgres always does. A tier that silently
+  # accepted the orphan would answer a row here where the other answers an
+  # error, and `orphanN` (a count, not a message) says whether the row landed
+  # independently of how the failure is worded.
+  row orphan todos.create '{"userId":"user_doesNotExist0000000","title":"orphan"}'
+  row orphanN todos.count '{"userId":"user_doesNotExist0000000"}'
+
+  # --- unique constraint, second declared index type ----------------------
+  row dupEmail users.seed "{\"email\":\"alice-$RUN@probe.test\",\"name\":\"Dup\",\"handle\":\"dup_$RUN\"}"
+
+  # --- single-row read, and the missing-row shape -------------------------
+  row getT1 todos.get "{\"id\":\"$t1\"}"
+  row getNone todos.get '{"id":"todo_0000000000000000000000"}'
+  row countA todos.count "{\"userId\":\"$aid\"}"
+
+  # --- ORDERED multi-row read ---------------------------------------------
+  # `todos.list` is `.sort({id:-1})`, so the order IS a contract here and is
+  # compared VERBATIM. Contrast the kv leg, where `kv.keys.list` had no
+  # documented order and had to be compared as a set. If this diverges, an
+  # explicit sort is being dropped or inverted by one backend.
+  row list todos.list "{\"userId\":\"$aid\"}"
+
+  # --- relation eager-load, the foreign key's other half ------------------
+  # `find({...}, { with: { userId: true } })` must replace the bare FK with
+  # the joined user row, batched. Note this query carries NO sort, so its row
+  # ORDER is an unspecified property of each backend -- exactly the shape of
+  # the divergence the kv leg found. Compared verbatim anyway: this run is the
+  # measurement, and pinning it to a set before measuring would decide the
+  # answer in advance.
+  row withUser todos.listWithUser "{\"userId\":\"$aid\"}"
+
+  # --- DataLoader batching -------------------------------------------------
+  # Two concurrent `db.users.get(id)` coalesce into one WHERE id IN (...).
+  # The stitch step (which row goes back to which caller) is what a regression
+  # would break, and it is visible in the response.
+  row pair users.getPair "{\"aId\":\"$aid\",\"bId\":\"$bid\"}"
+
+  # --- cursor pagination ---------------------------------------------------
+  # Same page size, same sort, three hops. The cursor is opaque on the wire,
+  # so it is decoded below and its STRUCTURE compared; whether page 2 advances
+  # past page 1 is asserted on the rows.
+  row p1 todos.listPage "{\"userId\":\"$aid\",\"cursor\":null,\"numItems\":2}"
+  local c1
+  c1="$(grep -m1 '^p1 ' "$RAWFILE" | grep -oE '"continueCursor":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  row p2 todos.listPage "{\"userId\":\"$aid\",\"cursor\":\"$c1\",\"numItems\":2}"
+  local c2
+  c2="$(grep -m1 '^p2 ' "$RAWFILE" | grep -oE '"continueCursor":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  row p3 todos.listPage "{\"userId\":\"$aid\",\"cursor\":\"$c2\",\"numItems\":2}"
+  # Decode both cursors. The base64 blob itself embeds minted ids, so the
+  # ENCODED form is scrubbed in `render` and these decoded rows are what keeps
+  # the cursor in the comparison.
+  printf '%-10s %s\n' p1cur "$(printf '%s' "$c1" | base64 -d 2>/dev/null)" >> "$RAWFILE"
+  printf '%-10s %s\n' p2cur "$(printf '%s' "$c2" | base64 -d 2>/dev/null)" >> "$RAWFILE"
+
+  # --- system columns under mutation --------------------------------------
+  # `version` must increment per write and `updated_at` must move. `version`
+  # is not scrubbed at all; `updated_at` keeps its shape but loses its digits,
+  # so its MOVEMENT is captured separately by `tsupd` below.
+  #
+  # The sleep makes that movement deterministic rather than a coin toss. Dev's
+  # SQLite stores `created_at`/`updated_at` as TEXT CURRENT_TIMESTAMP, which is
+  # WHOLE-SECOND resolution -- measured: every dev row comes back as
+  # ...000 millis. Without a full second between the insert and the update, a
+  # correct dev tier reports `updated_at == created_at` on some runs and not
+  # others, and the harness would flake on the clock rather than measure the
+  # backend.
+  sleep 1.2
+  row setDone todos.setDone "{\"id\":\"$t1\",\"done\":true}"
+  row archive todos.archive "{\"id\":\"$t1\"}"
+
+  # --- soft delete ---------------------------------------------------------
+  # The descriptor says `softDelete: false`, yet dev answers a row with
+  # `deleted_at` set and `version` bumped. Whatever the semantics, both tiers
+  # must agree on them, and the row must stop being visible afterwards.
+  row del todos.delete "{\"id\":\"$t1\"}"
+  row getDel todos.get "{\"id\":\"$t1\"}"
+  row listAfter todos.list "{\"userId\":\"$aid\"}"
+
+  # --- timestamp RELATION, computed before the scrub ----------------------
+  # The scrub blanks the digits, so magnitude and equality would be invisible.
+  # This row carries the digit count of `created_at` (13 == epoch millis, 10
+  # == seconds) and whether `created_at == updated_at` on a freshly inserted
+  # row. A tier storing seconds, or moving `updated_at` on insert, diverges
+  # here even though the scrubbed rows agree.
+  local ca ua
+  ca="$(grep -m1 '^mkT2 ' "$RAWFILE" | grep -oE '"created_at":[0-9]+' | head -1 | cut -d: -f2)"
+  ua="$(grep -m1 '^mkT2 ' "$RAWFILE" | grep -oE '"updated_at":[0-9]+' | head -1 | cut -d: -f2)"
+  printf '%-10s digits=%s equal=%s\n' tsrel "${#ca}" \
+    "$([ -n "$ca" ] && [ "$ca" = "$ua" ] && echo true || echo false)" >> "$RAWFILE"
+  # And whether an UPDATE moved `updated_at` past `created_at`. Same reason:
+  # scrubbed digits make a frozen `updated_at` invisible to the diff.
+  local uc uu
+  uc="$(grep -m1 '^setDone ' "$RAWFILE" | grep -oE '"created_at":[0-9]+' | head -1 | cut -d: -f2)"
+  uu="$(grep -m1 '^setDone ' "$RAWFILE" | grep -oE '"updated_at":[0-9]+' | head -1 | cut -d: -f2)"
+  printf '%-10s moved=%s\n' tsupd \
+    "$([ -n "$uu" ] && [ -n "$uc" ] && [ "$uu" -gt "$uc" ] 2>/dev/null && echo true || echo false)" >> "$RAWFILE"
+  # And the timestamp RESOLUTION, which is the one thing the `<TS>` scrub hid
+  # completely and which the two backends do NOT agree on. Six todos are
+  # inserted back to back inside ~100ms; this counts how many DISTINCT
+  # `created_at` values they got. A whole-second clock collapses them to 1; a
+  # millisecond clock keeps all 6.
+  #
+  # Deterministic enough to assert on, and here is the residual risk stated
+  # rather than hidden: a second-resolution tier lands 2 instead of 1 if the
+  # inserts straddle a second boundary (~10% of runs, since the six span ~100ms
+  # of a 1000ms tick). It can never reach 6 -- that would need five boundaries
+  # inside 100ms. So `1 or 2` vs `6` separates the two clocks with no overlap,
+  # and the row is compared as the COUNT, not as a pass/fail threshold.
+  local distinct
+  distinct="$(grep -E '^mkT[1-6] ' "$RAWFILE" | grep -oE '"created_at":[0-9]+' \
+    | sort -u | wc -l)"
+  printf '%-10s distinct_created_at=%s of 6\n' tsres "$distinct" >> "$RAWFILE"
+}
+
+# Render a raw capture into the comparable form. Id aliases are assigned in
+# order of first appearance over the whole file; the probe creates every row
+# before it reads any, so the map is fixed by the creation rows and a later
+# ordering divergence cannot renumber it.
+render() { # <rawfile> <outfile>
+  local sedf="$WORK/alias.sed.$$" id n=0
+  : > "$sedf"
+  while read -r id; do
+    n=$((n+1))
+    printf 's|%s|<ID%d>|g\n' "$id" "$n" >> "$sedf"
+  done < <(grep -oE '(user|todo)_[0-9A-Za-z]+' "$1" | awk '!seen[$0]++')
+  sed -E \
+    -e 's/"(created_at|updated_at|deleted_at)":[0-9]+/"\1":<TS>/g' \
+    -e 's/"request_id":"[^"]*"/"request_id":"<RID>"/g' \
+    -e 's/"continueCursor":"[^"]*"/"continueCursor":"<B64>"/g' \
+    "$1" | sed -f "$sedf" > "$2"
+  rm -f "$sedf"
+}
+
+# --- 1. real build ---------------------------------------------------------
+echo ""
+echo "--- 1. build ---"
+( cd "$APP" && pnpm build ) > "$WORK/build.log" 2>&1
+[ -f "$ZSHIP" ] && pass "built app.zship ($(du -k "$ZSHIP" | cut -f1)KB)" \
+  || { fail "build produced no app.zship"; tail -30 "$WORK/build.log"; exit 1; }
+
+d="$WORK/unpack"; mkdir -p "$d"; tar -xf "$ZSHIP" -C "$d"
+# The descriptor is what installs the typed collections on `env.db` at
+# deployed boot. Without it every handler hits `undefined.find` -- the exact
+# failure db-todos shipped with before generated/zeroship was committed.
+grep -q '"runtime_descriptor"' "$d/manifest.json" \
+  && pass "manifest carries runtime_descriptor" \
+  || fail "manifest has no runtime_descriptor (run gen-types / commit generated/zeroship)"
+# Every RPC resource must declare an auth posture. Without one it resolves to
+# `auth: "user"` and the gateway refuses it: green in dev, 401 deployed. That
+# is how kv-dashboard, auth-uploads-kv AND db-todos shipped (#163).
+total=$(grep -oE '"rpc:[^"]+":' "$d/manifest.json" | wc -l)
+authed=$(grep -oE '"rpc:[^"]+":\{[^}]*"auth":' "$d/manifest.json" | wc -l)
+[ "$total" -gt 0 ] && [ "$authed" -eq "$total" ] \
+  && pass "all $total rpc resources declare an auth posture" \
+  || fail "only $authed of $total rpc resources declare auth (missing src/server/config.ts?)"
+
+# --- 2. dev side -----------------------------------------------------------
+echo ""
+echo "--- 2. dev (pnpm dev, SQLite) ---"
+# A PRIVATE state dir. The operator's own dev server holds an exclusive lock
+# on .zeroship/kv.redb and is never reaped (#221); sharing the directory makes
+# this harness fight it for the lock and fail with "Database already open".
+DEVSTATE="$WORK/devstate"; mkdir -p "$DEVSTATE"
+lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+(
+  cd "$APP" &&
+  DB_TODOS_API_PORT="$DEV_PORT" \
+  DATABASE_URL="sqlite:$DEVSTATE/dev.sqlite" \
+  ZEROSHIP_KV_PATH="$DEVSTATE/kv.redb" \
+  ZEROSHIP_WORKFLOW_SQLITE_PATH="$DEVSTATE/workflows.sqlite" \
+  ZEROSHIP_STORAGE_URL="file://$DEVSTATE/storage" \
+  ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1
+) & PIDS+=($!)
+for _ in $(seq 1 30); do
+  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
+    "http://localhost:$DEV_PORT/__zeroship/v1/todos.count" \
+    -d '{"json":{"userId":"user_doesNotExist0000000"}}' && break
+  sleep 2
+done
+# `applied=0 skipped=0` on a fresh database means nothing ran -- a failure
+# wearing a success's clothes (#176). Assert the count, not the log line.
+grep -qE 'dev migrations applied ahead of the runtime \(applied=[1-9]' "$WORK/dev.log" \
+  && pass "dev applied its migrations ahead of the runtime ($(grep -oE 'applied=[0-9]+ skipped=[0-9]+' "$WORK/dev.log" | head -1))" \
+  || { fail "dev did not apply migrations (#176 regression?)"; grep -i migrat "$WORK/dev.log" | head -5; }
+
+RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
+probe "http://localhost:$DEV_PORT"
+grep -q '^seedA .*"id":"user_' "$WORK/dev.raw" && pass "dev server answered the probe" \
+  || { fail "dev server never answered"; tail -25 "$WORK/dev.log"; head -3 "$WORK/dev.raw"; exit 1; }
+render "$WORK/dev.raw" "$WORK/dev.txt"
+
+# --- 3. deployed side ------------------------------------------------------
+echo ""
+echo "--- 3. deployed (gateway -> worker -> PostgreSQL) ---"
+for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do
+  lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+docker rm -f "$PGC" >/dev/null 2>&1 || true
+docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship \
+  -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 \
+  -c max_connections=200 >/dev/null || { fail "docker run postgres"; exit 1; }
+for _ in $(seq 1 40); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 \
+  && pass "ephemeral Postgres on :$PG_PORT" || {
+    fail "Postgres never became ready"
+    docker logs --tail 20 "$PGC" 2>&1 | sed 's/^/    /'
+    exit 1
+  }
+psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
+
+"$BIN/zeroship-platform-migrate" --database-url "$DBURL" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
+  --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
+  && pass "platform migrations applied" \
+  || { fail "platform migrations failed"; tail -25 "$WORK/migrate.log"; exit 1; }
+
+openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null
+chmod 600 "$WORK/sk.pem"
+openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
+
+"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/bundles" \
+  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$WORK/sk.pem" --dev-insecure > "$WORK/control.log" 2>&1 & PIDS+=($!)
+"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+  --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --dev-insecure > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
+  && pass "control healthy" || { fail "control did not come up"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null 2>&1 \
+  && pass "zeroship-migrated healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
+
+# The worker needs --db: without it the env.db namespace is absent BY DESIGN
+# and every handler fails loudly, which would read as an app bug.
+"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
+  --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+  --db "$DBURL" --blob-store "$WORK/bundles" --poll-interval 2 \
+  --dev-insecure > "$WORK/worker.log" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
+  && pass "worker healthy" || { fail "worker did not come up"; tail -30 "$WORK/worker.log"; exit 1; }
+
+"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" \
+  --blob-store "$WORK/bundles" --gateway-broker-secret-file "$WORK/gate-secret" \
+  --poll-interval 2 --dev-insecure > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
+  && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
+
+OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
+  --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
+API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
+[ -n "$API_KEY" ] && pass "deployed $APP_NAME ($APP_ID)" || { fail "provision: $OUT"; exit 1; }
+
+# --- apply the creator's recorded migration IR through zeroship-migrated ---
+# Same mechanism as tests/e2e_db_app_end_to_end.sh: the .zship carries the
+# DESCRIPTOR only; migrations travel through the migration service, which is
+# the real deployed path. A hand-rolled CREATE TABLE here would test nothing.
+POLICY_JSON='{"name":"e2e-devdeploy-db","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
+CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
+TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
+EXP=$(( $(date +%s) + 86400 ))
+psql_exec >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','devdeploy-db-$CREATOR@zeroship.test'::citext,'DevDeploy DB',NOW());
+INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
+INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$CREATOR','pat','devdeploy db','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP_ID','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
+[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted PAT" || { fail "PAT mint"; exit 1; }
+
+node --input-type=module - "$RECORDER" "$APP/migrations" > "$WORK/apply-migrations.json" <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const migration of migrations) {
+  documents.push({ filename: migration.stem + ".ir.json", body: await recordMigration(migration.path) });
+}
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+[ -s "$WORK/apply-migrations.json" ] || { fail "recorded no migration IR"; exit 1; }
+APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST \
+  "http://localhost:$MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  --data-binary @"$WORK/apply-migrations.json")"
+APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
+SKIPPED="$(jget '.skipped.length' < "$WORK/apply-response.json")"
+if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
+  pass "zeroship-migrated applied app IR (applied=$APPLIED skipped=${SKIPPED:-0})"
+else
+  fail "migrated apply failed (http=$APPLY_CODE)"
+  cat "$WORK/apply-response.json"; tail -30 "$WORK/migrated.log"; exit 1
+fi
+sleep 6   # gateway route-sync poll
+
+RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
+probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+grep -q '^seedA .*"id":"user_' "$WORK/deployed.raw" && pass "deployed app answered the probe" \
+  || { fail "deployed app never answered"; head -4 "$WORK/deployed.raw"; tail -20 "$WORK/worker.log"; }
+render "$WORK/deployed.raw" "$WORK/deployed.txt"
+
+# ---------------------------------------------------------------------------
+# 4. ABSOLUTE verdicts on the DEPLOYED answers.
+#
+# The diff in section 5 answers "do the two tiers AGREE". It structurally
+# cannot answer "is the answer RIGHT": if SQLite and Postgres were broken the
+# same way -- ids without prefixes, a version that never increments, a delete
+# that does not hide the row -- the two captures are byte-identical and the
+# comparison reports success. That is not hypothetical; production shipped
+# Error.stack to anonymous callers for weeks while the auth harness stayed
+# green, because dev leaked the same stack.
+#
+# Everything below reads the RAW deployed capture and does not consult dev.
+# Expectations come from the FIXTURE CONTRACT (examples/db-todos/src/index.ts
+# and migrations/), never from a previous run's output.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- 4. absolute verdicts on the DEPLOYED answers (dev not consulted) ---"
+DR="$WORK/deployed.raw"
+drow() { grep -m1 "^$1 " "$DR" | sed -E "s/^$1 +//"; }
+
+# THE CONTROL. Without it, a run where the gateway 401'd every call would
+# report a wall of green `reject` verdicts that all mean "never measured".
+# A result envelope is `{"json":...}`; a refusal is a bare `{"message":...}`.
+ROWS_WANT=30
+rows_got=$(wc -l < "$DR")
+rows_json=$(grep -c ' {"json":' "$DR")
+# SEVEN rows are expected NOT to be result envelopes: `orphan` and `dupEmail`
+# are errors by design, `p1cur`/`p2cur` are decoded cursors, and
+# `tsrel`/`tsupd`/`tsres` are derived scalars.
+ROWS_JSON_WANT=$((ROWS_WANT - 7))
+if [ "$rows_got" -eq "$ROWS_WANT" ] && [ "$rows_json" -eq "$ROWS_JSON_WANT" ]; then
+  pass "CONTROL: $rows_got deployed rows, $rows_json result envelopes (want $ROWS_WANT/$ROWS_JSON_WANT)"
+  ABS_OK=1
+else
+  fail "CONTROL: $rows_got rows, $rows_json envelopes (want $ROWS_WANT/$ROWS_JSON_WANT) -- verdicts below are UNSAFE"
+  grep -v ' {"json":' "$DR" | head -6 | sed 's/^/    /'
+  ABS_OK=0
+fi
+
+want()   { local r; r="$(drow "$1")"; if printf '%s' "$r" | grep -qF "$3"; then pass "deployed $1: $2"; else fail "deployed $1: $2 -- got $(printf '%s' "$r" | cut -c1-260)"; fi; }
+reject() { local r; r="$(drow "$1")"; if printf '%s' "$r" | grep -qF "$3"; then fail "deployed $1: $2 -- got $(printf '%s' "$r" | cut -c1-260)"; else pass "deployed $1: $2"; fi; }
+wantre() { local r; r="$(drow "$1")"; if printf '%s' "$r" | grep -qE "$3"; then pass "deployed $1: $2"; else fail "deployed $1: $2 -- got $(printf '%s' "$r" | cut -c1-260)"; fi; }
+
+# typed_id: prefix + base62, per crates/core/src/typed_id.rs.
+wantre seedA 'user id is a prefixed base62 typed_id' '"id":"user_[0-9A-Za-z]{20,24}"'
+wantre mkT1  'todo id is a prefixed base62 typed_id' '"id":"todo_[0-9A-Za-z]{20,24}"'
+
+# The camelCase column survives the round trip with its case intact. Asserted
+# on the RAW body, because the alias pass would rewrite the value but not the
+# KEY -- and the key is the half that Postgres folds.
+want mkT1 'the camelCase key userId is preserved'  '"userId":"user_'
+reject mkT1 'no lower-cased userid leaked through' '"userid"'
+
+# Declared defaults and declared columns.
+want mkT1 'explicit priority round-trips'  '"priority":"low"'
+want mkT2 'declared default priority applies' '"priority":"medium"'
+want mkT2 'declared default done applies'     '"done":false'
+want mkT2 'the json column round-trips as []' '"tags":[]'
+want mkT2 'the title round-trips'             '"title":"walk dog"'
+
+# The seven injected system columns, on a row the creator declared none of.
+for f in '"created_at":' '"updated_at":' '"created_by":' '"updated_by":' '"version":' '"deleted_at":'; do
+  want mkT2 "system column ${f%:} is present" "$f"
+done
+want mkT2 'a fresh row starts at version 1' '"version":1'
+# Epoch MILLIS, not seconds and not an ISO string. This is the magnitude the
+# scrub in section 5 blanks.
+wantre mkT2 'created_at is a 13-digit epoch-millis number' '"created_at":1[0-9]{12}[,}]'
+
+# The migration-declared foreign key actually refuses the orphan, measured by
+# the ROW COUNT rather than by the error text. The text is #231: a FK
+# violation reaches the caller as an opaque {"message":"internal error"} with
+# no code, though the runtime logs FOREIGN_KEY_VIOLATION. Deliberately NOT
+# asserted here -- see docs/pilot/e2e-scenarios.md.
+reject orphan 'the orphan insert did not succeed' '"json":{"id":"todo_'
+want   orphanN 'no orphan row exists for the dangling FK' '{"json":0}'
+want   dupEmail 'the duplicate email is refused' '"message"'
+
+# The relation eager-load replaces the bare FK with the joined row.
+wantre withUser 'userId carries the joined user object' '"userId":\{[^}]*"email":'
+want   withUser 'the joined row is the seeded user' "alice-$RUN@probe.test"
+
+# Ordering under an EXPLICIT sort({id:-1}): ids are UUIDv7-derived and
+# monotonic, so alice's LAST-created todo must come first. `bob task` was
+# created after `ship it`, so a row-order verdict that ignored the userId
+# filter would also be caught here.
+#
+# Asserted on the FIRST `"title"` in the row rather than by matching a regex
+# across the whole first object: insert responses come back with their keys in
+# ALPHABETICAL order and find responses in DESCRIPTOR order (measured), so a
+# positional regex would encode one tier's key order as if it were the
+# contract.
+first_title="$(drow list | grep -oE '"title":"[^"]*"' | head -1 | cut -d'"' -f4)"
+if [ "$first_title" = "pay bills" ]; then
+  pass "deployed list: sort({id:-1}) puts alice's newest todo first"
+else
+  fail "deployed list: sort({id:-1}) puts alice's newest todo first -- got '${first_title:-<none>}'"
+fi
+reject list 'the userId filter excludes bobs todo' '"title":"bob task"'
+
+# Pagination: 5 alice rows at numItems=2 is a genuine 2 / 2 / 1 walk.
+want p1 'page 1 is not the last page' '"isDone":false'
+want p1 'page 1 carries a cursor'     '"continueCursor":"'
+want p2 'page 2 is not the last page' '"isDone":false'
+want p3 'the third page ends the walk' '"isDone":true'
+wantre p1cur 'the cursor binds the orderBy it was minted under' '"orderBy":\{"id":1\}'
+
+# System columns under mutation, and the delete.
+want setDone 'an update bumps version to 2'  '"version":2'
+want archive 'a second update bumps to 3'    '"version":3'
+want tsupd   'an update moved updated_at past created_at' 'moved=true'
+# Deployed Postgres keeps millisecond resolution, so six inserts ~20ms apart get
+# six distinct `created_at` values. Asserted absolutely because the RELATIVE
+# diff cannot say which tier is right, only that they differ -- and here they
+# do differ (dev collapses all six).
+want tsres   'six back-to-back inserts get six distinct created_at' 'distinct_created_at=6 of 6'
+want getDel  'the deleted row is no longer readable' '{"json":null}'
+reject listAfter 'the deleted row is gone from the list' '"title":"buy milk"'
+want countA 'count sees the five todos created for alice' '{"json":5}'
+
+[ "$ABS_OK" = "1" ] || echo "  (verdicts above are UNSAFE: the control failed)"
+
+# --- 5. THE RELATIVE COMPARISON -------------------------------------------
+#     Green here does NOT mean the platform is right; it means SQLite and
+#     Postgres agree. Section 4 is the half that answers "right".
+echo ""
+echo "--- 5. relative comparison: identical operations, identical results? ---"
+if diff -q "$WORK/dev.txt" "$WORK/deployed.txt" >/dev/null 2>&1; then
+  pass "dev and deployed results are identical across every probed operation"
+else
+  fail "dev and deployed DIVERGE -- results below (< dev, > deployed)"
+  diff "$WORK/dev.txt" "$WORK/deployed.txt" | cut -c1-400 | head -60
+  echo ""
+  echo "  A divergence here is the finding, not a flaky test. Both backends are"
+  echo "  individually plausible; disagreeing on one contract is the defect."
+  echo "  See docs/pilot/e2e-scenarios.md before weakening anything above."
+fi
+
+echo ""
+echo "  dev vs deployed (env.db): $PASS passed, $FAIL failed"
+echo ""
+echo "  --- raw deployed bodies (verbatim, truncated to 240 cols) ---"
+cut -c1-240 "$WORK/deployed.raw" | sed 's/^/  /'
+[ "$FAIL" -eq 0 ]
