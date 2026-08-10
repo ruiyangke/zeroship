@@ -50,6 +50,33 @@ only the backend that answers them differs.
 > divergence directly, including a `declare-defaulted` control that flips one
 > posture and shows only the deployed side move.
 
+### The other three things the dev tier does not enforce
+
+The inert `auth:` posture above is the *best known* gap, not the only one. Three
+more are real and measured, and they all point the same way: **the dev tier
+accepts requests the deployed gateway refuses.** Code that works locally can be
+rejected in production; nothing here fails in the other direction.
+
+| Guard | `pnpm dev` | Deployed |
+| --- | --- | --- |
+| `X-ZS-Auth` header required on `POST /__zeroship/auth/{session,signout}` | not required — the string does not appear in the dev provider at all | required; a request without it is `400 invalid_request` |
+| `Origin` must exactly match the app origin | not checked — a request carrying `Origin: http://evil.example` completes the exchange | `403 forbidden` |
+| Signout revokes the credential server-side | no — the cookie is cleared, but a credential captured beforehand still authenticates on replay | yes; the server-held anchor is deleted and the family revoked, so a replay is `401 login_required` |
+
+What this means when you build:
+
+- **Do not conclude from a green local run that your app is same-origin safe.**
+  The two guards above are the platform's CSRF defence for the session
+  endpoints, and locally there is nothing to fail.
+- **Do not treat local signout as proof that a session ends.** Locally it ends
+  the cookie; in production it ends the session. If your app depends on a
+  signout actually invalidating access — an admin revoking a device, say —
+  that behaviour has no local equivalent to test against.
+
+Both differences are consequences of the dev tier being a single same-origin
+process with no gateway and no server-side session store, not choices made
+against these specific guards.
+
 ## The contract (prod tier — unchanged)
 
 The platform uses the **BFF model**: the browser holds an HttpOnly signed
