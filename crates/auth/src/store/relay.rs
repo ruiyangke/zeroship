@@ -79,6 +79,18 @@ pub struct AliasTarget {
 ///   the gateway then INSERTs with `relay_email` NULL; consent never runs
 ///   again for that grant.
 ///
+///   "Never runs again" is not an assumption — it is
+///   `oidc/authorization_code.rs`: the authorize path calls `consent_covers`,
+///   and when the stored grant already covers the requested scopes it calls
+///   `touch_consent_grant` and issues the code WITHOUT redirecting to consent.
+///   `post_consent_accept_native` is the only production caller of this
+///   function, so it is skipped on every subsequent login. The empty email is
+///   therefore PERMANENT for that `(user, client)` pair, not a first-login
+///   glitch that settles. The only paths back through consent are an explicit
+///   `prompt=consent` and deleting the grant row. Established by reading those
+///   call sites, not by running a second login — the login harness measured
+///   four logins and saw `""` throughout, but never exercised a re-grant.
+///
 ///   The app then receives an EMPTY STRING, not a null it could branch on:
 ///   `router/auth.rs` looks the alias up, leaves `relay_email = None` on a
 ///   miss, and projects `owned.email = relay_email.unwrap_or_default()`.
@@ -117,7 +129,9 @@ pub async fn mint_alias_at_consent(
         .map_err(|e| AuthError::Db(format!("consent alias select: {e}")))?;
 
     let Some(row) = existing.first() else {
-        // Row not written yet — defer to the gateway's lazy-mint (§7.1).
+        // Row not written yet. NOTHING mints it afterwards — see the arm in
+        // this function's doc comment. The gateway's "lazy-mint on read-through
+        // miss" that this line used to name does not exist.
         return Ok(None);
     };
 
