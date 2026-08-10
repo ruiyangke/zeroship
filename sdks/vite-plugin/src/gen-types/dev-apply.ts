@@ -25,7 +25,7 @@
  * still be broken with a success line in the log.
  */
 import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { loadMigrateAddon, type ApplyReply } from "./addon.js";
 import { recordMigrationsDir } from "./recorder.js";
@@ -101,12 +101,50 @@ indexes = [
 ]
 `;
 
+/**
+ * The state directory the worker's SQLite backend will use, derived from the
+ * SAME `DATABASE_URL` the runtime is spawned with.
+ *
+ * This must NOT be hardcoded to `<root>/.zeroship`. `DATABASE_URL` is
+ * overridable (shell, then `.env`, then the dev default), and applying to a
+ * different file than the worker opens is a silent failure: the apply reports
+ * `applied: [...]`, the boot log looks healthy, and every data call still fails
+ * with `no such table`. That is exactly what happened to
+ * `tests/e2e-browser`, which gives each demo a private state dir via
+ * `DATABASE_URL=sqlite:<stateDir>/dev.sqlite` so two runs cannot collide -- the
+ * apply wrote to `examples/db-todos/.zeroship` while the worker read
+ * `<stateDir>`, and the suite failed with
+ *
+ *     db: no such table: default.users
+ *
+ * Mirrors `SqliteBackend::open`: a `sqlite:` URL naming a FILE makes that file
+ * the session, and `db_dir` its parent. A relative path is relative to `root`,
+ * which is the dev server's cwd and therefore the runtime's.
+ */
+export function devSqliteDir(root: string, databaseUrl?: string): string {
+  const url = databaseUrl ?? "";
+  if (url.startsWith("sqlite:")) {
+    const path = url.slice("sqlite:".length);
+    // `:memory:` (and the `sqlite::memory:` spelling) name no file on disk, so
+    // there is nothing to apply into; fall back rather than compute a
+    // nonsensical parent directory.
+    if (path.length > 0 && !path.startsWith(":memory:")) {
+      return dirname(resolve(root, path));
+    }
+  }
+  return join(root, DEV_STATE_DIR);
+}
+
 /** The app file + journal the worker's SQLite backend derives for dev. */
-export function devSqlitePaths(root: string, appId: string = DEV_APP_ID): {
+export function devSqlitePaths(
+  root: string,
+  appId: string = DEV_APP_ID,
+  databaseUrl?: string,
+): {
   appPath: string;
   journalPath: string;
 } {
-  const dir = join(root, DEV_STATE_DIR);
+  const dir = devSqliteDir(root, databaseUrl);
   return {
     appPath: join(dir, `zs-${appId}.sqlite`),
     journalPath: join(dir, `zs-${appId}.migrations.sqlite`),
@@ -131,9 +169,16 @@ export async function applyMigrationsToDevSqlite(opts: {
   /** Collection names from the generated descriptor; every one maps to the dev app. */
   collections: string[];
   appId?: string;
+  /**
+   * The resolved `DATABASE_URL` the runtime will be spawned with. Pass the
+   * value from `resolveDatabaseUrl`, never a re-derived one: the apply and the
+   * worker must agree on the file, and the only way to guarantee that is to
+   * share the resolution rather than repeat it.
+   */
+  databaseUrl?: string;
 }): Promise<ApplyReply> {
   const appId = opts.appId ?? DEV_APP_ID;
-  const { appPath, journalPath } = devSqlitePaths(opts.root, appId);
+  const { appPath, journalPath } = devSqlitePaths(opts.root, appId, opts.databaseUrl);
 
   // The apply runs BEFORE the runtime spawns, and `.zeroship/` is normally
   // created by the runtime — so on a cold checkout (or after `rm -rf
