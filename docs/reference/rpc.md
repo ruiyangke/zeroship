@@ -53,7 +53,33 @@ export const subscribeTodos = stream(
 
 Production builds require explicit `id` values. Development may use export
 names for convenience, but deployable wire IDs must be pinned so refactors do
-not change HTTP paths. The active wrapper helpers are:
+not change HTTP paths.
+
+Because the wire ID and the export name are independent, calling one by the
+other's name fails, and the error does not tell you that. `listTodos` above is
+served at `todos.list`; a request to `/__zeroship/v1/listTodos` returns
+
+```json
+{ "message": "Method not found: listTodos", "name": "Error", "code": "NOT_FOUND" }
+```
+
+which is correct — that ID genuinely does not exist — but reads like the
+procedure is missing rather than renamed. If you get `NOT_FOUND` for a procedure
+you are sure you exported, check the ID before anything else.
+
+**Recovering the IDs your build actually published.** They are in the manifest
+inside your `.zship`, readable with `tar`:
+
+```bash
+tar --zstd -xOf dist/app.zship manifest.json | jq '.resources | keys[] | select(startswith("rpc:"))'
+```
+
+That prints one `rpc:<wireId>` per published procedure, which is the
+authoritative list — the same one the gateway dispatches against. There is no
+`zeroship inspect` command; the archive is a plain zstd tarball by design, so
+`tar` is the supported way in.
+
+The active wrapper helpers are:
 
 - `procedure(handler, { kind, id, ... })`
 - `query(handler, { id, ... })`
