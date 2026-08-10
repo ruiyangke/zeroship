@@ -161,10 +161,35 @@ fi
 
 echo ""
 echo "=== Stage 2: infra + platform migrations + billing seed + services ==="
+# An infra wait that times out must say WHY. Measured 2026-08-09: this stage
+# failed once with the single line "✗ PG" and exit 1, an immediate re-run
+# passed, and nothing survived to diagnose the failure — both probes sent
+# stdout AND stderr to /dev/null, the failure arm printed a two-character
+# label, and cleanup then destroyed the container. Reproducing this same
+# `docker run` by hand gave a healthy database in under 8 seconds, so the
+# recipe is sound and the cause is still unknown. It is unknown BECAUSE the
+# evidence was discarded, on precisely the run that had already gone wrong.
+#
+# This runs only on the failure path, so a green run costs nothing.
+infra_diag() {  # <container> <probe-description> <probe...>
+  local c="$1" what="$2"; shift 2
+  echo "  --- diagnostics for $c ($what) ---"
+  docker ps -a --filter "name=^${c}$" --format '  status: {{.Status}}  image: {{.Image}}' 2>&1 | sed 's/^/  /'
+  echo "  --- last 20 log lines ---"
+  docker logs --tail 20 "$c" 2>&1 | sed 's/^/  /'
+  echo "  --- final probe, unredirected ---"
+  "$@" 2>&1 | sed 's/^/  /'
+  echo "  --- end diagnostics ---"
+}
+
 docker rm -f "$PGC" >/dev/null 2>&1 || true
 docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 -c max_connections=200 >/dev/null || { fail "pg run"; exit 1; }
 for _ in $(seq 1 40); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG on :$PG_PORT" || { fail "PG"; exit 1; }
+docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG on :$PG_PORT" || {
+  fail "PG did not become ready in 40s"
+  infra_diag "$PGC" "pg_isready" docker exec "$PGC" pg_isready -U postgres
+  exit 1
+}
 
 docker rm -f "$RPC" >/dev/null 2>&1 || true
 docker run --name "$RPC" -d -p "$RP_PORT:$RP_PORT" docker.redpanda.com/redpandadata/redpanda:latest \
@@ -172,7 +197,11 @@ docker run --name "$RPC" -d -p "$RP_PORT:$RP_PORT" docker.redpanda.com/redpandad
   --kafka-addr "external://0.0.0.0:$RP_PORT" --advertise-kafka-addr "external://127.0.0.1:$RP_PORT" \
   --set redpanda.auto_create_topics_enabled=true >/dev/null || { fail "redpanda run"; exit 1; }
 for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && break; sleep 1.5; done
-docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
+docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || {
+  fail "redpanda did not become healthy in 60s"
+  infra_diag "$RPC" "rpk cluster health" docker exec "$RPC" rpk cluster health --exit-when-healthy
+  exit 1
+}
 
 MIG_LOG="$WORK/platform-migrate.log"
 # Post-extraction: platform schema is applied by zeroship-platform-migrate
