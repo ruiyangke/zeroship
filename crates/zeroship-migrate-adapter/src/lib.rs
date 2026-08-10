@@ -27,26 +27,43 @@
 //! `platform.rs:387`; `crates/migrated` does so at `apply.rs:1082` and `:1227`.
 //!
 //! `IrAuthor::lower`, `lower_plan` and `lower_steps` take an ALREADY-deserialized
-//! `MigrationIr` and skip five checks the loader performs:
+//! `MigrationIr` and do NOT run the loader. What that actually costs is narrower
+//! than it first looks, and the difference is worth stating precisely because the
+//! wrong version of it is alarming in a way that invites bad decisions.
+//!
+//! **Still enforced on the ungated path** (verified by reading the engine, not by
+//! searching for symbol names):
+//!
+//! - SCHEMA CONFINEMENT. `lower` refuses a cross-schema op itself, on both arms -
+//!   the inherited-default-schema case and the explicitly-qualified case - plus a
+//!   fail-closed refusal on the SQLite leg. The engine comment beside it says this
+//!   is deliberate: "Make `lower()` self-defending regardless of whether validate
+//!   ran." It has its own tests.
+//! - Six structural validations: authored identifier lengths, per-row DML
+//!   destinations, typed column references, table foreign-key targets, typed
+//!   reference catalogs, and the SQLite repeat-rename refusal. All three ungated
+//!   doors run them, because `lower` and `lower_plan` both delegate to
+//!   `lower_steps`.
+//!
+//! **Believed loader-only.** These need the deploying app, the project registry
+//! and the vendor authority that only the loader's CALLER holds, so a lower-side
+//! equivalent is implausible rather than merely unfound:
 //!
 //! - `check_ir_version` (IR version, fail-closed)
-//! - `validate_ir_authorized` (every `Expr` slot, plus SCHEMA CONFINEMENT and
-//!   guard direction - a Confined cross-schema op is refused here)
 //! - `enforce_ir_ownership` against the deploying app and project registry
 //! - checksum-hint verification
 //! - the `owner_app` stamp, which OVERWRITES whatever the artifact claimed
 //!
-//! The last two matter most for us: confinement and ownership are what keep one
-//! app's migration out of another app's schema, and the stamp is what makes a
-//! spoofed `owner_app` in a creator-supplied artifact inert. Deserializing an
-//! artifact yourself and handing it to an ungated door carries the claimed value
-//! instead.
+//! The stamp is the one that matters most for us: it is what makes a spoofed
+//! `owner_app` in a creator-supplied artifact inert. Deserializing an artifact
+//! yourself and handing it to an ungated door carries the claimed value instead.
 //!
-//! Not a licence to treat the ungated doors as unvalidated: they run six checks
-//! of their own (identifier lengths, per-row DML destinations, typed column
-//! references, FK targets, typed reference catalogs, SQLite repeat-rename). The
-//! five above are simply not among them, and lowering documents that it assumes
-//! a pre-validated IR rather than checking.
+//! NOT ESTABLISHED EITHER WAY, and deliberately not asserted: whether the
+//! remaining `validate_ir_authorized` behaviours - invalid schema ident, illegal
+//! guard direction, embedded-expression rejection, vendor authority - have
+//! lower-side equivalents. Confinement did, and it was the most alarming item on
+//! the original list, so absence should not be inferred for the rest without
+//! finding the behaviour rather than the symbol.
 //!
 //! Deserializing IR directly is fine as a PRE-PASS - `crates/migrated`
 //! deserializes to resolve table-shape policy and re-serializes, then hands the
