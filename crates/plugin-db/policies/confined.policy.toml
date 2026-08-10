@@ -35,15 +35,32 @@ key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 30000
-scope = "all"
-
-[[grant]]
-key = "runtime.statement_timeout_ms"
-value = 300000
-scope = "all"
+# NO per-op timeout ceilings. This file granted `runtime.lock_timeout_ms = 30000`
+# and `runtime.statement_timeout_ms = 300000` until 2026-08-10, and the engine
+# REFUSES the whole document for it:
+#
+#   sqlite engine: confined policy failed: policy charter failed to load:
+#   DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
+#
+# so every confined SQLite registerModel failed and three `register_model::tests::
+# sqlite_*` cases were red on main. The identical grants were dropped from
+# `crates/migrated/policies/confined.policy.toml` the same day, for the same
+# refusal, and that file carries the full reasoning; this one was missed, so the
+# fix was half-applied and only the plugin-db half stayed broken.
+#
+# The refusal is CORRECT. Both keys are registered `declared_only` in the vendored
+# engine (third_party/zero-migrate/crates/zero-migrate-ir/src/policy_registry.rs,
+# "Declared only - no execution path applies it"), so a charter raising either
+# above its default advertises authority the engine does not have.
+#
+# Dropping them costs NO enforcement HERE either, and for a different reason than
+# in migrated: plugin-db does not bound its statements through the charter at all.
+# It issues `SET LOCAL statement_timeout` / `SET LOCAL lock_timeout` from its own
+# constants (`DB_STATEMENT_TIMEOUT_MS` / `DB_LOCK_TIMEOUT_MS`, see
+# crates/plugin-db/src/auth/bootstrap.rs), on a path that never consults this file.
+#
+# These come back the moment the engine wires the knobs into the executor - the
+# classification is a property of the current implementation, not of the key.
 
 [[inject]]
 scope = "all"
