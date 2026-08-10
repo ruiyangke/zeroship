@@ -4576,3 +4576,84 @@ fn call_fetch_inner(
         }
     }
 }
+
+#[cfg(test)]
+mod rpc_path_anchor_tests {
+    use super::{extract_zs_v1_id, url_path_start};
+
+    /// The bypass this anchor exists to close. Before the fix the tag was
+    /// located with `url.find(TAG)` — a SUBSTRING search — while the gateway
+    /// only recognises an RPC request whose canonical path STARTS WITH the tag.
+    /// Prefix on one side, substring on the other: an `auth:user` procedure ran
+    /// anonymously behind any leading segment, plain ASCII.
+    ///
+    /// Each case is paired with the canonical form it differs from by exactly
+    /// one thing (the leading segment), so a green here separates "the anchor
+    /// rejects" from "the function never matches anything".
+    #[test]
+    fn tag_must_be_at_the_path_root_not_anywhere_in_the_url() {
+        // Control: the canonical shape still resolves.
+        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/secret"), Some("secret"));
+        assert_eq!(
+            extract_zs_v1_id("POST", "http://h/__zeroship/v1/secret"),
+            Some("secret")
+        );
+
+        // One variable changed: a leading segment. Captured on the wire as
+        // GET /apps/bslash/x/__zeroship/v1/secret -> 200 RPC-SECRET-DATA.
+        assert_eq!(extract_zs_v1_id("GET", "/x/__zeroship/v1/secret"), None);
+        assert_eq!(extract_zs_v1_id("GET", "/apps/a/x/__zeroship/v1/secret"), None);
+        assert_eq!(extract_zs_v1_id("POST", "http://h/x/__zeroship/v1/secret"), None);
+
+        // The tag appearing in the query or fragment is not a path either.
+        assert_eq!(extract_zs_v1_id("GET", "/foo?u=/__zeroship/v1/secret"), None);
+        assert_eq!(extract_zs_v1_id("GET", "/foo#/__zeroship/v1/secret"), None);
+
+        // A leading segment that itself contains `://`. This reaches the bypass
+        // through `url_path_start` rather than through the prefix compare: drop
+        // the scheme-detection bound below and the origin moves past `/a:/`,
+        // leaving the tag looking root-anchored. Found by mutating that filter.
+        assert_eq!(extract_zs_v1_id("GET", "/a://b/__zeroship/v1/secret"), None);
+    }
+
+    #[test]
+    fn id_is_terminated_by_query_or_fragment_and_never_empty() {
+        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/a?input=x"), Some("a"));
+        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/a#f"), Some("a"));
+        // A bare tag names no procedure.
+        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/"), None);
+        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/?input=x"), None);
+    }
+
+    #[test]
+    fn only_get_and_post_reach_the_rpc_rail() {
+        for m in ["get", "GET", "post", "POST"] {
+            assert_eq!(extract_zs_v1_id(m, "/__zeroship/v1/a"), Some("a"), "{m}");
+        }
+        for m in ["PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
+            assert_eq!(extract_zs_v1_id(m, "/__zeroship/v1/a"), None, "{m}");
+        }
+    }
+
+    /// `url_path_start` bounds scheme detection on `/ ? #` so a `://` that is
+    /// not a scheme separator cannot shift the path origin past real path
+    /// bytes — which would let a segment before the tag be skipped.
+    #[test]
+    fn path_start_skips_only_a_real_scheme_and_authority() {
+        assert_eq!(url_path_start("/a/b"), Some(0));
+        assert_eq!(url_path_start("http://h/a"), Some(8));
+        // No path at all: origin-form and authority-only both have none.
+        assert_eq!(url_path_start("http://h"), None);
+        assert_eq!(url_path_start("http://h?q=/x"), None);
+        assert_eq!(url_path_start("http://h#/x"), None);
+        // `://` after a path/query/fragment byte is not a scheme separator.
+        assert_eq!(url_path_start("/a://b/c"), Some(0));
+        assert_eq!(url_path_start("/?x=a://b/c"), Some(0));
+    }
+
+    // What these do NOT cover: the gateway's own path canonicalisation (a
+    // different crate, driven by tests/e2e_gateway_path_backslash.sh), percent
+    // or backslash decoding — this function sees the raw request-target and
+    // deliberately does no unescaping — and whether the resolved id names a
+    // procedure at all, which is the dispatcher's job downstream.
+}
