@@ -19,7 +19,7 @@
 //     export into `_zsRpc`, keyed by `fn.config.id ?? exportName`.
 //     User's own `default.rpc` (if a plain object) merges in first;
 //     named-export procedures take precedence on key conflict.
-//   - Phase-2 (binding-fed): the reference-graph walk hands us a
+//   - Phase-2 (binding-fed): a caller hands us a pre-computed
 //     `Map<string, ServerBinding>`. We emit one namespace import per
 //     target file and a static dict literal mapping wireId → handler
 //     reference (or an async arrow that does a dynamic import for
@@ -27,7 +27,27 @@
 
 import type { Plugin } from "vite";
 import type { TransformState } from "./transform.js";
-import type { ServerBinding } from "./server-graph.js";
+
+// ── Server bindings ────────────────────────────────────────────────────────
+
+/**
+ * One server-binding entry consumed by the Phase-2 static-dispatch
+ * emitter below. The map is keyed by `<sourceFile>::<exportName>` so
+ * the synthetic-entry generator can emit a stable per-target import.
+ */
+export interface ServerBinding {
+  wireId: string;
+  sourceFile: string;
+  exportName: string;
+  kind: "query" | "mutation" | "stream" | "subscription";
+  /** When true, the synthetic entry emits a dynamic-import wrapper so
+   *  the procedure's source module loads only on first call. Defaults
+   *  to false (eager). Detected from `fn.config.lazy = true` or the
+   *  wrapper's `lazy: true` option (Wave #188). The dynamic import
+   *  rides V8's host callback (Wave #187) — second call to the same
+   *  lazy procedure resolves to the cached namespace. */
+  lazy?: boolean;
+}
 
 // ── Public IDs ─────────────────────────────────────────────────────────────
 
@@ -160,8 +180,8 @@ export default {
 
 // ── Server-Binding Synthetic Entry (Phase-2) ──────────────────────────────
 //
-// When the plugin has run the reference-graph walk it hands the generator
-// a `ServerBinding` map keyed by `<sourceFile>::<exportName>`. We emit
+// When the caller supplies a pre-computed `ServerBinding` map keyed by
+// `<sourceFile>::<exportName>`, the generator uses it directly. We emit
 // one ESM import per target file (deduplicated) and a static `_zsRpc`
 // literal keyed by wireId. The user's own `default.rpc` (when present)
 // merges with the binding-derived entries — bindings win on key conflict
