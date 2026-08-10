@@ -92,10 +92,22 @@ impl RedbBackend {
     /// lock for the process lifetime — see the module docs. Open/create
     /// failures map to [`KvError::Connection`] (the file is the backend's
     /// "transport"); a missing parent dir or a corrupt file surfaces here.
+    /// On failure the error names any process still holding the file. redb
+    /// itself says only "Database already open. Cannot acquire lock.", which
+    /// states the condition and not the cause; the cause is nearly always an
+    /// orphaned runtime from an earlier run (task #221). The scan runs only
+    /// here, on the failure path, so a successful open pays nothing for it.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, KvError> {
         let path = path.as_ref();
         let db = Database::create(path).map_err(|e| {
-            KvError::connection(format!("kv: redb open '{}': {e}", path.display()))
+            let base = format!("kv: redb open '{}': {e}", path.display());
+            // No holder text when nothing readable holds it: see
+            // `holders::describe_holders` for why silence beats a false
+            // all-clear here.
+            match crate::holders::describe_holders(path) {
+                Some(who) => KvError::connection(format!("{base} -- {who}")),
+                None => KvError::connection(base),
+            }
         })?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -491,6 +503,40 @@ mod tests {
     use std::time::Duration;
 
     const APP: &str = "test-app";
+
+    /// The wiring test for task #221: a SECOND open of a held database must
+    /// name the holder, not just say "Database already open".
+    ///
+    /// This drives `RedbBackend::open` itself, so unlike the `holders::tests`
+    /// pair it proves the scanner is actually CALLED on the failure path. A
+    /// green here with those two also green would still be possible if the
+    /// call site were missing, which is exactly why this test exists
+    /// separately rather than being folded into them.
+    ///
+    /// What it does NOT prove: that the holder is a *different* process. The
+    /// holder here is this test process, because a same-process second open
+    /// hits the same lock a stale `zeroship serve` would. The cross-process
+    /// case was observed by hand (four orphans on ports 3151/3161/3171/3181)
+    /// and is not reproduced here.
+    #[test]
+    fn second_open_names_the_holding_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kv.redb");
+        let _first = RedbBackend::open(&path).expect("first open succeeds");
+
+        let err = RedbBackend::open(&path).expect_err("second open must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("pid {}", std::process::id())),
+            "second-open error did not name the holding pid ({}); got: {msg}",
+            std::process::id()
+        );
+        assert!(
+            msg.contains("will NOT help"),
+            "error did not rule out the port remedy, which is the wrong advice \
+             for a state-dir lock (#221); got: {msg}"
+        );
+    }
 
     /// Open a fresh redb backend rooted in a temp dir. The `TempDir` is
     /// returned so the caller keeps it alive for the test's duration.
