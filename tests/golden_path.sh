@@ -685,6 +685,32 @@ else
   fi
 fi
 
+# The step above is a step a CREATOR must now run too, so the artifact we hand
+# them has to be able to run it. `npm create zeroship-app` copies
+# sdks/create-zeroship-app/template/, and ee2c352aa added the `migrate` script
+# to examples/db-todos/package.json ONLY -- so a scaffolded app with a
+# migrations/ directory had no command that could apply it.
+#
+# Asserted on the TEMPLATE rather than on a scaffolded copy on purpose: the
+# template is a directory inside a workspace member, not a package, and must
+# never get a node_modules (it is copied verbatim to creators -- d6ab0a80a).
+# So it cannot be built or run here; its package.json is the only surface this
+# harness can check, and it is the one that carries the defect.
+#
+# This does NOT establish that `pnpm migrate` succeeds in a scaffolded app --
+# only that the command exists to be run. tests/external_chain.sh is the one
+# that scaffolds for real, and it stops at `test -f dist/app.zship` without
+# deploying or invoking anything (see docs/pilot/e2e-scenarios.md, scenario 1).
+TEMPLATE_PKG="$ROOT/sdks/create-zeroship-app/template/package.json"
+if node -e '
+    const p = require(process.argv[1]);
+    process.exit((p.scripts || {}).migrate ? 0 : 1);
+  ' "$TEMPLATE_PKG" 2>/dev/null; then
+  pass "the scaffold template declares a migrate script (creators can apply their migrations)"
+else
+  fail "scaffold template has no \`migrate\` script; a creator with migrations/ cannot apply them. scripts: $(node -e 'console.log(Object.keys(require(process.argv[1]).scripts||{}).join(","))' "$TEMPLATE_PKG" 2>/dev/null)"
+fi
+
 free_ports "$DB_V" "$DB_RT"
 ( cd "$TODOS" && DB_TODOS_API_PORT="$DB_RT" ./node_modules/.bin/vite --port "$DB_V" --strictPort ) \
   >/tmp/gp-dbtodos.log 2>&1 &
@@ -787,7 +813,7 @@ gp_close_step
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
 # an easier one keeps the total at 24. Nothing here can see that; review can.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-25}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-26}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
