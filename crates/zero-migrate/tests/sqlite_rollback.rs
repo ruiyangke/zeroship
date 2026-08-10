@@ -364,3 +364,41 @@ async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
     assert!(!table_exists(&be, "child").await, "child table gone");
     assert!(!table_exists(&be, "parent").await, "parent table gone");
 }
+
+// ---------------------------------------------------------------------------
+// The lock is REAL, not merely called. Hold the project lock, then ask for a
+// rollback of nothing: without the acquire this returns a no-op `Ok`, so the
+// refusal is what proves `rollback` takes the lock before it plans. SQLite
+// refuses a same-instance re-acquire outright, which is what makes this arm
+// single-process; PostgreSQL and MySQL would block on the server instead.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn rollback_refuses_while_another_holder_has_the_project_lock() {
+    use zero_migrate::MigrationBackend;
+
+    let p = paths("rb_lock_held");
+    let be = backend(&p);
+    let cfg =
+        zero_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
+
+    be.acquire_project_lock(&cfg)
+        .await
+        .expect("take the project lock first");
+
+    let err = zero_migrate::rollback(
+        &be,
+        &cfg,
+        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &[],
+        zero_migrate::Approval::Approved,
+        "operator",
+        &zero_migrate::SqliteDescriptorGuard::new(),
+    )
+    .await
+    .expect_err("rollback must not proceed while the project lock is held");
+
+    assert!(
+        err.to_string().contains("already held"),
+        "the refusal must name the held lock, not something downstream: {err}"
+    );
+}
