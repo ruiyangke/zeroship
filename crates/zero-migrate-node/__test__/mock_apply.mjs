@@ -94,16 +94,23 @@ function mysqlHostDriver([request, done]) {
     request.sql.includes('COLLATION_NAME AS collation_name') &&
     request.sql.includes('schema_migrations_inflight')
   ) {
-    rows = [
-      ['schema_migrations', 'version'],
-      ['schema_migrations', 'checksum'],
-      ['schema_migrations_supersedes', 'squash_version'],
-      ['schema_migrations_supersedes', 'superseded_version'],
-      ['schema_migrations_inflight', 'version'],
-      ['schema_migrations_inflight', 'checksum'],
-      ['schema_migrations_recovery', 'version'],
-      ['schema_migrations_recovery', 'checksum'],
-    ].map(([table, column]) => row(
+    // Answer with exactly the columns the probe asked for, read back out of the probe.
+    // The engine refuses to finish the journal bootstrap when any identity column is
+    // absent from this result, so a hand-written list here stops covering a table the
+    // moment one is added on the Rust side. That is not hypothetical: this arm kept
+    // answering for eight columns after the rollback marker took the count to ten, and
+    // the only reason it went unnoticed is that the compiled addon under test is a
+    // build artifact the repository does not carry.
+    const requested = [...request.sql.matchAll(
+      /TABLE_NAME = '([^']+)'\s+AND COLUMN_NAME IN \(([^)]+)\)/g,
+    )].flatMap(([, table, columns]) =>
+      [...columns.matchAll(/'([^']+)'/g)].map(([, column]) => [table, column]),
+    );
+    check(
+      requested.length > 0,
+      'the identity-column probe was recognised but no (table, column) pair parsed out of it',
+    );
+    rows = requested.map(([table, column]) => row(
       ['table_name', 'column_name', 'character_set_name', 'collation_name'],
       [text(table), text(column), text('utf8mb4'), text('utf8mb4_bin')],
     ));
