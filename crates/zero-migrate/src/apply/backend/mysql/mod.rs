@@ -739,10 +739,11 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         m: &Migration,
         applied_by: &str,
     ) -> Result<(), RollbackError> {
-        // "Transactional" is the trait's name for the rollback entry; on MySQL the
-        // `down` auto-commits and the `rolled_back` append is ordered after it (the
-        // same two-phase reality as apply). The trait method name is kept for a
-        // single generic rollback caller.
+        // "Transactional" is the trait's name for the rollback entry, not a promise
+        // this backend can keep: on MySQL the `down` auto-commits statement by
+        // statement, the same two-phase reality as apply. What IS transactional is the
+        // pair that follows it - the `rolled_back` append and the marker clear commit
+        // together. The trait method name is kept for a single generic caller.
         session::rollback_one(self.conn, cfg, m, applied_by).await
     }
 
@@ -5072,6 +5073,55 @@ mod render_tests {
                 && all.contains("'rolled_back', ?, ?, ?, ?, ?")
                 && all.contains("(event_kind, version, name, checksum, `by`, exec_ms)"),
             "rolled_back event appends only the 5 event fields (applied-only cols NULL): {all}"
+        );
+    }
+
+    // The sibling test above asserts the `down` ran and the `rolled_back` row has the
+    // right shape, and it kept passing when the marker and the transaction bracket
+    // were added around it - it reads a narrow slice of a rich log. This one pins the
+    // ordering those two things exist for, so removing either fails here.
+    //
+    // MySQL DDL auto-commits, so the marker must be durable BEFORE the `down`, and the
+    // `rolled_back` append must share a transaction with the marker delete. Otherwise
+    // a `down` that half-runs, or an append that fails after it, leaves no evidence.
+    #[compio::test]
+    async fn rollback_arms_a_marker_before_the_down_and_clears_it_with_the_event() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let m = trivial_migration();
+
+        backend
+            .rollback_one_transactional(&cfg, &m, "tester")
+            .await
+            .expect("rollback runs");
+
+        let log = rec.log.borrow();
+        let at = |needle: &str| {
+            log.iter()
+                .position(|s| s.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle} in {log:?}"))
+        };
+
+        let probe = at("FROM `proj_x_migrations`.schema_migrations_rollback_inflight");
+        let arm = at("INSERT INTO `proj_x_migrations`.schema_migrations_rollback_inflight");
+        let down = at("batch: DROP TABLE t");
+        let begin = at("START TRANSACTION");
+        let event = at("'rolled_back', ?, ?, ?, ?, ?");
+        let clear = at("DELETE FROM `proj_x_migrations`.schema_migrations_rollback_inflight");
+        let commit = at("COMMIT");
+
+        assert!(
+            probe < arm && arm < down,
+            "an unmatched marker is checked, then one is armed, both before the down: {log:?}"
+        );
+        assert!(
+            down < begin && begin < event && begin < clear,
+            "the journal bracket opens after the down: {log:?}"
+        );
+        assert!(
+            event < commit && clear < commit,
+            "the rolled_back append and the marker clear commit as one unit: {log:?}"
         );
     }
 

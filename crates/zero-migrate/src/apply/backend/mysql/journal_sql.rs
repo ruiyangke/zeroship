@@ -156,6 +156,27 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     ))
     .await?;
 
+    // The rollback-side peer of the marker above. It gets its own table rather than a
+    // discriminator column on that one: the two describe opposite hazards, so they
+    // need different diagnosis and different repair wording, and a shared table would
+    // save one CREATE while still needing the second recovery path. Keeping the
+    // apply marker's meaning single also keeps the operator docs that quote it true.
+    //
+    // What this buys is worth stating plainly, because it is easy to over-read: it
+    // CANNOT make a MySQL rollback atomic. The `down` auto-commits statement by
+    // statement, and no marker changes that. It converts a silent corruption window
+    // into durable ambiguity an operator can see and repair.
+    conn.batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_rollback_inflight (
+            version     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
+            name        VARCHAR(255) NOT NULL,
+            checksum    VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            started_at  TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            applied_by  VARCHAR(255) NOT NULL
+        ) ENGINE=InnoDB"
+    ))
+    .await?;
+
     // Immutable operator recovery audit. Clearing an ambiguous marker for a
     // verified retry and reconciling a fully-landed migration are both durable,
     // append-only decisions rather than undocumented direct table edits.
@@ -681,6 +702,83 @@ pub(crate) async fn clear_inflight<D: SqlSession>(
     )
     .await?;
     Ok(())
+}
+
+/// Arm the rollback marker before a `down` runs, so an interrupted unwind leaves
+/// evidence instead of a silently half-reverted schema.
+///
+/// Written on its own and committed before the first byte of `down` reaches MySQL.
+/// It cannot join the `down` in a transaction: MySQL DDL auto-commits, so the marker
+/// has to be durable BEFORE the statements it describes, not alongside them.
+///
+/// # Errors
+/// [`JournalError::Db`] on failure.
+pub(crate) async fn mark_rollback_inflight<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+    name: &str,
+    checksum: &str,
+    applied_by: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    conn.exec(
+        &format!(
+            "INSERT INTO {meta}.schema_migrations_rollback_inflight
+             (version, name, checksum, applied_by)
+             VALUES (?, ?, ?, ?)"
+        ),
+        &[
+            version.into(),
+            name.into(),
+            checksum.into(),
+            applied_by.into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Clear the rollback marker. Called inside the caller's transaction, paired with
+/// the `rolled_back` append so the two commit as one unit.
+///
+/// # Errors
+/// [`JournalError::Db`] on failure.
+pub(crate) async fn clear_rollback_inflight<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    conn.exec(
+        &format!("DELETE FROM {meta}.schema_migrations_rollback_inflight WHERE version = ?"),
+        &[version.into()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Whether a version carries an unmatched rollback marker: a `down` that started and
+/// whose outcome was never recorded.
+///
+/// # Errors
+/// [`JournalError::Db`] on failure.
+pub(crate) async fn has_rollback_inflight<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+) -> Result<bool, JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT version FROM {meta}.schema_migrations_rollback_inflight
+                  WHERE version = ? LIMIT 1"
+            ),
+            &[version.into()],
+        )
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 /// Lock and read one recovery marker inside the caller's transaction. The row is

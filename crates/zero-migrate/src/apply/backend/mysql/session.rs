@@ -27,10 +27,15 @@
 //! `completed` row + clear the marker. Because generated MySQL DDL is not safely
 //! replayable after an ambiguous crash, an unmatched marker is preserved and
 //! recovery fails closed for operator inspection instead of re-running `up`.
-//! - **rollback** — the `down` runs, then a `rolled_back` event is appended. MySQL
-//! DDL auto-commits, so the `down` + its journal append are NOT atomic (same
-//! two-phase reality as apply); the append is best-effort-ordered after the
-//! `down` succeeds.
+//! - **rollback** - the mirror of apply, for the same reason: a rollback marker ->
+//! run the `down` -> the immutable `rolled_back` row + clear the marker, those last
+//! two in one transaction. MySQL DDL auto-commits, so the `down` itself can never
+//! join a transaction and a partially-run `down` is a real outcome. The marker does
+//! not prevent that; it records it, so an interrupted unwind is durable ambiguity an
+//! operator can see rather than a silently half-reverted schema. An unmatched
+//! rollback marker fails closed on BOTH paths - rollback will not replay a `down`
+//! over its own partial work, and apply will not run an `up` over a shape nobody
+//! has verified.
 //!
 //! Placeholders are the anonymous positional `?`
 //! ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
@@ -778,6 +783,23 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
 ) -> Result<bool, ApplyError> {
     let version = m.version.as_str();
 
+    // A rollback marker is a different hazard from the apply marker below, and it is
+    // checked first because it says something stronger: this version's `down` started
+    // and never finished, so the schema is not the pre-migration shape an `up`
+    // assumes. Trusting the journal's net-applied state and running the `up` anyway
+    // would build on a shape nobody has verified.
+    if journal_sql::has_rollback_inflight(conn, cfg, version).await? {
+        let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        return Err(ApplyError::Backend(format!(
+            "mysql migration {version} has a rollback marker from an interrupted unwind; \
+             its `down` auto-committed an unknown number of statements, so the live shape \
+             is not the one this `up` expects. Inspect the live schema against the \
+             migration's `down`, settle the partial revert, then clear the marker with \
+             DELETE FROM {meta}.schema_migrations_rollback_inflight WHERE version = \
+             '{version}' and run apply again"
+        )));
+    }
+
     if had_inflight {
         // Name the repair the person reading this can actually perform. The
         // inflight side-table is mutable by design and the applying credential
@@ -966,6 +988,29 @@ pub(crate) async fn rollback_one<D: SqlSession>(
             other => RollbackError::Backend(other.to_string()),
         })?;
     let result: Result<(), RollbackError> = async {
+        // An unmatched marker means a previous `down` for this version started and
+        // never recorded its outcome, so the schema may be partly reverted. Replaying
+        // a `down` over that is not safe: reverse SQL is no more idempotent than the
+        // `up` it undoes, and MySQL committed whatever part of it landed.
+        if journal_sql::has_rollback_inflight(conn, cfg, version)
+            .await
+            .map_err(RollbackError::Journal)?
+        {
+            let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)
+                .map_err(RollbackError::Journal)?;
+            return Err(RollbackError::Backend(format!(
+                "mysql migration {version} has a rollback marker from an interrupted \
+                 unwind; its `down` auto-committed an unknown number of statements, so \
+                 zero-migrate will not run it again. Inspect the live schema against the \
+                 migration's `down`, finish or undo the partial revert yourself, then \
+                 clear the marker with DELETE FROM \
+                 {meta}.schema_migrations_rollback_inflight WHERE version = '{version}'. \
+                 This is a different marker from the apply-side \
+                 schema_migrations_inflight, and a different repair: that one means an \
+                 `up` may be half-applied, this one means a `down` may be half-reverted"
+            )));
+        }
+
         // Rollback is another author-SQL execution entry. Pin the same literal
         // mode and budgets as apply before the first byte of `down` reaches MySQL.
         conn.batch(&session_settings_sql(
@@ -974,6 +1019,21 @@ pub(crate) async fn rollback_one<D: SqlSession>(
         ))
         .await
         .map_err(|e| RollbackError::Db(e.into()))?;
+
+        // Durable BEFORE the `down`, and on its own: MySQL DDL auto-commits, so a
+        // marker written alongside the reverse SQL would not survive the statement
+        // that fails.
+        journal_sql::mark_rollback_inflight(
+            conn,
+            cfg,
+            version,
+            &m.name,
+            m.checksum.as_str(),
+            applied_by,
+        )
+        .await
+        .map_err(RollbackError::Journal)?;
+
         let started = Instant::now();
         conn.batch(down)
             .await
@@ -982,17 +1042,45 @@ pub(crate) async fn rollback_one<D: SqlSession>(
                 source: e.into(),
             })?;
         let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        journal_sql::record_rolled_back(
-            conn,
-            cfg,
-            version,
-            &m.name,
-            m.checksum.as_str(),
-            applied_by,
-            exec_ms,
-        )
-        .await
-        .map_err(RollbackError::Journal)?;
+
+        // The `rolled_back` append and the marker clear commit as ONE unit, the way
+        // apply pairs its completed row with `clear_inflight`. Without the bracket a
+        // failed append would leave the schema reverted and the journal still saying
+        // applied, with nothing recording the disagreement.
+        conn.batch("START TRANSACTION")
+            .await
+            .map_err(|e| RollbackError::Db(e.into()))?;
+        let finalize = async {
+            journal_sql::record_rolled_back(
+                conn,
+                cfg,
+                version,
+                &m.name,
+                m.checksum.as_str(),
+                applied_by,
+                exec_ms,
+            )
+            .await
+            .map_err(RollbackError::Journal)?;
+            journal_sql::clear_rollback_inflight(conn, cfg, version)
+                .await
+                .map_err(RollbackError::Journal)?;
+            Ok::<(), RollbackError>(())
+        }
+        .await;
+        if let Err(error) = finalize {
+            if let Err(rollback) = conn.batch("ROLLBACK").await {
+                tracing::warn!(
+                    error = %rollback,
+                    version,
+                    "zero-migrate: MySQL ROLLBACK failed after rollback journal finalization error"
+                );
+            }
+            return Err(error);
+        }
+        conn.batch("COMMIT")
+            .await
+            .map_err(|e| RollbackError::Db(e.into()))?;
         Ok(())
     }
     .await;
