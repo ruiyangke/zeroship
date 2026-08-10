@@ -988,6 +988,24 @@ db_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' "$DB_RPC/
 # leg pass exactly once per database and fail on every re-run. The identity is
 # per-run.
 GP_TAG="gp-$$-${RANDOM}"
+# MADE/JOINED are assigned ONLY inside the `DB_UP -eq 1` branch below, but the
+# dev-vs-deployed divergence messages interpolate them unguarded. Under
+# `set -uo pipefail` that is a HARD ABORT, not a `fail()` - the harness dies
+# mid-run and every later step is lost, so a real dev-tier outage reports as a
+# crashed script rather than a red row.
+#
+# MEASURED, not hypothetical: a 20-run campaign hit this in runs 8-12, five
+# CONSECUTIVE runs, byte-identical from step 9 onward, with runs 1-7 and 13-20
+# clean. `tests/golden_path.sh: line 1180: MADE: unbound variable`. The trigger
+# was the dev leg never binding (redb lock held by an untracked process), which
+# leaves DEV_INSERT_VERDICT at "not-run" while the deployed leg answers "ok" -
+# so the verdicts differ, the divergence arm fires, and it reaches for a variable
+# that was never declared.
+#
+# Defaulting them here keeps the diagnostic honest: the row goes RED and says the
+# dev leg did not run, which is the truth, instead of taking the script down.
+MADE=""
+JOINED=""
 DEV_INSERT_VERDICT="not-run"
 DEV_JOIN_VERDICT="not-run"
 DB_UP=0
