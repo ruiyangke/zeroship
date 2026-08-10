@@ -1,7 +1,7 @@
 import { defineApp } from "@zeroship/server";
 
 // App resource policy. Without this file every procedure in `src/index.ts`
-// resolves to `auth: "user"`, and the gateway refuses all nineteen with
+// resolves to `auth: "user"`, and the gateway refuses all twenty-four with
 // `{"code":"UNAUTHENTICATED","message":"authentication required"}` -- which is
 // exactly how this example shipped: green under `pnpm dev` (18 of 19 smoke
 // checks) and 100% unreachable once deployed. Measured by
@@ -9,7 +9,7 @@ import { defineApp } from "@zeroship/server";
 //
 // THE BUILD ALREADY SAID SO, in detail, and the example shipped anyway. Deleting
 // this file and rebuilding printed this when there were fourteen procedures
-// (verified by running it, 2026-08-10; the count is now nineteen, and the count
+// (verified by running it, 2026-08-10; the count is now twenty-four, and the count
 // in the message is the only part of it that has changed):
 //
 //   [zeroship:manifest] 14 procedures declare no `auth` policy and will deploy
@@ -57,6 +57,11 @@ export default defineApp({
     "rpc:todos.txNested": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.txIsolation": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.txDepth": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.countTitle": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txParallel": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txOverlap": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txPlainWrite": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txRaceStep": { auth: "anon", publiclyAccessible: true },
     "rpc:users.seed": { auth: "anon", publiclyAccessible: true },
     "rpc:users.getPair": { auth: "anon", publiclyAccessible: true },
     "rpc:users.public": { auth: "anon", publiclyAccessible: true },

@@ -12,11 +12,16 @@
 //!
 //! 1. [`transaction_dispatch`] (a sync v8_method body) mints the outer
 //!    [`v8::PromiseResolver`] and returns its promise to JS immediately.
-//! 2. It reads the per-isolate tx state ([`crate::context`]) to decide
-//!    whether this is a **top-level** transaction (no tx active → emit
-//!    `BEGIN`) or a **nested** one (an explicit transaction already
-//!    holds the `tx_conn` slot → emit `SAVEPOINT zs_sp_<N>`). Nesting
-//!    beyond [`MAX_SAVEPOINT_DEPTH`] rejects with `savepoint_depth_exceeded`.
+//! 2. It reads the calling frame's **async context**
+//!    ([`crate::tx_scope`]) to decide whether this is a **top-level**
+//!    transaction (not inside any transaction callback → emit `BEGIN`)
+//!    or a **nested** one (inside this app's enclosing callback → emit
+//!    `SAVEPOINT zs_sp_<N>`). Nesting beyond [`MAX_SAVEPOINT_DEPTH`]
+//!    rejects with `savepoint_depth_exceeded`. It is deliberately NOT
+//!    "does this app have a transaction open right now" — that test
+//!    cannot tell a nested call from an unrelated concurrent one, and
+//!    reading it that way silently folded one request's transaction into
+//!    another's (see [`crate::tx_scope`] for the measurement).
 //! 3. A spawned op runs the `BEGIN` / `SAVEPOINT` SQL against the pinned
 //!    connection. On success it hands back a
 //!    [`zeroship_runtime::state::ResolveValue::Continuation`] (see step
@@ -44,12 +49,33 @@
 //!
 //! ## Single-connection model & backend scope
 //!
-//! V8 is single-threaded per isolate, so only one transaction connection
-//! is active at a time. It lives in `IsolateDbContext::tx_conns`;
-//! every CRUD callback ([`crate::exec::run_sql`]) routes through that slot
-//! when it is set. Nested savepoints reuse the **same** connection (that
-//! is the whole point of `SAVEPOINT`), so no new connection is acquired
-//! for a nested `transaction()`.
+//! There is exactly one transaction connection slot per (app, isolate).
+//! It lives in `IsolateDbContext::tx_conns` and a second top-level
+//! transaction for the same app **waits** for it
+//! ([`AwaitTxClaim`]) rather than racing for it.
+//!
+//! An earlier version of this paragraph said "V8 is single-threaded per
+//! isolate, so only one transaction connection is active at a time",
+//! which is why the slot was treated as safe to read ambiently. It does
+//! not follow. Single-threaded means one *executing frame* at a time, not
+//! one *in-flight operation*: a worker thread multiplexes many requests
+//! over one isolate and hands the thread to another dispatch at every
+//! `.await`, so two `transaction()` calls overlap routinely. The
+//! serialisation above is what actually makes the one-slot model hold.
+//!
+//! Nested savepoints reuse the **same** connection (that is the whole
+//! point of `SAVEPOINT`), so no new connection is acquired for a nested
+//! `transaction()`.
+//!
+//! **Known gap.** Ordinary (non-transactional) CRUD still routes through
+//! that slot ambiently: [`crate::exec::run_sql`] asks
+//! `has_tx_for(app_id)` with no notion of *whose* transaction it is, so a
+//! plain `env.db.x.insert()` issued while some unrelated unit of work
+//! holds a transaction open executes inside it and is undone by its
+//! rollback. Measured on both tiers (`cxPlain` in
+//! `tests/e2e_dev_vs_deployed_db.sh`). Closing it means capturing the
+//! async scope at each CRUD dispatch site the way this module now does
+//! for `transaction()`.
 //!
 //! The top-level `BEGIN` path acquires a backend-specific dedicated
 //! client via [`crate::backend::SqlExecutor::acquire_dedicated_client`]
@@ -217,14 +243,41 @@ pub fn transaction_dispatch<'s>(
     // the pump scope.
     let user_fn_global = v8::Global::new(scope, user_fn);
 
-    // Decide BEGIN vs SAVEPOINT from the *current* tx state.
-    // `has_tx_for(app_id)` is true whenever an enclosing explicit
-    // `transaction()` for THIS app holds the slot. SEC-1: a co-resident
-    // app's parked tx reads `false`, so this app correctly opens its own
-    // top-level BEGIN rather than nesting into the other app's tx. A
-    // nested call therefore emits `SAVEPOINT` and reuses the open
-    // connection.
-    let nested = crate::context::with(|c| c.has_tx_for(&app_id));
+    // Decide BEGIN vs SAVEPOINT from the calling frame's ASYNC CONTEXT,
+    // not from whether the app happens to have a transaction open.
+    //
+    // Until 2026-08-10 this read `has_tx_for(app_id)` — "does this app
+    // have a tx open right now?". That is a temporal test standing in for
+    // a structural one, and it is wrong whenever two transactions for one
+    // app overlap in time, which they routinely do: a worker thread
+    // multiplexes many requests over one isolate and yields at every
+    // `.await`, and `pnpm dev` is one isolate by construction. An
+    // unrelated request's `transaction()` read `true`, opened a SAVEPOINT
+    // on the FIRST request's connection, reported success, and then lost
+    // its row to the first request's ROLLBACK. Measured on both tiers by
+    // `tests/e2e_dev_vs_deployed_db.sh` (`cxOvl`).
+    //
+    // `current_tx_app` is true only inside the enclosing callback's own
+    // continuation chain — see `crate::tx_scope`. SEC-1 still holds and is
+    // now structural rather than incidental: a co-resident app's callback
+    // plants ITS app_id, so the comparison below fails and this app opens
+    // its own top-level BEGIN.
+    let nested = crate::tx_scope::current_tx_app(scope).as_deref() == Some(app_id.as_str());
+
+    // A nested call whose enclosing transaction has already settled (a
+    // continuation that outlived its tx — e.g. a callback that was never
+    // awaited) has nothing to open a SAVEPOINT on. Refuse loudly rather
+    // than emitting SQL against a drained slot.
+    if nested && !crate::context::with(|c| c.has_tx_for(&app_id)) {
+        let err = DbError::validation_hinted(
+            "transaction_scope_expired",
+            "db.transaction: the enclosing transaction has already settled".to_string(),
+            "A nested env.db.transaction(...) must run while its enclosing transaction is still \
+             open; awaiting the outer transaction's result first makes this a top-level call.",
+        );
+        reject_outer_now(scope, &outer_global, err);
+        return outer_promise;
+    }
 
     // Savepoint-depth cap: refuse the (MAX+1)-th level up front, before
     // any SQL runs. The depth that *would* be opened is the current
@@ -255,6 +308,31 @@ pub fn transaction_dispatch<'s>(
         // The Rust-side broker `pending_emits` queue is cleared on every
         // top-level BEGIN inside `exec_begin` so a prior tx's residue
         // never leaks into this one.
+        // Serialise top-level transactions for this app on this isolate.
+        // Only ONE tx connection slot exists per (app, isolate), so a
+        // second concurrent top-level transaction has nowhere to live: it
+        // used to evict the first (Postgres) or be refused by the single
+        // SQLite writer with `cannot start a transaction within a
+        // transaction`. Waiting turns both of those into "runs second and
+        // succeeds", which is what a creator writing
+        // `Promise.all([db.transaction(a), db.transaction(b)])` means.
+        //
+        // Cannot deadlock: a genuinely NESTED call skips this (it does not
+        // need a claim), and the claim holder never waits on a waiter.
+        //
+        // WHAT THIS DOES NOT COVER, stated rather than implied: if this op
+        // is CANCELLED between taking the claim and the `BEGIN` returning
+        // (a window of one round-trip), the claim leaks and later
+        // transactions for this app park until the isolate is evicted.
+        // Every non-cancelled path releases — the `Err` arm below, the
+        // settle in `exec_settle_top_level`, and `TxTeardownGuard::drop`.
+        // Closing the cancellation window needs an RAII guard armed for
+        // exactly this window and disarmed once the client is installed;
+        // it is not here because it is unverified, not because the window
+        // does not exist.
+        if !nested {
+            AwaitTxClaim::new(app_id.clone()).await;
+        }
         match exec_begin_or_savepoint(nested, isolation_level.as_deref(), &app_id).await {
             Ok(savepoint) => {
                 // Hand back a continuation that mints the tx-view, calls
@@ -287,6 +365,10 @@ pub fn transaction_dispatch<'s>(
                 let coded = if nested {
                     e
                 } else {
+                    // Nothing was opened, so nothing will settle — release
+                    // the claim here or every later transaction for this
+                    // app parks forever.
+                    crate::context::with_mut(|c| c.release_tx_claim(&app_id));
                     DbError::Coded {
                         code: "begin_failed".to_string(),
                         message: format!("db.transaction: BEGIN failed: {}", e.message_str()),
@@ -303,6 +385,40 @@ pub fn transaction_dispatch<'s>(
     }));
 
     outer_promise
+}
+
+/// Future that resolves once this app owns the top-level-transaction
+/// claim (see [`crate::context::IsolateDbContext::try_claim_tx`]).
+///
+/// Held from before the `BEGIN` until after the `COMMIT`/`ROLLBACK` has
+/// settled, so it covers the window in which the tx connection slot is
+/// still empty — the window two same-turn `transaction()` calls both fell
+/// into.
+struct AwaitTxClaim {
+    app_id: String,
+}
+
+impl AwaitTxClaim {
+    fn new(app_id: String) -> Self {
+        Self { app_id }
+    }
+}
+
+impl std::future::Future for AwaitTxClaim {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if crate::context::with_mut(|c| c.try_claim_tx(&self.app_id)) {
+            return std::task::Poll::Ready(());
+        }
+        // Lost. Park and re-check on the next release; `release_tx_claim`
+        // wakes every waiter, so a spurious wake just re-runs this poll.
+        crate::context::with_mut(|c| c.push_tx_waiter(&self.app_id, cx.waker().clone()));
+        std::task::Poll::Pending
+    }
 }
 
 /// Reject an outer resolver synchronously (used for the pre-flight
@@ -474,8 +590,14 @@ impl TxTeardownGuard {
 impl Drop for TxTeardownGuard {
     fn drop(&mut self) {
         let Some(client) = self.client.take() else {
+            // Normal path: `into_inner` already took the client and
+            // `exec_settle_top_level` released the claim. Nothing owed.
             return;
         };
+        // Cancellation path. The transaction is not going to settle, so
+        // release the claim; leaving it held would park every later
+        // transaction for this app on a settle that will never come.
+        crate::context::with_mut(|c| c.release_tx_claim(&self.app_id));
 
         match &client {
             TxConnection::Sqlite(handle) => {
@@ -543,8 +665,16 @@ fn run_begin_continuation(
     // 2. Call the creator callback inside a TryCatch to capture a
     //    *synchronous* throw (e.g. a non-async callback that throws, or
     //    an async callback that throws before its first await).
+    //    The call is wrapped in the async-scope marker: every continuation
+    //    that branches off inside the callback inherits `app_id` in V8's
+    //    continuation-preserved slot, so a `db.transaction()` reached from
+    //    in there reads as NESTED while a concurrent dispatch's does not.
+    //    See `crate::tx_scope`. Restored on both exit paths below —
+    //    leaving it set would make the NEXT unrelated dispatch on this
+    //    isolate think it was inside this transaction.
     let user_fn = v8::Local::new(scope, &user_fn_global);
     let undefined = v8::undefined(scope).into();
+    let prev_scope = crate::tx_scope::enter(scope, &app_id);
     let call_result = {
         v8::tc_scope!(let tc, scope);
         let ret = user_fn.call(tc, undefined, &[tx_view.into()]);
@@ -559,6 +689,7 @@ fn run_begin_continuation(
             }
         }
     };
+    crate::tx_scope::leave(scope, prev_scope);
 
     let ret_global = match call_result {
         Ok(v) => v,
@@ -826,11 +957,19 @@ async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> Se
 /// Top-level COMMIT / ROLLBACK. Drains `app_id`'s connection out of the
 /// slot, runs the statement, drops the client, and settles that app's
 /// broker queue.
+/// Every exit path below releases `app_id`'s top-level-transaction claim
+/// (see [`crate::context::IsolateDbContext::try_claim_tx`]). A path that
+/// forgot to would park every later transaction for that app forever, so
+/// the release is deliberately duplicated per-arm rather than hidden in a
+/// guard that a future `return` could skip.
 async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
     let backend = match crate::context::with(|c| c.backend()) {
         Some(backend) => backend,
         None => {
-            crate::context::with_mut(|c| c.reset_savepoint_depth_for(app_id));
+            crate::context::with_mut(|c| {
+                c.reset_savepoint_depth_for(app_id);
+                c.release_tx_claim(app_id);
+            });
             clear_pending_emits(app_id);
             return SettleOutcome::Ok;
         }
@@ -843,6 +982,7 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
     let Some(client) = client_opt else {
         // Slot already drained (e.g. a concurrent teardown). Treat as
         // settled — clear residual state.
+        crate::context::with_mut(|c| c.release_tx_claim(app_id));
         clear_pending_emits(app_id);
         return SettleOutcome::Ok;
     };
@@ -855,6 +995,9 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
     }
     let client = teardown.into_inner();
     drop(client);
+    // The terminal statement has run and the connection is gone: the next
+    // top-level transaction for this app may proceed.
+    crate::context::with_mut(|c| c.release_tx_claim(app_id));
 
     match (success, result) {
         (true, Ok(_)) => {

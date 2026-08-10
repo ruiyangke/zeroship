@@ -69,17 +69,12 @@
 #                         it. The empty-array round-trip IS compared; a
 #                         populated JSON document is NOT, and no procedure in
 #                         db-todos accepts one.
-#   CONCURRENT tx         every transaction probe below is a SINGLE transaction
-#                         at a time. The tx connection lives in a per-app slot
-#                         on the isolate, and a second `transaction()` call
-#                         while one is open NESTS (SAVEPOINT) rather than
-#                         running beside it -- so from inside one request there
-#                         is no way to stage two competing writers. That is
-#                         exactly what an isolation level is FOR, so the
-#                         behavioural half of the isolation-level divergence
-#                         (does SERIALIZABLE actually reject a conflicting
-#                         writer?) remains unmeasured on both tiers. Named as a
-#                         gap, not silently omitted.
+#   (CONCURRENT tx used to be listed here as unprobed. It is probed now --
+#    sections 3b and 4b. The claim that stood here, "from inside one request
+#    there is no way to stage two competing writers", was WRONG: two
+#    `db.transaction()` calls under one `Promise.all` stage exactly that, and
+#    measuring it found the defect in #244. Left as a correction rather than
+#    deleted, because the false claim is what kept the row closed.)
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
@@ -403,6 +398,120 @@ probe() {
   # ordinary (non-tx) path. Each procedure reports its own count; this row is
   # the one the procedures cannot fake.
   row txTotal todos.count "{\"userId\":\"$txid\"}"
+
+  # --- CONCURRENT TRANSACTIONS ---------------------------------------------
+  # The regime an isolation level exists for, and the last unmeasured element
+  # of scenario 3. Everything above is a single UNCONTENDED transaction.
+  #
+  # These two use their OWN user so `txTotal` above stays an exact count.
+  #
+  # Both are staged from inside ONE request via `Promise.all`, deliberately:
+  # that removes the confound named in docs/reference/sqlite-divergences.md
+  # (deployed can spread requests across isolates, `pnpm dev` cannot). One
+  # request is one isolate on BOTH tiers, so what these rows compare is the
+  # transaction machinery and not the request scheduler. The cross-REQUEST
+  # version, which does depend on the scheduler, is section 3b/4b.
+  row cxSeed users.seed "{\"email\":\"cx-$RUN@probe.test\",\"name\":\"Cx\",\"handle\":\"cx_$RUN\"}"
+  local cxid
+  cxid="$(grep -m1 '^cxSeed ' "$RAWFILE" | grep -oE '"id":"user_[^"]+"' | head -1 | cut -d'"' -f4)"
+  if [ -z "$cxid" ]; then
+    printf '%-10s CX SEED FAILED, concurrency probes skipped\n' cxabort >> "$RAWFILE"
+    return 1
+  fi
+  # Two transactions opened in the same JS turn. A creator reading
+  # docs/reference/db.md expects two independent units of work: two rows, no
+  # errors.
+  row cxPar todos.txParallel "{\"userId\":\"$cxid\",\"tag\":\"p$RUN\"}"
+  # A holds a transaction open across an await and then ABORTS; B opens its own
+  # transaction inside that window and COMMITS. `bAfter` is the load-bearing
+  # field: B reported success, so B's row must be in the table. If it is not,
+  # B was folded into A's transaction and A's ROLLBACK destroyed a stranger's
+  # committed write.
+  row cxOvl todos.txOverlap "{\"userId\":\"$cxid\",\"tag\":\"o$RUN\",\"holdMs\":400}"
+  # The sharper version: leg B here is an ORDINARY `db.todos.insert()` with
+  # no transaction anywhere in its call chain. If the tx connection is routed
+  # ambiently ("does this app have a tx open?") rather than by call context,
+  # then the DEFAULT write path inherits a stranger's transaction, and A's
+  # rollback deletes B's row.
+  row cxPlain todos.txPlainWrite "{\"userId\":\"$cxid\",\"tag\":\"w$RUN\",\"holdMs\":400}"
+  # Independent tally, read outside any transaction. Contract: 2 rows from
+  # cxPar (both legs commit) + 0 from cxOvl leg A (aborted) + 1 from cxOvl
+  # leg B (committed) + 0 from cxPlain leg A (aborted) + 1 from cxPlain
+  # leg B (an ordinary write) = 4.
+  row cxTotal todos.count "{\"userId\":\"$cxid\"}"
+}
+
+# ---------------------------------------------------------------------------
+# The cross-REQUEST write-write race, run N times and CLASSIFIED.
+#
+# Separate from `probe()` and deliberately OUTSIDE the byte-diff: the deployed
+# worker runs 2 threads with a thread-local isolate cache, so two concurrent
+# requests for one app may land on one isolate (cooperative interleaving) or on
+# two (genuine parallelism), and `pnpm dev` is pinned to `--workers=1` and has
+# no second isolate at all. That is a real structural difference between the
+# tiers and forcing it into a byte-diff would report the scheduler as a data
+# divergence. What IS compared is the CLASSIFICATION, in section 4b.
+#
+# One run of a race is worthless -- races are probabilistic. Each call fires
+# RACE_N pairs and prints a tally, so a rare interleaving is visible as a count
+# rather than as a coin toss.
+race() { # <base> <outfile> [header]
+  RACE_BASE="$1" RACE_HDR="${3:-}" RACE_N="${RACE_N:-16}" \
+    node --input-type=module - > "$2" 2>&1 <<'NODE'
+const base = process.env.RACE_BASE;
+const N = Number(process.env.RACE_N), holdMs = 400;
+const headers = { "content-type": "application/json" };
+const hdr = process.env.RACE_HDR;
+if (hdr) { const i = hdr.indexOf(":"); headers[hdr.slice(0, i)] = hdr.slice(i + 1).trim(); }
+const call = async (proc, json) => {
+  const r = await fetch(`${base}/__zeroship/v1/${proc}`, {
+    method: "POST", headers, body: JSON.stringify({ json }) });
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { unparseable: t.slice(0, 160) }; }
+};
+// One signature per leg, deliberately COARSE: an error CODE, or `ok` plus the
+// count the transaction read before it wrote. Messages and ids are excluded so
+// the two tiers are comparable; the raw bodies are in the harness work dir.
+const sig = (j) => j.threw ? `threw:${j.threw.code}`
+  : j.error ? `err:${j.error.code}` : `ok:before=${j.data?.before}`;
+// Its OWN user, so `todos.countTitle` below counts this race's rows and
+// nothing else, and so a failed seed is loud rather than silent.
+const stamp = `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+const seeded = await call("users.seed", {
+  email: `race-${stamp}@probe.test`, name: "Race", handle: `race_${stamp}` });
+const userId = seeded?.json?.id;
+if (typeof userId !== "string") {
+  console.log(`runs=0\n  0x SEED_FAILED ${JSON.stringify(seeded).slice(0, 200)}`);
+  process.exit(0);
+}
+const tally = new Map();
+for (let i = 0; i < N; i++) {
+  const tag = `rc-${i}-${Math.random().toString(36).slice(2, 8)}`;
+  const fire = (delay) => new Promise((res) => setTimeout(
+    () => res(call("todos.txRaceStep", { userId, tag, holdMs, level: "serializable" })), delay));
+  const [a, b] = await Promise.all([fire(0), fire(holdMs / 4)]);
+  const ja = a.json, jb = b.json;
+  if (!ja || !jb) { const k = `WIRE_ERROR`; tally.set(k, (tally.get(k) ?? 0) + 1); continue; }
+  // Did the two handlers actually overlap in wall-clock time? Without this the
+  // whole run could be two serialised requests reporting a clean result that
+  // says nothing about concurrency.
+  const overlapped = jb.t0 < ja.t1 && ja.t0 < jb.t1;
+  const rows = (await call("todos.countTitle", { userId, title: tag })).json;
+  // The two integrity questions, independent of which backend is underneath:
+  //   lostCommit  a leg reported success and its row is missing.
+  //   ghostCommit a leg reported failure and a row landed anyway.
+  const okCount = [ja, jb].filter((j) => !j.threw && !j.error).length;
+  const verdict = rows === okCount ? "consistent"
+    : rows < okCount ? `lostCommit(ok=${okCount},rows=${rows})`
+    : `ghostCommit(ok=${okCount},rows=${rows})`;
+  const k = `overlap=${overlapped} A=${sig(ja)} B=${sig(jb)} rows=${rows} ${verdict}`;
+  tally.set(k, (tally.get(k) ?? 0) + 1);
+}
+console.log(`runs=${N}`);
+for (const [k, v] of [...tally].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))) {
+  console.log(`${String(v).padStart(3)}x ${k}`);
+}
+NODE
 }
 
 # Render a raw capture into the comparable form. Id aliases are assigned in
@@ -482,6 +591,12 @@ grep -q '^seedA .*"id":"user_' "$WORK/dev.raw" && pass "dev server answered the 
   || { fail "dev server never answered"; tail -25 "$WORK/dev.log"; head -3 "$WORK/dev.raw"; exit 1; }
 render "$WORK/dev.raw" "$WORK/dev.txt"
 
+# --- 2b. dev: the cross-REQUEST race ---------------------------------------
+race "http://localhost:$DEV_PORT" "$WORK/dev.race"
+grep -q '^runs=[1-9]' "$WORK/dev.race" \
+  && pass "dev ran the concurrent-writer race ($(head -1 "$WORK/dev.race"))" \
+  || { fail "dev race produced no runs"; head -5 "$WORK/dev.race" | sed 's/^/    /'; }
+
 # --- 3. deployed side ------------------------------------------------------
 echo ""
 echo "--- 3. deployed (gateway -> worker -> PostgreSQL) ---"
@@ -502,10 +617,19 @@ docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship \
   -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 \
   -c max_connections=200 -c log_statement=all >/dev/null \
   || { fail "docker run postgres"; exit 1; }
-for _ in $(seq 1 40); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+# 90, not 40: measured 2026-08-10, a cold `postgres:16` first-boot is ~2s idle
+# but blew past 40s on a run that had a vite dev server and a 16-pair
+# concurrency race competing for the same disk. A too-short wait here reports
+# "Postgres never became ready" -- an infrastructure timeout wearing a platform
+# failure's clothes.
+PG_T0=$(date +%s)
+for _ in $(seq 1 90); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+# Report the elapsed seconds either way. "never became ready" with no number
+# cannot be told apart from "the wait was too short", and the first version of
+# this leg spent two runs on exactly that ambiguity.
 docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 \
-  && pass "ephemeral Postgres on :$PG_PORT" || {
-    fail "Postgres never became ready"
+  && pass "ephemeral Postgres on :$PG_PORT (ready in $(( $(date +%s) - PG_T0 ))s)" || {
+    fail "Postgres never became ready after $(( $(date +%s) - PG_T0 ))s (container state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' "$PGC" 2>&1))"
     docker logs --tail 20 "$PGC" 2>&1 | sed 's/^/    /'
     exit 1
   }
@@ -608,6 +732,12 @@ grep -q '^seedA .*"id":"user_' "$WORK/deployed.raw" && pass "deployed app answer
   || { fail "deployed app never answered"; head -4 "$WORK/deployed.raw"; tail -20 "$WORK/worker.log"; }
 render "$WORK/deployed.raw" "$WORK/deployed.txt"
 
+# --- 3b. deployed: the cross-REQUEST race -----------------------------------
+race "http://localhost:$GATE_PORT/apps/$APP_NAME" "$WORK/deployed.race" "X-Api-Key: $API_KEY"
+grep -q '^runs=[1-9]' "$WORK/deployed.race" \
+  && pass "deployed ran the concurrent-writer race ($(head -1 "$WORK/deployed.race"))" \
+  || { fail "deployed race produced no runs"; head -5 "$WORK/deployed.race" | sed 's/^/    /'; }
+
 # ---------------------------------------------------------------------------
 # 4. ABSOLUTE verdicts on the DEPLOYED answers.
 #
@@ -632,10 +762,13 @@ drow() { grep -m1 "^$1 " "$DR" | sed -E "s/^$1 +//"; }
 # report a wall of green `reject` verdicts that all mean "never measured".
 # A result envelope is `{"json":...}`; a refusal is a bare `{"message":...}`.
 # 30 pre-transaction rows + 11 transaction rows (seedTx, txCommit, txRoll,
-# txNest, four txIso*, txD9, txD10, txTotal). ALL ELEVEN are result envelopes:
-# every tx procedure catches its own failure and returns it as data, precisely
-# so a rollback reads as a measured value rather than as a wire error.
-ROWS_WANT=41
+# txNest, four txIso*, txD9, txD10, txTotal) + 5 concurrency rows (cxSeed,
+# cxPar, cxOvl, cxPlain, cxTotal). ALL SIXTEEN are result envelopes: every tx and
+# concurrency procedure catches its own failure and returns it as data,
+# precisely so a rollback reads as a measured value rather than as a wire
+# error. A concurrency probe that came back as a bare `{"message":...}` would
+# mean the request itself died, and this control says so.
+ROWS_WANT=46
 rows_got=$(wc -l < "$DR")
 rows_json=$(grep -c ' {"json":' "$DR")
 # SEVEN rows are expected NOT to be result envelopes: `orphan` and `dupEmail`
@@ -789,6 +922,43 @@ want txD10 'the refused nest wrote nothing'          '"countAfter":0'
 # Read through todos.count, which none of the tx procedures can influence.
 want txTotal 'exactly seven tx-probe rows committed in total' '{"json":7}'
 
+# --- CONCURRENT transactions, absolute --------------------------------------
+# The contract these assert is the CREATOR's, taken from docs/reference/db.md
+# and docs/reference/api-design-guidelines.md, not from the current
+# implementation: `db.transaction(fn)` is an independent unit of work, and a
+# transaction that resolves has committed. Nothing in the creator-facing
+# surface says a transaction opened while another happens to be in flight for
+# the same app stops being its own transaction.
+#
+# These verdicts were RED when first written (2026-08-10) -- see #244. They are
+# the measurement of the gap docs/pilot/e2e-scenarios.md row 3 named.
+want cxPar 'two transactions in one Promise.all: leg 1 commits' '{"n":1,"error":null'
+want cxPar 'two transactions in one Promise.all: leg 2 commits' '{"n":2,"error":null'
+want cxPar 'both concurrent transactions left their row'        '"countAfter":2'
+# THE LOAD-BEARING PAIR. B reported success; B's row must exist. A aborted;
+# A's row must not. If `bAfter` is 0 while B's `error` is null, one request's
+# ROLLBACK destroyed another's committed write.
+want cxOvl 'the aborting transaction rolled its own row back' '"aAfter":0'
+want cxOvl 'the overlapping transaction reported success'     '"b":{"error":null'
+want cxOvl "the overlapping transaction's committed row survived the other's rollback" '"bAfter":1'
+# THE DEFAULT PATH. Leg B is a plain insert, not a transaction. It must be
+# unaffected by a transaction that merely overlaps it.
+#
+# KNOWN RED as of 2026-08-10, on BOTH tiers, and deliberately left that way:
+# `crates/plugin-db/src/exec.rs` routes ordinary CRUD onto the open tx
+# connection whenever `has_tx_for(app_id)` is true, with no notion of WHOSE
+# transaction it is. So an unrelated write joins a stranger's transaction and
+# dies with its rollback. It is the same root cause as the `cxOvl` defect fixed
+# in this pass (ambient state standing in for call context) but a different
+# consumer, and the correct fix tags each CRUD dispatch site with the async
+# scope captured at dispatch. Two verdicts fail here and `cxTotal` reads 3
+# instead of 4. Do NOT relax these to match the current behaviour -- see
+# docs/pilot/e2e-scenarios.md row 3.
+want cxPlain 'the aborting transaction rolled its own row back'          '"aAfter":0'
+want cxPlain 'the ordinary overlapping write reported success'           '"inserted":true'
+want cxPlain "an ordinary write is not undone by a stranger's rollback"  '"bAfter":1'
+want cxTotal 'exactly four concurrency-probe rows committed' '{"json":4}'
+
 # --- the isolation clause and the savepoints, read off the Postgres log ------
 # Everything above measures RESPONSES, and the responses cannot see an
 # isolation level: no `env.db` call reads `transaction_isolation`, and the two
@@ -832,6 +1002,52 @@ fi
 pgwant 'CONTROL: the statement log is populated' 'LOG:' 50
 
 [ "$ABS_OK" = "1" ] || echo "  (verdicts above are UNSAFE: the control failed)"
+
+# ---------------------------------------------------------------------------
+# 4b. THE CROSS-REQUEST RACE, on both tiers.
+#
+# Section 4's cxPar/cxOvl stage the contention inside ONE request, so they are
+# scheduler-independent by construction. This block stages it across two
+# requests, which is the shape a real end user produces and the shape the two
+# tiers CANNOT match structurally: `pnpm dev` is `zeroship serve --workers=1`
+# (one thread, one isolate, cooperative interleaving only), while the worker's
+# isolate cache is `thread_local!` over `--worker-threads` threads, so two
+# requests may or may not share an isolate.
+#
+# The verdicts are therefore INTEGRITY invariants that hold whatever the
+# scheduler does, not an equality between the tiers:
+#
+#   overlap    at least one pair must actually have overlapped in wall-clock
+#              time. Without this the run measured nothing and every green
+#              below means "no race was staged".
+#   lostCommit no leg reported success while its row is missing.
+#   ghostCommit no leg reported failure while its row landed anyway.
+#
+# The full tallies are printed either way -- a divergence between the tiers is
+# the finding, and a tally is what makes it readable.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- 4b. cross-request concurrent writers (integrity, both tiers) ---"
+for tier in dev deployed; do
+  f="$WORK/$tier.race"
+  [ -s "$f" ] || { fail "$tier race: no output"; continue; }
+  echo "  [$tier] $(head -1 "$f")"
+  tail -n +2 "$f" | sed 's/^/    /'
+  n_over=$(grep -c 'overlap=true' "$f")
+  if [ "$n_over" -ge 1 ]; then
+    pass "$tier race CONTROL: $n_over classified outcomes actually overlapped"
+  else
+    fail "$tier race CONTROL: no pair overlapped -- the race was never staged, verdicts below mean nothing"
+  fi
+  n_lost=$(grep -c 'lostCommit' "$f")
+  n_ghost=$(grep -c 'ghostCommit' "$f")
+  [ "$n_lost" -eq 0 ] \
+    && pass "$tier race: no leg reported success with its row missing" \
+    || fail "$tier race: $n_lost outcome class(es) lost a committed row -- see the tally above"
+  [ "$n_ghost" -eq 0 ] \
+    && pass "$tier race: no leg reported failure with its row committed" \
+    || fail "$tier race: $n_ghost outcome class(es) committed a row after reporting failure"
+done
 
 # --- 5. THE RELATIVE COMPARISON -------------------------------------------
 #     Green here does NOT mean the platform is right; it means SQLite and

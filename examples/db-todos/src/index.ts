@@ -113,6 +113,23 @@ export const todoCount = query(
   { id: "todos.count" },
 );
 
+// The independent tally the concurrency probes below cannot influence:
+// how many rows really carry a given title, read through the ordinary
+// (non-transaction) path after everything has settled. `todos.count` filters
+// on `userId` only, which is a per-user total and useless for a probe that
+// shares one user across many runs.
+export const todoCountTitle = query(
+  async ({ userId, title }: { userId: string; title: string }) => {
+    const { data, error } = await db.todos.count({
+      userId: userIdFromWire(userId),
+      title,
+    });
+    if (error) throw error;
+    return data ?? 0;
+  },
+  { id: "todos.countTitle" },
+);
+
 // Smoke for the per-collection DataLoader: two `db.users.get(id)` calls
 // inside one `Promise.all([...])` MUST coalesce into a single underlying
 // `WHERE id IN (...)` fetch. Returning both rows verifies the loader
@@ -494,6 +511,220 @@ export const txDepth = mutation(
     return { ...out, countAfter: after.data ?? null };
   },
   { id: "todos.txDepth" },
+);
+
+// ---------------------------------------------------------------------------
+// CONCURRENT transactions -- the regime an isolation level exists for.
+//
+// Added 2026-08-10. Every probe above is a SINGLE uncontended transaction, so
+// none of them can see what happens when two transactions for the same app are
+// open at once. That is the whole point of `isolationLevel`, and
+// docs/reference/sqlite-divergences.md names it as unmeasured.
+//
+// The mechanism under test (crates/plugin-db/src/context.rs:146 and
+// crates/plugin-db/src/transaction/mod.rs:227):
+//
+//   * the open tx connection lives in `tx_conns: HashMap<app_id, TxConnection>`
+//     -- ONE slot per app, per isolate.
+//   * `transaction_dispatch` decides BEGIN-vs-SAVEPOINT **synchronously**, from
+//     `has_tx_for(app_id)`, but the client is only installed LATER, inside the
+//     async begin op.
+//
+// So there are two distinct windows, and these probes separate them:
+//
+//   txParallel  both `transaction()` calls happen in the SAME JS turn, so both
+//               read `has_tx_for == false` and both take the top-level BEGIN
+//               path. The second `install_tx_client` then overwrites the
+//               first's slot.
+//   txOverlap   the second call happens AFTER the first's BEGIN landed, so it
+//               reads `has_tx_for == true` and nests as a SAVEPOINT on the
+//               first transaction's connection -- even though the two are
+//               logically unrelated units of work.
+//
+// Both are reachable from ONE request (`Promise.all`), so they do not depend on
+// how the worker schedules requests across isolates. `txRaceStep` is the
+// cross-REQUEST version and does.
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(() => r(), ms));
+
+/** Two `db.transaction()` calls opened in the same JS turn.
+ *
+ *  Contract a creator would assume: two independent units of work, two rows,
+ *  no errors. What is actually under test is whether the second BEGIN silently
+ *  evicts the first from the per-app slot. */
+export const txParallel = mutation(
+  async ({ userId, tag }: TxInput) => {
+    const uid = userIdFromWire(userId);
+    const title = `${tag}-par`;
+    const leg = async (n: number) => {
+      const r = await db.transaction(async (tx) => {
+        // `before` is read on whichever connection the slot holds at that
+        // moment. Two legs on two real transactions both see 0; two legs
+        // sharing one connection see 0 then 1.
+        const before = await tx.todos.count({ userId: uid, title });
+        await tx.todos.insert({ userId: uid, title });
+        const after = await tx.todos.count({ userId: uid, title });
+        return { before, after };
+      });
+      return { n, error: errShape(r.error), seen: r.data ?? null };
+    };
+    let threw: ReturnType<typeof errShape> = null;
+    let legs: unknown = null;
+    try {
+      legs = await Promise.all([leg(1), leg(2)]);
+    } catch (e) {
+      threw = errShape(e);
+    }
+    const after = await db.todos.count({ userId: uid, title });
+    return { threw, legs, countAfter: after.data ?? null };
+  },
+  { id: "todos.txParallel" },
+);
+
+/** Leg A opens a transaction, holds it open across an await, then ABORTS.
+ *  Leg B opens its own transaction inside that window and COMMITS.
+ *
+ *  A creator's expectation: A's rollback undoes A's row and nothing else, so
+ *  `aAfter == 0` and `bAfter == 1`. If B was silently folded into A's
+ *  transaction as a savepoint, A's ROLLBACK also destroys B's committed-looking
+ *  write and `bAfter == 0` while B reported success -- two unrelated units of
+ *  work entangled. That is the outcome this probe exists to detect. */
+export const txOverlap = mutation(
+  async ({ userId, tag, holdMs }: TxInput & { holdMs: number }) => {
+    const uid = userIdFromWire(userId);
+    const titleA = `${tag}-oa`;
+    const titleB = `${tag}-ob`;
+    const legA = async () => {
+      const r = await db.transaction(async (tx) => {
+        await tx.todos.insert({ userId: uid, title: titleA });
+        await sleep(holdMs);
+        throw Object.assign(new Error("probe A aborts"), { code: "PROBE_A_ABORT" });
+      });
+      return { error: errShape(r.error) };
+    };
+    const legB = async () => {
+      // Start inside A's open window: long enough that A's BEGIN has landed,
+      // short enough that A has not yet thrown.
+      await sleep(Math.max(1, Math.floor(holdMs / 2)));
+      const r = await db.transaction(async (tx) => {
+        await tx.todos.insert({ userId: uid, title: titleB });
+        return { committed: true };
+      });
+      return { error: errShape(r.error), data: r.data ?? null };
+    };
+    let threw: ReturnType<typeof errShape> = null;
+    let a: unknown = null;
+    let b: unknown = null;
+    try {
+      [a, b] = await Promise.all([legA(), legB()]);
+    } catch (e) {
+      threw = errShape(e);
+    }
+    const aAfter = await db.todos.count({ userId: uid, title: titleA });
+    const bAfter = await db.todos.count({ userId: uid, title: titleB });
+    return { threw, a, b, aAfter: aAfter.data ?? null, bAfter: bAfter.data ?? null };
+  },
+  { id: "todos.txOverlap" },
+);
+
+/** An ORDINARY write that merely overlaps someone else's transaction.
+ *
+ *  `txOverlap` above asks what happens to a second `db.transaction()`.
+ *  This asks the sharper question: does a plain `db.todos.insert()` — no
+ *  transaction anywhere in its call chain — get pulled into a transaction
+ *  that happens to be open for the same app?
+ *
+ *  It matters more than the transaction-vs-transaction case because it is
+ *  the DEFAULT path: most creator writes are not inside a transaction, so
+ *  if routing is ambient then every ordinary write issued while any one
+ *  request holds a transaction open inherits that transaction's fate.
+ *  Contract: `bAfter == 1` -- B's write is its own unit of work and A's
+ *  rollback has no business touching it. */
+export const txPlainWrite = mutation(
+  async ({ userId, tag, holdMs }: TxInput & { holdMs: number }) => {
+    const uid = userIdFromWire(userId);
+    const titleA = `${tag}-pa`;
+    const titleB = `${tag}-pb`;
+    const legA = async () => {
+      const r = await db.transaction(async (tx) => {
+        await tx.todos.insert({ userId: uid, title: titleA });
+        await sleep(holdMs);
+        throw Object.assign(new Error("probe A aborts"), { code: "PROBE_A_ABORT" });
+      });
+      return { error: errShape(r.error) };
+    };
+    const legB = async () => {
+      await sleep(Math.max(1, Math.floor(holdMs / 2)));
+      const r = await db.todos.insert({ userId: uid, title: titleB });
+      return { error: errShape(r.error), inserted: r.data !== null && r.data !== undefined };
+    };
+    let threw: ReturnType<typeof errShape> = null;
+    let a: unknown = null;
+    let b: unknown = null;
+    try {
+      [a, b] = await Promise.all([legA(), legB()]);
+    } catch (e) {
+      threw = errShape(e);
+    }
+    const aAfter = await db.todos.count({ userId: uid, title: titleA });
+    const bAfter = await db.todos.count({ userId: uid, title: titleB });
+    return { threw, a, b, aAfter: aAfter.data ?? null, bAfter: bAfter.data ?? null };
+  },
+  { id: "todos.txPlainWrite" },
+);
+
+/** ONE half of a cross-REQUEST write-write race. The harness fires two of
+ *  these at the same `tag` concurrently.
+ *
+ *  `t0`/`t1` are wall-clock at handler entry/exit, so the harness can tell
+ *  whether the two dispatches actually OVERLAPPED before it reads anything into
+ *  the answers. If `t0(second) >= t1(first)` the platform serialised them and
+ *  no race was staged -- a refutation, not a pass.
+ *
+ *  `before` is the count read INSIDE the transaction. Two serialised
+ *  transactions read 0 then 1; two truly concurrent ones both read 0, which is
+ *  the lost-update signature `serializable` is supposed to reject. */
+export const txRaceStep = mutation(
+  async ({
+    userId,
+    tag,
+    holdMs,
+    level,
+  }: TxInput & { holdMs: number; level: string | null }) => {
+    const uid = userIdFromWire(userId);
+    const t0 = Date.now();
+    let threw: ReturnType<typeof errShape> = null;
+    let error: ReturnType<typeof errShape> = null;
+    let data: unknown = null;
+    try {
+      const r = await db.transaction(
+        async (tx) => {
+          const before = await tx.todos.count({ userId: uid, title: tag });
+          // The hold is what makes the window wide enough for the other
+          // request to land inside it.
+          await sleep(holdMs);
+          const row = await tx.todos.insert({
+            userId: uid,
+            title: tag,
+            priority: before === 0 ? "low" : "high",
+          });
+          return { before, priority: row.priority };
+        },
+        level === null
+          ? undefined
+          : { isolationLevel: level as TransactionOptions["isolationLevel"] },
+      );
+      error = errShape(r.error);
+      data = r.data ?? null;
+    } catch (e) {
+      threw = errShape(e);
+    }
+    const t1 = Date.now();
+    const after = await db.todos.count({ userId: uid, title: tag });
+    return { t0, t1, threw, error, data, countAfter: after.data ?? null };
+  },
+  { id: "todos.txRaceStep" },
 );
 
 export const seedUser = mutation(
