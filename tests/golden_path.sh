@@ -431,6 +431,70 @@ else
   fi
 fi
 
+# --- 6b. The request body cap, on BOTH tiers, at the byte -------------------
+#
+# A documented creator-facing contract with no e2e coverage on either tier
+# until now. `docs/reference/runtime-limits.md` names 4 MiB
+# (`MAX_REQUEST_BODY_BYTES`, enforced by the gateway); the STANDALONE server
+# that `pnpm dev` runs enforces its own, smaller `MAX_BODY_BYTES` of 1 MiB
+# (`crates/runtime/src/core/serve.rs`) and answers 413.
+#
+# The only `413` anywhere else under tests/ is e2e_platform.sh checking the
+# DEPLOY endpoint against its 256 MiB COMPRESSED limit -- a different limit, on
+# a different route, in a different service. It does not cover this.
+#
+# WHY THIS BELONGS HERE and not in a crate suite: the two tiers run different
+# HTTP servers, and the only way to see that they disagree is to send the same
+# bytes to both. A crate test can only ever pin one of them.
+#
+# THE DIVERGENCE IS THE POINT, not a bug: dev is the STRICTER tier, so it fails
+# safe -- a body dev accepts is accepted deployed. The trap is the reverse
+# reading, and pinning it here means a change to EITHER tier surfaces as a
+# failure rather than as a creator's surprise.
+#
+# Boundary measured by me on the dev vector before this was written:
+#   1 048 576 -> 200,  1 048 577 -> 413   (the predicate is `>`, not `>=`)
+# THE URL MUST BE ONE THE GATEWAY ACTUALLY ROUTES. Written first against
+# `/apps/$APP_ID/`, which answered 404 -- and a 404 is not evidence about the
+# size cap, because the request never had to be read to be rejected. An
+# assertion of "deployed did not answer 413" would have passed on that 404 while
+# establishing nothing. The rest of this file addresses the deployed app by
+# $APP_NAME (steps 5 and 6); the RPC path below is the one step 6 already
+# exercises, so a body sent there is genuinely read.
+BODYCAP_TMP="$(mktemp -d)"
+head -c 1048577 /dev/zero | tr '\0' 'a' > "$BODYCAP_TMP/over1mib.bin"
+BODYCAP_URL="http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
+
+DEV_413=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
+  -H 'Content-Type: application/octet-stream' "http://localhost:$DEV_RT_PORT/" 2>/dev/null)
+DEP_1MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
+  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+
+# POSITIVE CONTROL for the deployed leg: the SAME url with a tiny body. Without
+# it, a 404/500 from a broken route would make the size verdict below read as a
+# pass, which is the trap the $APP_ID version fell into.
+DEP_OK=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary '{"json":{}}' \
+  -H 'Content-Type: application/json' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+
+echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   deployed(tiny) -> $DEP_OK"
+
+[ "$DEV_413" = "413" ] \
+  && pass "dev refuses a body one byte over its 1 MiB cap (413)" \
+  || fail "dev answered $DEV_413 for 1 048 577 bytes; expected 413 (serve.rs MAX_BODY_BYTES)"
+
+[ "$DEP_OK" != "404" ] && [ "$DEP_OK" != "000" ] \
+  && pass "CONTROL: the deployed body-cap URL routes (tiny body -> $DEP_OK)" \
+  || fail "CONTROL: deployed body-cap URL does not route (tiny body -> $DEP_OK); the size verdict below means nothing"
+
+# Only meaningful because the control above proves the route exists: the tiers
+# disagree, and dev is the stricter one. If both answered 413 the divergence
+# would be gone and this goes red.
+[ "$DEP_1MIB" != "413" ] \
+  && pass "deployed does NOT reject on size what dev refuses (1 MiB+1 -> $DEP_1MIB)" \
+  || fail "deployed also answered 413 at 1 048 577 bytes; the documented 4 MiB cap is not in force"
+
+rm -rf "$BODYCAP_TMP"
+
 # --- 7. A dev runtime that never starts must be LOUD, not silently looping ---
 #
 # THE SEAM THIS TESTS, and why it cannot live in a crate suite or a vite-plugin
