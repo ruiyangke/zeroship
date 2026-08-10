@@ -46,6 +46,35 @@ const CREATE_NOTES: &str = r#"{"ir_version":1,"name":"create_notes","ops":[
     ],"primaryKey":["id"]}
 ]}"#;
 
+/// A view created in one envelope and dropped in a later one. The pair exists to
+/// prove the SYNTHESISED inverse survives the verb, which is a different claim
+/// from the engine rendering it.
+///
+/// The engine tests hand `Vec<Migration>` built during apply straight to
+/// `rollback(...)`, so the `down` they exercise is the one apply produced. The verb
+/// cannot do that: the `down` is not journaled, so it RE-LOWERS the authored
+/// envelopes against a catalog read after the lock - a catalog in which the view is
+/// already gone. The inverse only survives because the envelope loop folds each
+/// envelope onto the running live schema before lowering the next, so the authored
+/// `createView` puts the view back (with its typed body) before the `dropView`
+/// envelope lowers.
+const CREATE_ACTIVE_USERS: &str = r#"{"ir_version":1,"name":"create_active_users","ops":[
+    {"op":"createTable","name":"users","columns":[
+        {"name":"id","type":"bigInt","nullable":false},
+        {"name":"email","type":"text","nullable":false}
+    ],"primaryKey":["id"]},
+    {"op":"createView","name":"active_users","query":{"kind":"structured","select":{
+        "from":{"name":"users"},
+        "projection":[{"kind":"colRef","name":"email"}],
+        "joins":[],
+        "groupBy":[]
+    }}}
+]}"#;
+
+const DROP_ACTIVE_USERS: &str = r#"{"ir_version":1,"name":"drop_active_users","ops":[
+    {"op":"dropView","name":"active_users"}
+]}"#;
+
 /// One authored envelope that lowers to a DDL step AND a DML step, which is the
 /// shape the verb leaves out of the migration set it builds.
 const SEED_NOTES: &str = r#"{"ir_version":1,"name":"seed_notes","ops":[
@@ -118,6 +147,78 @@ async fn deploy(be: &SqliteBackend, envelopes: &[&str]) -> Vec<String> {
         .await
         .expect("the authored envelopes deploy")
         .applied
+}
+
+async fn view_exists(be: &SqliteBackend, name: &str) -> bool {
+    let rows = be
+        .actor()
+        .query(&format!(
+            "SELECT name FROM main.sqlite_master WHERE type='view' AND name='{name}'"
+        ))
+        .await
+        .expect("catalog probe");
+    !rows.is_empty()
+}
+
+/// A dropped view comes back when the unwind runs through the VERB, not just when
+/// the engine is handed the migrations apply built.
+///
+/// This is the one that proves re-lowering reconstructs the synthesised `down`.
+/// The verb reads the live catalog AFTER taking the lock, and at that moment the
+/// view is already dropped - so if the envelope loop lowered every envelope against
+/// that one static snapshot, the `dropView` would find no recorded view, render
+/// `down: None`, and the rollback would refuse the very migration the engine tests
+/// prove reversible.
+#[test]
+fn a_view_dropped_by_a_later_envelope_comes_back_through_the_verb() {
+    let p = paths("rb_verb_view_inverse");
+    let charter = support::no_inject_charter_toml(PROJECT_SCHEMA);
+
+    let (reply, view_back) = futures::executor::block_on(async {
+        let be = backend(&p);
+        deploy(&be, &[CREATE_ACTIVE_USERS]).await;
+        assert!(
+            view_exists(&be, "active_users").await,
+            "the first envelope must create the view this test then drops"
+        );
+        deploy(&be, &[CREATE_ACTIVE_USERS, DROP_ACTIVE_USERS]).await;
+        assert!(
+            !view_exists(&be, "active_users").await,
+            "the second envelope must actually drop the view"
+        );
+
+        let reply = rollback_with_locked_backend(
+            &be,
+            &exec_cfg(),
+            &[
+                CREATE_ACTIVE_USERS.to_string(),
+                DROP_ACTIVE_USERS.to_string(),
+            ],
+            OWNER_APP,
+            PROJECT_SCHEMA,
+            "sqlite",
+            "{}",
+            std::slice::from_ref(&charter),
+            RollbackTarget::Steps(1),
+            RollbackOptions::default(),
+            Approval::Approved,
+            "operator",
+        )
+        .await;
+
+        (reply, view_exists(&be, "active_users").await)
+    });
+
+    let reply = reply.expect("the verb rolls the dropped view back");
+    assert!(
+        reply.skipped_irreversible.is_empty(),
+        "the drop has a synthesised inverse, so nothing may be skipped as irreversible: {:?}",
+        reply.skipped_irreversible
+    );
+    assert!(
+        view_back,
+        "the view the verb rolled back must be in the catalog again"
+    );
 }
 
 #[test]

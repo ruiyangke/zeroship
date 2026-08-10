@@ -551,7 +551,10 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
                 .map_err(|error| error.to_string())?,
             None => Vec::new(),
         };
-        let artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
+        // Rollback lowers against what the history LEFT BEHIND, not what apply is moving
+        // towards: the inverse of a drop needs the definition the drop removed, and the
+        // pending projection cannot see it once everything is applied.
+        let artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_rollback(
             envelope_json,
             owner_app,
             project_schema,
@@ -560,7 +563,6 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
             &charter_refs,
             snapshot,
             &journal_entries,
-            &resolved_contracts,
         )?;
         let set = rollback_migration_set(&artifacts)?;
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);

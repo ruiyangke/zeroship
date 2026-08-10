@@ -349,6 +349,206 @@ pub fn lower_ordered_envelopes_to_plans_for_apply(
     )
 }
 
+/// Lower an ordered envelope set for ROLLBACK, where every envelope is already applied.
+///
+/// The apply entry advances its schema by the ops that are still PENDING. That is right when
+/// the catalog has not caught up yet and wrong here: at rollback time nothing is pending, so
+/// the projection collapses to the live catalog and a `dropView` lowers against a database
+/// where the view is already gone. The definition its inverse needs was in the schema one
+/// envelope earlier.
+///
+/// So the executed history is replayed from nothing into a SEPARATE snapshot, and only the
+/// object DEFINITIONS are merged into the live schema. The catalog stays authoritative for
+/// table state - it already reflects every applied op, so folding the same history onto it
+/// would double-apply and fail with `table already exists`.
+///
+/// Each envelope contributes only AFTER it has lowered. That ordering is the mechanism: it is
+/// what leaves an earlier `createView` visible to the later `dropView` that undoes it.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_ordered_envelopes_to_plans_for_rollback(
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    charter_layers: &[&str],
+    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    journal_entries: &[AppliedEntry],
+) -> Result<Vec<LoweredArtifact>, String> {
+    let dialect = parse_sql_dialect(dialect)?;
+    let effective = effective_policy_from_charter_layers(charter_layers)?;
+    let mut registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
+        .map_err(|e| format!("registry_json is not a string-to-string map: {e}"))?;
+    let base_snapshot = snapshot;
+    let mut live = live_schema_with_ownership(base_snapshot.clone(), owner_app, &registry);
+    let mut history_ops: Vec<Op> = Vec::new();
+    let mut artifacts = Vec::with_capacity(envelope_json.len());
+
+    for envelope in envelope_json {
+        let effective_registry = serde_json::to_string(&registry)
+            .map_err(|e| format!("effective ownership registry failed to serialize: {e}"))?;
+        let (artifact, _resolved) = lower_envelope_to_plan_with_live_and_resolved_ir(
+            envelope,
+            owner_app,
+            project_schema,
+            dialect_name(dialect),
+            &effective_registry,
+            charter_layers,
+            &live,
+        )?;
+
+        let contributed = executed_history_ops(&artifact, journal_entries)?;
+        advance_ownership_registry(&mut registry, &contributed, dialect, owner_app);
+        history_ops.extend(contributed);
+
+        let logical_columns = live.logical_columns.clone();
+        live = live_schema_with_ownership(base_snapshot.clone(), owner_app, &registry);
+        live.logical_columns = logical_columns;
+        merge_recovered_definitions(&mut live, &history_ops, dialect, project_schema, &effective);
+
+        artifacts.push(artifact);
+    }
+
+    Ok(artifacts)
+}
+
+/// Replay the executed history from nothing and lend the live schema the object definitions
+/// the catalog can no longer show, so a drop's inverse can be rendered from what created it.
+///
+/// Only objects the live schema does NOT already carry are filled in, and only the four
+/// definition-bearing kinds. Tables are deliberately untouched: the catalog is authoritative
+/// for them, and replaying creates over it is what made the first attempt at this fail with
+/// `fold: table \`notes\` already exists`.
+///
+/// A history that will not replay contributes NOTHING rather than failing the rollback. Some
+/// histories legitimately cannot be replayed from empty - one that views a table it never
+/// created, for instance - and the cost of skipping is a `down: None` the operator can see,
+/// against a wrong inverse they cannot.
+fn merge_recovered_definitions(
+    live: &mut LiveSchema,
+    history_ops: &[Op],
+    dialect: SqlDialect,
+    project_schema: &str,
+    effective: &zero_migrate::EffectivePolicy,
+) {
+    // Onto an EXPLICITLY empty snapshot, which is what makes this a reconstruction of what the
+    // history created rather than a second application of it over the catalog.
+    let empty = zero_migrate::model::snapshot::SchemaSnapshot::default();
+    let Ok(recovered) = fold_ops_onto(&empty, history_ops, dialect, project_schema, effective)
+    else {
+        return;
+    };
+    for (name, view) in recovered.views {
+        live.views.entry(name).or_insert(view);
+    }
+    for (name, sequence) in recovered.sequences {
+        live.sequences.entry(name).or_insert(sequence);
+    }
+    for (name, extension) in recovered.extensions {
+        live.extensions.entry(name).or_insert(extension);
+    }
+    for (name, schema) in recovered.schemas {
+        live.schemas.entry(name).or_insert(schema);
+    }
+}
+
+/// The operations of one lowered artifact that provably RAN, and may therefore stand in the
+/// schema an inverse is synthesised against.
+///
+/// Anything that cannot be proven is dropped rather than assumed. That costs rollback
+/// availability and never buys a wrong inverse.
+fn executed_history_ops(
+    artifact: &LoweredArtifact,
+    journal_entries: &[AppliedEntry],
+) -> Result<Vec<Op>, String> {
+    let mut executed = Vec::new();
+    for span in &artifact.op_spans {
+        if op_may_have_been_skipped(&span.op) {
+            continue;
+        }
+        let mut proven = true;
+        let mut saw_step = false;
+        for range in std::iter::once(&span.step_range).chain(&span.additional_step_ranges) {
+            let steps = artifact.plan.steps.get(range.clone()).ok_or_else(|| {
+                format!(
+                    "lowered operation has invalid plan-step range {}..{} for {} steps",
+                    range.start,
+                    range.end,
+                    artifact.plan.steps.len()
+                )
+            })?;
+            for step in steps {
+                saw_step = true;
+                if !step_ran_under_its_own_checksum(step, journal_entries) {
+                    proven = false;
+                    break;
+                }
+            }
+            if !proven {
+                break;
+            }
+        }
+        if saw_step && proven {
+            executed.push(span.op.clone());
+        }
+    }
+    Ok(executed)
+}
+
+/// Whether an operation could have been journaled `completed` without running.
+///
+/// `Op::existence_guard()` answers this for the core ops and for the DROP side of view and
+/// sequence, but it returns `None` for every vendor CREATE - the guard there is a native
+/// `IF NOT EXISTS` clause on the op's own field, not the catalog-probe mechanism. Asking only
+/// `existence_guard()` would be a constant `false` for exactly the creates whose definitions
+/// the synthesised inverses are built from.
+fn op_may_have_been_skipped(op: &Op) -> bool {
+    if op.existence_guard().is_some() {
+        return true;
+    }
+    matches!(
+        op,
+        Op::CreateSchema {
+            if_not_exists: Some(true),
+            ..
+        } | Op::CreateExtension {
+            if_not_exists: Some(true),
+            ..
+        } | Op::DropSchema {
+            if_exists: Some(true),
+            ..
+        } | Op::DropExtension {
+            if_exists: Some(true),
+            ..
+        }
+    )
+}
+
+/// Whether one plan step is journaled `completed` under the SAME checksum it carries now.
+///
+/// Version alone is not evidence. `plan_rollback` checksum-checks only the versions it SELECTS,
+/// so an earlier contributor is never re-checked there - editing its body would change the SQL
+/// an inverse synthesises while the selected step's own checksum stayed put.
+///
+/// Only a `Ddl` step carries a checksum, so every other step kind is unproven by construction.
+/// `Baseline` records an `up` that was NOT run, `Squash` a supersession whose forward SQL never
+/// ran as written, and `Repeatable` is the one kind whose checksum legitimately changes between
+/// runs - none can stand as evidence that THIS text executed.
+fn step_ran_under_its_own_checksum(
+    step: &zero_migrate::PlanStep,
+    journal_entries: &[AppliedEntry],
+) -> bool {
+    let zero_migrate::PlanStep::Ddl(migration) = step else {
+        return false;
+    };
+    journal_entries.iter().any(|entry| {
+        entry.version == migration.version.as_str()
+            && entry.checksum == migration.checksum.as_str()
+            && entry.phase == Phase::Completed
+            && entry.kind == Some(zero_migrate::apply::journal::JournaledKind::Apply)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_ordered_envelopes_to_plans_inner(
     envelope_json: &[String],
