@@ -283,7 +283,7 @@ if [ "$V1C" = "200" ] && echo "$V1B" | grep -q '"json"'; then
   fi
 else
   ERR="$(grep -iE 'env.kv|KvPlugin|Cannot find module|redis' "$WORK/worker.log" | tail -1)"
-  known "env.kv kv.visit failed over /dispatch. HTTP $V1C; err: ${ERR:-$V1B}"
+  fail "env.kv kv.visit failed over /dispatch. HTTP $V1C; err: ${ERR:-$V1B}"
 fi
 
 # kv.string.set stores a string; kv.snapshot reads it back (round-trip).
@@ -354,7 +354,7 @@ if [ "$PUTC" = "200" ] && echo "$PUTB" | grep -q '"json"'; then
   fi
 else
   ERR="$(grep -iE 'env.storage|StoragePlugin|Cannot find module|storage' "$WORK/worker.log" | tail -1)"
-  known "env.storage gallery.put failed over /dispatch. HTTP $PUTC; err: ${ERR:-$PUTB}"
+  fail "env.storage gallery.put failed over /dispatch. HTTP $PUTC; err: ${ERR:-$PUTB}"
 fi
 
 # ---------------------------------------------------------------------------

@@ -306,7 +306,7 @@ if [ "$GW_CODE" = "200" ] && echo "$GW_BODY" | grep -q '"json"'; then
 elif [ "$GW_CODE" = "401" ]; then
   known "gateway gates db-todos RPC at 401 (SEC-5 fail-closed default; no headless app session without the native OP). body=$GW_BODY"
 else
-  known "db-todos RPC via gateway: HTTP $GW_CODE body=$GW_BODY"
+  fail "db-todos RPC via gateway: HTTP $GW_CODE body=$GW_BODY"
 fi
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
 else
   ERR="$(grep -iEo "Cannot find module '[^']*'" "$WORK/worker.log" | tail -1)"
   [ -z "$ERR" ] && ERR="$(grep -iE 'install-schema|Evaluate rejected' "$WORK/worker.log" | tail -1)"
-  known "db-todos schema-init fails on worker ⇒ env.db unreachable. HTTP $WK_CODE; runtime error: ${ERR:-$WK_BODY}"
+  fail "db-todos schema-init fails on worker ⇒ env.db unreachable. HTTP $WK_CODE; runtime error: ${ERR:-$WK_BODY}"
 fi
 
 # ---------------------------------------------------------------------------

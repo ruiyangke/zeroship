@@ -309,7 +309,7 @@ if [ "$PUT_CODE" = "200" ] && echo "$PUT_BODY" | grep -q '"json"'; then
   fi
 else
   ERR="$(grep -iE 'env.storage|StoragePlugin|s3|multipart|storage' "$WORK/worker.log" | tail -3)"
-  known "putLarge failed over /dispatch (HTTP $PUT_CODE). err: ${ERR:-$PUT_BODY}"
+  fail "putLarge failed over /dispatch (HTTP $PUT_CODE). err: ${ERR:-$PUT_BODY}"
 fi
 
 # Buffered put/get/list/delete also work over S3 (small-object path).
@@ -327,7 +327,7 @@ if echo "$BPUT" | head -n -1 | grep -q '"json"'; then
   BDEL="$(dispatch "gallery.delete" "{\"key\":\"$BKEY\"}" | head -n -1)"
   echo "$BDEL" | grep -q '"deleted":true' && pass "delete removed it over S3" || fail "delete failed over S3 (body=$BDEL)"
 else
-  known "buffered put over S3 failed (body=$(echo "$BPUT" | head -n -1))"
+  fail "buffered put over S3 failed (body=$(echo "$BPUT" | head -n -1))"
 fi
 
 # ---------------------------------------------------------------------------
