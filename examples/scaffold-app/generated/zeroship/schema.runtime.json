@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "collections": {
+    "notes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "notes_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "notes_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "notes_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "users": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_email_key",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}
