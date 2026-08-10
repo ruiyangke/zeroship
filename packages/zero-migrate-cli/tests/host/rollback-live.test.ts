@@ -401,6 +401,67 @@ test("PostgreSQL: a guarded create is not trusted to rebuild what a later drop r
   }
 });
 
+test("MySQL: a rollback whose project lock is held fails with the holder named", async (t) => {
+  if (!MYSQL_URL) {
+    t.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL lock exclusion skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const schema = uniqueSchema("rb_lock_my");
+  const metaSchema = `${schema}_migrations`;
+  // Mirrors `project_lock_name` (crates/zero-migrate/src/apply/backend/mysql/session.rs:109):
+  // `zero_migrate:<project_id>` while that fits in 64 chars, and the CLI passes the project
+  // SCHEMA as the project id (packages/zero-migrate-cli/src/index.ts:544).
+  //
+  // A hand-mirrored derivation cannot go quietly wrong here: if this name stopped matching the
+  // engine's, the rollback below would ACQUIRE the lock and succeed, and the refusal assertion
+  // would fail loudly. The mirror is checked by the thing it is used for.
+  const lockName = `zero_migrate:${schema}`;
+
+  const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
+  const holder = await mysql.createConnection({ uri: MYSQL_URL });
+  let dir: string | undefined;
+  try {
+    await admin.query(`CREATE DATABASE \`${schema}\``);
+    dir = scaffold(schema);
+
+    const applied = spawnCli([...baseArgs(schema, MYSQL_URL), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+
+    const [gotRows] = await holder.query(`SELECT GET_LOCK(?, 0) AS got`, [lockName]);
+    assert.equal(
+      Number((gotRows as { got: number | string }[])[0].got),
+      1,
+      "the test must actually hold the project lock, or it proves nothing",
+    );
+
+    // MySQL's acquire is BOUNDED - GET_LOCK(name, PROJECT_LOCK_TIMEOUT_SECS) with a 10s
+    // constant - so this returns a real error rather than hanging. The PostgreSQL acquire is
+    // `pg_advisory_lock`, unbounded, which is why there is no PostgreSQL twin of this arm: it
+    // would wait forever instead of failing.
+    const blocked = spawnCli(
+      [...baseArgs(schema, MYSQL_URL), "rollback", "--all", "--approve"],
+      dir,
+    );
+    assert.notEqual(blocked.status, 0, "a rollback cannot proceed while a peer holds the lock");
+    // Matched in two pieces on purpose: the engine joins them with an em dash, and the source
+    // of this file stays ASCII. The lock NAME is asserted too, which is what proves the mirror
+    // above resolved to the same lock the engine took.
+    assert.match(
+      blocked.stderr,
+      new RegExp(`failed to acquire project lock: .*GET_LOCK\\('${lockName}'\\) timed out after 10s`),
+    );
+    assert.match(blocked.stderr, /another apply holds the project lock/);
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    await holder.query(`SELECT RELEASE_LOCK(?)`, [lockName]).catch(() => {});
+    await holder.end().catch(() => {});
+    await admin.query(`DROP DATABASE IF EXISTS \`${schema}\``).catch(() => {});
+    await admin.query(`DROP DATABASE IF EXISTS \`${metaSchema}\``).catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
 test("MySQL: the CLI rolls an applied migration back and leaves it pending", async (t) => {
   if (!MYSQL_URL) {
     t.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL rollback skipped");
