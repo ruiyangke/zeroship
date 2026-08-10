@@ -255,6 +255,31 @@ pub fn build_error_body(
 ///    `OptimisticLockError`, etc.). Exempting them keeps the developer-facing
 ///    code on the wire without leaking anything secret. (Mirrors the TS
 ///    fetch-handler rail, which already preserves any string `.code` at 5xx.)
+///
+/// ## Every code is listed TWICE, and that is not redundancy
+///
+/// The names above are what `crates/plugin-db/src/error.rs` throws. They are
+/// not what arrives here on the path a creator actually takes.
+/// `@zeroship/db` re-stamps every native error through `canonicalErrorCode`
+/// (`sdks/db/src/errors.ts:27`) *inside the isolate*, before the throw
+/// propagates out to this rail: the generic arm uppercases and
+/// underscore-separates, and `CANONICAL_CODE_OVERRIDES` renames two outright
+/// (`fk_violation` → `FOREIGN_KEY_VIOLATION`, `version_mismatch` →
+/// `OPTIMISTIC_CONCURRENCY`).
+///
+/// So until 2026-08-10 both allow-lists here tested for a spelling that had
+/// already been rewritten one layer down, and every exemption they describe
+/// was inert on the SDK path — which is the only path creator code takes.
+/// Measured on a live `pnpm dev`: an FK violation reached the caller as a
+/// bare `{"message":"internal error","name":"Error","request_id":"24"}` with
+/// no code at all. Both spellings are kept because both occur: native for a
+/// direct `env.db` call, canonical for anything through the SDK.
+///
+/// The two lists are hand-mirrored across a language boundary with nothing
+/// joining them, so a THIRD override added to `canonicalErrorCode` re-opens
+/// this silently. `tests/e2e_dev_vs_deployed_db.sh` is the only instrument
+/// that could catch that, and it deliberately asserts the FK by row count
+/// rather than by error text.
 fn is_public_error_code(code: &str) -> bool {
     matches!(
         code,
@@ -270,6 +295,19 @@ fn is_public_error_code(code: &str) -> bool {
             | "reserved_system_field_name"
             | "immutable_system_field"
             | "filter_nesting_too_deep"
+            // The same set as canonicalised by `@zeroship/db`. Note
+            // `version_mismatch` becomes `OPTIMISTIC_CONCURRENCY`, not
+            // `VERSION_MISMATCH` — the mapping is a table, not a transform.
+            | "CAPABILITY_VIOLATION"
+            | "OPTIMISTIC_CONCURRENCY"
+            | "VERSION_FILTER_MUST_BE_TOP_LEVEL"
+            | "MULTI_ROW_VERSION_FILTER_UNSUPPORTED"
+            | "INVALID_FILTER"
+            | "INVALID_COLLECTION"
+            | "INVALID_IDENTIFIER"
+            | "RESERVED_SYSTEM_FIELD_NAME"
+            | "IMMUTABLE_SYSTEM_FIELD"
+            | "FILTER_NESTING_TOO_DEEP"
     )
 }
 
@@ -305,10 +343,20 @@ fn expose_internal_dispatch_errors() -> bool {
 /// 5xx, which is a live divergence between the two rails; widening this one to
 /// match is a contract decision, not a bug fix, and is left open rather than
 /// taken here.
+/// Both spellings of each code are listed, and the pairing is NOT mechanical:
+/// `fk_violation` canonicalises to `FOREIGN_KEY_VIOLATION`, not
+/// `FK_VIOLATION`. See [`is_public_error_code`] for why the canonical form is
+/// the one that actually arrives.
 fn is_code_only_public_error(code: &str) -> bool {
     matches!(
         code,
+        // Native spelling — `env.db` called directly, no SDK in the chain.
         "unique_violation" | "fk_violation" | "not_null_violation" | "check_violation"
+        // Canonical spelling — anything routed through `@zeroship/db`.
+            | "UNIQUE_VIOLATION"
+            | "FOREIGN_KEY_VIOLATION"
+            | "NOT_NULL_VIOLATION"
+            | "CHECK_VIOLATION"
     )
 }
 
@@ -650,6 +698,79 @@ mod tests {
         ErrorExtras {
             code: Some(code),
             ..Default::default()
+        }
+    }
+
+    /// The spellings in both allow-lists are the NATIVE ones, but nothing a
+    /// creator writes reaches this rail carrying them.
+    ///
+    /// `@zeroship/db` maps every native error through `canonicalErrorCode`
+    /// (`sdks/db/src/errors.ts:27`) *inside the isolate*, before the throw
+    /// propagates out to this rail. That function uppercases every code and
+    /// additionally renames two: `fk_violation` → `FOREIGN_KEY_VIOLATION`
+    /// and `version_mismatch` → `OPTIMISTIC_CONCURRENCY`. So the rail was
+    /// testing for a spelling that had already been rewritten one layer down.
+    ///
+    /// MEASURED against a live `pnpm dev` (`examples/db-todos`, port 3061,
+    /// 2026-08-10) — the same orphan insert, twice, with only
+    /// `AUTH_INSECURE_DEV` differing:
+    ///
+    /// ```text
+    /// unset:      {"message":"internal error","name":"Error","request_id":"24"}
+    /// =true:      {"message":"{\"code\":\"fk_violation\",…}",…,
+    ///              "code":"FOREIGN_KEY_VIOLATION"}
+    /// ```
+    ///
+    /// The second body is this file's own verbose serializer, so
+    /// `extras.code` at the rail is `FOREIGN_KEY_VIOLATION` — `Some`, but
+    /// matching neither list, hence blanked to a bare `internal error` with
+    /// no code at all. That made the whole code-kept/message-blanked third
+    /// state (and the CAS exemption above it) dead on every creator path
+    /// that goes through the SDK, which is all of them.
+    ///
+    /// Both spellings are kept: a caller using `env.db` directly, with no
+    /// SDK in the chain, still arrives with the native lowercase code.
+    ///
+    /// WHAT THIS TEST DOES NOT CATCH: it pins the two spellings that exist
+    /// today. If `canonicalErrorCode` grows a third override, nothing here
+    /// fails — the lists are hand-mirrored across a language boundary and
+    /// only `tests/e2e_dev_vs_deployed_db.sh` exercises the real join.
+    #[test]
+    fn sdk_canonicalised_codes_survive_the_5xx_sanitization_rail() {
+        // (canonical spelling, whether the MESSAGE may also survive)
+        let cases = [
+            // Renamed by CANONICAL_CODE_OVERRIDES.
+            ("FOREIGN_KEY_VIOLATION", false),
+            ("OPTIMISTIC_CONCURRENCY", true),
+            // Uppercased by the generic arm.
+            ("UNIQUE_VIOLATION", false),
+            ("NOT_NULL_VIOLATION", false),
+            ("CHECK_VIOLATION", false),
+            ("VERSION_FILTER_MUST_BE_TOP_LEVEL", true),
+            ("INVALID_FILTER", true),
+            ("RESERVED_SYSTEM_FIELD_NAME", true),
+        ];
+        for (code, verbatim) in cases {
+            let body =
+                build_error_body(500, 42, "the real message", "Error", extras_with_code(code));
+            assert!(
+                body.contains(&format!(r#""code":"{code}""#)),
+                "canonical code {code:?} must survive the 5xx rail, got: {body}"
+            );
+            if verbatim {
+                assert!(
+                    !body.contains(r#""message":"internal error""#),
+                    "verbatim body expected for {code:?}, got sanitized: {body}"
+                );
+            } else {
+                // Constraint violations keep the classification and drop the
+                // backend-written wording — the same split the native
+                // spellings get.
+                assert!(
+                    body.contains(r#""message":"internal error""#),
+                    "constraint code {code:?} must keep its message blanked, got: {body}"
+                );
+            }
         }
     }
 
