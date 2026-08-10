@@ -612,11 +612,47 @@ echo "--- 2. dev (pnpm dev, SQLite) ---"
 # on .zeroship/kv.redb and is never reaped (#221); sharing the directory makes
 # this harness fight it for the lock and fail with "Database already open".
 DEVSTATE="$WORK/devstate"; mkdir -p "$DEVSTATE"
+DEV_DBURL="sqlite:$DEVSTATE/dev.sqlite"
 lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+
+# MIGRATE FIRST, as its own step. Since ee2c352aa `pnpm dev` applies nothing --
+# it opens the app database READONLY and names the command that fixes it. This
+# harness kept the pre-split assertion ("dev applied its migrations ahead of the
+# runtime", grepped out of the DEV-SERVER log) and so went red the moment it ran
+# against the new contract, on a private state dir that is empty by construction.
+# Measured 2026-08-10 at HEAD, before this block existed:
+#     FAIL dev did not apply migrations (#176 regression?)
+#     FAIL dev server never answered
+#     seedA {"message":"internal error","name":"Error","request_id":"30"}
+#   with the runtime logging `db: no such table: default.todos` 30 times.
+# golden_path.sh took the same repair at line ~677; the reasoning there applies
+# verbatim here, including WHY the dist path and not `pnpm migrate`: the
+# `zeroship-dev-migrate` bin is only symlinked by an install that post-dates
+# ee2c352aa, so an older node_modules answers "command not found".
+#
+# DATABASE_URL is passed EXPLICITLY and identically to both processes. The
+# resolution helper (sdks/vite-plugin/src/dev-database-url.ts) puts the shell
+# ahead of `.env` and the dev default, so passing it here is what guarantees the
+# apply writes the file the runtime later opens -- applying to some other file is
+# a silent failure that looks exactly like success.
+MIGRATE_CLI="$ROOT/sdks/vite-plugin/dist/cli/migrate-dev.js"
+if [ ! -f "$MIGRATE_CLI" ]; then
+  fail "dev-migrate CLI missing at $MIGRATE_CLI (run pnpm build)"
+else
+  if ( cd "$APP" && DATABASE_URL="$DEV_DBURL" node "$MIGRATE_CLI" ) > "$WORK/dev-migrate.log" 2>&1; then
+    pass "dev migrations applied ahead of the runtime ($(grep -oE 'applied=[0-9]+ skipped=[0-9]+' "$WORK/dev-migrate.log" | tail -1))"
+  else
+    fail "zeroship-dev-migrate failed: $(tail -3 "$WORK/dev-migrate.log" | tr '\n' ' ')"
+  fi
+fi
+# `applied=0 skipped=0` on a fresh database means nothing ran -- a failure
+# wearing a success's clothes (#176). The CLI already exits non-zero on exactly
+# that, so the verdict above carries it; the count is echoed so a reader can see
+# WHICH it was rather than trusting the exit status alone.
 (
   cd "$APP" &&
   DB_TODOS_API_PORT="$DEV_PORT" \
-  DATABASE_URL="sqlite:$DEVSTATE/dev.sqlite" \
+  DATABASE_URL="$DEV_DBURL" \
   ZEROSHIP_KV_PATH="$DEVSTATE/kv.redb" \
   ZEROSHIP_WORKFLOW_SQLITE_PATH="$DEVSTATE/workflows.sqlite" \
   ZEROSHIP_STORAGE_URL="file://$DEVSTATE/storage" \
@@ -628,12 +664,6 @@ for _ in $(seq 1 30); do
     -d '{"json":{"userId":"user_doesNotExist0000000"}}' && break
   sleep 2
 done
-# `applied=0 skipped=0` on a fresh database means nothing ran -- a failure
-# wearing a success's clothes (#176). Assert the count, not the log line.
-grep -qE 'dev migrations applied ahead of the runtime \(applied=[1-9]' "$WORK/dev.log" \
-  && pass "dev applied its migrations ahead of the runtime ($(grep -oE 'applied=[0-9]+ skipped=[0-9]+' "$WORK/dev.log" | head -1))" \
-  || { fail "dev did not apply migrations (#176 regression?)"; grep -i migrat "$WORK/dev.log" | head -5; }
-
 RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
 probe "http://localhost:$DEV_PORT"
 grep -q '^seedA .*"id":"user_' "$WORK/dev.raw" && pass "dev server answered the probe" \
@@ -876,12 +906,46 @@ want mkT2 'a fresh row starts at version 1' '"version":1'
 # scrub in section 5 blanks.
 wantre mkT2 'created_at is a 13-digit epoch-millis number' '"created_at":1[0-9]{12}[,}]'
 
-# The migration-declared foreign key actually refuses the orphan, measured by
-# the ROW COUNT rather than by the error text. The text is #231: a FK
-# violation reaches the caller as an opaque {"message":"internal error"} with
-# no code, though the runtime logs FOREIGN_KEY_VIOLATION. Deliberately NOT
-# asserted here -- see docs/pilot/e2e-scenarios.md.
+# The migration-declared foreign key actually refuses the orphan. TWO
+# independent verdicts, and they answer different questions:
+#
+#   the ROW COUNT (`reject` + `orphanN`) is the INTEGRITY verdict -- did the
+#   write land. It is deliberately independent of how the failure is worded,
+#   so it survives any future rewording of the error.
+#
+#   the CODE is the CONTRACT verdict -- can a creator branch on the failure.
+#
+# The comment that stood here said the code was "deliberately NOT asserted"
+# because a FK violation reached the caller as an opaque
+# {"message":"internal error"} with no code (#231). That was true until
+# 2cb3d9b81, which found the cause: both allow-lists in the dispatch
+# sanitization rail named the NATIVE spelling `fk_violation`, while
+# `@zeroship/db` re-stamps it to `FOREIGN_KEY_VIOLATION` via
+# `canonicalErrorCode` INSIDE the isolate, before the throw reaches the rail.
+#
+# 2cb3d9b81 measured the fix on the DEV TIER ONLY. Whether the deployed tier
+# (gateway -> worker -> isolate) delivers the same code was unmeasured until
+# now. Measured here 2026-08-10, raw captures, one run, both tiers:
+#
+#   dev       {"message":"internal error","name":"Error",
+#              "code":"FOREIGN_KEY_VIOLATION","request_id":"10"}
+#   deployed  {"message":"internal error","name":"Error",
+#              "code":"FOREIGN_KEY_VIOLATION","request_id":"5"}
+#
+# They agree, so the assertion below is absolute rather than a known-divergence
+# note. The DISAGREEMENT half needs nothing added: `render` scrubs only
+# created_at/updated_at/deleted_at, request_id, continueCursor and the minted
+# ids, so `code` reaches the section-5 diff verbatim and a tier that dropped or
+# renamed it shows up there as a divergence row. A second cross-tier assertion
+# here would be a duplicate of that diff, not extra coverage.
+#
+# What the code verdict does NOT catch: that the code is CORRECT for the
+# constraint that fired. Every constraint class in `is_code_only_public_error`
+# is preserved by the same arm, so a rail that answered UNIQUE_VIOLATION for
+# an FK violation would still pass this line -- `dupEmail` below is a
+# different row, not a discriminating control for this one.
 reject orphan 'the orphan insert did not succeed' '"json":{"id":"todo_'
+want   orphan 'the FK violation carries its canonical code' '"code":"FOREIGN_KEY_VIOLATION"'
 want   orphanN 'no orphan row exists for the dangling FK' '{"json":0}'
 want   dupEmail 'the duplicate email is refused' '"message"'
 
@@ -1233,9 +1297,74 @@ else
   echo "  See docs/pilot/e2e-scenarios.md before weakening anything above."
 fi
 
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script used to exit on $FAIL alone, and $FAIL is 0 both when
+#     every assertion passed and when NO assertion ran. The section-4 helpers are
+#     the specific hazard: `want`/`reject`/`wantre` all read `drow "$label"`, so a
+#     probe label renamed on one side alone makes the row EMPTY -- and `reject`
+#     PASSES on an empty row, because the string it forbids is indeed not there.
+#     A capture that went entirely missing therefore turns some verdicts green
+#     rather than red. This repo has shipped three gates that passed over zero
+#     tests (#102/#103/#112). Every sibling leg (kv/env/errors) has this guard;
+#     the db leg was the one without it.
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, this script run
+# unmodified with its own ephemeral Postgres:
+#
+#     dev vs deployed (env.db): 120 passed, 1 failed        (exit 1)
+#
+# The ONE failure is the section-5 divergence, and it is a standing, documented
+# finding rather than a flake: SQLite's `tsres` timestamp resolution, plus the
+# three dev-tier single-connection rows (`cxPlain`, `txBranch`, `txOrphan`)
+# root-caused in docs/pilot/e2e-scenarios.md row 3 and recorded in
+# sqlite-divergences.md. So the floor is 120 of 121 verdicts, not 121 of 121.
+#
+# CROSS-CHECKED against a second, independent instrument: counting CALL SITES in
+# the source rather than outcomes in a run.
+#
+#     27 `pass` call sites outside the helper definitions,
+#        of which 3 sit inside the `for tier in dev deployed` loop      27 + 3
+#     80 `want`/`reject`/`wantre` invocations,
+#        of which 1 sits inside the six-element system-column loop      80 + 5
+#      6 `pgwant` invocations                                                + 6
+#                                                                        = 121
+#
+# 121 verdicts emitted, 120 of which pass. The two derivations agree, and they
+# fail differently: the dynamic count moves when a tier stops answering or a
+# capture is lost, the static one when an assertion leaves the file.
+#
+# NO HEADROOM, deliberately -- the total is fixed by the source, not discovered
+# at run time, so adding an assertion passes untouched and removing one costs a
+# deliberate edit here.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total at 121. Nothing here can see that; review can.
+#
+# AND WHAT IT OVER-REPORTS, measured rather than predicted: with no headroom
+# over a standing FAIL, any ADDITIONAL red also drops PASS below the floor, so
+# the block below prints its "assertions do not vanish by accident" advice on a
+# run where nothing vanished. Observed on the FK mutation runs (119 passed, 2
+# failed). That is noise, not a wrong verdict -- $FAIL had already set exit 1 --
+# and it is the price of the floor being a PASS count. A verdicts-EMITTED floor
+# (PASS+FAIL) would read 121 either way and so would not notice the hazard this
+# guard exists for: a lost capture leaves every verdict emitted, turning the
+# `reject`s green and the `want`s red.
+DB_MIN_PASSED="${DB_MIN_PASSED:-120}"
+
 echo ""
-echo "  dev vs deployed (env.db): $PASS passed, $FAIL failed"
+echo "  dev vs deployed (env.db): $PASS passed, $FAIL failed  (floor $DB_MIN_PASSED)"
 echo ""
 echo "  --- raw deployed bodies (verbatim, truncated to 240 cols) ---"
 cut -c1-240 "$WORK/deployed.raw" | sed 's/^/  /'
-[ "$FAIL" -eq 0 ]
+
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$DB_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $DB_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: either the deployed capture lost" >&2
+  echo '      rows (in which case reject verdicts are passing on EMPTY rows and mean' >&2
+  echo "      nothing) or an assertion was removed. If the removal was deliberate," >&2
+  echo "      lower DB_MIN_PASSED in the same change and say why." >&2
+  rc=1
+fi
+exit "$rc"
