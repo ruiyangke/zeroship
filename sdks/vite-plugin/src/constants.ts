@@ -27,5 +27,34 @@ export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";
 /** Default port for the zeroship dev runtime. */
 export const DEFAULT_DEV_PORT = 3001;
 
+/**
+ * Dev-runtime supervisor thresholds (`dev-server.ts`).
+ *
+ * The dev server re-spawns the `zeroship serve` child when it exits
+ * unexpectedly. That is a real feature - a runtime that ran for minutes and
+ * then crashed on a bad request must come back - but an UNBOUNDED restart loop
+ * turns a runtime that never starts at all into a silent one, because vite
+ * keeps serving HTTP the whole time. These two numbers are what separates the
+ * two cases.
+ *
+ * - `RUNTIME_HEALTHY_MS` - a child that stays up at least this long is treated
+ *   as having genuinely started; its later death is a mid-session crash and the
+ *   rapid-failure counter resets.
+ * - `MAX_RAPID_RESTARTS` - consecutive sub-`RUNTIME_HEALTHY_MS` exits tolerated
+ *   before the supervisor gives up and goes terminal.
+ *
+ * The backoff is 1s, 2s, 4s, 8s (capped), so the terminal verdict lands ~15s
+ * after the first failure - long enough that a port being released by a dying
+ * previous dev server still recovers, short enough that a creator sees the
+ * banner while they are still looking at the terminal.
+ */
+export const RUNTIME_HEALTHY_MS = 5_000;
+export const MAX_RAPID_RESTARTS = 4;
+export const RUNTIME_RESTART_BASE_MS = 1_000;
+export const RUNTIME_RESTART_MAX_MS = 8_000;
+
+/** Lines of the child runtime's own output retained to explain a failure. */
+export const RUNTIME_LOG_TAIL_LINES = 20;
+
 /** Default RPC endpoint path. */
 export const DEFAULT_RPC_ENDPOINT = "/_rpc";

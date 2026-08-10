@@ -20,6 +20,11 @@ import {
   ENV_DEV_AUTH,
   ENV_DEV_AUTH_SECRET,
   DEFAULT_DEV_PORT,
+  RUNTIME_HEALTHY_MS,
+  MAX_RAPID_RESTARTS,
+  RUNTIME_RESTART_BASE_MS,
+  RUNTIME_RESTART_MAX_MS,
+  RUNTIME_LOG_TAIL_LINES,
 } from "./constants.js";
 import { resolveDevAuthEnv, type DevAuthOption } from "./dev-auth-config.js";
 import {
@@ -54,6 +59,156 @@ export interface DevServerOptions {
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 type DatabaseUrlSource = "shell" | "dotenv" | "default";
+
+/**
+ * What the supervisor currently believes about the `zeroship serve` child.
+ *
+ * - `ok`      - never crashed, or last child ran past `RUNTIME_HEALTHY_MS`.
+ *               Requests are proxied.
+ * - `failing` - at least one sub-healthy exit since the last healthy run; a
+ *               restart is pending. Requests are NOT proxied (see below).
+ * - `fatal`   - `MAX_RAPID_RESTARTS` consecutive sub-healthy exits. No further
+ *               restart is scheduled.
+ *
+ * WHY `failing` STOPS PROXYING RATHER THAN LETTING THE PROXY FAIL NATURALLY.
+ * The dev runtime listens on a port of its OWN (`devServerPort`), separate from
+ * vite's. When our child cannot bind that port it is because some OTHER process
+ * holds it - in practice a second example's dev runtime, since several examples
+ * share the 3001 default. Proxying anyway does not produce a connection error:
+ * it produces a SUCCESSFUL connection to somebody else's app. Measured on
+ * examples/starter + examples/error-probe sharing one runtime port, the starter
+ * dev server answered its own `getMessages` with
+ * `404 {"message":"Method not found: getMessages"}` - error-probe's runtime
+ * replying about a procedure it has never heard of. Two instances of the SAME
+ * example are worse still: HTTP 200 carrying the other instance's data.
+ * So the guard is not belt-and-braces around a connection refusal; it is the
+ * only thing standing between a creator and another app's answers.
+ *
+ * WHAT THIS DOES NOT CLOSE. The state starts at `ok`, so between vite accepting
+ * its first request and the first child exit (measured at 7-65ms for a bind
+ * failure, though vite may answer sooner) a request CAN still be forwarded to
+ * whoever holds the port. That window is bounded by one process spawn and ends
+ * for good at the first exit; the defect this replaces had no end. Closing it
+ * entirely would mean proving our own child owns the socket before every
+ * proxy - a per-request syscall against a race that resolves itself in
+ * milliseconds. Named here so the next reader does not mistake the guard for
+ * total.
+ */
+type RuntimeHealth = "ok" | "failing" | "fatal";
+
+interface RuntimeStatus {
+  health: RuntimeHealth;
+  /** Consecutive exits faster than `RUNTIME_HEALTHY_MS`. */
+  rapidFailures: number;
+  /** Tail of the current/last child's own stdout+stderr. */
+  logTail: string[];
+  /** Port the child was told to bind, for the operator-facing message. */
+  port: number;
+}
+
+function pushRuntimeLog(status: RuntimeStatus, chunk: string): void {
+  for (const line of chunk.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    status.logTail.push(trimmed);
+  }
+  if (status.logTail.length > RUNTIME_LOG_TAIL_LINES) {
+    status.logTail.splice(0, status.logTail.length - RUNTIME_LOG_TAIL_LINES);
+  }
+}
+
+function restartDelayMs(rapidFailures: number): number {
+  if (rapidFailures <= 0) return RUNTIME_RESTART_BASE_MS;
+  return Math.min(
+    RUNTIME_RESTART_BASE_MS * 2 ** (rapidFailures - 1),
+    RUNTIME_RESTART_MAX_MS,
+  );
+}
+
+/**
+ * The request-time answer when the runtime is not running.
+ *
+ * SHAPED TO `@zeroship/rpc`'s ERROR ENVELOPE ON PURPOSE. The client
+ * (`sdks/rpc/src/error.ts`) lifts only `code`, `message`, `details`,
+ * `retryable` and `trace_id` off a JSON error body and DISCARDS everything
+ * else, falling back to `RPC error: 503 Service Unavailable`. An envelope that
+ * put the explanation under a key of its own invention would therefore be
+ * thrown away between here and the creator's browser console - the log would
+ * say why, and the only surface they were actually looking at would not. So
+ * the actionable sentence goes in `message`, and the structured extras ride in
+ * `details` where the client preserves them.
+ */
+function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
+  const fatal = status.health === "fatal";
+  // The runtime's own words are the specific half ("port N is already in use");
+  // the frame around them is the generic half. Both are needed: one names the
+  // cause, the other says who is reporting it and what to do.
+  //
+  // Lines the DEV SERVER printed (`[zeroship] Loaded ...`, `[zeroship] Starting
+  // server on port ...`) are dropped first. They are boot chatter that is
+  // present on every attempt including successful ones, so they carry no
+  // information about the failure -- and taking the last line blindly picks up
+  // whichever of them happened to come last. The real cause is usually two
+  // lines ("port N is already in use" + "Hint: use --port=<N>"), so this keeps
+  // the run of unprefixed lines rather than just the final one.
+  const causeLines = status.logTail.filter((l) => !l.startsWith("[zeroship]"));
+  const cause = (causeLines.length > 0 ? causeLines : status.logTail).join(" ")
+    || "no output captured";
+  const message = fatal
+    ? `zeroship dev runtime failed to start on port ${status.port} and was given up on `
+      + `after ${MAX_RAPID_RESTARTS} attempts. The runtime said: ${cause} `
+      + "Fix that, then restart `pnpm dev`. If the port is taken by another app, "
+      + "set zeroship({ devServerPort: <N> }) in vite.config.ts."
+    : `zeroship dev runtime exited immediately on port ${status.port} and is being `
+      + `retried (attempt ${status.rapidFailures}/${MAX_RAPID_RESTARTS}). `
+      + `The runtime said: ${cause}`;
+  return {
+    code: "UNAVAILABLE",
+    message,
+    retryable: !fatal,
+    details: {
+      state: status.health,
+      devServerPort: status.port,
+      attempts: status.rapidFailures,
+      runtimeOutput: status.logTail,
+    },
+  };
+}
+
+/**
+ * The terminal message. It is deliberately loud and deliberately quotes the
+ * CHILD's own words: `zeroship serve` already prints the actionable line
+ * ("port N is already in use / Hint: use --port=<N>"), and in the failure this
+ * exists for, that line scrolled past interleaved with a dozen identical boot
+ * banners. Re-stating it once, at the end, next to "giving up", is the whole
+ * point - a generic "runtime failed" would leave the creator exactly where the
+ * infinite loop did.
+ */
+function formatFatalBanner(status: RuntimeStatus): string {
+  const rule = "=".repeat(72);
+  const lines = [
+    rule,
+    `  [zeroship] DEV RUNTIME FAILED TO START - giving up after ${MAX_RAPID_RESTARTS} attempts`,
+    "",
+    `  The runtime exited ${MAX_RAPID_RESTARTS} times in a row without staying up for`,
+    `  ${RUNTIME_HEALTHY_MS / 1000}s. Vite is still serving this page, but NOTHING`,
+    "  server-side works: every server function now returns HTTP 503.",
+    "",
+    "  What the runtime itself said:",
+  ];
+  const tail = status.logTail.length > 0 ? status.logTail : ["(no output captured)"];
+  for (const line of tail) lines.push(`    | ${line}`);
+  lines.push(
+    "",
+    `  The dev runtime binds :${status.port}, which is SEPARATE from vite's port -`,
+    "  `vite --port N` does not move it. Two apps sharing it collide. Set a",
+    "  different one in vite.config.ts:  zeroship({ devServerPort: <N> })",
+    "",
+    "  Fix the cause above, then restart `pnpm dev`.",
+    rule,
+  );
+  return lines.join("\n");
+}
 interface FetchInvokePayload {
   name: string;
   data: unknown;
@@ -320,6 +475,16 @@ export function devServerPlugin(
     configureServer(server: ViteDevServer) {
       if (!isDev) return;
 
+      // Supervisor state, shared between the crash-restart handler (section 3)
+      // and the proxy middleware (section 4) so a known-dead runtime is visible
+      // AT REQUEST TIME and not only in a log the creator has scrolled past.
+      const runtimeStatus: RuntimeStatus = {
+        health: "ok",
+        rapidFailures: 0,
+        logTail: [],
+        port: devPort,
+      };
+
       // 0. Migration-first gen-types — ensure the migrations dir is WATCHED so a
       //    change there fires `hotUpdate` (Vite only watches the module graph +
       //    root by default; a migrations dir holding `.ts` sources not imported
@@ -484,19 +649,76 @@ export function devServerPlugin(
         );
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
+        let healthyTimer: ReturnType<typeof setTimeout> | null = null;
         let tornDown = false;
 
-        const attachRestartHandler = (child: ChildProcess) => {
+        /**
+         * Distinguish "never came up" from "ran, then died".
+         *
+         * The uptime of the child at the moment it exits is the whole
+         * discriminator. A runtime that could not bind its port dies in
+         * milliseconds, every time; a runtime that served requests for minutes
+         * and then crashed is a different event and MUST still be restarted -
+         * that is a working feature, not collateral.
+         *
+         * `healthyTimer` is what stops a single early crash from wedging the
+         * dev server for the rest of the session: without it, a status set to
+         * `failing` at second 1 would only ever be cleared by the NEXT exit, so
+         * a child that then ran happily for an hour would still be refusing
+         * requests. The timer clears the flag from the live child instead.
+         */
+        const markHealthy = () => {
+          healthyTimer = null;
+          if (runtimeStatus.health === "fatal") return;
+          if (runtimeStatus.rapidFailures > 0) {
+            console.log("[zeroship] runtime is up and stable again");
+          }
+          runtimeStatus.rapidFailures = 0;
+          runtimeStatus.health = "ok";
+        };
+
+        const attachRestartHandler = (child: ChildProcess, spawnedAt: number) => {
           child.once("exit", (code, signal) => {
+            if (healthyTimer) {
+              clearTimeout(healthyTimer);
+              healthyTimer = null;
+            }
             if (tornDown || signal === "SIGTERM" || signal === "SIGKILL") return;
-            console.warn(
-              `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
-            );
+
+            const uptimeMs = Date.now() - spawnedAt;
+            const reason = `code=${code}, signal=${signal}`;
+
+            if (uptimeMs >= RUNTIME_HEALTHY_MS) {
+              // Ran, then died. A genuine mid-session crash: restart, and do
+              // NOT count it toward the give-up budget.
+              runtimeStatus.rapidFailures = 0;
+              runtimeStatus.health = "ok";
+              console.warn(
+                `[zeroship] runtime exited after ${Math.round(uptimeMs / 1000)}s (${reason}) - `
+                  + `restarting in ${restartDelayMs(0) / 1000}s`,
+              );
+            } else {
+              runtimeStatus.rapidFailures += 1;
+              runtimeStatus.health = "failing";
+
+              if (runtimeStatus.rapidFailures >= MAX_RAPID_RESTARTS) {
+                runtimeStatus.health = "fatal";
+                console.error(formatFatalBanner(runtimeStatus));
+                return; // terminal: no further restart is scheduled
+              }
+
+              console.warn(
+                `[zeroship] runtime exited after ${uptimeMs}ms without starting (${reason}) - `
+                  + `attempt ${runtimeStatus.rapidFailures}/${MAX_RAPID_RESTARTS}, `
+                  + `retrying in ${restartDelayMs(runtimeStatus.rapidFailures) / 1000}s`,
+              );
+            }
+
             if (restartTimer) clearTimeout(restartTimer);
             restartTimer = setTimeout(() => {
               restartTimer = null;
               runSpawn();
-            }, 1000);
+            }, restartDelayMs(runtimeStatus.rapidFailures));
           });
         };
 
@@ -505,6 +727,10 @@ export function devServerPlugin(
           if (restartTimer) {
             clearTimeout(restartTimer);
             restartTimer = null;
+          }
+          if (healthyTimer) {
+            clearTimeout(healthyTimer);
+            healthyTimer = null;
           }
           const child = serverProcess;
           serverProcess = null;
@@ -570,6 +796,10 @@ export function devServerPlugin(
           };
 
           try {
+            // Reset the captured tail so a terminal verdict quotes THIS
+            // attempt's output, not a mixture of every attempt's boot banner.
+            runtimeStatus.logTail = [];
+            const spawnedAt = Date.now();
             const child = spawn(
               cmd,
               ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
@@ -583,15 +813,22 @@ export function devServerPlugin(
 
             child.stdout?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
-              if (msg) console.log(`[zeroship:api] ${msg}`);
+              if (!msg) return;
+              pushRuntimeLog(runtimeStatus, msg);
+              console.log(`[zeroship:api] ${msg}`);
             });
 
             child.stderr?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
-              if (msg) console.log(`[zeroship:api] ${msg}`);
+              if (!msg) return;
+              pushRuntimeLog(runtimeStatus, msg);
+              console.log(`[zeroship:api] ${msg}`);
             });
 
-            attachRestartHandler(child);
+            attachRestartHandler(child, spawnedAt);
+            if (healthyTimer) clearTimeout(healthyTimer);
+            healthyTimer = setTimeout(markHealthy, RUNTIME_HEALTHY_MS);
+            healthyTimer.unref?.();
             console.log(`[zeroship] API server starting on :${devPort}`);
           } catch {
             console.warn(
@@ -674,6 +911,17 @@ export function devServerPlugin(
             return next();
           }
 
+          // The runtime is known not to be running. Answer HERE rather than
+          // forwarding: see the `RuntimeHealth` comment - forwarding to a port
+          // our child failed to bind reaches whoever DID bind it, and that
+          // process answers, so the creator gets a confident wrong answer
+          // (another app's data, or `Method not found` about their own
+          // procedure) instead of a symptom pointing at the real cause.
+          if (runtimeStatus.health !== "ok") {
+            writeJson(res, 503, runtimeDownEnvelope(runtimeStatus));
+            return;
+          }
+
           // Forward path as-is — the dev-bootstrap's `default.fetch`
           // dispatches /__zeroship/v1/<id> through `default.rpc`, mirroring
           // production.
@@ -692,8 +940,17 @@ export function devServerPlugin(
           proxyReq.on("error", () => {
             req.destroy();
             if (!res.headersSent) {
-              res.writeHead(503, { "Content-Type": "application/json" });
-              res.end('{"error":"zeroship API not ready"}');
+              // Same envelope contract as `runtimeDownEnvelope` - see its note
+              // on why `message` is the only field that survives the trip to
+              // the creator. This arm is the ordinary "still booting" case: the
+              // supervisor believes the runtime is healthy, it just is not
+              // accepting connections yet.
+              writeJson(res, 503, {
+                code: "UNAVAILABLE",
+                message:
+                  `zeroship dev runtime on port ${devPort} is not accepting connections yet`,
+                retryable: true,
+              });
             }
           });
         }
