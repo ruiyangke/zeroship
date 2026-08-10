@@ -50,7 +50,7 @@ import { auth } from "@zeroship/auth";
 const user = auth.requireUser();
 ```
 
-The current auth helper lives in [sdks/auth/src/index.ts](../../sdks/auth/src/index.ts).
+The current auth helper lives in [sdks/auth/src/server.ts](../../sdks/auth/src/server.ts).
 
 ### 4. Zero setup for creator code
 
