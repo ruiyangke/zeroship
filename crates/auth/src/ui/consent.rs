@@ -228,7 +228,13 @@ async fn post_consent_accept_native(
                     tracing::debug!(client_id = %ctx.client.client_id, alias = %alias, "relay alias minted at native consent");
                 }
                 Ok(None) => {
-                    tracing::debug!(client_id = %ctx.client.client_id, "relay alias deferred to gateway lazy-mint (identity row not yet projected)");
+                    // NOT deferred — nothing picks this up. The identity row is
+                    // not projected yet, and consent is the only writer of
+                    // `relay_email`; `consent_covers` short-circuits every later
+                    // login for this grant, so this app sees `email: ""` from
+                    // here on. Warn, not debug: it is a permanent outcome, not a
+                    // step in a retry.
+                    tracing::warn!(client_id = %ctx.client.client_id, "relay alias NOT minted: identity row not yet projected, and no later path mints it (app will see an empty email)");
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, client_id = %ctx.client.client_id, "relay alias mint failed at native consent (non-fatal)");
