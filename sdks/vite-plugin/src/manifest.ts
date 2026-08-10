@@ -819,6 +819,105 @@ function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
   return out;
 }
 
+// ── Fail-closed auth visibility ────────────────────────────────────────────
+
+/**
+ * The resource keys the gateway consults when resolving a `rpc:` key's
+ * effective policy, in chain order.
+ *
+ * Mirrors `build_inheritance_chain` in `crates/gateway/src/compiled.rs`:
+ * the root `*` sentinel, then each dot-segment ancestor (`rpc:a`,
+ * `rpc:a.b`, ... but NOT the key itself), then the key. The Rust side
+ * skips ancestors absent from the resource map; here the caller does the
+ * same implicitly by looking each key up and finding nothing.
+ */
+function rpcInheritanceChain(key: string): string[] {
+  const chain: string[] = ["*"];
+  const segs = key.slice("rpc:".length).split(".");
+  for (let end = 1; end < segs.length; end++) {
+    chain.push(`rpc:${segs.slice(0, end).join(".")}`);
+  }
+  chain.push(key);
+  return chain;
+}
+
+/**
+ * Surface, AT BUILD TIME, every procedure that will deploy fail-closed.
+ *
+ * A `rpc:` procedure whose whole inheritance chain declares no `auth`
+ * resolves to `AuthLevel::User` in the gateway (`resolve_effective_policy`,
+ * the `if !auth_declared && key.starts_with("rpc:")` arm). That default is
+ * deliberate and stays as it is: forgetting a policy must be a loud 401,
+ * never a silent public endpoint.
+ *
+ * The gap this closes is visibility, not policy. Enforcement lives ONLY in
+ * the gateway -- `AuthLevel` has no reader in `crates/cli` or
+ * `crates/runtime` -- so `pnpm dev` cannot reproduce the 401 and the
+ * creator learns about it only after deploying. The build, by contrast,
+ * already holds both halves of the answer (the discovered procedure list
+ * and the resolved resource tree), so it can name the affected procedures
+ * for free.
+ *
+ * WARNING, never a build failure: making this fatal is a policy call, and
+ * it would break every example that currently relies on the default.
+ * Silence is mandatory when every procedure is covered -- a warning that
+ * fires on correct apps is one people learn to scroll past.
+ */
+function warnFailClosedProcedures(
+  assignments: readonly {
+    resourceKey: string;
+    proc: Pick<DiscoveredProcedure, "exportName" | "filePath">;
+  }[],
+  merged: Record<string, WireResource>,
+  onWarn: (msg: string) => void,
+): void {
+  // Dedupe by resource key: the same procedure can be recorded twice when
+  // the transform fires in more than one environment (see the collision
+  // check above, which dedupes for the same reason).
+  const seen = new Set<string>();
+  const offenders: { resourceKey: string; exportName: string; filePath: string }[] = [];
+  for (const a of assignments) {
+    if (seen.has(a.resourceKey)) continue;
+    seen.add(a.resourceKey);
+    const declared = rpcInheritanceChain(a.resourceKey).some(
+      (k) => merged[k]?.auth !== undefined,
+    );
+    if (!declared) {
+      offenders.push({
+        resourceKey: a.resourceKey,
+        exportName: a.proc.exportName,
+        filePath: a.proc.filePath,
+      });
+    }
+  }
+  if (offenders.length === 0) return;
+
+  offenders.sort((x, y) => x.resourceKey.localeCompare(y.resourceKey));
+  const n = offenders.length;
+  const lines = offenders.map(
+    (a) => `  - ${JSON.stringify(a.resourceKey)} (export ${a.exportName} in ${a.filePath})`,
+  );
+  const sample = offenders[0].resourceKey;
+
+  onWarn(
+    `${n} ${n === 1 ? "procedure declares" : "procedures declare"} no \`auth\` policy ` +
+      `and will deploy fail-closed:\n` +
+      lines.join("\n") +
+      `\n  Each resolves to \`auth: "user"\` at the gateway, so every call returns 401 ` +
+      `until an authenticated end user is present. \`pnpm dev\` runs no gateway and does ` +
+      `NOT enforce this, so these procedures work locally and fail only once deployed.\n` +
+      `  Declare the policy in src/server/config.ts:\n` +
+      `      export default defineApp({\n` +
+      `        resources: {\n` +
+      `          ${JSON.stringify(sample)}: { auth: "anon", publiclyAccessible: true },\n` +
+      `        },\n` +
+      `      });\n` +
+      `  Use \`auth: "anon", publiclyAccessible: true\` to make a procedure publicly ` +
+      `reachable, or \`auth: "user"\` / \`auth: "admin"\` to keep it gated and make that ` +
+      `intent explicit.`,
+  );
+}
+
 // ── Public entry point ─────────────────────────────────────────────────────
 
 export async function computeManifestExtras(
@@ -968,6 +1067,12 @@ export async function computeManifestExtras(
       merged[key] = node;
     }
   }
+
+  // 5b. Name every procedure that will deploy fail-closed. Runs on the
+  //     MERGED tree (auto-derived + user-declared), because a policy can
+  //     legitimately arrive from either side, so neither input alone can
+  //     answer the question.
+  warnFailClosedProcedures(assignments, merged, onWarn);
 
   // 6. Validate.
   validateResources(merged, mode, onWarn);
