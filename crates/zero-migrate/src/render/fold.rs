@@ -505,7 +505,10 @@ fn rewrite_incoming_fk_column_targets(
     }
 }
 
-fn selected_dialectal_leg<'a>(
+/// The leg an `Op::Dialectal` contributes on `dialect`: its own, else `default`, else
+/// nothing. `pub(crate)` so callers outside the fold select legs the SAME way rather
+/// than re-deriving the own-then-default rule and drifting from it.
+pub(crate) fn selected_dialectal_leg<'a>(
     dialect: SqlDialect,
     default: &'a Option<Vec<Op>>,
     pg: &'a Option<Vec<Op>>,

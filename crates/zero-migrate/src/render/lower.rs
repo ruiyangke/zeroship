@@ -4178,11 +4178,43 @@ impl IrAuthor {
         if self.dialect != SqlDialect::Sqlite {
             return Ok(());
         }
+        // Descends `Op::Dialectal` for the SAME reason the lowering below does: a
+        // rename authored inside a leg is a rename SQLite runs, and it rebuilds the
+        // table from the same stored CREATE text. Scanning the raw list let a wrapper
+        // hide the second rename from this preflight while the rebuild still happened,
+        // so the hazard survived and only the refusal that names it was lost.
+        //
+        // The SELECTED leg, not every leg: a rename sitting in the PostgreSQL leg is
+        // never executed here and rebuilds nothing, so refusing on it would reject a
+        // migration that is correct on this target. Selection goes through the fold's
+        // own `selected_dialectal_leg` rather than a second own-then-default rule
+        // written here, so the two cannot drift.
+        //
+        // One level deep is complete: a leg cannot hold a wrapper, refused by the
+        // validator before lowering is reached.
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for op in &ir.ops {
-            if let Op::RenameColumn { table, .. } = op {
-                if !seen.insert(table.as_str()) {
-                    return Err(IrLowerError::SqliteRepeatRenameTarget(table.clone()));
+            let effective: &[Op] = match op {
+                Op::Dialectal {
+                    default,
+                    pg,
+                    sqlite,
+                    mysql,
+                } => crate::render::fold::selected_dialectal_leg(
+                    self.dialect,
+                    default,
+                    pg,
+                    sqlite,
+                    mysql,
+                )
+                .unwrap_or(&[]),
+                other => std::slice::from_ref(other),
+            };
+            for inner in effective {
+                if let Op::RenameColumn { table, .. } = inner {
+                    if !seen.insert(table.as_str()) {
+                        return Err(IrLowerError::SqliteRepeatRenameTarget(table.clone()));
+                    }
                 }
             }
         }
