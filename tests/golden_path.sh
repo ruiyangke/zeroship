@@ -54,7 +54,9 @@ DEV_RT_PORT="${DEV_RT_PORT:-3140}"    # dev runtime, step 6 (STARTER_API_PORT)
 SUP_RT="${SUP_RT:-3141}"              # dev runtime SHARED by 7a and 7b (the collision)
 SUP_V1="${SUP_V1:-3142}"              # vite, 7a
 SUP_V2="${SUP_V2:-3143}"              # vite, 7b
-DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2"
+DB_V="${DB_V:-3144}"                  # vite, step 9 (db-todos data plane)
+DB_RT="${DB_RT:-3145}"                # dev runtime, step 9 (DB_TODOS_API_PORT)
+DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT"
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -539,6 +541,109 @@ if [ "${SUP_CODE:0:1}" = "5" ] && [ "${DEP_DOWN_CODE:0:1}" = "5" ]; then
   pass "dev and deployed AGREE: runtime unavailable is a 5xx on both tiers"
 else
   fail "dev($SUP_CODE) and deployed($DEP_DOWN_CODE) DIVERGE on runtime-unavailable"
+fi
+
+# --- 9. The data plane: a migration's own field names must reach the DB ---
+#
+# THE SEAM THIS TESTS. Everything above drives RPC and assets; no step touches
+# `env.db`, because examples/starter declares no migrations at all. That left
+# the longest chain in the platform uncovered end to end:
+#
+#   committed migration  ->  engine DDL      (the column, spelled verbatim)
+#                        ->  descriptor      (schema.runtime.json)
+#                        ->  generated env.db.ts
+#                        ->  installSchema   (JS field -> wire column)
+#                        ->  the actual SQL
+#
+# Each link reads correctly alone. The defect was in the JOIN: installSchema
+# snake_cased the field on the way out while every other link passed the
+# authored name through, so an app whose migration declared `userId` got a
+# table with a `userId` column and a data plane asking for `user_id`:
+#
+#     db: table default.todos has no column named user_id
+#
+# No crate suite can see that -- the two halves live in a Rust plugin and a JS
+# SDK, and each is self-consistent. It stayed invisible for a second reason
+# worth recording: all 40+ platform migrations author snake_case, on which the
+# mapping is the identity, so the only fixture that could ever expose it is one
+# with a case boundary in a field name. db-hitcounter's single column is
+# `path`. examples/db-todos is the first.
+#
+# The second assertion covers the same seam for relation metadata: a migration
+# declares its FK as `t.text().references("users","id")` (the vendored engine
+# DSL has no t.ref()), and `with:` used to reject exactly that shape.
+#
+# This drives the DEV tier only, deliberately. Step 3 above deploys a .zship but
+# never runs `migrated`, so the deployed stack in this script has no creator
+# schema to query -- asserting against it would test the absence of a migration,
+# not the presence of a column. Extending step 3 to apply creator migrations is
+# what would let this become a dev-vs-deployed comparison.
+echo "=== 9. Data plane: migration field names survive to the database ==="
+TODOS="$ROOT/examples/db-todos"
+free_ports "$DB_V" "$DB_RT"
+( cd "$TODOS" && DB_TODOS_API_PORT="$DB_RT" ./node_modules/.bin/vite --port "$DB_V" --strictPort ) \
+  >/tmp/gp-dbtodos.log 2>&1 &
+PIDS+=($!)
+
+DB_RPC="http://localhost:$DB_RT/__zeroship/v1"
+db_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' "$DB_RPC/$1" -d "{\"json\":$2}"; }
+
+# The wire ids used here are the PUBLISHED ids (`users.seed`, `todos.create`),
+# which are NOT the export names (`seedUser`, `createTodo`) -- see the note at
+# step 1b. A call against an export name answers `Method not found` forever.
+#
+# Readiness and the seed are SEPARATE steps on purpose. Folding them together
+# (retrying `users.seed` until it returns an id) looks tidier and is wrong: it
+# retries through real errors as though they were "not up yet", so a genuine
+# defect is reported as "the runtime never came up" with the actual cause
+# buried. Observed while building this: the loop reported a startup timeout
+# when what had happened was `UNIQUE constraint failed: users.handle`.
+#
+# `users.handle` and `users.email` are UNIQUE, so a fixed literal makes this
+# leg pass exactly once per database and fail on every re-run. The identity is
+# per-run.
+GP_TAG="gp-$$-${RANDOM}"
+DB_UP=0
+for _ in $(seq 1 60); do
+  if [ "$(http_status "http://localhost:$DB_RT/__zeroship/v1/todos.list")" != "000" ]; then
+    DB_UP=1; break
+  fi
+  sleep 1
+done
+
+if [ "$DB_UP" -ne 1 ]; then
+  fail "db-todos dev runtime never bound :$DB_RT (data-plane leg could not run)"
+  tail -20 /tmp/gp-dbtodos.log
+else
+  SEED=$(db_call users.seed "{\"email\":\"$GP_TAG@example.com\",\"name\":\"GP\",\"handle\":\"$GP_TAG\"}")
+  GP_ID=$(printf '%s' "$SEED" | sed -nE 's/.*"id":"([^"]+)".*/\1/p')
+  if [ -z "$GP_ID" ]; then
+    fail "users.seed did not return an id: ${SEED:0:200}"
+  else
+    pass "seeded a user through env.db"
+
+    # The camelCase field is the whole point: `userId` must arrive as the
+    # column the migration created, not a snake_cased rewrite of it.
+    MADE=$(db_call todos.create "{\"userId\":\"$GP_ID\",\"title\":\"golden path\",\"priority\":\"low\"}")
+    case "$MADE" in
+      *'"id":'*) pass "insert with a camelCase field (userId) reached the migration's column" ;;
+      *) fail "insert with a camelCase field FAILED: ${MADE:0:220}
+    This is the descriptor-name-vs-column seam. A body naming a column that
+    'has no column named ...' means a link in the chain renamed the field." ;;
+    esac
+
+    # A foreign key DECLARED IN A MIGRATION must be usable as a relation.
+    JOINED=$(db_call todos.listWithUser "{\"userId\":\"$GP_ID\"}")
+    # Asserting on THIS run's email, not a literal: the joined row must be the
+    # user this run seeded. Matching a fixed address would pass on a row some
+    # earlier run left behind.
+    case "$JOINED" in
+      *"$GP_TAG@example.com"*) pass "with: eager-loaded across a migration-declared FK" ;;
+      *) fail "with: did not join across the migration's FK: ${JOINED:0:220}
+    'is not a t.ref field' here means relation loading is gated on a type
+    token the migration-first pipeline cannot produce." ;;
+    esac
+  fi
 fi
 
 echo ""

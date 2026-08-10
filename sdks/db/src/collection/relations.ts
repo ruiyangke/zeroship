@@ -19,7 +19,8 @@ export interface RelationsCollectionInternals {
  * `find` paths so the relation-loading logic lives in one place.
  *
  * Per `with` key:
- *   1. Walk the schema; the key must be a `t.ref(...)` field.
+ *   1. Walk the schema; the key must carry a `refTarget` — set either by
+ *      `t.ref(...)` or by a migration's `t.text().references(...)`.
  *   2. Resolve the target Collection via the planted `_resolveCollection`.
  *   3. Dedupe foreign ids across the parent rows.
  *   4. Fire ONE `find({id: {$in: [...]}})` against the target.
