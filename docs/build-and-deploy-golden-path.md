@@ -50,8 +50,17 @@ REAL vite-built `.zship` (not a hand-packed fixture):
 
 ## Both halves are now proven end-to-end
 
-### External build (`tests/external_chain.sh`) — gap #1 PROVEN closable
-An app **outside the monorepo** installs `@zeroship/*` **from a registry** and
+### External build (`tests/external_chain.sh`) — BROKEN since 2026-07-14
+
+> **This section describes a run that no longer happens.** It was accurate when
+> written on 2026-06-29. On 2026-07-14 (`4e0f49a16`) `@zeroship/vite-plugin`
+> took a dependency on `zero-migrate` + `zero-migrate-node`, which are published
+> to no registry, so `npm install` in a scaffolded app now dies with `E404`
+> before the build step this section claims to have proven. Measured 2026-08-10;
+> see task #265 and `docs/pilot/e2e-scenarios.md`. Nothing in CI runs this
+> script, which is why the regression sat for weeks.
+
+The claim below, as originally written: an app **outside the monorepo** installs `@zeroship/*` **from a registry** and
 builds a deploy artifact, with zero workspace/file coupling. The script stands up
 the `verdaccio` compose service (`deploy/verdaccio/`), publishes all SDKs
 (`deploy/scripts/publish-sdks.sh`), scaffolds with `create-zeroship-app` into a temp
@@ -85,8 +94,11 @@ For the **real agent flow** against a deployed platform, the path is
 - ✅ Real build → `.zship` (vite-plugin) — proven.
 - ✅ In-monorepo chain: migrate → stack → deploy → serve + RPC — **9/9**
   (`tests/golden_path.sh`).
-- ✅ External build: registry-installed SDKs, scaffolded app builds outside the
-  monorepo — **PASS** (`tests/external_chain.sh`) — gap #1 mechanism proven.
+- ❌ External build: registry-installed SDKs, scaffolded app builds outside the
+  monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). Published
+  `@zeroship/vite-plugin` requires `zero-migrate@0.1.0` +
+  `zero-migrate-node@0.1.0`; neither is on npmjs at any version. This was PASS
+  when recorded on 2026-06-29 and regressed on 2026-07-14. Task #265.
 - ✅ Local/CI deploy auth unblocked (`dev-provision`); real flow = `zeroship login`.
 - ☐ Host a real SDK registry (npmjs / hosted Verdaccio) for production gap #1.
 - ☐ Smooth one-step deploy UX (provision-app-if-needed; a `zeroship deploy` that
