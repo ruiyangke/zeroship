@@ -444,7 +444,28 @@ pub(crate) async fn mint_session_from_code(
     // 2. The id_token is LOAD-BEARING: validate sig/iss/aud(=client_id)/exp
     //    via the gateway's OP JWKS. `expected_nonce=None` — the nonce is
     //    the SDK's own sessionStorage cross-flow guard, never echoed to the
-    //    gateway. at_hash/c_hash bind the id_token to the access token + code.
+    //    gateway. `at_hash` binds the id_token to the paired access token.
+    //
+    //    `expected_c_hash_input` is None, NOT `Some(code)`. `c_hash` is defined
+    //    only for the AUTHORIZATION-endpoint id_token of the implicit/hybrid
+    //    flows (OIDC Core 3.3.2.11); the TOKEN-endpoint id_token of the
+    //    authorization-code flow carries none, and the platform OP does not
+    //    emit one: `crates/auth/src/oidc/issuer.rs` mints `at_hash` and no
+    //    `c_hash` at all (measured: 0 occurrences in that file, against 3 for
+    //    `at_hash`). `c_hash` DOES appear elsewhere under `crates/auth`, and
+    //    every occurrence agrees with this — the test mock provider sets it to
+    //    `None` citing OIDC Core 3.1.3.6, and the Google RP client passes
+    //    `None` for the same reason. It is not absent from the tree, it is
+    //    absent from what our OP issues.
+    //    Requiring it here made `verify_id_token` fail CLOSED on every single
+    //    end-user login through this endpoint:
+    //      400 {"error":"invalid_token","error_description":"id_token verification failed"}
+    //      gate.log: "c_hash missing while authorization code binding was requested"
+    //    measured by tests/e2e_dev_vs_deployed_login.sh against a live OP. The
+    //    sibling RP path already passes None for exactly this reason and says so
+    //    (`crate::oidc_rp::exchange_code`); the two call sites had drifted.
+    //    Code injection is blocked by mandatory S256 PKCE, which is enforced by
+    //    both the gateway (`browser_auth::authorize`) and the OP.
     let Some(id_token) = tokens.id_token.as_deref() else {
         return error_response(
             HttpResponse::BadRequest(),
@@ -459,7 +480,7 @@ pub(crate) async fn mint_session_from_code(
         &route.client_id,
         None,
         Some(&tokens.access_token),
-        Some(code),
+        None,
     )
     .await
     {
