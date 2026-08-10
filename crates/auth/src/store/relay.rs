@@ -69,9 +69,30 @@ pub struct AliasTarget {
 /// - row exists, `relay_email` set ⇒ reuse it, clear `revoked_at` (re-grant
 ///   stability, §6.1) — the address is unchanged.
 /// - row absent (consent ran before the gateway's first `ZeroShip-User`
-///   projection) ⇒ returns `None`. The gateway's **lazy-mint on read-through
-///   miss** (main spec §7.1) is the INSERT path that supplies `pairwise_sub`,
-///   so the app-facing email is never spuriously null.
+///   projection) ⇒ returns `None`, and NOTHING mints it afterwards. This arm
+///   used to claim the gateway's "lazy-mint on read-through miss (main spec
+///   §7.1)" covered it, "so the app-facing email is never spuriously null".
+///   That mint does not exist. `crates/gateway/src/identities.rs` has exactly
+///   three functions — `upsert`, `lookup_pairwise_sub`, `lookup_relay_email` —
+///   and `upsert`'s own doc says `relay_email` is LEFT UNTOUCHED. So on a
+///   first login the order is: consent runs, finds no row, returns `None`;
+///   the gateway then INSERTs with `relay_email` NULL; consent never runs
+///   again for that grant.
+///
+///   The app then receives an EMPTY STRING, not a null it could branch on:
+///   `router/auth.rs` looks the alias up, leaves `relay_email = None` on a
+///   miss, and projects `owned.email = relay_email.unwrap_or_default()`.
+///   Measured end to end on a live deployed login by
+///   `tests/e2e_dev_vs_deployed_login.sh` (2026-08-10): dev handed the app
+///   `alpha@probe.zeroship.test`, deployed handed it `""`, through both the
+///   browser projection and `env.auth.getUser()`.
+///
+///   Which side should close it — auth minting without `pairwise_sub`, the
+///   gateway minting on miss, or the projection distinguishing "unknown" from
+///   "none" instead of collapsing both to `""` — is a contract decision on an
+///   identity path and is deliberately NOT taken here. What is fixed is the
+///   claim: it asserted a safety net that does not exist, which is why no test
+///   ever checked for the empty string.
 ///
 /// Runs under the consent grant's advisory lock on a dedicated owned `Client`,
 /// so two concurrent first-consents mint exactly one alias.
