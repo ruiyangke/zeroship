@@ -288,6 +288,30 @@ export interface GenArtifactsReply {
   runtimeJson?: string
   /** A human-readable error when `ok == false`. */
   error?: string
+  /**
+   * Did the folded history carry an op-level `dialect()` wrapper?
+   *
+   * [`GenArtifactsSource::dialect`] is required and has no default because leg
+   * selection changes WHICH COLUMNS EXIST. This reports whether that mechanism
+   * was in play, so a host that supplies a constant can assert the constant was
+   * harmless instead of hoping. ABSENT (`undefined` to a JS caller, `None` in
+   * Rust) when `ok == false`: a refused call folded nothing and has no answer.
+   * A consumer asserting on this must therefore test `=== false` rather than
+   * falsiness, so neither a refusal nor an older addon that predates the field
+   * can pass as a clean result.
+   *
+   * Reports PRESENCE, not selection. A pg-only wrapper folded under SQLite
+   * selects no leg and no `default`, contributing nothing while the fold
+   * succeeds - the case a caller most needs told about - so a selection-shaped
+   * answer would be `false` exactly there. The descriptor source cannot carry a
+   * wrapper at all and reports `false` by construction.
+   *
+   * `false` does NOT mean the artifacts are dialect-independent. The
+   * materialized enum/domain capability gates and the identity/primary-key reuse
+   * rules key on the dialect too (see the `render_artifacts` contract), so this
+   * answers one narrow question and promises nothing wider.
+   */
+  hasDialectalOps?: boolean
 }
 
 /**

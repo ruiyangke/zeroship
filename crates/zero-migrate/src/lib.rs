@@ -207,8 +207,8 @@ pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
 pub use render::fold::{
-    descriptors_to_create_ops, fold_ops, fold_ops_onto, fold_to_field_defs, recover_check_facet,
-    FoldError, ProduceError, RecoveredCheck,
+    descriptors_to_create_ops, fold_ops, fold_ops_onto, fold_to_field_defs,
+    history_carries_dialectal_ops, recover_check_facet, FoldError, ProduceError, RecoveredCheck,
 };
 pub use zero_migrate_policy::EffectivePolicy;
 // The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or

@@ -550,6 +550,28 @@ fn push_fold_op<'a>(
     }
 }
 
+/// Does this op stream carry an op-level `dialect()` wrapper?
+///
+/// Answers "the dialect argument decides part of this history's content", which is
+/// the fact a caller needs in order to know whether the dialect it supplied mattered.
+/// Deliberately NOT "a leg was selected": a pg-only wrapper folded under SQLite
+/// matches no leg and has no `default`, so it contributes nothing and the fold
+/// succeeds - the dialect decided that op's entire content, and a selection-shaped
+/// answer would report `false` at the one moment the answer carries weight.
+///
+/// A TOP-LEVEL scan is complete because a leg cannot itself hold a wrapper: nesting
+/// is refused by the validator, and [`push_fold_op`] returns
+/// `FoldError::Unsupported("nested dialectal op reached fold")` if one ever reaches
+/// here. So an op stream that survives validation carries its wrappers at depth one.
+///
+/// Says NOTHING about whether the artifacts are dialect-independent. Other fold
+/// rules key on the dialect too - see the [`crate::render_artifacts`] contract - so
+/// `false` means "no `dialect()` wrapper", never "the target does not matter".
+#[must_use]
+pub fn history_carries_dialectal_ops(ops: &[Op]) -> bool {
+    ops.iter().any(|op| matches!(op, Op::Dialectal { .. }))
+}
+
 pub(crate) fn flatten_dialectal_ops(
     ops: &[Op],
     dialect: SqlDialect,

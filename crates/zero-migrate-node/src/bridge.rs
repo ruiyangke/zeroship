@@ -212,6 +212,8 @@ fn gen_artifacts_err(msg: impl Into<String>) -> GenArtifactsReply {
         env_db_ts: None,
         runtime_json: None,
         error: Some(msg.into()),
+        // Refused at the boundary before any fold ran, so there is no answer to give.
+        has_dialectal_ops: None,
     }
 }
 

@@ -179,8 +179,12 @@ pub fn gen_artifacts_from_envelopes(
         // one policy-resolution seam for every generated-artifact caller.
         ops.extend(raw_ir.ops);
     }
+    // Read the wrapper count off the RAW concatenated stream, before the fold
+    // consumes it: the fold's output no longer distinguishes an op that came from a
+    // leg from one authored at the top level.
+    let has_dialectal_ops = zero_migrate::history_carries_dialectal_ops(&ops);
     match render_artifacts(&ops, dialect, schema, &effective) {
-        Ok(a) => gen_ok(a),
+        Ok(a) => gen_ok(a, has_dialectal_ops),
         Err(e) => gen_err(e.to_string()),
     }
 }
@@ -219,17 +223,24 @@ pub fn gen_artifacts_from_descriptors(
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
     match render_artifacts_from_descriptors(descriptors, dialect, schema, &effective) {
-        Ok(a) => gen_ok(a),
+        // A declared descriptor set has no op stream, so it cannot carry a
+        // `dialect()` wrapper. `false` here is a property of the source shape, not a
+        // default standing in for an unasked question.
+        Ok(a) => gen_ok(a, false),
         Err(e) => gen_err(e.to_string()),
     }
 }
 
-fn gen_ok(artifacts: zero_migrate::GeneratedArtifacts) -> GenArtifactsReply {
+fn gen_ok(
+    artifacts: zero_migrate::GeneratedArtifacts,
+    has_dialectal_ops: bool,
+) -> GenArtifactsReply {
     GenArtifactsReply {
         ok: true,
         env_db_ts: Some(artifacts.env_db_ts),
         runtime_json: Some(artifacts.runtime_json),
         error: None,
+        has_dialectal_ops: Some(has_dialectal_ops),
     }
 }
 
@@ -239,6 +250,9 @@ fn gen_err(msg: impl Into<String>) -> GenArtifactsReply {
         env_db_ts: None,
         runtime_json: None,
         error: Some(msg.into()),
+        // A refusal folded nothing and has no answer. `None` rather than `false` so
+        // a consumer's `=== false` assertion cannot pass on a call that never ran.
+        has_dialectal_ops: None,
     }
 }
 
