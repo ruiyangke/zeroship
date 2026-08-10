@@ -184,6 +184,26 @@ fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
     }
 }
 
+/// Every table name `ops` creates, descending into `Op::Dialectal` legs.
+///
+/// The aggregate form of [`collect_created_tables`], for callers that need the whole
+/// stream's creations rather than one op's. Use this rather than mapping
+/// [`op_created_table`] over `ops`: that helper answers for a SINGLE op and returns
+/// `None` for a wrapper, so a create authored inside `dialect({ ... })` disappears.
+///
+/// EVERY leg, matching [`enforce_ir_ownership`], because the answer feeds ownership
+/// rather than execution. A name declared in any leg is a name this app authored, and
+/// over-claiming costs a refusal that names the owner while under-claiming lets
+/// another app take the table.
+#[must_use]
+pub fn ir_created_tables(ops: &[Op]) -> Vec<&str> {
+    let mut out = Vec::new();
+    for op in ops {
+        collect_created_tables(op, &mut out);
+    }
+    out
+}
+
 /// The single target table of an [`Op`] for the ownership check. Every op the IR
 /// admits operates on exactly one table (the closed `Op` enum carries a `name`
 /// for `createTable`, a `table` for every alter/DML op, and `DropIndex` carries

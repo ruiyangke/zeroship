@@ -43,7 +43,7 @@ use crate::model::ir::{
     RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
     TriggerAction, TriggerEvent, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
 };
-use crate::model::load::op_created_table;
+use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
@@ -2942,10 +2942,12 @@ impl IrAuthor {
         .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
         // cross-file registry + live-set before the next IR envelope.
-        let created_tables: Vec<String> = ir
-            .ops
-            .iter()
-            .filter_map(|op| op_created_table(op).map(str::to_string))
+        // Descends `Op::Dialectal`, so a table authored inside a leg claims its name.
+        // `op_created_table` answers for one op and returns `None` for a wrapper, which
+        // left a leg-created table applied to the database and owned by nobody.
+        let created_tables: Vec<String> = ir_created_tables(&ir.ops)
+            .into_iter()
+            .map(str::to_string)
             .collect();
         let (steps, fragments, op_spans) = self
             .lower_guarded_with_op_spans(&ir, guard_cfg, live)
