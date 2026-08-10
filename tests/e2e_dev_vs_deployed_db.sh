@@ -852,6 +852,53 @@ want p2 'page 2 is not the last page' '"isDone":false'
 want p3 'the third page ends the walk' '"isDone":true'
 wantre p1cur 'the cursor binds the orderBy it was minted under' '"orderBy":\{"id":1\}'
 
+# COMPLETENESS, which the four assertions above do not test.
+#
+# They check that the cursor advances and that the walk terminates. A paginator
+# that silently dropped a row would satisfy every one of them: page 1 would
+# still not be last, page 3 would still be `isDone`, and the cursor would still
+# carry its orderBy. The pages are a rich artifact and those assertions read a
+# narrow projection of it.
+#
+# That is not hypothetical here. The id column is where SQLite (BINARY) and
+# Postgres (en_US.utf8) order differently -- see #236/#255 and the ordering rows
+# this harness has already caught -- and keyset pagination filters on the SAME
+# column it sorts by. Measured on a throwaway Postgres 16 (en_US.utf8) with real
+# minted ids: with the filter and the sort under the same collation the walk is
+# complete (6 rows, 6 emitted, 0 missing); with the filter forced to a different
+# collation than the sort, exactly one row VANISHES from the walk and every
+# isDone/cursor assertion above still passes.
+#
+# So: the three pages together must contain alice's five rows, each exactly
+# once. Compared as SETS against the `list` probe, not by position -- `list` is
+# sorted DESC and the pages ASC, so a positional check would encode one tier's
+# ordering as the contract and fail for the wrong reason.
+pg_ids="$(for p in p1 p2 p3; do drow "$p"; done \
+          | grep -oE '"id":"todo_[^"]*"' | cut -d'"' -f4 | sort)"
+list_ids="$(drow list | grep -oE '"id":"todo_[^"]*"' | cut -d'"' -f4 | sort)"
+pg_n="$(printf '%s\n' "$pg_ids" | grep -c .)"
+pg_u="$(printf '%s\n' "$pg_ids" | sort -u | grep -c .)"
+list_n="$(printf '%s\n' "$list_ids" | grep -c .)"
+
+if [ "$pg_n" -eq 5 ]; then
+  pass "deployed pagination: the walk emitted 5 rows across 3 pages"
+else
+  fail "deployed pagination: the walk emitted $pg_n rows, want 5"
+fi
+if [ "$pg_n" -eq "$pg_u" ]; then
+  pass "deployed pagination: no row appears on two pages"
+else
+  fail "deployed pagination: $(( pg_n - pg_u )) duplicate row(s) across pages"
+fi
+# The set equality is the load-bearing one: it fails if the walk loses a row
+# EVEN IF the count still reaches 5, which is what a skip-plus-duplicate would
+# look like.
+if [ "$pg_ids" = "$list_ids" ] && [ "$list_n" -eq 5 ]; then
+  pass "deployed pagination: the pages are exactly the rows list returns"
+else
+  fail "deployed pagination: pages != list ($pg_u distinct paged, $list_n listed)"
+fi
+
 # System columns under mutation, and the delete.
 want setDone 'an update bumps version to 2'  '"version":2'
 want archive 'a second update bumps to 3'    '"version":3'
