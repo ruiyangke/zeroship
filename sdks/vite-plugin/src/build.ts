@@ -340,6 +340,11 @@ export function buildPlugin(
   // production-mode gate (every procedure must have an explicit `id`
   // when shipping a production build).
   let viteMode: "production" | "development" = "production";
+  // Vite's resolved logger. Manifest warnings (notably the fail-closed
+  // auth notice, which names procedures that will 401 once deployed) go
+  // through it so they land in a normal `vite build` / `pnpm build`
+  // transcript rather than a bare console.warn.
+  let logger: { warn: (msg: string) => void } | undefined;
 
   /**
    * Run the SSR server sub-build (`virtual:zeroship/_server-entry` →
@@ -609,6 +614,7 @@ export function buildPlugin(
     configResolved(config: any) {
       root = config.root;
       isDev = config.command === "serve";
+      logger = config.logger;
       // Vite's ResolvedConfig.mode reflects the `--mode` flag
       // (`production` for `vite build` by default; `development` for
       // `vite build --mode development`). Anything other than the two
@@ -710,6 +716,11 @@ export function buildPlugin(
           schedules,
           workflowNames,
           mode: viteMode,
+          onWarn: (msg) => {
+            const line = `[zeroship:manifest] ${msg}`;
+            if (logger) logger.warn(line);
+            else console.warn(line);
+          },
         });
 
         await emitZship({
