@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "collections": {
+    "todos": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "priority": {
+          "type": "string",
+          "required": true,
+          "default": "medium"
+        },
+        "tags": {
+          "type": "json"
+        },
+        "done": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "archived": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "todos_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "todos_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "todos_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "todos_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "users": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "handle": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_email_key",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_handle_key",
+          "fields": [
+            "handle"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}
