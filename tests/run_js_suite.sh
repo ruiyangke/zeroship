@@ -37,8 +37,8 @@
 #   tests/run_js_suite.sh
 #
 # ENV
-#   JS_MIN_PACKAGES (16)  packages that must actually RUN a test script
-#   JS_MIN_TESTS   (800)  total TAP assertions that must pass
+#   JS_MIN_PACKAGES (18)  packages that must actually RUN a test script
+#   JS_MIN_TESTS   (950)  total TAP assertions that must pass
 # ============================================================================
 set -uo pipefail
 
@@ -58,7 +58,6 @@ trap 'rm -f "$LOG"' EXIT
 set +e
 pnpm -r --no-bail \
   --filter='!zero-migrate' \
-  --filter='!@zeroship/migrate' \
   --filter='!@zeroship/vite-plugin' \
   test 2>&1 | tee "$LOG"
 # PIPESTATUS, not $?: piping into tee makes $? tee's status, which is 0 whenever
@@ -89,11 +88,12 @@ if [ "$run_status" -ne 0 ]; then
   status=1
 fi
 
-# 16 measured on 2026-08-08. Floor 16, not 15: the package set is discrete and
+# 18 measured on 2026-08-10 (was 16 on 08-08, then 17; un-excluding
+# @zeroship/migrate added the 18th). Floor at the measured number, not below: the package set is discrete and
 # changes only when someone adds or removes a suite, so there is no noise to
 # absorb - and a package silently dropping out is the exact defect this guards.
 # Adding a suite means raising this deliberately, which is the point.
-JS_MIN_PACKAGES="${JS_MIN_PACKAGES:-16}"
+JS_MIN_PACKAGES="${JS_MIN_PACKAGES:-18}"
 if [ "$packages" -lt "$JS_MIN_PACKAGES" ]; then
   echo "FAIL: only ${packages} packages ran a test script, fewer than the ${JS_MIN_PACKAGES} expected." >&2
   echo "A package whose 'test' script is renamed or removed is SKIPPED SILENTLY by pnpm -r." >&2
@@ -101,9 +101,9 @@ if [ "$packages" -lt "$JS_MIN_PACKAGES" ]; then
   status=1
 fi
 
-# 800 against 862 measured, the same ~7 percent headroom the auth and billing
-# gates carry.
-JS_MIN_TESTS="${JS_MIN_TESTS:-800}"
+# 950 against 1056 measured 2026-08-10, ~10 percent headroom (was 800/862).
+# The +183 is @zeroship/migrate, un-excluded here.
+JS_MIN_TESTS="${JS_MIN_TESTS:-950}"
 if [ "$tests_passed" -lt "$JS_MIN_TESTS" ]; then
   echo "FAIL: only ${tests_passed} JS tests passed, fewer than the ${JS_MIN_TESTS} expected." >&2
   status=1
