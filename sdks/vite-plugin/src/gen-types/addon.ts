@@ -5,10 +5,18 @@
  * The addon is a napi-rs package whose `index.js` locates its prebuilt
  * `*.node` binary next to itself (or via `NAPI_RS_NATIVE_LIBRARY_PATH`). In a
  * *published* install the binary ships in the package tarball, so a bare
- * `require("zero-migrate-node")` resolves it. In *dev* (this monorepo linking the
- * standalone repo via a `file:` dep), the compiled `*.node` is gitignored in the
- * standalone tree, so pnpm's tarball-pack omits it and the bare require fails
- * with "Cannot find native binding".
+ * `require("zero-migrate-node")` resolves it.
+ *
+ * The paragraph that stood here described dev as "this monorepo linking the
+ * standalone repo via a `file:` dep", whose tarball-pack omitted the gitignored
+ * `*.node` and so broke the bare require. That mechanism is GONE: e4ad10373
+ * moved both engine deps to `workspace:*` (verified at package.json:64-65, and
+ * no `file:` spec for them survives anywhere in the tree). pnpm resolves a
+ * workspace member by SYMLINK into third_party/zero-migrate/, not by packing a
+ * tarball, so dev now points at the standalone tree in place - binary included.
+ *
+ * The fallback below is kept for the cases the symlink does not cover, not for
+ * the one it replaced. Do not reason about dev resolution from the old premise.
  *
  * This loader makes both cases work with no build-graph coupling: it first tries
  * the ordinary require, and on failure re-points napi's own
@@ -77,8 +85,43 @@ const require = createRequire(import.meta.url);
  * `t.text().primaryKey()`), which is the engine's own artifact and neither
  * resolvable nor type-bearing in a creator app. gen-types renders the typed
  * `env.db` surface itself from `runtimeJson` (see `render-env-db.ts`).
+ *
+ * WHAT THIS DOES NOT CATCH, because `Pick` enumerates: a field the engine ADDS
+ * to `GenArtifactsReply` is invisible here until someone edits this line. That
+ * is the one protection the type-only import does NOT buy for this type - the
+ * seven types re-exported verbatim above do get it. Stated because the engine
+ * told us to expect exactly that (`hasDialectalOps`, absent at pin cb1bcb59)
+ * and predicted it would "appear without anyone editing anything"; it will not.
+ *
+ * What the narrowing DOES buy, and the reason it stays: if a picked field
+ * changes shape or is removed, that is a compile error rather than a runtime
+ * `undefined`. Widening to the full reply to catch future additions would
+ * re-admit `envDbTs`, which is excluded above for a stated reason - so the
+ * deliberate trade is a known one-line edit when a needed field lands.
  */
 export type GenArtifactsReply = Pick<AddonGenArtifactsReply, "ok" | "runtimeJson" | "error">;
+
+/**
+ * Closes the `Pick` blind spot described above WITHOUT widening the `Pick`.
+ *
+ * Every key of the engine's reply must be one this file has triaged: either
+ * consumed by the `Pick`, or deliberately dropped (`envDbTs`). A key the engine
+ * ADDS belongs to neither set, so `UntriagedReplyKeys` stops being `never` and
+ * the `AssertNever` instantiation below fails to compile - naming the new key in
+ * the error. That is the compile-time signal ticket #68 asked for; the `Pick`
+ * alone could not give it, because `Pick` enumerates what it wants rather than
+ * reacting to what arrives.
+ *
+ * Deleting a name from the exclusion list is what proves this load-bearing:
+ * drop `"envDbTs"` and the build goes red with TS2344 naming `"envDbTs"`.
+ * This is type-only and erases at compile time - it loads no addon binary.
+ */
+type UntriagedReplyKeys = Exclude<
+  keyof AddonGenArtifactsReply,
+  "ok" | "runtimeJson" | "error" | "envDbTs"
+>;
+type AssertNever<T extends never> = T;
+export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;
 
 /** The verbs the dev tier needs, so the addon's larger apply-side surface is
  *  not reachable from here.
