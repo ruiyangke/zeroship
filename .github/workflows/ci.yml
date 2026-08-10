@@ -433,41 +433,23 @@ jobs:
       #
       # Written as exclusions, not an allow-list, so a new package is gated the
       # day it appears rather than the day someone remembers to add it. The
-      # three below are excluded by name because they fail today for one shared
+      # two below are excluded by name because they fail today for one shared
       # reason, and each exclusion is a debt with an owner:
       #
       #   zero-migrate           vendored third-party code at a pinned commit.
       #                          Its suite is not ours to gate; it became
       #                          visible only because the pin joined the
       #                          workspace.
-      #   @zeroship/migrate      ONE failure, not the 6 recorded here until
-      #                          2026-08-10. Measured locally at the current
-      #                          submodule pin: 183 tests, 182 pass, 1 fail.
-      #                          Its fixtures resolve into
-      #                          third_party/zero-migrate, so they compare
-      #                          against that same pin.
-      #                          The survivor is `fluent_ddl fluent-recorded
-      #                          ops equal the committed golden`, and it is NOT
-      #                          staleness that regenerating fixes: the engine
-      #                          fixture types the confined system columns
-      #                          `{string:{length:255}}` while our injector
-      #                          emits TEXT on both dialects we ship
-      #                          (zeroship-schema/src/query.rs, PG and SQLite
-      #                          arms; the sole VARCHAR there is the MySQL arm
-      #                          at 191). A cross-repo disagreement, raised
-      #                          upstream as ZEROSHIP-2026-08-10-171 and
-      #                          deliberately not re-blessed here - the fixture
-      #                          is in the vendored tree, and that suite's own
-      #                          header calls a disagreement an upstream
-      #                          finding rather than a licence to match it.
-      #                          I never observed 6. On a clean tree it was 2,
-      #                          and a7eab7174 fixed one of them (a dead
-      #                          `string` ColType our hand-authored types
-      #                          admitted and the engine schema rejects).
-      #                          Whether the 6 was ever true, I do not know -
-      #                          it was recorded unverified and I am replacing
-      #                          it with a measurement, not correcting a
-      #                          history I can see. See task #251.
+      #   (@zeroship/migrate is NO LONGER EXCLUDED. It was, for failures that
+      #    are now fixed: 183 tests, 183 pass, 0 fail as of e5b87b7ad, and the
+      #    filter came out in eaca2500b. Measured on removal: 17 packages/873
+      #    passed with it excluded, 18/1056 without, same 5 failures either way
+      #    - so it added +183 tests and no failures. Floors raised to 18/950.
+      #    The last failure was OURS, not the engine's: a hand-written mirror
+      #    of the confined system columns typed three of them `text` where the
+      #    engine deliberately bounds them `string(255)` for MySQL keying.
+      #    Settled by escalating upstream rather than re-blessing the shared
+      #    fixture; see task #251.)
       #   @zeroship/vite-plugin  7 failures, and they are TWO causes, not one.
       #                          2 are drift (env.db.ts committed vs fresh).
       #                          The other 5 are not drift at all: gen-types
@@ -498,8 +480,8 @@ jobs:
       # for `version` (17cd17b46) that the committed artifacts predate.
       # See task #220.
       #
-      # The @zeroship/migrate line above is unverified by me and left as
-      # written; only the vite-plugin claim was measured.
+      # The vite-plugin claim is the measured one; the migrate entry above is
+      # now a record of a CLEARED exclusion, not an open debt.
       #
       # Runs through a script rather than inline so the result can be COUNTED.
       # `pnpm -r` skips a package whose `test` script is renamed or removed, in
