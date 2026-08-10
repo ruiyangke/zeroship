@@ -88,8 +88,24 @@ columns = [
   # value; without these the first insert into any migration-created table fails
   # with "null value in column created_at violates not-null constraint".
   # `id` is deliberately defaultless — it is minted into the INSERT instead.
-  # Values match `zeroship-schema`'s `system_field_columns` so the migration and
-  # plugin-db producers emit the same table.
+  #
+  # THE NAMES AND NULLABILITY match `zeroship-schema`'s `system_field_columns`,
+  # and that is all that matches. An earlier version of this comment claimed the
+  # two producers "emit the same table"; they do not, and the claim is what kept
+  # anyone from checking (measured 2026-08-10 on a deployed app schema):
+  #
+  #   this file, via the engine   id / created_by / updated_by  varchar(255)
+  #   zeroship-schema PG renderer id / created_by / updated_by  text
+  #
+  # THE LIVE CONSEQUENCE is the collation, not the width. All three columns hold
+  # typed ids (`<prefix>_<base62(uuidv7)>`), whose byte order IS creation order -
+  # and the engine has no way to express a column collation for an injected
+  # column, so they land on the database default (`en_US.utf8`), which
+  # interleaves base62's case runs. `ORDER BY id` on a deployed creator app is
+  # therefore NOT creation order, while dev's SQLite (BINARY) is correct.
+  # `zeroship-schema` now pins `COLLATE "C"` on its three; this file CANNOT until
+  # the engine grows a collation slot on `InjectColumn`. Tracked as #255; the
+  # end-to-end red is `tests/golden_path.sh` step 11.
   { name = "id",         type = "text",        nullable = false },
   { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
   { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
