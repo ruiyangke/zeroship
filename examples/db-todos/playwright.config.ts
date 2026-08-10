@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
@@ -34,7 +36,23 @@ export default defineConfig({
     reuseExistingServer: true,
     timeout: 120_000,
     env: {
-      ZEROSHIP_BIN: "/home/ruiyang/Projects/appbase/target/release/zeroship",
+      // Pinned to the RELEASE binary on purpose: `pnpm dev` otherwise resolves
+      // `node_modules/.bin/zeroship`, and a stale target/release/zeroship
+      // reproduces already-fixed runtime bugs exactly, which is a long way to
+      // travel before suspecting the binary.
+      //
+      // Resolved RELATIVE to this file. It was an absolute path into one
+      // developer's home directory, so on any other checkout the dev server
+      // spawned a binary that does not exist -- `dev-server.ts` uses
+      // ZEROSHIP_BIN directly when set, with no existence check and no
+      // fallback. The sibling at tests/e2e-browser/src/dev-server.ts already
+      // resolves it this way; examples/ssr-blog omits it entirely and relies
+      // on the bin-dir fallback, which is the other valid answer.
+      //
+      // `process.env` still wins, so an operator can point it elsewhere.
+      ZEROSHIP_BIN:
+        process.env.ZEROSHIP_BIN
+        ?? fileURLToPath(new URL("../../target/release/zeroship", import.meta.url)),
     },
   },
 });
