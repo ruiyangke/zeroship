@@ -3130,6 +3130,35 @@ impl IrAuthor {
     /// Tables created EARLIER in the same IR are added to the working live-table set
     /// as lowering proceeds, so an intra-migration FK inlines correctly.
     ///
+    /// # What this entry point does and does not check
+    ///
+    /// This is one of three entries taking an ALREADY-DESERIALIZED IR
+    /// ([`lower_plan`](Self::lower_plan), [`lower`](Self::lower), and this one), as
+    /// opposed to [`load_and_lower`](Self::load_and_lower) /
+    /// [`load_and_lower_guarded`](Self::load_and_lower_guarded), which parse the
+    /// bytes through `model::load` first. An embedder holding a `MigrationIr` can
+    /// reach either, so the difference is worth stating rather than assuming.
+    ///
+    /// Enforced here regardless of which entry was used: authored identifier
+    /// lengths, per-row DML destinations, column references, table foreign-key
+    /// targets, typed reference catalogs, and the repeat-rename refusal - the six
+    /// calls opening this function. Schema confinement and vendor capability are
+    /// enforced too, in the per-op path rather than here, under names of their own:
+    /// `DefaultSchemaOutOfScope` / `LowerCrossSchema` for confinement and
+    /// `enforce_vendor_capability_at_lower` for the charter's capability grants.
+    ///
+    /// Added by the loading entries and NOT re-run here: the IR-version gate, the
+    /// per-op authoritative validation that is not restated above (embedded
+    /// expressions, guard direction, schema-identifier validity), the whole-IR
+    /// online-rename-sequence, partition-recording and MySQL key-storage checks,
+    /// ownership against the deploying app and project registry, the checksum-hint
+    /// comparison, and the server stamp that discards a spoofed `owner_app`.
+    ///
+    /// Prefer the loading entries for anything whose IR did not originate in this
+    /// process. The list above is a map, not a guarantee of completeness: it was
+    /// built by walking the call chain, and a check added to one side and not the
+    /// other will not announce itself here.
+    ///
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected an op's fields.
     /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
