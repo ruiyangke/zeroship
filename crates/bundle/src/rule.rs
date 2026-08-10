@@ -139,13 +139,28 @@ pub enum AuthLevel {
     Anon,
     /// Authenticated end-user.
     User,
-    /// Platform admin. Highest level.
+    /// Platform admin. Highest level *for merging* — *not* for enforcement.
+    ///
+    /// **The gateway enforces `Admin` exactly as `User`.** Both are handled by
+    /// the same match arm (`router/dispatch.rs`, the `(None, AuthLevel::User |
+    /// AuthLevel::Admin)` arm), and `router/auth.rs` special-cases only `Anon`.
+    /// So any signed-in end user reaches a procedure declared `admin`; nothing
+    /// checks for platform-admin identity.
+    ///
+    /// Easy to get wrong from the code, because `rank()` below IS real and IS
+    /// load-bearing — it makes `Admin` win a merge against `User`. An auditor
+    /// who finds `rank()` reasonably concludes the level is handled. It is,
+    /// but for the merge question, not the access question. The two are
+    /// separate and only one of them is implemented.
     Admin,
 }
 
 impl AuthLevel {
     /// Strictness rank — higher number = stricter. Used by the merge
     /// rule "stricter wins".
+    ///
+    /// This orders levels for MERGING only. It is not consulted to decide
+    /// whether a caller may proceed; see the `Admin` note above.
     pub fn rank(self) -> u8 {
         match self {
             Self::Anon => 0,

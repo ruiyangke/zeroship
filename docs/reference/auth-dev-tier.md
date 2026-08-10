@@ -29,8 +29,11 @@ only the backend that answers them differs.
 
 > **Identity has a dev tier. Authorization does not.** Everything on this page
 > is about *who the caller is*. The separate question of *whether this
-> procedure requires a caller* — the manifest's per-procedure `auth: "user"` /
-> `"admin"` posture — is enforced by the **gateway**, before dispatch. There is
+> procedure requires a caller* — the manifest's per-procedure `auth: "user"`
+> posture — is enforced by the **gateway**, before dispatch. (`auth: "admin"`
+> parses and merges as a stricter level but is *enforced identically to*
+> `"user"`; it restricts nothing extra today. See `docs/reference/rpc.md`.)
+> There is
 > no gateway under `pnpm dev`, and nothing in the dev path substitutes for one:
 > `AuthLevel` is read only in `crates/gateway` (`compiled.rs`,
 > `router/auth.rs`), and `crates/cli/src` and `crates/runtime/src` contain no
