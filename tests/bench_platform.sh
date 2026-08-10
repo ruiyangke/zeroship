@@ -12,6 +12,33 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+
+# PREFLIGHT. Every service below is started as `"$BIN/name" ... > /dev/null 2>&1 &`,
+# which swallows "No such file or directory" and backgrounds it, so a missing
+# binary is invisible until wrk cannot connect ten seconds later -- and before
+# the guards in run_bench, not even then.
+#
+# This is not hypothetical. MEASURED 2026-08-10 on a tree where
+# `cargo build --release` had been run: zeroship-bench-server was ABSENT, because
+# it is a separate bin target that the plain workspace build does not produce.
+# It serves :5100 and :5101 -- the two legs whose jsonrpc envelope is CORRECT --
+# so the harness would have silently benchmarked two refused connections.
+#
+# Named here, at the top, rather than diagnosed from a throughput table.
+# (Same shape as the preflight in tests/e2e_metering_billing.sh.)
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-bench-server; do
+    [ -x "$BIN/$b" ] || {
+        echo "FAIL: missing $BIN/$b" >&2
+        echo "      Build it before benchmarking; a missing service is started into" >&2
+        echo "      /dev/null here and would surface only as an unreachable port." >&2
+        echo "      zeroship-bench-server + echo-server carry" >&2
+        echo "      required-features = [\"bench-bins\"] (crates/runtime/Cargo.toml:98-106)," >&2
+        echo "      so a plain \`cargo build --release\` does NOT produce them. Build with:" >&2
+        echo "        cargo build --release -p zeroship-runtime --features bench-bins --bins" >&2
+        exit 2
+    }
+done
+command -v wrk >/dev/null 2>&1 || { echo "FAIL: wrk not installed; nothing can be measured." >&2; exit 2; }
 CORES=$(nproc)
 
 PIDS=()
