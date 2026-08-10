@@ -150,7 +150,13 @@ pub fn build_error_body(
         // true now; it is not a property of the codes. Do not restore the
         // assertion in place of the enforcement.
         if !extras.code.is_some_and(is_public_error_code) && !expose_internal_dispatch_errors() {
-            return build_internal_error_body(request_id);
+            // The code may still ride out alone: see `is_code_only_public_error`
+            // for why a constraint violation needs its classification kept and
+            // its backend-written wording dropped.
+            return build_internal_error_body(
+                request_id,
+                extras.code.filter(|c| is_code_only_public_error(c)),
+            );
         }
     } else if extras.stack.is_some() {
         // 4xx never reached the `tracing::error!` above, so stripping the
@@ -244,9 +250,47 @@ fn expose_internal_dispatch_errors() -> bool {
     )
 }
 
-fn build_internal_error_body(request_id: u64) -> String {
-    let mut out = String::with_capacity(64);
-    out.push_str(r#"{"message":"internal error","name":"Error","request_id":""#);
+/// Codes that survive the 5xx rail WITHOUT their message — the third state
+/// between "verbatim" ([`is_public_error_code`]) and "blanked".
+///
+/// A database constraint violation is developer-facing in its CLASSIFICATION
+/// and backend-specific in its WORDING, so the two halves need opposite
+/// treatment. plugin-db already classifies all four correctly
+/// (`DbError::{UniqueViolation, FkViolation, NotNullViolation, CheckViolation}`,
+/// stamped in `to_op_error`); before this existed the rail dropped the code on
+/// the floor and a creator inserting a duplicate email got
+/// `{"message":"internal error"}` — indistinguishable from the server falling
+/// over. Measured end to end by `tests/e2e_dev_vs_deployed_db.sh`.
+///
+/// The message stays blanked because it is written by the backend, not by us:
+/// Postgres says `duplicate key value violates unique constraint
+/// "users_email_key"` and SQLite answers with a JSON envelope, so a creator
+/// branching on the text would be branching on which tier they are running.
+/// The value-bearing `DETAIL:` line is stripped upstream by
+/// `scrub_constraint_detail`, so this is a contract-stability rule, not a
+/// containment one.
+///
+/// Deliberately NOT "any string code". The TS rail in
+/// `sdks/bootstrap/src/fetch-handler.ts` does preserve any string `.code` at
+/// 5xx, which is a live divergence between the two rails; widening this one to
+/// match is a contract decision, not a bug fix, and is left open rather than
+/// taken here.
+fn is_code_only_public_error(code: &str) -> bool {
+    matches!(
+        code,
+        "unique_violation" | "fk_violation" | "not_null_violation" | "check_violation"
+    )
+}
+
+fn build_internal_error_body(request_id: u64, code: Option<&str>) -> String {
+    let mut out = String::with_capacity(64 + code.map_or(0, |c| c.len() + 10));
+    out.push_str(r#"{"message":"internal error","name":"Error""#);
+    if let Some(code) = code {
+        out.push_str(r#","code":""#);
+        escape_json_string(code, &mut out);
+        out.push('"');
+    }
+    out.push_str(r#","request_id":""#);
     out.push_str(&request_id.to_string());
     out.push_str(r#""}"#);
     out
@@ -633,6 +677,63 @@ mod tests {
             "non-whitelisted 5xx code must be sanitized"
         );
         assert!(!body.contains("secret connection string"));
+    }
+
+    /// A database CONSTRAINT violation must reach the caller with its
+    /// `.code`, and without its message.
+    ///
+    /// Measured 2026-08-10 by `tests/e2e_dev_vs_deployed_db.sh`: inserting a
+    /// todo whose `userId` names no user, and re-inserting a duplicate
+    /// `users.email`, both came back as
+    /// `{"message":"internal error","name":"Error","request_id":"5"}` — no
+    /// code. plugin-db classifies both correctly (`DbError::FkViolation` /
+    /// `UniqueViolation`, stamped `fk_violation` / `unique_violation` in
+    /// `to_op_error`), so the platform KNOWS which constraint failed and the
+    /// creator cannot find out. "Duplicate email" is indistinguishable from
+    /// "the server fell over", which is the difference between a form
+    /// validation message and a 500 page.
+    ///
+    /// The message must still be blanked, and that is not belt-and-braces.
+    /// Postgres phrases it `duplicate key value violates unique constraint
+    /// "users_email_key"` and SQLite phrases it as a JSON envelope; both are
+    /// backend-generated, so a creator branching on the text would be
+    /// branching on which tier they are running. The value-bearing `DETAIL:`
+    /// line is already stripped upstream by `scrub_constraint_detail`
+    /// (`crates/plugin-db/src/error.rs`), so this is about a stable contract,
+    /// not about a leak.
+    ///
+    /// NOT asserted here: that the code is safe to expose in general. This is
+    /// a fixed four-member family of platform-owned tokens, not a widening of
+    /// the rail — `non_whitelisted_5xx_code_is_still_sanitized` above pins
+    /// `transient` to the codeless envelope and must keep passing.
+    #[test]
+    fn constraint_violation_codes_reach_the_caller_without_their_message() {
+        for code in [
+            "unique_violation",
+            "fk_violation",
+            "not_null_violation",
+            "check_violation",
+        ] {
+            let body = build_error_body(
+                500,
+                5,
+                r#"db: duplicate key value violates unique constraint "users_email_key""#,
+                "Error",
+                extras_with_code(code),
+            );
+            assert!(
+                body.contains(&format!(r#""code":"{code}""#)),
+                "code {code:?} must reach the caller, got: {body}"
+            );
+            assert!(
+                body.contains(r#""message":"internal error""#),
+                "the backend-specific message must still be blanked for {code:?}, got: {body}"
+            );
+            assert!(
+                !body.contains("users_email_key"),
+                "the constraint name must not ride out for {code:?}, got: {body}"
+            );
+        }
     }
 
     /// 4xx errors are a developer-facing boundary — the rail leaves them
