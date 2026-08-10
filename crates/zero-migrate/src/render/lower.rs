@@ -2033,7 +2033,8 @@ pub(crate) fn render_ir_default(
 ///   - [`Expr::UuidV4`] renders its own parentheses at the leaf
 ///     ([`crate::render::renderer`]'s MySQL `uuid_v4`), so wrapping again would
 ///     nest a second redundant pair.
-///   - [`SynthFn::Now`] renders as `CURRENT_TIMESTAMP(6)`, which MySQL accepts
+///   - [`SynthFn::Now`](crate::model::expr::SynthFn::Now) renders as
+///     `CURRENT_TIMESTAMP(6)`, which MySQL accepts
 ///     bare. Wrapping it is accepted too, so this is not a correctness choice: it
 ///     would simply rewrite the DDL every existing MySQL timestamp default emits,
 ///     for no gain. Note this is NOT a drift argument - an ordinary default's raw

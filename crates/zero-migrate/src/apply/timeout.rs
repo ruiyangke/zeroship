@@ -23,7 +23,7 @@
 //! with no loader involved. A zero can also arrive from CONFIG, which no IR
 //! validation can see: `ExecutorConfig::statement_timeout_ms` is
 //! `Duration::as_millis`, and `Duration::from_micros(500).as_millis() == 0`.
-//! [`resolve_timeout_ms`] sits at the one point every one of those paths
+//! `resolve_timeout_ms` sits at the one point every one of those paths
 //! converges on -- where the effective value is computed and handed to the
 //! session render -- so each path is refused on its own evidence.
 //!

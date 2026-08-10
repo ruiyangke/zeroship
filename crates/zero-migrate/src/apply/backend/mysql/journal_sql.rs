@@ -290,7 +290,8 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
 ///
 /// A migration version read under a case-insensitive collation could match a version
 /// it is not, so each of these carries `utf8mb4_bin` and
-/// [`ensure_binary_identity_columns`] repairs any that does not.
+/// `ensure_binary_identity_columns` repairs any that does not. That repair is private
+/// to this module, so it is named here rather than linked.
 ///
 /// Shared with the test that asserts the repair rather than mirrored into it: a
 /// hand-copied second list is a list that silently stops covering a table somebody

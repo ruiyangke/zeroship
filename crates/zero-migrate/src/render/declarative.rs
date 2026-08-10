@@ -4951,7 +4951,7 @@ pub enum DeclarativeError {
     /// leaves present must end RLS-enabled. The IR path can discharge it, because an
     /// author can write a `setRls` op next to the create. The declarative path
     /// cannot: the desired model is a
-    /// [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot), which records RLS
+    /// [`SchemaSnapshot`], which records RLS
     /// only as `RoleSnapshot.bypass_rls` and carries nothing per table, so no diff of
     /// it can author the `ENABLE ROW LEVEL SECURITY` the obligation asks for.
     ///

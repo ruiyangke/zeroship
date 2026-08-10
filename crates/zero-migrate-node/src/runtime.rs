@@ -19,7 +19,7 @@
 //! That worker thread is also where the engine's diagnostics are collected. The
 //! engine emits `tracing` events for the secondary failures its reply cannot carry
 //! (a release that failed, a `RESET ROLE` that failed), and a `tracing` event with
-//! no subscriber installed reaches nobody. [`with_diagnostics`] installs one for
+//! no subscriber installed reaches nobody. `with_diagnostics` installs one for
 //! the length of the verb, on the thread that runs it, when the operator opts in
 //! through `ZERO_MIGRATE_LOG`.
 
