@@ -318,6 +318,11 @@ pub struct LiveSchema {
     /// the effective schema of the DROP says nothing about where the extension
     /// lived. Only the recorded `CREATE` knows.
     pub extensions: std::collections::BTreeMap<String, crate::model::snapshot::ExtensionSnapshot>,
+    /// Schemas already present in the folded live schema, with the AUTHORIZATION each
+    /// was created with. A non-cascading `dropSchema` renders its own inverse from
+    /// this; a cascading one never does, because the snapshot records the namespace
+    /// and never its contents.
+    pub schemas: std::collections::BTreeMap<String, crate::model::snapshot::SchemaObjectSnapshot>,
     /// Logical column declarations accumulated from ordered migration artifacts.
     ///
     /// This semantic map is intentionally never inferred from the physical
@@ -358,6 +363,7 @@ impl LiveSchema {
             views: live.views,
             sequences: live.sequences,
             extensions: live.extensions,
+            schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -378,6 +384,7 @@ impl LiveSchema {
             views: std::collections::BTreeMap::new(),
             sequences: std::collections::BTreeMap::new(),
             extensions: std::collections::BTreeMap::new(),
+            schemas: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -462,6 +469,7 @@ impl LiveSchema {
             views: desired.snapshot.views,
             sequences: desired.snapshot.sequences,
             extensions: desired.snapshot.extensions,
+            schemas: desired.snapshot.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -544,6 +552,7 @@ impl LiveSchema {
             views: live.views,
             sequences: live.sequences,
             extensions: live.extensions,
+            schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -7893,6 +7902,32 @@ fn vendor_inverse_from_history(op: &Op, live_schema: &LiveSchema) -> Option<Stri
             if let Some(schema) = &snapshot.schema {
                 sql.push_str(" WITH SCHEMA ");
                 sql.push_str(&crate::render::dml::quote_ident_checked(schema).ok()?);
+            }
+            Some(sql)
+        }
+        // A CASCADING schema drop is never reversed, and that is the one refusal
+        // this family needs beyond the two above. `DROP SCHEMA ... CASCADE`
+        // destroys every table, view and sequence inside; `CREATE SCHEMA` would
+        // then SUCCEED and hand back an empty namespace, so the rollback would
+        // journal a clean success over data that is permanently gone. Measured on
+        // PostgreSQL 18.4: after `DROP SCHEMA s CASCADE` reports "drop cascades to
+        // table s.keepme", a plain `CREATE SCHEMA s` leaves `pg_tables` empty for
+        // that schema. Without CASCADE the drop is RESTRICT, which PostgreSQL only
+        // permits on an empty schema, so re-creating it really does restore
+        // everything the drop removed.
+        Op::DropSchema {
+            name,
+            if_exists,
+            cascade,
+        } if !if_exists.unwrap_or(false) && !cascade.unwrap_or(false) => {
+            let snapshot = live_schema.schemas.get(name)?;
+            let mut sql = format!(
+                "CREATE SCHEMA {}",
+                crate::render::dml::quote_ident_checked(name).ok()?
+            );
+            if let Some(owner) = &snapshot.owner {
+                sql.push_str(" AUTHORIZATION ");
+                sql.push_str(&crate::render::dml::quote_ident_checked(owner).ok()?);
             }
             Some(sql)
         }
