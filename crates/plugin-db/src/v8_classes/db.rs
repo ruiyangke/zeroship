@@ -300,9 +300,19 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
         "repeatableRead" | "repeatable read" | "REPEATABLE READ" => "REPEATABLE READ",
         "serializable" | "SERIALIZABLE" => "SERIALIZABLE",
         _ => {
+            // Name every level the match above accepts. This listed three
+            // while the first arm admitted `readUncommitted`, so the one
+            // artefact a creator reads at the moment they get it wrong omitted
+            // a value that would have worked (task #245).
+            //
+            // Spelled camelCase here, which is NOT a statement that camelCase
+            // is canonical: each level also accepts its SQL-spaced and
+            // uppercase forms, and which vocabulary the platform publishes is
+            // still open. Listing four instead of three is correct under any
+            // of those choices.
             return Err(OpError::type_error(format!(
                 "db.transaction: unknown isolationLevel '{raw}' \
-                 (expected readCommitted | repeatableRead | serializable)"
+                 (expected readUncommitted | readCommitted | repeatableRead | serializable)"
             )));
         }
     };
@@ -421,8 +431,42 @@ mod tests {
     //! never the override.
     #![allow(unsafe_code)]
 
-    use super::resolve_consumer_app_id;
+    use super::{normalize_isolation_level, resolve_consumer_app_id};
     use zeroship_runtime::init_v8;
+
+    /// The rejection message is the one artefact a creator reads at the moment
+    /// they get the spelling wrong, so it must not omit a value the very same
+    /// function accepts. It did: the match admitted `readUncommitted` while the
+    /// message advertised only three levels (task #245).
+    ///
+    /// The four names are asserted ACCEPTED first, in this same test, so the
+    /// list the message is checked against is not an independent copy that can
+    /// drift from the match arms on its own.
+    ///
+    /// WHAT THIS DOES NOT CATCH: a fifth level added to the match without being
+    /// added here. Nothing enumerates match arms at runtime, so that case needs
+    /// the author to update this list. It catches the reverse -- the message
+    /// falling behind a level this test already knows is accepted.
+    #[test]
+    fn rejection_message_names_every_accepted_level() {
+        let levels = ["readUncommitted", "readCommitted", "repeatableRead", "serializable"];
+
+        for spelling in levels {
+            assert!(
+                normalize_isolation_level(spelling).is_ok(),
+                "{spelling} is expected to be an accepted isolation level"
+            );
+        }
+
+        let err = normalize_isolation_level("bogus").expect_err("bogus must be rejected");
+        let msg = err.message;
+        for level in levels {
+            assert!(
+                msg.contains(level),
+                "rejection message omits the accepted level {level}: {msg}"
+            );
+        }
+    }
 
     #[test]
     fn consumer_app_id_ignores_string_override() {
