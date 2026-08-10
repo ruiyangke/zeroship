@@ -5235,3 +5235,146 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// A plan whose LATER migration carries a zero lock-timeout budget applies
+/// nothing, rather than committing everything ahead of it and then refusing.
+///
+/// The coalescing loop runs each maximal run of consecutive DDL steps as its own
+/// `apply_with_lock_backend` call, and the executor inside that call applies one
+/// migration at a time. A budget that resolves to zero is discovered when the
+/// session preamble renders, which is after every earlier step has committed. The
+/// database is then half-migrated for a reason that was knowable before anything
+/// ran, since a budget is a property of the plan and never of live state.
+///
+/// The plan is built by hand rather than authored, because the lowering gate
+/// refuses a per-migration timeout override on any plan carrying a non-DDL step -
+/// any value, not only zero. Reaching this state requires an embedder holding
+/// `Migration` and `PlanStep` directly, which is the population the refusal in
+/// `apply::timeout` exists for.
+///
+/// The assertion that carries the test is the second one: the error alone proves
+/// nothing, because the unfixed path also errors. What separates them is whether
+/// the first migration's table survives the refusal.
+#[compio::test]
+async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+
+    // The backfill target has to exist before the plan runs: the middle step is
+    // what forces the two DDL runs apart, and it needs a real table to walk.
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".late_zero_seed (\
+                id bigint PRIMARY KEY, value text NOT NULL\
+            ); \
+             INSERT INTO \"{schema}\".late_zero_seed (id, value) VALUES (1, 'seed')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create the backfill target");
+
+    let first = mig(
+        MigrationId::generate(),
+        "create the run A marker",
+        &format!(
+            "CREATE TABLE \"{}\".late_zero_run_a (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+
+    let backfill_version = MigrationId::generate();
+    let backfill_checksum = step_checksum("late zero backfill");
+    let backfill = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "late_zero_seed".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 10,
+        set_clause: r#""value" = 'walked'"#.into(),
+        per_row: BTreeMap::new(),
+        filter: None,
+        name: "walk the seed".into(),
+    };
+
+    // The zero lives on the LAST step, so every earlier step is legitimate and
+    // would apply cleanly on its own.
+    let last_up = format!(
+        "CREATE TABLE \"{}\".late_zero_run_b (id bigint PRIMARY KEY)",
+        cfg.project_schema
+    );
+    let mut last = mig(MigrationId::generate(), "create the run B marker", &last_up);
+    last.flags.lock_timeout_ms = Some(0);
+    last.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+        up: &last_up,
+        down: None,
+        flags: &last.flags,
+        owner_app: "app_test",
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+
+    let steps = vec![
+        PlanStep::Ddl(first.clone()),
+        PlanStep::Backfill {
+            version: backfill_version,
+            checksum: backfill_checksum,
+            spec: backfill,
+        },
+        PlanStep::Ddl(last),
+    ];
+
+    let error = MigrationEngine::new()
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "tester",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("a plan carrying a zero lock-timeout budget must be refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("lock_timeout = 0"),
+        "the refusal must name the indefinite budget: {rendered}"
+    );
+
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "late_zero_run_a").await,
+        "the refusal must land before the first migration commits, and did not"
+    );
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "late_zero_run_b").await,
+        "the migration carrying the zero budget must not have run"
+    );
+    let walked: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".late_zero_seed WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read the backfill target")
+        .try_get("value")
+        .expect("decode the backfill target");
+    assert_eq!(
+        walked, "seed",
+        "the intervening backfill must not have run either"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}

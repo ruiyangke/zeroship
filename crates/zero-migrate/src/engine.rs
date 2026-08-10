@@ -1846,6 +1846,19 @@ impl MigrationEngine {
             }
         }
 
+        // A timeout budget that resolves to zero is refused when the session
+        // preamble renders, which is inside the per-step apply and therefore after
+        // every earlier step has committed. The budget is a property of the plan -
+        // a migration flag or an executor field, never live state - so waiting
+        // until render time buys nothing and costs a half-migrated database. Ask
+        // once, here, for the whole plan.
+        //
+        // The render-time checks stay exactly where they are. They cover the direct
+        // executor and backend callers that never pass through the engine, which is
+        // the population `apply::timeout` documents itself for.
+        self.preflight_plan_timeouts(steps, backend, exec_cfg)
+            .await?;
+
         // Reconcile every approval-gated step against the journal before the
         // authored-order loop can execute anything. Per-step DML/backfill gates
         // are still required as defense in depth, but they are too late to make a
@@ -2743,6 +2756,119 @@ impl MigrationEngine {
     /// approval. Any matching inflight/progress evidence remains pending and is
     /// gated before the authored-order loop starts; any checksum disagreement is
     /// drift and wins over the approval error.
+    /// Refuse the whole plan when any step's effective timeout budget resolves to
+    /// zero, before the authored loop can commit anything.
+    ///
+    /// Every input is known without touching the database: a step either carries
+    /// its own `flags.timeout_ms` / `flags.lock_timeout_ms`, or it has no override
+    /// slot at all and inherits the executor's. That is what makes the question
+    /// answerable up front, and what makes discovering it at render time - after
+    /// earlier steps have committed - avoidable rather than inherent.
+    ///
+    /// SQLite is exempt because it resolves neither budget: its lock timeout bounds
+    /// a local file-lock attempt rather than a server wait, so a zero there means
+    /// "do not wait" rather than "wait forever". Judging it by the PostgreSQL and
+    /// MySQL rule would refuse plans it runs correctly today.
+    ///
+    /// Completed migrations are skipped so a retried deploy stays idempotent: the
+    /// executor would not render them, so neither should this. A step whose
+    /// precondition would make the executor skip it IS still judged - evaluating
+    /// preconditions needs the live database, and a zero budget is invalid
+    /// configuration whether or not this particular run would have reached it.
+    ///
+    /// # Errors
+    /// [`ApplyError::IndefiniteTimeout`] naming the step and the knob that produced
+    /// the zero.
+    async fn preflight_plan_timeouts<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<(), DeclarativeApplyError> {
+        let (statement_setting, lock_setting) = match backend.dialect() {
+            SqlDialect::Sqlite => return Ok(()),
+            SqlDialect::Mysql => ("max_execution_time", "innodb_lock_wait_timeout"),
+            SqlDialect::Postgres => ("statement_timeout", "lock_timeout"),
+        };
+
+        let completed: std::collections::BTreeSet<String> = backend
+            .applied(exec_cfg)
+            .await
+            .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .map(|entry| entry.version)
+            .collect();
+
+        // A step with no override slot resolves purely from the executor config,
+        // which is why it still has to be asked: the zero can come from either end.
+        let mut budgets: Vec<(&str, Option<u64>, Option<u64>)> = Vec::new();
+        for step in steps {
+            match step {
+                PlanStep::Ddl(m) => budgets.push((
+                    m.version.as_str(),
+                    m.flags.timeout_ms,
+                    m.flags.lock_timeout_ms,
+                )),
+                PlanStep::Dml { version, .. } | PlanStep::Backfill { version, .. } => {
+                    budgets.push((version.as_str(), None, None));
+                }
+                PlanStep::AlterPrimaryKey(step) => budgets.push((
+                    step.migration.version.as_str(),
+                    step.migration.flags.timeout_ms,
+                    step.migration.flags.lock_timeout_ms,
+                )),
+                PlanStep::SynchronizeIdentity(step) => budgets.push((
+                    step.migration.version.as_str(),
+                    step.migration.flags.timeout_ms,
+                    step.migration.flags.lock_timeout_ms,
+                )),
+                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => budgets.push((
+                    rebuild.migration.version.as_str(),
+                    rebuild.migration.flags.timeout_ms,
+                    rebuild.migration.flags.lock_timeout_ms,
+                )),
+                // An expand-contract carries real migrations on both halves plus a
+                // config-budgeted backfill between them. All of it runs under this
+                // one plan, so all of it is in scope.
+                PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) => {
+                    for m in plan.expand.iter().chain(plan.contract.iter()) {
+                        budgets.push((
+                            m.version.as_str(),
+                            m.flags.timeout_ms,
+                            m.flags.lock_timeout_ms,
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (version, timeout_override, lock_override) in budgets {
+            if completed.contains(version) {
+                continue;
+            }
+            crate::apply::timeout::resolve_timeout_ms(
+                version,
+                statement_setting,
+                timeout_override,
+                "timeout_ms",
+                exec_cfg.statement_timeout_ms(),
+                "pg.statement_timeout",
+            )
+            .map_err(|error| EngineError::Apply(ApplyError::IndefiniteTimeout(error)))?;
+            crate::apply::timeout::resolve_timeout_ms(
+                version,
+                lock_setting,
+                lock_override,
+                "lock_timeout_ms",
+                exec_cfg.lock_timeout_ms(),
+                "pg.lock_timeout",
+            )
+            .map_err(|error| EngineError::Apply(ApplyError::IndefiniteTimeout(error)))?;
+        }
+        Ok(())
+    }
+
     async fn preflight_plan_approval<B: MigrationBackend>(
         &self,
         steps: &[PlanStep],

@@ -468,3 +468,78 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         .await
         .expect("a follow-on touch of the renamed table is NEVER gated on SQLite");
 }
+
+/// SQLite applies a plan whose migration carries a zero lock-timeout budget, which
+/// the PostgreSQL and MySQL rule would refuse.
+///
+/// The two dialects mean different things by the same number. On a server engine a
+/// zero budget reads as "no limit" and the statement waits forever holding whatever
+/// it took, which is why the plan-wide preflight refuses it. SQLite's lock timeout
+/// bounds an attempt on a local application file, where zero means "do not wait" -
+/// a tighter budget, not an unbounded one. A preflight that judged every dialect by
+/// the server rule would reject this plan, so this is the control that keeps the
+/// gate from being wider than the defect.
+#[compio::test]
+async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
+    let v1 = vec![CollectionDescriptor {
+        name: "widgets".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "label".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    }];
+
+    let p = paths("zero_budget_admitted");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+
+    let up = "ALTER TABLE widgets ADD COLUMN note text";
+    let flags = zero_migrate::model::migration::MigrationFlags {
+        lock_timeout_ms: Some(0),
+        ..Default::default()
+    };
+    let add = zero_migrate::model::migration::Migration {
+        version: zero_migrate::model::migration::MigrationId::generate(),
+        name: "add_widgets_note".into(),
+        up: up.into(),
+        down: None,
+        checksum: zero_migrate::model::migration::Checksum::of(
+            &zero_migrate::model::migration::ChecksumInput {
+                up,
+                down: None,
+                flags: &flags,
+                owner_app: APP,
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            },
+        ),
+        flags,
+        owner_app: APP.into(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        existence_guard: None,
+    };
+
+    MigrationEngine::new()
+        .apply_plan(
+            &[PlanStep::Ddl(add)],
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            zero_migrate::apply::executor::LockMode::Acquire,
+        )
+        .await
+        .expect("SQLite never resolves a server timeout budget, so a zero is not a refusal");
+}
