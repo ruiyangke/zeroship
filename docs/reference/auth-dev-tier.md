@@ -27,6 +27,26 @@ stub. The same `@zeroship/auth` client code and the same server-side
 `env.auth.getUser()` / `currentUser()` calls run byte-identical in dev and prod;
 only the backend that answers them differs.
 
+> **Identity has a dev tier. Authorization does not.** Everything on this page
+> is about *who the caller is*. The separate question of *whether this
+> procedure requires a caller* — the manifest's per-procedure `auth: "user"` /
+> `"admin"` posture — is enforced by the **gateway**, before dispatch. There is
+> no gateway under `pnpm dev`, and nothing in the dev path substitutes for one:
+> `AuthLevel` is read only in `crates/gateway` (`compiled.rs`,
+> `router/auth.rs`), and `crates/cli/src` and `crates/runtime/src` contain no
+> reader for it at all.
+>
+> So a procedure declared `auth: "user"` runs for **anyone** in dev and returns
+> `401` once deployed. `env.auth.requireUser()` inside the handler still throws
+> in both tiers — that is app code and has parity. What has no parity is the
+> declarative posture, which is inert locally.
+>
+> Call `requireUser()` in any handler whose posture you are relying on, and
+> treat a green `pnpm dev` as saying nothing about whether your auth
+> declarations are correct. `tests/e2e_dev_vs_deployed_auth.sh` measures this
+> divergence directly, including a `declare-defaulted` control that flips one
+> posture and shows only the deployed side move.
+
 ## The contract (prod tier — unchanged)
 
 The platform uses the **BFF model**: the browser holds an HttpOnly signed
