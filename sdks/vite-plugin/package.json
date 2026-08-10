@@ -63,5 +63,8 @@
     "unenv": "2.0.0-rc.24",
     "zero-migrate": "workspace:*",
     "zero-migrate-node": "workspace:*"
+  },
+  "bin": {
+    "zeroship-dev-migrate": "dist/cli/migrate-dev.js"
   }
 }

@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import http from "node:http";
 import {
   MODULE_FETCH_PATH,
@@ -39,7 +40,16 @@ import {
   RUNTIME_DESCRIPTOR_FILE,
   genTypesFromMigrations,
 } from "./gen-types/index.js";
-import { applyMigrationsToDevSqlite, DEV_APP_ID } from "./gen-types/dev-apply.js";
+import { devSqlitePaths, DEV_APP_ID } from "./gen-types/dev-apply.js";
+import {
+  collectionNamesFrom,
+  readGeneratedRuntimeDescriptorAt,
+} from "./gen-types/read-descriptor.js";
+import {
+  logDatabaseUrlSource,
+  parseDotenvVars,
+  resolveDatabaseUrl,
+} from "./dev-database-url.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -59,7 +69,6 @@ export interface DevServerOptions {
 }
 
 type FetchMethod = "fetchModule" | "getBuiltins";
-type DatabaseUrlSource = "shell" | "dotenv" | "default";
 
 /**
  * What the supervisor currently believes about the `zeroship serve` child.
@@ -244,17 +253,9 @@ function readGeneratedRuntimeDescriptor(
   root: string,
   migrations: DevServerOptions["migrations"],
 ): string | undefined {
-  const descriptorPath = resolve(
-    root,
-    migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT,
-    RUNTIME_DESCRIPTOR_FILE,
+  return readGeneratedRuntimeDescriptorAt(
+    resolve(root, migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT),
   );
-  try {
-    const json = readFileSync(descriptorPath, "utf8").trim();
-    return json.length > 0 ? json : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function regenTypesDev(
@@ -276,62 +277,77 @@ async function regenTypesDev(
 }
 
 /**
- * Apply the committed migrations to the dev SQLite app file, ahead of the
- * worker. Mirrors the platform: `migrated` applies at deploy on Postgres, so
- * dev should not have the runtime creating its own schema.
+ * REPORT — never apply — the dev schema state.
  *
- * NEVER THROWS, matching `regenTypesDev` directly above: a bad migration must
- * leave the dev server serving rather than kill it. It DOES log loudly,
- * including the engine's own message, because the failure this replaces was
- * silent — a 500 on every `env.db` call with no indication the schema was
- * never created.
+ * Migrating is a SEPARATE, explicit step (`zeroship-dev-migrate`, wired as the
+ * example apps' `pnpm migrate`), deliberately not folded into `pnpm dev`. The
+ * dev server starts a runtime; it does not mutate the developer's database as a
+ * side effect of being started. That mirrors the platform, where `migrated`
+ * applies at deploy and the worker only ever reads the schema — and it means a
+ * half-written migration cannot be applied by the mere act of running the dev
+ * server, nor re-applied by every file-watch restart.
  *
- * Idempotent via the engine's `_mig` journal, so it is safe on every boot.
+ * What is left here is the diagnostic the coupling used to provide for free: if
+ * the app declares collections the dev database does not have, say so, name the
+ * command that fixes it, and keep serving. The failure this guards against is
+ * silent — a 500 on every `env.db` call with no indication the schema was never
+ * created.
+ *
+ * READ-ONLY by construction: it opens the app file `readonly` and touches
+ * nothing else.
  */
-async function applyDevSqliteMigrations(
+function reportDevSchemaState(
   root: string,
   migrations: DevServerOptions["migrations"],
   descriptorJson: string | undefined,
   databaseUrl: string,
-): Promise<void> {
+): void {
   const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
   if (!existsSync(migrationsDir)) return; // not a migration-first app
 
-  // Collection names come from the descriptor gen-types just wrote, so the
-  // ownership registry lists exactly the tables this app declares.
-  let collections: string[] = [];
-  if (descriptorJson) {
+  // The collections the app expects to exist, from the descriptor gen-types
+  // just wrote.
+  let expected: string[];
+  try {
+    expected = collectionNamesFrom(descriptorJson);
+  } catch {
+    return; // an unreadable descriptor is gen-types' error to report, not ours
+  }
+  if (expected.length === 0) return;
+
+  const { appPath } = devSqlitePaths(root, DEV_APP_ID, databaseUrl);
+
+  let present: Set<string>;
+  try {
+    // `node:sqlite` in readonly mode. A missing file throws rather than being
+    // created — which is the "never migrated" case, handled below.
+    const db = new DatabaseSync(appPath, { readOnly: true });
     try {
-      const d = JSON.parse(descriptorJson) as { collections?: { name?: string }[] };
-      collections = (d.collections ?? [])
-        .map((c) => c.name)
-        .filter((n): n is string => typeof n === "string" && n.length > 0);
-    } catch {
-      // Fall through with an empty registry rather than failing the boot; the
-      // apply still creates the tables, it just carries no ownership entries.
+      const rows = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+        name: string;
+      }[];
+      present = new Set(rows.map((r) => r.name));
+    } finally {
+      db.close();
     }
+  } catch {
+    present = new Set();
   }
 
-  try {
-    const reply = await applyMigrationsToDevSqlite({
-      root,
-      migrationsDir,
-      collections,
-      databaseUrl,
-    });
-    const applied = reply.applied?.length ?? 0;
-    const skipped = reply.skipped?.length ?? 0;
-    // Report the COUNTS, not "ok". `applied=0 skipped=0` on a fresh database
-    // means nothing ran, which is a failure wearing a success's clothes.
+  const missing = expected.filter((name) => !present.has(name));
+  if (missing.length === 0) {
     console.log(
-      `[zeroship] dev migrations applied ahead of the runtime ` +
-        `(applied=${applied} skipped=${skipped}, ${DEV_APP_ID})`
+      `[zeroship] dev schema present (${expected.length} collection(s) in ${appPath})`
     );
-  } catch (e) {
-    console.error(
-      `[zeroship] dev migration apply FAILED — env.db will not work: ${(e as Error).message}`
-    );
+    return;
   }
+
+  console.error(
+    `[zeroship] dev schema NOT applied — env.db will fail for: ${missing.join(", ")}\n` +
+      `[zeroship]   the database is migrated by a separate, explicit step:\n` +
+      `[zeroship]       pnpm migrate\n` +
+      `[zeroship]   (${appPath})`
+  );
 }
 
 function writeJson(
@@ -349,52 +365,6 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
-}
-
-function parseDotenvVars(root: string): Record<string, string> {
-  const envPath = resolve(root, ".env");
-  if (!existsSync(envPath)) return {};
-
-  const dotenvVars: Record<string, string> = {};
-  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    if ((val.startsWith("\"") && val.endsWith("\"")) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    dotenvVars[key] = val;
-  }
-  return dotenvVars;
-}
-
-function resolveDatabaseUrl(
-  parentEnv: NodeJS.ProcessEnv,
-  dotenvVars: Record<string, string>,
-  defaultDatabaseUrl: string,
-): { databaseUrl: string; source: DatabaseUrlSource } {
-  if (parentEnv.DATABASE_URL) {
-    return { databaseUrl: parentEnv.DATABASE_URL, source: "shell" };
-  }
-  if (dotenvVars.DATABASE_URL) {
-    return { databaseUrl: dotenvVars.DATABASE_URL, source: "dotenv" };
-  }
-  return { databaseUrl: defaultDatabaseUrl, source: "default" };
-}
-
-function logDatabaseUrlSource(source: DatabaseUrlSource, databaseUrl: string): void {
-  if (source === "shell") {
-    console.log("[zeroship] using DATABASE_URL from shell environment");
-    return;
-  }
-  if (source === "dotenv") {
-    console.log("[zeroship] using DATABASE_URL from .env");
-    return;
-  }
-  console.log(`[zeroship] using default DATABASE_URL ${databaseUrl}`);
 }
 
 function isAllowedFetchMethod(methodName: string): methodName is FetchMethod {
@@ -563,25 +533,22 @@ export function devServerPlugin(
         // `regenTypesDev` logs on error and NEVER throws.
         bootRegenDone = regenTypesDev(root, options.migrations).then(async (json) => {
           runtimeDescriptorJson = json;
-          // Apply the committed migrations to the dev SQLite file BEFORE the
-          // runtime is spawned (spawnRuntime awaits this same promise), so dev
-          // matches prod: a migration process creates the schema ahead of the
-          // worker, and the worker only reads it.
+          // Report — do NOT apply. Migrating is `pnpm migrate`, a separate step
+          // run ahead of `pnpm dev`; see `reportDevSchemaState`.
           //
-          // The DATABASE_URL is resolved HERE and handed to the apply, using
-          // the same `resolveDatabaseUrl` + the same three inputs that
-          // `spawnRuntime` uses below. Sharing the resolution is the point: the
-          // apply must write to the file the worker opens, and `DATABASE_URL`
-          // is overridable (shell, then `.env`, then the dev default). A
-          // hardcoded `.zeroship` silently applied to the wrong file whenever a
-          // caller redirected it -- see `devSqliteDir`.
+          // The DATABASE_URL is resolved HERE using the same
+          // `resolveDatabaseUrl` + the same three inputs that `spawnRuntime`
+          // uses below, so the file we inspect is the file the worker opens.
+          // `DATABASE_URL` is overridable (shell, then `.env`, then the dev
+          // default); a hardcoded `.zeroship` would inspect the wrong file
+          // whenever a caller redirected it -- see `devSqliteDir`.
           if (!devDb) devDb = resolveDevDatabase(root);
           const { databaseUrl } = resolveDatabaseUrl(
             process.env,
             parseDotenvVars(root),
             devDb.databaseUrl,
           );
-          await applyDevSqliteMigrations(root, options.migrations, json, databaseUrl);
+          reportDevSchemaState(root, options.migrations, json, databaseUrl);
         });
       }
 
