@@ -31,7 +31,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { connectLivePg, pgUrl } from "./live-db.js";
-import { noInjectPolicy } from "./policy.js";
+import { createSchemaPolicy, noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -243,6 +243,82 @@ test("PostgreSQL: rolling back a dropSequence rebuilds it from the migration tha
     await client
       .query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
+/** The same two-migration shape as the sequence arm, over a VENDOR op. The drop carries
+ *  no `cascade`: the engine refuses to invert a cascading drop, so a cascading author
+ *  here would earn a correct `down: None` and fail this test for a reason that is not
+ *  the thing it is testing. */
+function scaffoldSchemaDrop(projectSchema: string, authored: string): string {
+  const dir = mkdtempSync(join(HERE, "rollback-live-schema-"));
+  writeFileSync(
+    join(dir, "20260101000000_create_reporting.ts"),
+    `import { schema } from "zero-migrate";
+export const name = "create_reporting";
+export function up() {
+  schema(${JSON.stringify(authored)}).create({});
+}
+`,
+  );
+  writeFileSync(
+    join(dir, "20260101000001_drop_reporting.ts"),
+    `import { schema } from "zero-migrate";
+export const name = "drop_reporting";
+export function up() {
+  schema(${JSON.stringify(authored)}).drop({});
+}
+`,
+  );
+  writeFileSync(join(dir, "policy.toml"), createSchemaPolicy(projectSchema, authored));
+  return dir;
+}
+
+test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create authored", async (t) => {
+  const client = await connectLivePg(t);
+  if (!client) return;
+
+  const schemaName = uniqueSchema("rb_live_sch");
+  const metaSchema = `${schemaName}_migrations`;
+  const authored = `${schemaName}_reporting`;
+  const authoredExists = async (): Promise<boolean> => {
+    const result = await client.query(
+      `SELECT 1 FROM information_schema.schemata WHERE schema_name = $1`,
+      [authored],
+    );
+    return result.rows.length > 0;
+  };
+
+  let dir: string | undefined;
+  try {
+    await client.query(`CREATE SCHEMA "${schemaName}"`);
+    dir = scaffoldSchemaDrop(schemaName, authored);
+
+    const applied = spawnCli([...baseArgs(schemaName, pgUrl()), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+    assert.equal(
+      await authoredExists(),
+      false,
+      "both migrations ran, so the schema is created and then dropped",
+    );
+
+    const rolledBack = spawnCli(
+      [...baseArgs(schemaName, pgUrl()), "rollback", "--steps", "1", "--approve"],
+      dir,
+    );
+    assert.equal(rolledBack.status, 0, `rollback failed: ${rolledBack.stderr}`);
+    assert.ok(
+      await authoredExists(),
+      "the reversed dropSchema rebuilds the schema the earlier migration authored",
+    );
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${authored}" CASCADE; DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
       )
       .catch(() => {});
     await client.end().catch(() => {});
