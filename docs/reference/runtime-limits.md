@@ -16,12 +16,44 @@ Idle GC is separate. It is a `RuntimeBuilder` knob, not part of `AppRuntimeLimit
 
 ## Current knobs
 
-| Knob | Where it lives | Default |
+| Knob | Where it lives | Struct default |
 | --- | --- | --- |
 | `cpu_limit_ms` | `AppRuntimeLimits` → `RuntimeLimits.cpu_limit` | unset |
 | `wall_timeout_ms` | `AppRuntimeLimits` → `RuntimeLimits.wall_timeout` | unset |
 | `heap_limit_mb` | `AppRuntimeLimits` → `RuntimeLimits.heap_limit_bytes` | 128 MB when unset |
 | `idle_gc_after_ms(ms)` | `RuntimeBuilder` only | 30 s |
+
+**"Struct default" is not what your app gets.** Those are the `Default` impl's
+values for the Rust type. A deployed app is given its PLAN's limits, and an app
+whose plan row is missing or whose `runtime_limits_json` fails to parse falls
+back to the free tier rather than to unbounded — `FREE_TIER_RUNTIME_LIMITS` in
+[crates/core/src/types.rs](../../crates/core/src/types.rs) exists precisely so
+"the worker therefore never gets `(None, None, None)` (unbounded) for an unpriced
+app".
+
+## Effective limits per plan
+
+From `builtin_plans` in
+[crates/control/src/bootstrap_console.rs](../../crates/control/src/bootstrap_console.rs):
+
+| Plan | `cpu_limit_ms` | `wall_timeout_ms` | `heap_limit_mb` |
+| --- | --- | --- | --- |
+| free (and the fallback for any unpriced app) | **50** | 5 000 | 64 |
+| pro | 30 000 | 30 000 | 256 |
+| unlimited (system/console) | none | none | none |
+
+Two consequences worth knowing before you design around them:
+
+- **50 ms is a CPU budget, not a wall-clock one.** Time blocked on I/O — a
+  database round trip, an object fetch — is not supposed to count against it
+  (enforcement is a POSIX timer on `CLOCK_THREAD_CPUTIME_ID`; see the CPU limit
+  section below). What does count is the work your handler does with the bytes:
+  parsing, copying, encoding.
+- **The step from free to pro is 600x**, with nothing between. If a handler
+  exceeds 50 ms of CPU there is no intermediate tier to move to.
+
+A request that exceeds its CPU budget is cancelled and surfaces
+`"CPU time limit exceeded"` for that request.
 
 ## Request body size
 
