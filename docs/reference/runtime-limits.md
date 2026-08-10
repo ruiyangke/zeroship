@@ -86,6 +86,31 @@ Over the cap, the caller gets `413` with a JSON body. A bare `400` from the
 HTTP layer would mean the limit was applied by the framework's own default
 rather than by this one.
 
+### `zeroship serve` caps bodies at 1 MiB, not 4
+
+The standalone server — what `zeroship serve` runs, and therefore what `pnpm dev`
+exercises — is a separate HTTP implementation with its own, smaller cap:
+`MAX_BODY_BYTES` in
+[crates/runtime/src/core/serve.rs](../../crates/runtime/src/core/serve.rs) is
+**1 MiB**, and it answers `413 Content Too Large`.
+
+This is deliberate rather than an oversight — the standalone server is a
+dev/benchmark entrypoint whose limits are static by design, and the gateway is
+where an operator tunes the real ones. But it means the two tiers disagree by 4x,
+and the direction matters:
+
+| tier | request body cap |
+| --- | --- |
+| `pnpm dev` / `zeroship serve` | 1 MiB |
+| deployed (gateway → worker) | 4 MiB |
+
+**Dev is the stricter tier**, so this fails in the safe direction: a body your
+app accepts locally will be accepted in production. The trap is the reverse
+reading — a 2 MiB request that answers `413` under `pnpm dev` is not evidence
+that the platform rejects it, and a creator who sizes their upload path against
+the local number will under-use the deployed one by 4x. Route large payloads
+through `env.storage` regardless; the object bytes never pass through this cap.
+
 ## CPU limit
 
 CPU enforcement is implemented in [crates/runtime/src/core/cpu_timer.rs](../../crates/runtime/src/core/cpu_timer.rs).
