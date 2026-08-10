@@ -18,6 +18,19 @@
 //! [`AuthorPrimaryKeyForbidden`](TableShapeError::AuthorPrimaryKeyForbidden) when a
 //! covering spec pins the PK and forbids author PKs, injected indexes appended, and
 //! an idempotent re-run over an already-resolved table.
+//!
+//! Appending an injected index shapes the table AT RESOLUTION. It is not a standing
+//! guarantee that the index survives: a later admitted raw `CREATE TABLE` can omit
+//! it, and nothing refuses that. `CREATE INDEX` is a separate statement, so a
+//! `CREATE TABLE` can never carry proof of an index obligation, and the guard is
+//! per-statement by contract - the obligation spans two statements it never sees
+//! together. Stripping injects from the guard's policy was considered and rejected,
+//! because the same `injects_for` feeds the column-shape and primary-key rules, so
+//! the strip would also let a later migration drop `deleted_at` or the pinned key.
+//!
+//! So this is a priced loosening, not an oversight. Whether the column-shape and
+//! primary-key rules hold up better against the same raw-create path has not been
+//! measured here; do not read this note as a claim that they do.
 
 use zero_migrate_policy::{
     normalize_pg_identifier, AuthorPkPolicy, EffectivePolicy, InjectColumn, InjectIndex, ObjectName,
