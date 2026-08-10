@@ -27,13 +27,7 @@ key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
-# Per-op timeout CEILINGS (ms), identical to the managed confined ceiling.
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 30000
-scope = "all"
-
-[[grant]]
-key = "runtime.statement_timeout_ms"
-value = 300000
-scope = "all"
+# NO per-op timeout ceilings, matching the managed confined ceiling. Both files
+# granted them until 2026-08-10 and both were refused at load with
+# `DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }`; see the long note in
+# confined.policy.toml for the mechanism and for what brings them back.

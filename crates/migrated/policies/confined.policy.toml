@@ -37,18 +37,43 @@ key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
-# Per-op timeout CEILINGS (ms). A `UintCeiling` composes DOWN: a creator draft may set
-# any value up to this ceiling (never above; the hard floor 1 forbids the indefinite
-# lock 0). 30s is a generous confined migration ceiling; a creator tightens within it.
-[[grant]]
-key = "runtime.lock_timeout_ms"
-value = 30000
-scope = "all"
-
-[[grant]]
-key = "runtime.statement_timeout_ms"
-value = 300000
-scope = "all"
+# NO per-op timeout ceilings. This file granted `runtime.lock_timeout_ms = 30000`
+# and `runtime.statement_timeout_ms = 300000` until 2026-08-10, and the engine now
+# REFUSES the whole document for it:
+#
+#   migrated: invalid migration policy seal config: load operator ceiling:
+#   DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
+#
+# so `zeroship-migrated` exited before binding its port and the deployed creator
+# migration path was dead. Found by tests/e2e_dev_vs_deployed_db.sh.
+#
+# The refusal is CORRECT and is the engine's II.6 gate. Every `runtime.*` knob is
+# registered `DeclaredOnly` in the vendored engine
+# (third_party/zero-migrate/crates/zero-migrate-ir/src/policy_registry.rs:432-439):
+# no guard, executor or validator path reads one, so a charter raising one above
+# its default would seal a policy ADVERTISING AUTHORITY THE ENGINE LACKS. A 30s
+# "ceiling" that nothing applies is worse than no ceiling, because it reads like a
+# control in a security-relevant file.
+#
+# These come back the moment the engine wires the knobs into the executor -- the
+# classification is a property of the current implementation, not of the key.
+#
+# Dropping them costs NO enforcement, because these knobs were never the mechanism
+# that bounds an apply. The executor bounds it, from `PgConfinement`, which the
+# apply path takes at its defaults (`ExecutorConfig::new` in src/apply.rs sets no
+# override): `SET statement_timeout` = 60s and `SET lock_timeout` = 3s
+# (third_party/zero-migrate/crates/zero-migrate/src/conn.rs:124-125), applied per
+# migration on the apply connection. A single migration may raise its OWN lock
+# budget through `MigrationFlags::lock_timeout_ms`, which IS read.
+#
+# So the grants removed here did not merely fail to bind, they CONTRADICTED the
+# binding value: this file advertised a 30s lock ceiling while every apply has in
+# fact been failing fast at 3s. Read that as the real hazard of a declared-only
+# knob, not the loss of a control.
+#
+# The default for a `UintCharter` is 1, so this is not a value that could be
+# softened to stay: ANY value above 1, in this ceiling or in a creator draft, is
+# refused at load.
 
 # ── the mandatory system table shape (II.2.6a) ──
 [[inject]]
