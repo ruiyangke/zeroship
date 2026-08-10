@@ -5,7 +5,6 @@
       "fields": {
         "id": {
           "type": "string",
-          "maxLength": 255,
           "required": true
         },
         "created_at": {
@@ -17,12 +16,10 @@
           "required": true
         },
         "created_by": {
-          "type": "string",
-          "maxLength": 255
+          "type": "string"
         },
         "updated_by": {
-          "type": "string",
-          "maxLength": 255
+          "type": "string"
         },
         "version": {
           "type": "int",
@@ -97,7 +94,6 @@
       "fields": {
         "id": {
           "type": "string",
-          "maxLength": 255,
           "required": true
         },
         "created_at": {
@@ -109,12 +105,10 @@
           "required": true
         },
         "created_by": {
-          "type": "string",
-          "maxLength": 255
+          "type": "string"
         },
         "updated_by": {
-          "type": "string",
-          "maxLength": 255
+          "type": "string"
         },
         "version": {
           "type": "int",
