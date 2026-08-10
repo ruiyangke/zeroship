@@ -25,7 +25,8 @@
     "build": "tsc && cp src/client-manifest.d.ts dist/ && node --import tsx scripts/build-bootstrap.ts",
     "build:bootstrap": "node --import tsx scripts/build-bootstrap.ts",
     "dev": "tsc --watch",
-    "test": "node --import tsx --test 'test/**/*.test.ts'"
+    "test": "node --import tsx --test 'test/**/*.test.ts'",
+    "gen-types:all": "node --import tsx scripts/gen-types-all.ts"
   },
   "peerDependencies": {
     "vite": "^8.0.0",

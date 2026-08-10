@@ -23,7 +23,8 @@
         },
         "version": {
           "type": "int",
-          "required": true
+          "required": true,
+          "default": 1
         },
         "deleted_at": {
           "type": "date"

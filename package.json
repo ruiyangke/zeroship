@@ -22,6 +22,8 @@
     "build": "pnpm --filter @zeroship/db build && pnpm --filter @zeroship/bootstrap build && pnpm -r --filter './sdks/*' --filter '!@zeroship/db' --filter '!@zeroship/bootstrap' build",
     "publish:sdks": "deploy/scripts/publish-sdks.sh",
     "test": "pnpm -r --filter './sdks/*' test",
-    "check": "pnpm -r --filter './sdks/*' check"
+    "check": "pnpm -r --filter './sdks/*' check",
+    "gen-types": "pnpm --filter @zeroship/vite-plugin gen-types:all",
+    "gen-types:check": "pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
   }
 }
