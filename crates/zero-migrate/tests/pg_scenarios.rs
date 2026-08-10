@@ -5378,3 +5378,81 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// The rollback ORCHESTRATOR against live PostgreSQL. The SQLite proof shows the
+// ordering; this shows the same code path drives a second dialect, which was an
+// argument from the `MigrationBackend` seam until it was measured here.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+
+    let schema = cfg.project_schema.clone();
+    let parent = mig_with_down(
+        MigrationId::generate(),
+        "create_parent",
+        &format!("CREATE TABLE {schema}.parent (id int primary key)"),
+        &format!("DROP TABLE {schema}.parent"),
+    );
+    let mut child = mig_with_down(
+        MigrationId::generate(),
+        "create_child",
+        &format!("CREATE TABLE {schema}.child (id int primary key)"),
+        &format!("DROP TABLE {schema}.child"),
+    );
+    child.depends_on = vec![parent.version.clone()];
+
+    backend
+        .apply_one(&cfg, &parent, "tester", false, &[], "apply")
+        .await
+        .expect("apply parent");
+    backend
+        .apply_one(&cfg, &child, "tester", false, &[], "apply")
+        .await
+        .expect("apply child");
+    assert!(table_exists(&session, &schema, "parent").await);
+    assert!(table_exists(&session, &schema, "child").await);
+
+    let set = vec![parent.clone(), child.clone()];
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), SqlDialect::Postgres);
+    let guard = zero_migrate::guard_for(&guard_cfg);
+    let outcome = zero_migrate::rollback(
+        &backend,
+        &cfg,
+        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &set,
+        zero_migrate::Approval::Approved,
+        "operator",
+        &*guard,
+    )
+    .await
+    .expect("orchestrated rollback on live postgres");
+
+    assert_eq!(
+        outcome.rolled_back,
+        vec![
+            child.version.as_str().to_string(),
+            parent.version.as_str().to_string()
+        ],
+        "child rolls back before the parent it depends on"
+    );
+    assert!(
+        !table_exists(&session, &schema, "child").await,
+        "child gone"
+    );
+    assert!(
+        !table_exists(&session, &schema, "parent").await,
+        "parent gone"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
