@@ -758,6 +758,11 @@ pub async fn snapshot_schema<D: SqlSession>(
                 materialized,
                 columns: None,
                 definition,
+                // Introspection reads back rendered SQL, never the typed body an
+                // author wrote, so a view discovered here carries no inverse and a
+                // drop of it stays irreversible.
+                authored_query: None,
+                authored_schema: None,
                 comment: r.try_get("comment").ok().flatten(),
             },
         );

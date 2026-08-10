@@ -296,6 +296,14 @@ pub struct LiveSchema {
     /// drops need the child bound even when the drop is authored in a later
     /// migration than the createPartition op that established it.
     pub partitions: std::collections::BTreeMap<String, PartitionSnapshot>,
+    /// Views already present in the folded live schema, carrying the typed body each
+    /// was created with. A `dropView` renders its own inverse from this, for the same
+    /// reason `partitions` exists: the create and the drop are authored in different
+    /// migrations, so only the accumulated history holds both.
+    ///
+    /// Populated when the schema comes from folding a history. A catalog-introspected
+    /// schema leaves the bodies `None`, and a drop with no body stays irreversible.
+    pub views: std::collections::BTreeMap<String, crate::model::snapshot::ViewSnapshot>,
     /// Logical column declarations accumulated from ordered migration artifacts.
     ///
     /// This semantic map is intentionally never inferred from the physical
@@ -333,6 +341,7 @@ impl LiveSchema {
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership,
             partitions: live.partitions,
+            views: live.views,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -350,6 +359,7 @@ impl LiveSchema {
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership: std::collections::BTreeMap::new(),
             partitions: std::collections::BTreeMap::new(),
+            views: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -431,6 +441,7 @@ impl LiveSchema {
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
             partitions: desired.snapshot.partitions,
+            views: desired.snapshot.views,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -510,6 +521,7 @@ impl LiveSchema {
             sqlite_schemas,
             table_ownership,
             partitions: live.partitions,
+            views: live.views,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -5381,7 +5393,7 @@ impl IrAuthor {
             // and lower before this renderer runs.
             Op::CreateView { .. } => {
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
-                self.lower_view_op(op, &eff_schema, &decl, confinement)?
+                self.lower_view_op(op, &eff_schema, &decl, confinement, live_schema)?
             }
             Op::DropView { name, .. } => {
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
@@ -5392,7 +5404,7 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
-                self.lower_view_op(op, &eff_schema, &decl, confinement)?
+                self.lower_view_op(op, &eff_schema, &decl, confinement, live_schema)?
             }
             // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
             // capability; unsupported pieces are refused per dialect/action/facet.
@@ -5708,8 +5720,9 @@ impl IrAuthor {
         eff_schema: &str,
         decl: &DeclarativeAuthor,
         confinement: &crate::model::policy::SchemaScope,
+        live_schema: &LiveSchema,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        let stmt = render_view_op(op, eff_schema, self.dialect, Some(confinement))?;
+        let stmt = render_view_op(op, eff_schema, self.dialect, Some(confinement), live_schema)?;
         Ok(vec![
             decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)
         ])
@@ -8019,6 +8032,7 @@ fn render_view_op(
     eff_schema: &str,
     dialect: SqlDialect,
     scope: Option<&crate::model::policy::SchemaScope>,
+    live_schema: &LiveSchema,
 ) -> Result<ViewStatement, IrLowerError> {
     match op {
         Op::CreateView {
@@ -8075,10 +8089,48 @@ fn render_view_op(
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&qname);
+
+            // Undo the drop by re-creating the view from the body the history
+            // recorded when it was created. Two conditions have to hold, and both
+            // are refusals rather than best guesses.
+            //
+            // A GUARDED drop is never reversed. `ifExists` can journal `completed`
+            // without running the `DROP` at all - the existence-guard arm resolves
+            // `SatisfiedNoop`, skips the `up`, and still records the version - so
+            // re-creating on rollback would conjure a view that never existed on
+            // this database.
+            //
+            // A view with no recorded body is never reversed either. That is the
+            // adopted view and the catalog-introspected schema: a live catalog
+            // cannot produce a typed query, so there is nothing faithful to restore
+            // and the migration stays irreversible.
+            let down = if existence_guard.is_some() {
+                None
+            } else {
+                live_schema
+                    .views
+                    .get(name)
+                    .and_then(|view| view.authored_query.as_ref().map(|query| (view, query)))
+                    .map(|(view, query)| {
+                        let create_schema = view.authored_schema.as_deref().unwrap_or(eff_schema);
+                        let renderer = crate::render::renderer::renderer(dialect);
+                        let create_name = renderer.view_object_name(name, create_schema)?;
+                        let cols = render_view_columns(view.columns.as_deref(), dialect)?;
+                        let body = render_view_query(query, create_schema, dialect, scope)?;
+                        let mut create = renderer.view_create_prefix(view.materialized, false)?;
+                        create.push_str(&create_name);
+                        create.push_str(&cols);
+                        create.push_str(" AS ");
+                        create.push_str(&body);
+                        Ok::<String, IrLowerError>(create)
+                    })
+                    .transpose()?
+            };
+
             Ok(ViewStatement {
                 name: format!("drop_view_{name}"),
                 up: vec![up],
-                down: None,
+                down,
             })
         }
         _ => Err(IrLowerError::UnsupportedOp(

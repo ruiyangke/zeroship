@@ -574,6 +574,10 @@ fn fold_records_views_and_drop_removes_them() {
             materialized: false,
             columns: None,
             definition: None,
+            authored_query: Some(ViewQuery::Structured {
+                select: Box::new(active_users_select()),
+            }),
+            authored_schema: None,
             comment: None,
         },
     );
@@ -584,6 +588,18 @@ fn fold_records_views_and_drop_removes_them() {
             views: expected_views,
             ..Default::default()
         }
+    );
+
+    // `ViewSnapshot` equality compares only `materialized` and `comment`, so the
+    // assertion above cannot see the retained body at all. Read it directly: a
+    // later `dropView` renders its inverse from this, and nothing else proves the
+    // fold kept it.
+    assert_eq!(
+        folded.views["active_users"].authored_query,
+        Some(ViewQuery::Structured {
+            select: Box::new(active_users_select()),
+        }),
+        "the fold must retain the authored view body for the drop to invert"
     );
 
     let drop = Op::DropView {

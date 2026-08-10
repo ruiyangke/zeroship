@@ -292,6 +292,11 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                 materialized: false,
                 columns: None,
                 definition,
+                // Introspection reads back rendered SQL, never the typed body an
+                // author wrote, so a view discovered here carries no inverse and a
+                // drop of it stays irreversible.
+                authored_query: None,
+                authored_schema: None,
                 comment: None,
             },
         );

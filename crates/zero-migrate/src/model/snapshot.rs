@@ -946,7 +946,25 @@ pub struct ViewSnapshot {
     /// Optional declared/output columns. Emission metadata for now.
     pub columns: Option<Vec<String>>,
     /// Optional live/declared definition text. Diagnostic metadata for now.
+    ///
+    /// NOT a rollback source: the two backends fill this from different things.
+    /// PostgreSQL stores a bare SELECT body from `pg_get_viewdef` and SQLite stores
+    /// the whole `CREATE VIEW` statement from `sqlite_master.sql`, so the text is not
+    /// one format and is not executable as-is. Use [`Self::authored_query`], which is
+    /// typed and dialect-neutral.
     pub definition: Option<String>,
+    /// The typed body an authored `createView` carried, when this snapshot came from
+    /// folding a migration history rather than from introspecting a catalog.
+    ///
+    /// This is what lets a later `dropView` render its own inverse: the body is
+    /// already in the history, so restoring the view needs no catalog read and stays
+    /// identical across dialects. A snapshot built by introspection leaves it `None`,
+    /// because a live catalog cannot yield a typed query - and a drop with no typed
+    /// body correctly stays irreversible rather than guessing one.
+    pub authored_query: Option<crate::model::ir::ViewQuery>,
+    /// The schema the authored `createView` resolved to, paired with
+    /// [`Self::authored_query`] so the inverse names the object the drop named.
+    pub authored_schema: Option<String>,
     /// User-authored catalog comment on this view.
     pub comment: Option<String>,
 }

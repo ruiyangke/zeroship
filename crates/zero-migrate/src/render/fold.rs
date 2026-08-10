@@ -2291,7 +2291,9 @@ pub fn fold_ops_onto(
             }
             Op::CreateView {
                 name,
+                schema,
                 columns,
+                query,
                 materialized,
                 ..
             } => {
@@ -2307,6 +2309,13 @@ pub fn fold_ops_onto(
                         materialized: materialized.unwrap_or(false),
                         columns: columns.clone(),
                         definition: None,
+                        // Keep the authored body so a later `dropView` can render the
+                        // `CREATE VIEW` that undoes it. Folding is the only place the
+                        // typed query and the drop meet: they are authored in
+                        // different migrations, and only the accumulated history sees
+                        // both.
+                        authored_query: Some(query.clone()),
+                        authored_schema: schema.clone(),
                         comment: None,
                     },
                 );
