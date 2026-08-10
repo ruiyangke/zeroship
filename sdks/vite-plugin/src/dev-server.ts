@@ -39,6 +39,7 @@ import {
   RUNTIME_DESCRIPTOR_FILE,
   genTypesFromMigrations,
 } from "./gen-types/index.js";
+import { applyMigrationsToDevSqlite, DEV_APP_ID } from "./gen-types/dev-apply.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -274,6 +275,59 @@ async function regenTypesDev(
   return readGeneratedRuntimeDescriptor(root, migrations);
 }
 
+/**
+ * Apply the committed migrations to the dev SQLite app file, ahead of the
+ * worker. Mirrors the platform: `migrated` applies at deploy on Postgres, so
+ * dev should not have the runtime creating its own schema.
+ *
+ * NEVER THROWS, matching `regenTypesDev` directly above: a bad migration must
+ * leave the dev server serving rather than kill it. It DOES log loudly,
+ * including the engine's own message, because the failure this replaces was
+ * silent — a 500 on every `env.db` call with no indication the schema was
+ * never created.
+ *
+ * Idempotent via the engine's `_mig` journal, so it is safe on every boot.
+ */
+async function applyDevSqliteMigrations(
+  root: string,
+  migrations: DevServerOptions["migrations"],
+  descriptorJson: string | undefined,
+): Promise<void> {
+  const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
+  if (!existsSync(migrationsDir)) return; // not a migration-first app
+
+  // Collection names come from the descriptor gen-types just wrote, so the
+  // ownership registry lists exactly the tables this app declares.
+  let collections: string[] = [];
+  if (descriptorJson) {
+    try {
+      const d = JSON.parse(descriptorJson) as { collections?: { name?: string }[] };
+      collections = (d.collections ?? [])
+        .map((c) => c.name)
+        .filter((n): n is string => typeof n === "string" && n.length > 0);
+    } catch {
+      // Fall through with an empty registry rather than failing the boot; the
+      // apply still creates the tables, it just carries no ownership entries.
+    }
+  }
+
+  try {
+    const reply = await applyMigrationsToDevSqlite({ root, migrationsDir, collections });
+    const applied = reply.applied?.length ?? 0;
+    const skipped = reply.skipped?.length ?? 0;
+    // Report the COUNTS, not "ok". `applied=0 skipped=0` on a fresh database
+    // means nothing ran, which is a failure wearing a success's clothes.
+    console.log(
+      `[zeroship] dev migrations applied ahead of the runtime ` +
+        `(applied=${applied} skipped=${skipped}, ${DEV_APP_ID})`
+    );
+  } catch (e) {
+    console.error(
+      `[zeroship] dev migration apply FAILED — env.db will not work: ${(e as Error).message}`
+    );
+  }
+}
+
 function writeJson(
   res: http.ServerResponse,
   statusCode: number,
@@ -501,8 +555,13 @@ export function devServerPlugin(
         // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
         // `bootRegenDone` so the runtime is injected WITH the fresh descriptor.
         // `regenTypesDev` logs on error and NEVER throws.
-        bootRegenDone = regenTypesDev(root, options.migrations).then((json) => {
+        bootRegenDone = regenTypesDev(root, options.migrations).then(async (json) => {
           runtimeDescriptorJson = json;
+          // Apply the committed migrations to the dev SQLite file BEFORE the
+          // runtime is spawned (spawnRuntime awaits this same promise), so dev
+          // matches prod: a migration process creates the schema ahead of the
+          // worker, and the worker only reads it.
+          await applyDevSqliteMigrations(root, options.migrations, json);
         });
       }
 
