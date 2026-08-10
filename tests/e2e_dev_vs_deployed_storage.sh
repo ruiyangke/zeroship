@@ -458,6 +458,7 @@ else
   fail "dev and deployed DIVERGE -- results below (< dev, > deployed)"
   diff "$WORK/dev.txt" "$WORK/deployed.txt" | head -60
   echo ""
+  zs_report_staleness_here
   echo "  A divergence here is the finding, not a flaky test. Both backends are"
   echo "  individually correct; disagreeing is the defect. See"
   echo "  docs/pilot/e2e-scenarios.md before weakening anything above."
