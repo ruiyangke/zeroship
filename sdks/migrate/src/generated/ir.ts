@@ -102,7 +102,6 @@ export type IrScalar =
 /** The dialect-NEUTRAL column-type lexicon (§3.2). Closed; camel-cased on the
  *  wire. `encrypted.of` is itself a `ColType` (the recursive arm). */
 export type ColType =
-  | "string"
   | "text"
   | "int"
   | "smallInt"
