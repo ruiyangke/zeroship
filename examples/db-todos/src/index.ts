@@ -16,7 +16,7 @@
 //   exports become RPC procedures at /__zeroship/v1/<id>.
 
 import { env } from "zeroship";
-import type { Db } from "@zeroship/db";
+import type { Db, TransactionOptions } from "@zeroship/db";
 import { query, mutation, action, stream } from "@zeroship/rpc/server";
 import { runQuery } from "@zeroship/server";
 import {
@@ -222,9 +222,29 @@ export const deleteTodo = mutation(
 );
 
 // ---------------------------------------------------------------------------
-// Actions — can call fetch(); cannot directly write the DB (must use
-// runMutation). Auto-tx is NOT applied here — actions are long-lived and
-// shouldn't hold a database transaction open across HTTP calls.
+// Actions -- can call fetch(); cannot directly write the DB (must use
+// runMutation).
+//
+// An earlier version of this comment said "Auto-tx is NOT applied here",
+// implying mutation() gets an implicit transaction and action() does not.
+// It does not, and neither does mutation(). Verified 2026-08-10:
+// `mutation()` is `attach(handler, "mutation", config)` (sdks/rpc/src/
+// server.ts:225) -- a capability TAG, nothing more; the dispatcher's only
+// per-call frame is `__zsEnterKind` (sdks/bootstrap/src/dispatcher.ts:140-146),
+// which sets a thread-local ProcedureKind; and plugin-db reads that kind in
+// exactly one place, `refuse_if_query_capability` (v8_bridge.rs:82), which
+// matches ONLY `ProcedureKind::Query` in order to refuse writes from a
+// query(). Nothing anywhere opens a BEGIN per dispatch.
+// docs/reference/db.md:898-902 states the same: the wrappers "do not open a
+// transaction implicitly" and top-level `db.<table>.*` calls autocommit per
+// operation.
+//
+// So a multi-step mutation() is NOT atomic unless it calls db.transaction()
+// itself. Note that crates/runtime/src/web/fetch/mod.rs:284 still tells
+// callers the opposite ("Mutations are transactional and must complete
+// quickly; holding a DB tx open across an outbound HTTP call would block
+// other writers") when it refuses fetch() inside a mutation -- the refusal is
+// right, the reason given for it is not.
 // ---------------------------------------------------------------------------
 
 type ShareInput = { id: string; webhookUrl: string };
@@ -245,6 +265,235 @@ export const shareToWebhook = action(
     return { status: resp.status, ok: resp.ok };
   },
   { id: "todos.shareToWebhook" },
+);
+
+// ---------------------------------------------------------------------------
+// Transactions -- `db.transaction(async tx => ...)`.
+//
+// Added 2026-08-10 for the transaction third of scenario 3. Until then this
+// example had ZERO transaction calls (both greps hit COMMENTS, above), so the
+// dev-vs-deployed harness could not compare commit / rollback / savepoint
+// behaviour on the two backends at all.
+//
+// Why these live HERE and not in `examples/db-e2e` (which has four real
+// `db.transaction()` calls at src/server.ts:644/664/683/696): db-e2e declares
+// its schema INLINE via `schema()`/`t.*`, has no `migrations/` and no
+// `generated/zeroship/`, so its build emits a manifest with NO
+// `runtime_descriptor` (measured 2026-08-10). Runtime boot then installs
+// nothing on `env.db` and every handler hits `undefined.find` -- the #209
+// mechanism db-todos itself hit before it was given migrations. Giving db-e2e
+// a migration-first port is a much larger surface (vector/FTS/geo columns,
+// masking, replication) with failure modes unrelated to transactions; db-todos
+// is already proven end to end on BOTH tiers.
+//
+// Contract these exercise (crates/plugin-db/src/transaction/mod.rs):
+//   - `transaction(fn)` returns `Result<R>` -- resolve -> commit, throw ->
+//     rollback. There is no tx.commit()/tx.rollback().
+//   - Collections handed to the callback THROW instead of returning Result.
+//   - A `transaction()` opened while one is already active for this app emits
+//     `SAVEPOINT zs_sp_<N>` on the SAME connection, so an inner failure rolls
+//     back only to that savepoint (cap: MAX_SAVEPOINT_DEPTH = 8).
+//   - `{ isolationLevel }` is honoured on the outermost BEGIN only. Postgres
+//     emits `BEGIN ISOLATION LEVEL ...`; SQLite validates the string and then
+//     runs a plain `BEGIN` (transaction/mod.rs:384-391). That divergence is
+//     documented in docs/reference/sqlite-divergences.md and had never been
+//     measured; `txIsolation` below is the probe that measures whether it is
+//     observable through this surface at all.
+//
+// Every procedure returns counts read AFTER the transaction settles, through
+// the ordinary (non-tx) path, so the harness can tell "the callback said it
+// inserted" from "the row is actually there".
+// ---------------------------------------------------------------------------
+
+type TxInput = { userId: string; tag: string };
+
+/** Flatten an error to the two fields that are comparable across tiers.
+ *  Deliberately keeps `message` VERBATIM: a backend-specific string is
+ *  exactly the kind of divergence this leg exists to surface. */
+function errShape(e: unknown): { code: string | null; message: string } | null {
+  if (e === null || e === undefined) return null;
+  const o = e as { code?: unknown; message?: unknown };
+  return {
+    code: typeof o.code === "string" ? o.code : null,
+    message: typeof o.message === "string" ? o.message : String(e),
+  };
+}
+
+// Commit path + read-your-own-writes INSIDE the open transaction.
+export const txCommit = mutation(
+  async ({ userId, tag }: TxInput) => {
+    const uid = userIdFromWire(userId);
+    const result = await db.transaction(async (tx) => {
+      const a = await tx.todos.insert({ userId: uid, title: `${tag}-a` });
+      const b = await tx.todos.insert({ userId: uid, title: `${tag}-b`, priority: "high" });
+      // Both rows must be visible to a read on the SAME connection before
+      // COMMIT. A backend that routed this read to the pool instead of the
+      // tx connection would answer 0 here and still commit.
+      const seen = await tx.todos.find({ userId: uid, title: `${tag}-a` }).first();
+      const inTxCount = await tx.todos.count({ userId: uid });
+      return { aId: a.id, bTitle: b.title, bPriority: b.priority, seenTitle: seen?.title ?? null, inTxCount };
+    });
+    const after = await db.todos.count({ userId: uid });
+    return {
+      error: errShape(result.error),
+      data: result.data ?? null,
+      committedCount: after.data ?? null,
+    };
+  },
+  { id: "todos.txCommit" },
+);
+
+// Rollback path: the callback throws AFTER a successful insert.
+export const txRollback = mutation(
+  async ({ userId, tag }: TxInput) => {
+    const uid = userIdFromWire(userId);
+    const result = await db.transaction(async (tx) => {
+      await tx.todos.insert({ userId: uid, title: `${tag}-doomed` });
+      const inTxCount = await tx.todos.count({ userId: uid, title: `${tag}-doomed` });
+      throw Object.assign(new Error("probe rollback"), {
+        code: "PROBE_ROLLBACK",
+        inTxCount,
+      });
+    });
+    const after = await db.todos.count({ userId: uid, title: `${tag}-doomed` });
+    const visible = await db.todos.find({ userId: uid, title: `${tag}-doomed` });
+    return {
+      error: errShape(result.error),
+      // Does the creator's own thrown error reach the caller verbatim, with
+      // the extra property it was decorated with? That is the "what does the
+      // caller receive" half of the contract.
+      inTxCount: (result.error as { inTxCount?: unknown } | null)?.inTxCount ?? null,
+      data: result.data ?? null,
+      countAfter: after.data ?? null,
+      visibleAfter: (visible.data ?? []).length,
+    };
+  },
+  { id: "todos.txRollback" },
+);
+
+// Nested transaction = SAVEPOINT. The inner throw must roll back ONLY the
+// inner insert; the outer transaction keeps going and commits its own row.
+export const txNested = mutation(
+  async ({ userId, tag }: TxInput) => {
+    const uid = userIdFromWire(userId);
+    const outer = await db.transaction(async (tx) => {
+      await tx.todos.insert({ userId: uid, title: `${tag}-outer` });
+      // NOTE the `db.` here, not `tx.` -- nesting is detected from the
+      // isolate's tx slot, not from which handle you call.
+      const inner = await db.transaction(async (tx2) => {
+        await tx2.todos.insert({ userId: uid, title: `${tag}-inner` });
+        throw Object.assign(new Error("probe inner abort"), { code: "PROBE_INNER" });
+      });
+      // Still inside the OUTER transaction, after ROLLBACK TO SAVEPOINT.
+      const outerSeen = await tx.todos.count({ userId: uid, title: `${tag}-outer` });
+      const innerSeen = await tx.todos.count({ userId: uid, title: `${tag}-inner` });
+      return { innerError: errShape(inner.error), outerSeen, innerSeen };
+    });
+    const outerAfter = await db.todos.count({ userId: uid, title: `${tag}-outer` });
+    const innerAfter = await db.todos.count({ userId: uid, title: `${tag}-inner` });
+    return {
+      error: errShape(outer.error),
+      data: outer.data ?? null,
+      outerAfter: outerAfter.data ?? null,
+      innerAfter: innerAfter.data ?? null,
+    };
+  },
+  { id: "todos.txNested" },
+);
+
+// The documented isolation-level divergence, and the invalid-level contract.
+// `level: null` means "no opts at all" (plain BEGIN on both tiers).
+export const txIsolation = mutation(
+  async ({ userId, tag, level }: { userId: string; tag: string; level: string | null }) => {
+    const uid = userIdFromWire(userId);
+    const title = `${tag}-${level ?? "none"}`;
+    // `threw` distinguishes a SYNCHRONOUS TypeError out of the native method
+    // from a rejected Result. Measured rather than assumed: an unknown
+    // isolationLevel is raised by normalize_isolation_level() before any SQL
+    // runs, and it is not obvious from the source alone which of the two
+    // paths the caller ends up on.
+    let threw: ReturnType<typeof errShape> = null;
+    let error: ReturnType<typeof errShape> = null;
+    let data: unknown = null;
+    try {
+      const result = await db.transaction(
+        async (tx) => {
+          const r = await tx.todos.insert({ userId: uid, title });
+          return { title: r.title };
+        },
+        // The cast is NOT only there for `txIsoBad`. THREE spellings-of-record
+        // exist for this option and no two agree (measured 2026-08-10):
+        //
+        //   the TypeScript union   sdks/types/shared.d.ts:18-22 allows ONLY the
+        //                          SQL-spaced forms: "read uncommitted" |
+        //                          "read committed" | "repeatable read" |
+        //                          "serializable".
+        //   the reference doc      docs/reference/db.md:893-894 tells creators
+        //                          to write "readCommitted" (default),
+        //                          "repeatableRead" or "serializable".
+        //   the runtime            normalize_isolation_level
+        //                          (crates/plugin-db/src/v8_classes/db.rs:295)
+        //                          accepts camelCase, spaced and uppercase, all
+        //                          four levels -- and its rejection message
+        //                          recommends the camelCase spellings.
+        //
+        // So the two spellings the reference doc recommends do not compile.
+        // Verified with `tsc --noEmit` on this project: `{ isolationLevel:
+        // "repeatableRead" }` gives `TS2820: Type '"repeatableRead"' is not
+        // assignable to type 'ZeroshipIsolationLevel | undefined'. Did you mean
+        // '"repeatable read"'?`, and the same for "readCommitted", while
+        // "repeatable read" and "serializable" compile clean. They WORK at
+        // runtime: this probe sends "repeatableRead" and Postgres was observed
+        // emitting `BEGIN ISOLATION LEVEL REPEATABLE READ` for it.
+        level === null
+          ? undefined
+          : { isolationLevel: level as TransactionOptions["isolationLevel"] },
+      );
+      error = errShape(result.error);
+      data = result.data ?? null;
+    } catch (e) {
+      threw = errShape(e);
+    }
+    const after = await db.todos.count({ userId: uid, title });
+    return { threw, error, data, countAfter: after.data ?? null };
+  },
+  { id: "todos.txIsolation" },
+);
+
+// Savepoint depth. MAX_SAVEPOINT_DEPTH is 8, so `levels` = 1 outer BEGIN plus
+// (levels - 1) SAVEPOINTs: 9 is the deepest that may open, 10 must be refused
+// with `savepoint_depth_exceeded` BEFORE any SQL runs.
+type TxDepthResult = {
+  deepestLevel: number;
+  refusedAtLevel: number | null;
+  error: ReturnType<typeof errShape>;
+};
+
+export const txDepth = mutation(
+  async ({ userId, tag, levels }: { userId: string; tag: string; levels: number }) => {
+    const uid = userIdFromWire(userId);
+    const title = `${tag}-d${levels}`;
+    const nest = async (remaining: number, level: number): Promise<TxDepthResult> => {
+      const r = await db.transaction(async (tx) => {
+        if (remaining <= 1) {
+          await tx.todos.insert({ userId: uid, title });
+          return { deepestLevel: level, refusedAtLevel: null, error: null };
+        }
+        return await nest(remaining - 1, level + 1);
+      });
+      if (r.error) {
+        return { deepestLevel: level - 1, refusedAtLevel: level, error: errShape(r.error) };
+      }
+      return r.data as TxDepthResult;
+    };
+    const out = await nest(levels, 1);
+    // A refusal at ANY level must leave nothing behind: the deepest insert
+    // never ran, and every enclosing savepoint is released rather than
+    // committed only halfway.
+    const after = await db.todos.count({ userId: uid, title });
+    return { ...out, countAfter: after.data ?? null };
+  },
+  { id: "todos.txDepth" },
 );
 
 export const seedUser = mutation(
