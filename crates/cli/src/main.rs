@@ -129,7 +129,16 @@ fn cmd_serve(args: &[String]) {
     // doesn't bill). The production worker pairs the same meter with a
     // `spawn_flush_task` → control POST.
     let dev_meter = Arc::new(zeroship_metering::Meter::new());
-    eprintln!("[zeroship] metering infrastructure on (dev: no flush — local accumulation only)");
+    // Say NOT READABLE, not just "local". The producers below are four writers
+    // into this meter and there are ZERO readers in dev - no flush, no snapshot,
+    // no endpoint. "local accumulation only" is true but reads like "your usage
+    // is tracked here", and a creator who wants to see it locally goes looking
+    // for a surface that does not exist. Deployed is where usage becomes
+    // visible; see docs/pilot/e2e-scenarios.md row 14.
+    eprintln!(
+        "[zeroship] metering on (dev: counters accumulate but are NOT READABLE - \
+         no flush, no snapshot API; usage is only observable on a deployed app)"
+    );
 
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
