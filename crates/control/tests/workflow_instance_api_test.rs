@@ -916,3 +916,171 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     drop(fx);
     common::drain_pg().await;
 }
+
+/// Injects a scheduler-store timer-registration failure for one app.
+///
+/// A `BEFORE INSERT` trigger on `workflow_scheduler.timers` raises whenever the
+/// inserted row's `app_id` is listed in a sentinel table, so the failure is
+/// scoped to the app under test and every other registration in the binary is
+/// untouched. This is the same class of failure a missing scheduler schema or a
+/// dead store connection produces, and it is the only failure the handler can
+/// hit after its journal writes have already succeeded.
+async fn install_timer_registration_failpoint(fx: &Fixture) {
+    fx.pg
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS workflow_scheduler.zs_test_timer_insert_fails \
+                 (app_id uuid PRIMARY KEY); \
+             CREATE OR REPLACE FUNCTION workflow_scheduler.zs_test_fail_timer_insert() \
+                 RETURNS trigger AS $fp$ \
+             BEGIN \
+                 IF EXISTS (SELECT 1 FROM workflow_scheduler.zs_test_timer_insert_fails f \
+                             WHERE f.app_id = NEW.app_id) THEN \
+                     RAISE EXCEPTION 'injected workflow scheduler timer registration failure'; \
+                 END IF; \
+                 RETURN NEW; \
+             END; \
+             $fp$ LANGUAGE plpgsql; \
+             DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON workflow_scheduler.timers; \
+             CREATE TRIGGER zs_test_fail_timer_insert \
+                 BEFORE INSERT ON workflow_scheduler.timers \
+                 FOR EACH ROW EXECUTE FUNCTION workflow_scheduler.zs_test_fail_timer_insert();",
+        )
+        .await
+        .expect("install timer registration failpoint");
+}
+
+async fn remove_timer_registration_failpoint(fx: &Fixture) {
+    fx.pg
+        .batch_execute(
+            "DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON workflow_scheduler.timers; \
+             DROP FUNCTION IF EXISTS workflow_scheduler.zs_test_fail_timer_insert(); \
+             DROP TABLE IF EXISTS workflow_scheduler.zs_test_timer_insert_fails;",
+        )
+        .await
+        .expect("remove timer registration failpoint");
+}
+
+async fn arm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
+    fx.pg
+        .execute(
+            "INSERT INTO workflow_scheduler.zs_test_timer_insert_fails (app_id) \
+             VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&app_id],
+        )
+        .await
+        .expect("arm timer registration failure");
+}
+
+async fn disarm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
+    fx.pg
+        .execute(
+            "DELETE FROM workflow_scheduler.zs_test_timer_insert_fails WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("disarm timer registration failure");
+}
+
+async fn count_runs(fx: &Fixture, app_id: Uuid, workflow_name: &str) -> i64 {
+    fx.pg
+        .query_one(
+            &wf_sql(
+                app_id,
+                "SELECT count(*)::bigint AS n FROM zeroship.workflow_runs \
+                  WHERE app_id = $1 AND workflow_name = $2",
+            ),
+            &[&app_id, &workflow_name],
+        )
+        .await
+        .expect("count runs")
+        .get("n")
+}
+
+/// A start whose timer registration fails must leave NO run behind, so a client
+/// retry of the resulting 500 creates exactly one run and the workflow executes
+/// once.
+///
+/// Before the fix the handler committed the run and only then registered the
+/// timer: the failure returned 500 over a durable `queued` run with
+/// `wake_at = now()`, which `run_inflight_reaper` adopts and executes. Unkeyed
+/// starts carry no dedup key, so the client's retry inserted a second run and a
+/// non-idempotent workflow ran twice.
+///
+/// What this test does NOT catch: it drives the failure only through the
+/// timers INSERT, so a registration path that fails before reaching that
+/// statement (for example the run-tables lookup) is not exercised; and it says
+/// nothing about the keyed (`key` + `onConflict`) start path, which is already
+/// protected by the unique index on `(app_id, workflow_name, dedup_key)`.
+#[compio::test]
+async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one() {
+    let Some(db_url) = db_url() else {
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        return;
+    };
+    let fx = build_fixture(&db_url, "timerfail").await;
+    let (app_id, _) = seed_app(&fx, "timerfail", &["Charge"]).await;
+    install_timer_registration_failpoint(&fx).await;
+    arm_timer_registration_failure(&fx, app_id).await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+
+    // Unkeyed start: no dedup key, so nothing but transactional atomicity can
+    // stop a retry from creating a second run.
+    let start = || {
+        authed(
+            test::TestRequest::post()
+                .uri("/internal/workflows/Charge/runs")
+                .set_json(&json!({ "input": { "amountCents": 4200 } })),
+            app_id,
+        )
+        .to_request()
+    };
+
+    let resp = test::call_service(&app, start()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a start whose timer registration fails must not report success"
+    );
+    let runs_after_failed_start = count_runs(&fx, app_id, "Charge").await;
+
+    // The client retries the 500. Registration now succeeds.
+    disarm_timer_registration_failure(&fx, app_id).await;
+    let resp = test::call_service(&app, start()).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    let retried_run = run_id(&body);
+    let runs_after_retry = count_runs(&fx, app_id, "Charge").await;
+
+    // Both counts in one assertion so a failure reports the whole story: how
+    // many runs the failed start left behind, and how many exist after the
+    // retry. The second number is also the control for the first — the same
+    // query against the same table DOES see the row a successful start writes,
+    // so a zero from it means zero rows and not an unreachable table.
+    assert_eq!(
+        (runs_after_failed_start, runs_after_retry),
+        (0, 1),
+        "a failed start must leave no run, and the unkeyed retry must leave exactly one \
+         (got {runs_after_failed_start} after the 500, {runs_after_retry} after the retry)"
+    );
+    let timers: i64 = fx
+        .pg
+        .query_one(
+            "SELECT count(*)::bigint AS n FROM workflow_scheduler.timers WHERE run_id = $1",
+            &[&retried_run],
+        )
+        .await
+        .expect("count timers")
+        .get("n");
+    assert_eq!(timers, 1, "the successful start must register its timer");
+
+    remove_timer_registration_failpoint(&fx).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}

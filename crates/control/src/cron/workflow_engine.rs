@@ -977,6 +977,105 @@ pub async fn register_run_timer(state: &AppState, run_id: &str) -> Result<(), Re
     sync_scheduler_for_run(&store, &state.registry, run_id).await
 }
 
+/// [`register_run_timer`] executed on the caller's open transaction.
+///
+/// The timer store is a separate SCHEMA in the same database as the workflow
+/// journal (`Registry::workflow_store_db_url`), so both the run row and its
+/// timer row can be written in one transaction. Callers that mutate a run and
+/// then need it scheduled MUST use this rather than registering after commit:
+/// a post-commit registration failure leaves a durable, queued run behind while
+/// the caller reports an error, and the inflight reaper then adopts and runs it
+/// — so an unkeyed client retry executes the workflow twice.
+///
+/// Reads go through the same `tx`, so the run's uncommitted state is what gets
+/// synced.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn register_run_timer_in_tx<C>(
+    state: &AppState,
+    tx: &C,
+    run_id: &str,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+    sync_scheduler_for_run_on(&store, tx, run_id, AckExec::CallerConnection).await
+}
+
+/// Where a scheduler-store write is executed.
+///
+/// The store's own methods open a fresh connection (and, where two statements
+/// must agree, their own transaction). That is right for the cron paths, which
+/// have no transaction to join. It is wrong for an API handler that has just
+/// written the run row: there the ack has to land in the caller's transaction
+/// or the two facts can disagree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AckExec {
+    /// The store opens its own connection and transaction.
+    OwnConnection,
+    /// The store's statements run on the connection passed to
+    /// [`sync_scheduler_row`] — the caller's transaction.
+    CallerConnection,
+}
+
+#[allow(clippy::future_not_send)]
+async fn ack_register_next<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    exec: AckExec,
+    conn: &C,
+    run_id: &str,
+    app_id: Uuid,
+    wake_at: DateTime<Utc>,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    match exec {
+        AckExec::OwnConnection => scheduler_store.ack_register_next(run_id, app_id, wake_at).await,
+        AckExec::CallerConnection => {
+            scheduler_store
+                .ack_register_next_on(conn, run_id, app_id, wake_at)
+                .await
+        }
+    }
+    .map(|_| ())
+    .map_err(scheduler_store_error_to_registry)
+}
+
+#[allow(clippy::future_not_send)]
+async fn ack_park<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    exec: AckExec,
+    conn: &C,
+    run_id: &str,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    match exec {
+        AckExec::OwnConnection => scheduler_store.ack_park(run_id).await,
+        AckExec::CallerConnection => scheduler_store.ack_park_on(conn, run_id).await,
+    }
+    .map_err(scheduler_store_error_to_registry)
+}
+
+#[allow(clippy::future_not_send)]
+async fn ack_terminal<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    exec: AckExec,
+    conn: &C,
+    run_id: &str,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    match exec {
+        AckExec::OwnConnection => scheduler_store.ack_terminal(run_id).await,
+        AckExec::CallerConnection => scheduler_store.ack_terminal_on(conn, run_id).await,
+    }
+    .map_err(scheduler_store_error_to_registry)
+}
+
 fn scheduler_error_to_registry(error: workflow_scheduler::SchedulerError) -> RegistryError {
     RegistryError::Database(format!("workflow scheduler: {error}"))
 }
@@ -1039,7 +1138,7 @@ async fn sync_scheduler_after_apply(
         return Ok(());
     }
     for row in rows {
-        sync_scheduler_row(scheduler_store, &conn, &tables, &row).await?;
+        sync_scheduler_row(scheduler_store, &conn, &tables, &row, AckExec::OwnConnection).await?;
     }
     sync_parent_after_child_apply(scheduler_store, &conn, &tables, run_id).await?;
 
@@ -1082,7 +1181,7 @@ where
         .await
         .map_err(RegistryError::from)?;
     if let Some(row) = parent_rows.first() {
-        sync_scheduler_row(scheduler_store, conn, tables, row).await?;
+        sync_scheduler_row(scheduler_store, conn, tables, row, AckExec::OwnConnection).await?;
     }
     Ok(())
 }
@@ -1094,12 +1193,21 @@ async fn sync_scheduler_for_run(
     run_id: &str,
 ) -> Result<(), RegistryError> {
     let conn = registry.conn().await?;
-    let Some(tables) = find_run_tables(&conn, run_id).await? else {
-        scheduler_store
-            .ack_terminal(run_id)
-            .await
-            .map_err(scheduler_store_error_to_registry)?;
-        return Ok(());
+    sync_scheduler_for_run_on(scheduler_store, &conn, run_id, AckExec::OwnConnection).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn sync_scheduler_for_run_on<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    conn: &C,
+    run_id: &str,
+    exec: AckExec,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let Some(tables) = find_run_tables(conn, run_id).await? else {
+        return ack_terminal(scheduler_store, exec, conn, run_id).await;
     };
     let sql = journal_sql(
         &tables,
@@ -1112,13 +1220,9 @@ async fn sync_scheduler_for_run(
         .await
         .map_err(RegistryError::from)?;
     let Some(row) = rows.first() else {
-        scheduler_store
-            .ack_terminal(run_id)
-            .await
-            .map_err(scheduler_store_error_to_registry)?;
-        return Ok(());
+        return ack_terminal(scheduler_store, exec, conn, run_id).await;
     };
-    sync_scheduler_row(scheduler_store, &conn, &tables, row).await
+    sync_scheduler_row(scheduler_store, conn, &tables, row, exec).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -1127,6 +1231,7 @@ async fn sync_scheduler_row<C>(
     conn: &C,
     tables: &WorkflowTables,
     row: &compio_postgres::Row,
+    exec: AckExec,
 ) -> Result<(), RegistryError>
 where
     C: GenericClient + Sync,
@@ -1148,10 +1253,7 @@ where
             // The journal claim gates execution; the scheduler store still
             // needs a row for every durable wake so claimed parent joins cannot
             // disappear between child-terminal applies and the parent's park.
-            scheduler_store
-                .ack_register_next(&run_id, app_id, wake_at)
-                .await
-                .map_err(scheduler_store_error_to_registry)?;
+            ack_register_next(scheduler_store, exec, conn, &run_id, app_id, wake_at).await?;
         } else if state == "waiting"
             && waiting_run_has_live_resume_source(conn, tables, &run_id, waiting_step_key.as_deref()).await?
         {
@@ -1160,21 +1262,12 @@ where
             // guarantees a signal/child completion will register a due wake.
             // `ack_park` clears only in-flight so a concurrent event wake
             // registration in the timer store is not clobbered.
-            scheduler_store
-                .ack_park(&run_id)
-                .await
-                .map_err(scheduler_store_error_to_registry)?;
+            ack_park(scheduler_store, exec, conn, &run_id).await?;
         } else {
-            scheduler_store
-                .ack_terminal(&run_id)
-                .await
-                .map_err(scheduler_store_error_to_registry)?;
+            ack_terminal(scheduler_store, exec, conn, &run_id).await?;
         }
     } else {
-        scheduler_store
-            .ack_terminal(&run_id)
-            .await
-            .map_err(scheduler_store_error_to_registry)?;
+        ack_terminal(scheduler_store, exec, conn, &run_id).await?;
     }
     Ok(())
 }

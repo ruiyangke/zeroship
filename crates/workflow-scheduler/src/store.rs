@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use compio_postgres::{Client, NoTls};
+use compio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
 
 use crate::wheel::TimerEntry;
@@ -54,9 +54,31 @@ impl WorkflowSchedulerStore {
     ) -> Result<TimerRow, WorkflowSchedulerStoreError> {
         let mut conn = self.open_conn().await?;
         let tx = conn.transaction().await?;
-        tx.execute(&format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()), &[&run_id])
+        let row = self.register_timer_on(&tx, run_id, app_id, wake_at).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// [`Self::register_timer`] on a borrowed connection, so it composes inside
+    /// a caller's existing transaction. The timer store lives in its own schema
+    /// but the SAME database as the workflow journal (see
+    /// `Registry::workflow_store_db_url`), so a caller that writes a run row and
+    /// registers its timer can do both in one transaction and never publish a
+    /// run whose timer registration failed.
+    #[allow(clippy::future_not_send)]
+    pub async fn register_timer_on<C>(
+        &self,
+        conn: &C,
+        run_id: &str,
+        app_id: Uuid,
+        wake_at: DateTime<Utc>,
+    ) -> Result<TimerRow, WorkflowSchedulerStoreError>
+    where
+        C: GenericClient + Sync,
+    {
+        conn.execute(&format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()), &[&run_id])
             .await?;
-        let row = tx
+        let row = conn
             .query_one(
                 &format!("INSERT INTO {}.timers \
                     (run_id, app_id, wake_at, generation, registered_at) \
@@ -73,7 +95,6 @@ impl WorkflowSchedulerStore {
                 &[&run_id, &app_id, &wake_at],
             )
             .await?;
-        tx.commit().await?;
         Ok(TimerRow::from_row(&row))
     }
 
@@ -216,7 +237,28 @@ impl WorkflowSchedulerStore {
     ) -> Result<TimerRow, WorkflowSchedulerStoreError> {
         let mut conn = self.open_conn().await?;
         let tx = conn.transaction().await?;
-        let rows = tx
+        let row = self
+            .ack_register_next_on(&tx, run_id, app_id, next_wake_at)
+            .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// [`Self::ack_register_next`] on a borrowed connection. See
+    /// [`Self::register_timer_on`] for why composing inside a caller's
+    /// transaction is both possible and worth doing.
+    #[allow(clippy::future_not_send)]
+    pub async fn ack_register_next_on<C>(
+        &self,
+        conn: &C,
+        run_id: &str,
+        app_id: Uuid,
+        next_wake_at: DateTime<Utc>,
+    ) -> Result<TimerRow, WorkflowSchedulerStoreError>
+    where
+        C: GenericClient + Sync,
+    {
+        let rows = conn
             .query(
                 &format!("DELETE FROM {}.inflight \
                   WHERE run_id = $1 \
@@ -227,7 +269,7 @@ impl WorkflowSchedulerStore {
         let generation = rows
             .first()
             .map_or(0, |row| row.get::<_, i64>("dispatch_generation") + 1);
-        let row = tx
+        let row = conn
             .query_one(
                 &format!("INSERT INTO {}.timers \
                     (run_id, app_id, wake_at, generation, registered_at) \
@@ -244,13 +286,26 @@ impl WorkflowSchedulerStore {
                 &[&run_id, &app_id, &next_wake_at, &generation],
             )
             .await?;
-        tx.commit().await?;
         Ok(TimerRow::from_row(&row))
     }
 
     #[allow(clippy::future_not_send)]
     pub async fn ack_terminal(&self, run_id: &str) -> Result<(), WorkflowSchedulerStoreError> {
         let conn = self.open_conn().await?;
+        self.ack_terminal_on(&conn, run_id).await
+    }
+
+    /// [`Self::ack_terminal`] on a borrowed connection. See
+    /// [`Self::register_timer_on`].
+    #[allow(clippy::future_not_send)]
+    pub async fn ack_terminal_on<C>(
+        &self,
+        conn: &C,
+        run_id: &str,
+    ) -> Result<(), WorkflowSchedulerStoreError>
+    where
+        C: GenericClient + Sync,
+    {
         conn.execute(
             &format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()),
             &[&run_id],
@@ -267,6 +322,20 @@ impl WorkflowSchedulerStore {
     #[allow(clippy::future_not_send)]
     pub async fn ack_park(&self, run_id: &str) -> Result<(), WorkflowSchedulerStoreError> {
         let conn = self.open_conn().await?;
+        self.ack_park_on(&conn, run_id).await
+    }
+
+    /// [`Self::ack_park`] on a borrowed connection. See
+    /// [`Self::register_timer_on`].
+    #[allow(clippy::future_not_send)]
+    pub async fn ack_park_on<C>(
+        &self,
+        conn: &C,
+        run_id: &str,
+    ) -> Result<(), WorkflowSchedulerStoreError>
+    where
+        C: GenericClient + Sync,
+    {
         conn.execute(
             &format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()),
             &[&run_id],

@@ -1477,17 +1477,22 @@ async fn create_run_inner(
         candidate
     };
 
-    tx.commit()
-        .await
-        .map_err(workflow_pg_error)?;
-    workflow_engine::register_run_timer(state, &run_id)
+    // Timer registration happens INSIDE the transaction. Registering after the
+    // commit meant a registration failure returned 500 for a run that was
+    // already durable and queued with `wake_at = now()`; the inflight reaper
+    // then adopted and executed it, so an unkeyed client retry of that 500
+    // started a second run and the workflow ran twice.
+    workflow_engine::register_run_timer_in_tx(state, &tx, &run_id)
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    for run_id in cascade_run_ids {
-        workflow_engine::register_run_timer(state, &run_id)
+    for cascade_run_id in &cascade_run_ids {
+        workflow_engine::register_run_timer_in_tx(state, &tx, cascade_run_id)
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
+    tx.commit()
+        .await
+        .map_err(workflow_pg_error)?;
     Ok((StatusCode::CREATED, json!({ "id": run_id, "state": "queued" })))
 }
 
@@ -1685,19 +1690,23 @@ async fn start_many_inner(
         }
     }
 
+    // Same atomicity rule as `create_run_inner`: every run this batch created
+    // gets its timer in the batch's own transaction, so a registration failure
+    // rolls the whole batch back instead of leaving reaper-adoptable runs
+    // behind an error response.
+    for run_id in &run_ids {
+        workflow_engine::register_run_timer_in_tx(state, &tx, run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
+    for run_id in &cascade_run_ids {
+        workflow_engine::register_run_timer_in_tx(state, &tx, run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
     tx.commit()
         .await
         .map_err(workflow_pg_error)?;
-    for run_id in run_ids {
-        workflow_engine::register_run_timer(state, &run_id)
-            .await
-            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    }
-    for run_id in cascade_run_ids {
-        workflow_engine::register_run_timer(state, &run_id)
-            .await
-            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    }
     Ok(json!({ "results": results }))
 }
 
@@ -2113,13 +2122,16 @@ pub async fn signal_run(
             return WorkflowApiError::Database(e.to_string()).response();
         }
     }
-    if let Err(e) = tx.commit().await {
-        return WorkflowApiError::Database(e.to_string()).response();
-    }
+    // Registered in-transaction: the wake_at UPDATE above and the timer row it
+    // implies have to become visible together, or a registration failure
+    // reports an error over a durably woken run the reaper will pick up anyway.
     if wakes_run {
-        if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
+        if let Err(e) = workflow_engine::register_run_timer_in_tx(&state, &tx, &run_id).await {
             return WorkflowApiError::from(e).response();
         }
+    }
+    if let Err(e) = tx.commit().await {
+        return WorkflowApiError::Database(e.to_string()).response();
     }
     web::HttpResponse::Accepted().json(&json!({ "id": signal_id }))
 }
@@ -2505,14 +2517,14 @@ async fn deliver_ingress_run_signal(
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
-    tx.commit()
-        .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     if wakes_run {
-        workflow_engine::register_run_timer(state, run_id)
+        workflow_engine::register_run_timer_in_tx(state, &tx, run_id)
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     Ok(json!({ "id": signal_id, "runId": run_id }))
 }
 
@@ -2891,10 +2903,10 @@ async fn restart_run_inner(
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
-    tx.commit()
+    workflow_engine::register_run_timer_in_tx(state, &tx, run_id)
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    workflow_engine::register_run_timer(state, run_id)
+    tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
@@ -3185,16 +3197,20 @@ async fn control_transition(
             }
         }
     }
-    if let Err(e) = tx.commit().await {
-        return workflow_pg_error(e).response();
-    }
-    if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
+    // Same shape as the start path, same fix: the state change and its timer
+    // registration commit together, so an error response never leaves a run
+    // whose durable state says "run me".
+    if let Err(e) = workflow_engine::register_run_timer_in_tx(&state, &tx, &run_id).await {
         return WorkflowApiError::Database(e.to_string()).response();
     }
-    for run_id in cascade_run_ids {
-        if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
+    for cascade_run_id in &cascade_run_ids {
+        if let Err(e) = workflow_engine::register_run_timer_in_tx(&state, &tx, cascade_run_id).await
+        {
             return WorkflowApiError::Database(e.to_string()).response();
         }
+    }
+    if let Err(e) = tx.commit().await {
+        return workflow_pg_error(e).response();
     }
     web::HttpResponse::Ok().json(&json!({ "state": state_value }))
 }
