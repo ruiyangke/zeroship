@@ -110,7 +110,26 @@ function validateRows(rows) {
   }
   // Deterministic order: by (kind, variant) so the generated artifacts are stable
   // regardless of sidecar row order.
-  rows.sort((a, b) => (a.kind === b.kind ? a.variant.localeCompare(b.variant) : a.kind.localeCompare(b.kind)));
+  //
+  // Compared by CODE UNIT, not `localeCompare`. The comparator has to be a
+  // property of the data alone, because this ordering is baked into committed
+  // artifacts that a drift gate then re-derives: a comparator that consults the
+  // runtime locale or ICU build would let two contributors generate two orderings
+  // from one sidecar and each see the other as drift. `localeCompare` also orders
+  // case differently from code units ("a" before "B", rather than after), which is
+  // exactly the axis camelCase keys vary on.
+  //
+  // Measured on the current 92 rows: locale and code-unit ordering agree, and so
+  // do the `en` and `sv` collations. So this is closing a guarantee rather than
+  // correcting today's output - the generated files do not change.
+  rows.sort((a, b) => (a.kind === b.kind ? compareCodeUnits(a.variant, b.variant) : compareCodeUnits(a.kind, b.kind)));
+}
+
+/** Order two strings by UTF-16 code unit, independent of locale and ICU build. */
+function compareCodeUnits(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 }
 
 function esc(s) {

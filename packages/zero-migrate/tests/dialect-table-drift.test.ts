@@ -64,11 +64,26 @@ function sortKey(r: { kind: string; variant: string }): string {
   return `${r.kind}\0${r.variant}`;
 }
 
+/**
+ * Order by UTF-16 code unit, matching the generator.
+ *
+ * Both sides have to use the SAME locale-independent rule or this test can accuse
+ * a correctly generated file of drifting. It also makes the two orderings equal by
+ * construction rather than by luck: the generator compares `kind` then `variant`,
+ * this compares them joined by NUL, and those agree only because NUL sorts below
+ * every other code unit - a property `localeCompare` does not promise.
+ */
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 test("committed dialect-table.ts matches the sidecar rows", () => {
-  const expected = [...sidecarRows].sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+  const expected = [...sidecarRows].sort((a, b) => compareCodeUnits(sortKey(a), sortKey(b)));
   const actual = [...DIALECT_TABLE]
     .map((r) => ({ kind: r.kind, variant: r.variant, postgres: r.postgres, sqlite: r.sqlite, mysql: r.mysql }))
-    .sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    .sort((a, b) => compareCodeUnits(sortKey(a), sortKey(b)));
   assert.deepEqual(actual, expected, "generated dialect-table.ts drifted from dialect-support.toml");
 });
 
