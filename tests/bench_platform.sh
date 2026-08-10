@@ -136,12 +136,39 @@ wrk.headers["Content-Type"] = "application/json"
 wrk.headers["X-Api-Key"] = "$API_KEY"
 EOF
 
+# wrk ALREADY TELLS YOU when it is timing failures; this harness used to throw
+# that away. It grepped Requests/sec and printed it, so a leg answering 404 on
+# every request reported a throughput figure indistinguishable from a working
+# one -- and higher, because a 404 is cheaper than a dispatch into V8.
+#
+# wrk prints `Non-2xx or 3xx responses: N` whenever any request failed, and
+# `unable to connect` when nothing is listening. Both are read here. Nothing is
+# probed that wrk does not already measure; the defect was purely that the
+# instrument's own error reporting was discarded.
+#
+# Measured 2026-08-10 on the artifact this harness benchmarks: POST /rpc gives
+# 404 while POST /__zeroship/v1/ping gives 200, so at least one leg was timing
+# the failure path. See the warmup block above.
 run_bench() {
     local label=$1 url=$2 lua=$3
     local result
     result=$(wrk -t4 -c50 -d10s -s "$lua" "$url" 2>&1)
     local rps=$(echo "$result" | grep 'Requests/sec' | awk '{print $2}')
     local lat=$(echo "$result" | grep 'Latency' | awk '{print $2}')
+    local bad=$(echo "$result" | grep -oE 'Non-2xx or 3xx responses: [0-9]+' | grep -oE '[0-9]+$')
+    if echo "$result" | grep -qi 'unable to connect\|connection refused'; then
+        printf "  %-45s %12s\n" "$label" "UNREACHABLE"
+        echo "FAIL: $label -- wrk could not connect to $url; nothing was measured." >&2
+        BENCH_BAD=$((${BENCH_BAD:-0} + 1))
+        return
+    fi
+    if [ -n "$bad" ] && [ "$bad" -gt 0 ]; then
+        printf "  %-45s %12s req/s  %8s avg   <- %s NON-2xx\n" "$label" "$rps" "$lat" "$bad"
+        echo "FAIL: $label -- $bad non-2xx responses. This number times the FAILURE" >&2
+        echo "      path, not app dispatch, and a failure is cheaper so it reads FAST." >&2
+        BENCH_BAD=$((${BENCH_BAD:-0} + 1))
+        return
+    fi
     printf "  %-45s %12s req/s  %8s avg\n" "$label" "$rps" "$lat"
 }
 
@@ -163,3 +190,14 @@ wrk -t4 -c50 -d10s -s "$LUA_GATE" http://localhost:8000/apps/bench/rpc 2>&1 | gr
 rm "$LUA_RPC" "$LUA_GATE"
 echo ""
 echo "================================================================="
+
+# A counter nobody reads is the defect this file just fixed, arriving one level
+# up. run_bench increments BENCH_BAD for every leg that timed failures or could
+# not connect; without this the FAIL lines would go to stderr and the script
+# would still exit 0, so a run where every leg 404'd would look like a
+# successful benchmark to anything checking the exit status.
+if [ "${BENCH_BAD:-0}" -gt 0 ]; then
+    echo "BENCHMARK INVALID: ${BENCH_BAD} leg(s) timed a failure path or were unreachable." >&2
+    echo "                   The figures above do not measure app dispatch. Do not quote them." >&2
+    exit 1
+fi
