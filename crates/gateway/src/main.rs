@@ -295,6 +295,14 @@ fn main() -> std::io::Result<()> {
     let port = cli.port;
     let bind_host = cli.bind;
     let control_url = cli.control;
+    // Refuse a scheme this transport cannot honour, the same way `--blob-store`
+    // below refuses a store URL it cannot parse. Without this an `https://`
+    // control URL is silently downgraded to plaintext on port 80 and the
+    // control key goes out in the clear.
+    if let Err(e) = zeroship_gateway::sync::validate_control_url(&control_url) {
+        eprintln!("gateway: invalid --control: {e}");
+        std::process::exit(2);
+    }
     // Secret-bearing inputs are resolved through the secret-reference
     // resolver: a literal value passes through byte-identically, while a
     // `urn:zeroship:{env|file|...}:…` / `arn:…` reference is dereferenced

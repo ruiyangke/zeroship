@@ -190,6 +190,36 @@ async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
         .map_err(|_| control_timeout_error())?
 }
 
+/// Reject a `--control` URL this transport cannot actually honour.
+///
+/// `http_get_inner` opens a plain `TcpStream` and writes the control key as a
+/// `Authorization: Bearer` header. There is no TLS on this path at all, so an
+/// `https://` control URL does not get encrypted - it gets silently downgraded,
+/// and the key goes out in cleartext. Worse, `Url::port()` returns `None` for a
+/// scheme-default port, so `https://control` lands on port 80 rather than 443.
+///
+/// Until this transport speaks TLS, the only honest answer is to refuse the
+/// scheme rather than pretend to serve it. `--blob-store` in the same binary
+/// already validates and exits; this brings `--control` up to that bar.
+pub fn validate_control_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("not a URL: {e}"))?;
+    match parsed.scheme() {
+        "http" => {}
+        other => {
+            return Err(format!(
+                "unsupported --control scheme {other:?}: the control transport \
+                 is plaintext HTTP and would send the control key in the clear. \
+                 Use http:// (and keep the hop on a trusted network), or \
+                 terminate TLS in front of the gateway."
+            ));
+        }
+    }
+    if parsed.host_str().is_none() {
+        return Err("no host in --control URL".to_string());
+    }
+    Ok(())
+}
+
 fn control_timeout_error() -> String {
     format!(
         "control request timed out after {}s",
@@ -484,5 +514,42 @@ mod tests {
         // client_id, and an unknown client_id resolves to nothing.
         assert!(cache.lookup_by_oauth_client_id("oac_unknown").is_none());
         assert!(cache.lookup_by_oauth_client_id("").is_none());
+    }
+
+    #[test]
+    fn control_url_rejects_https_because_this_transport_has_no_tls() {
+        // `http_get_inner` opens a plain TcpStream and writes
+        // `Authorization: Bearer <control_key>`. Accepting an https:// URL does
+        // not encrypt that - it silently downgrades and ships the key in
+        // cleartext. Refusing is the only honest answer until TLS exists here.
+        let err = validate_control_url("https://control.internal:9090")
+            .expect_err("https must be refused, not silently downgraded");
+        assert!(
+            err.contains("https"),
+            "the error must name the scheme it refused, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn control_url_rejects_https_on_the_default_port_too() {
+        // The nastiest shape: `Url::port()` returns None for a scheme-default
+        // port, so this would connect to 80 rather than 443 - not merely
+        // unencrypted but a different port than the operator wrote.
+        assert!(validate_control_url("https://control.internal").is_err());
+    }
+
+    #[test]
+    fn control_url_accepts_http() {
+        // POSITIVE CONTROL. The validator must reject the scheme it cannot
+        // serve and nothing else - the compose and local-dev defaults are
+        // http:// and must keep working.
+        validate_control_url("http://localhost:9090").expect("http is the supported scheme");
+        validate_control_url("http://control:9090/").expect("trailing slash is fine");
+    }
+
+    #[test]
+    fn control_url_rejects_a_value_that_is_not_a_url() {
+        assert!(validate_control_url("localhost:9090").is_err());
+        assert!(validate_control_url("").is_err());
     }
 }
