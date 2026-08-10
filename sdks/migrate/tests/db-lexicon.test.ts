@@ -20,10 +20,11 @@ function migrateColType(def: unknown): unknown {
 }
 
 test("ONE lexicon: a @zeroship/db field reduces to the same ColType the migration t.* produces", () => {
-  // `dbT.string()` reduces to the neutral `"string"` ColType (the migration
-  // lexicon's canonical text type is `t.text()`→`"text"`; the `string` token is a
-  // distinct wire variant only the db bridge still produces, §7 alias removal).
-  assert.deepEqual(colTypeFromDbField(dbT.string()), "string");
+  // §7 removed the `string` alias: the engine's ColType has `text` and not
+  // `string`, so the db bridge reduces onto the SAME token `t.text()` produces.
+  // This previously asserted "string" and so pinned a token the engine rejects,
+  // while ir-types-drift.test.ts reported the same divergence as drift.
+  assert.deepEqual(colTypeFromDbField(dbT.string()), migrateColType(t.text()));
   assert.deepEqual(colTypeFromDbField(dbT.boolean()), migrateColType(t.boolean()));
   assert.deepEqual(colTypeFromDbField(dbT.timestamp()), migrateColType(t.timestamp()));
   assert.deepEqual(colTypeFromDbField(dbT.json()), migrateColType(t.json()));
@@ -52,7 +53,9 @@ test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColT
   assert.deepEqual(colTypeFromDbField(dbT.encrypted({ wraps: dbT.number() })), {
     encrypted: { of: "double" },
   });
-  assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "string" } });
+  // Bare encrypted() wraps the default string-ish field, so its inner arm rides
+  // the same §7 alias removal: "string" is not an engine ColType, "text" is.
+  assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "text" } });
 });
 
 test("fromDb lifts a live-schema field into a migration column on the SAME ColType path", () => {

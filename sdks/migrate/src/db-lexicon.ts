@@ -107,8 +107,12 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
   }
   switch (def.type) {
     // Scalars whose db token maps 1:1 onto a neutral ColType.
+    // §7 removed the `string` alias from the wire: the engine's ColType admits
+    // `text` and NOT `string`. This bridge was the last producer of the dead
+    // token, so a db string-ish field now reduces to the same `text` a
+    // `t.text()` migration column produces.
     case "string":
-      return "string";
+      return "text";
     case "number":
       return "double";
     // The generator emits these when it reproduces the columns the migrations
