@@ -1255,19 +1255,44 @@ storage-side; they're independent.
 
 | Kind         | Input            | Output             | Use case                       |
 |--------------|------------------|--------------------|--------------------------------|
-| `full`       | `"123-45-6789"`  | `"***********"`    | Default — safest                |
+| `full`       | `"123-45-6789"`  | `"***"`            | Default — safest                |
 | `last4`      | `"123-45-6789"`  | `"***-**-6789"`    | Card tail / SSN tail            |
 | `first4`     | `"4111222233334444"` | `"4111************"` | Card BIN visible       |
-| `email`      | `"alice@x.com"`  | `"a****@x.com"`    | Identifiable but not enumerable |
-| `name`       | `"Alice Smith"`  | `"A. S."`          | Initials only                   |
-| `dateYear`   | `"1990-05-12"`   | `"1990"`           | Year-only for analytics         |
-| `dateDecade` | `"1990-05-12"`   | `"1990s"`          | Decade-only — coarser           |
+| `email`      | `"alice@x.com"`  | `"a***@x.com"`     | Identifiable but not enumerable |
+| `name`       | `"Alice Smith"`  | `"A. S***"`        | Initials, last name marked      |
+| `dateYear`   | `"1990-05-12"`   | `"1990-**-**"`     | Year-only for analytics         |
+| `dateDecade` | `"1990-05-12"`   | `"199?-**-**"`     | Decade-only — coarser           |
 | `none`       | `"x"`            | `"x"`              | Opt-out — read returns bare `T` |
 
+`full` emits exactly three asterisks whatever the input length, so it does
+not disclose how long the original value was. `last4` and `first4` preserve
+non-alphanumeric characters in place, which is why the separators survive in
+the `last4` row above; they count only alphanumerics when deciding what to
+keep.
+
 `null` plaintext passes through as `null` (no mask). Empty string
-becomes `""`. Numbers and `Uint8Array` are supported by `full`;
-the string-oriented kinds throw `MASK_KIND_INCOMPATIBLE` at deploy
-time if the column type doesn't match.
+becomes `""`. Numbers and `Uint8Array` are supported by `full`.
+
+The string-oriented kinds are **not** type-checked, at deploy or at
+write. Nothing is rejected and nothing is thrown if a kind meets a value
+whose shape it did not expect. What happens instead differs by kind, and
+the difference matters:
+
+| Kind | On an unexpected shape |
+| --- | --- |
+| `email`, `dateYear`, `dateDecade` | falls back to `"***"` — full redaction |
+| `name` | still emits initials: a single token becomes `"4***"` |
+| `first4`, `last4` | no shape check at all — reveals 4 alphanumerics by position |
+
+Only the first row fails safe. `name`, `first4` and `last4` reveal
+characters from whatever column they are pointed at, so a mask attached
+to the wrong field can disclose the leading or trailing characters of a
+value you meant to protect — a `last4` aimed at a date yields its last
+four digits just as readily as a card's.
+
+Verify masks by reading a masked row back, not by deploying successfully.
+A successful deploy establishes nothing about whether a kind suits the
+column it is attached to.
 
 ### The six classifications
 
