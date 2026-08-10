@@ -26,19 +26,33 @@
 #     OP) session. There is NO `--dev-insecure` shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
 #     reachable without standing up the native OP. (gateway-auth gap)
-#   * SCHEMA-INIT bug — any app exporting a declared schema (every env.db app)
-#     fails module init on the production worker: the runtime's embedded
-#     runtime-entry does `await import("@zeroship/bootstrap/install-schema")`,
-#     which the worker's module loader cannot resolve (not in the bundle's
-#     static graph, not a native module) ⇒ `Cannot find module` ⇒ the app
-#     never initializes. This blocks env.db over BOTH the gateway and the
-#     direct worker path. (runtime gap — needs a code fix in the runtime.)
+#   * SCHEMA-INIT bug — FIXED, and this header described it as live long after
+#     it stopped being so. It said any app exporting a declared schema fails
+#     module init on the production worker, because runtime-entry's
+#     `await import("@zeroship/bootstrap/install-schema")` could not be
+#     resolved by the worker's module loader (not in the bundle's static
+#     graph, not a native module) => `Cannot find module`.
 #
-# Because of the SCHEMA-INIT bug, db-todos cannot currently run on the
-# worker. The harness asserts the parts that DO work (clean stack, migration,
-# PAT auth, create, deploy, schema-less app over the edge) as PASS, and marks
-# the env.db-over-edge steps as KNOWN-FAIL with the captured error so a future
-# fix flips them green. Set STRICT=1 to make the known-fails hard-fail.
+#     That resolution now exists. `crates/runtime/src/core/dynamic_import.rs`
+#     carries "Path 2.5: runtime-provided module", which resolves exactly
+#     `@zeroship/bootstrap/install-schema`, `@zeroship/db/internal` and
+#     `zeroship` on the grounds that the runtime injects the code importing
+#     them, so it owns their resolution even when a tree-shaken bundle does
+#     not carry them (ISS-63).
+#
+#     Verified by running, 2026-08-10, not by reading the fix:
+#       cargo test -p zeroship-runtime --test bootstrap_install_schema_resolve
+#       4 passed; 0 failed  (resolves_and_is_callable, resolves_during_module
+#       _evaluation, shares_instance_across_imports, transitive_db_internal)
+#
+# So db-todos DOES run on the worker. It is the DEPLOYED vehicle of
+# tests/e2e_dev_vs_deployed_db.sh, and `tests/golden_path.sh` step 10 deploys
+# an env.db app and drives it over the gateway. Any KNOWN-FAIL arm below whose
+# stated reason is the SCHEMA-INIT bug is therefore justified by something that
+# is no longer true, and needs re-checking against a live run rather than being
+# trusted — see task #256, which tracks that this harness's `known()` counter
+# conflates four incompatible meanings and does not fail at the default
+# STRICT=0. Set STRICT=1 to make the known-fails hard-fail.
 #
 # Usage:
 #   ./tests/e2e_app_primitives.sh
