@@ -311,6 +311,13 @@ pub struct LiveSchema {
     /// Unlike a view body, nothing had to be added to record this: the fold already
     /// keeps every sequence facet it needs to re-create one.
     pub sequences: std::collections::BTreeMap<String, crate::model::snapshot::SequenceSnapshot>,
+    /// Extensions already present in the folded live schema, with the placement each
+    /// was created with. A `dropExtension` renders its own inverse from this.
+    ///
+    /// The placement matters: `Op::DropExtension` carries no schema qualifier, so
+    /// the effective schema of the DROP says nothing about where the extension
+    /// lived. Only the recorded `CREATE` knows.
+    pub extensions: std::collections::BTreeMap<String, crate::model::snapshot::ExtensionSnapshot>,
     /// Logical column declarations accumulated from ordered migration artifacts.
     ///
     /// This semantic map is intentionally never inferred from the physical
@@ -350,6 +357,7 @@ impl LiveSchema {
             partitions: live.partitions,
             views: live.views,
             sequences: live.sequences,
+            extensions: live.extensions,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -369,6 +377,7 @@ impl LiveSchema {
             partitions: std::collections::BTreeMap::new(),
             views: std::collections::BTreeMap::new(),
             sequences: std::collections::BTreeMap::new(),
+            extensions: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
     }
@@ -452,6 +461,7 @@ impl LiveSchema {
             partitions: desired.snapshot.partitions,
             views: desired.snapshot.views,
             sequences: desired.snapshot.sequences,
+            extensions: desired.snapshot.extensions,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -533,6 +543,7 @@ impl LiveSchema {
             partitions: live.partitions,
             views: live.views,
             sequences: live.sequences,
+            extensions: live.extensions,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
     }
@@ -5453,9 +5464,17 @@ impl IrAuthor {
                 }
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 let stmts = crate::render::vendor::render_vendor_op(op, &eff_schema)?;
+                let history_down = vendor_inverse_from_history(op, live_schema);
                 stmts
                     .into_iter()
-                    .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
+                    .map(|s| {
+                        // The vendor renderer is pure by contract - it sees the op and
+                        // nothing else - so an inverse that needs the migration history
+                        // is attached here, where the history is already in scope,
+                        // rather than by handing the renderer a live schema.
+                        let down = s.down.or_else(|| history_down.clone());
+                        decl.lower_vendor_statement(&s.name, s.up, down)
+                    })
                     .collect()
             }
         };
@@ -7847,6 +7866,38 @@ fn render_sequence_create_from_snapshot(
         eff_schema,
     )?);
     Ok(sql)
+}
+
+/// The `down` a vendor drop can recover from the migration history, or `None` when
+/// the drop is not reversible.
+///
+/// This lives beside the vendor lowering rather than inside
+/// [`crate::render::vendor`] because that module renders from the op ALONE by
+/// contract, and its output is the string the guard re-parses at this seam.
+///
+/// The guard test here is the op's own `if_exists`, NOT `Op::existence_guard()`.
+/// That accessor returns `None` for every vendor op by design - the guard on these
+/// is a native `IF EXISTS` clause, not the catalog-probe mechanism - so reading it
+/// would report every guarded drop as unguarded and re-create an object that may
+/// never have been dropped.
+fn vendor_inverse_from_history(op: &Op, live_schema: &LiveSchema) -> Option<String> {
+    match op {
+        Op::DropExtension { name, if_exists } if !if_exists.unwrap_or(false) => {
+            let snapshot = live_schema.extensions.get(name)?;
+            let mut sql = format!(
+                "CREATE EXTENSION {}",
+                crate::render::dml::quote_ident_checked(name).ok()?
+            );
+            // The placement comes from the recorded CREATE. A DROP EXTENSION has no
+            // schema qualifier, so the drop's effective schema would be a guess.
+            if let Some(schema) = &snapshot.schema {
+                sql.push_str(" WITH SCHEMA ");
+                sql.push_str(&crate::render::dml::quote_ident_checked(schema).ok()?);
+            }
+            Some(sql)
+        }
+        _ => None,
+    }
 }
 
 fn render_sequence_op(

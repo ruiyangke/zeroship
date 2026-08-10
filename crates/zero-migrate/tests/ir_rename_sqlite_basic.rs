@@ -104,6 +104,7 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         partitions: desired.snapshot.partitions.clone(),
         views: desired.snapshot.views.clone(),
         sequences: desired.snapshot.sequences.clone(),
+        extensions: desired.snapshot.extensions.clone(),
         sqlite_schemas: desired.sqlite_schemas,
         table_ownership,
         logical_columns: Default::default(),
