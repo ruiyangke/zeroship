@@ -223,10 +223,24 @@ fn record_plain_index(
 /// indexes) the FieldDef map does not carry. Table lifecycle (create/drop/rename)
 /// and index lifecycle (create/drop, column drop/rename) are all tracked so the
 /// metadata stays in lock-step with the folded field map.
-fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMetadata> {
+///
+/// Takes the `dialect` and expands through [`flatten_dialectal_ops`] for the same
+/// reason its siblings do: an index or runtime option authored inside a `dialect()`
+/// leg belongs to the table the target actually gets. Walking the raw list let the
+/// `Op::Dialectal` wrapper fall through the catch-all arm, so the field map (which
+/// expands) and this map (which did not) described different tables - fields present,
+/// indexes and options missing, on the very dialect whose leg declared them.
+///
+/// Expands the SELECTED leg only, never the union: an index declared in an inactive
+/// leg is one the target never creates, so naming it would describe an object the
+/// database does not have.
+fn runtime_metadata_from_ops(
+    ops: &[Op],
+    dialect: SqlDialect,
+) -> Result<BTreeMap<String, RuntimeCollectionMetadata>, crate::FoldError> {
     let mut metadata: BTreeMap<String, RuntimeCollectionMetadata> = BTreeMap::new();
 
-    for op in ops {
+    for op in crate::render::fold::flatten_dialectal_ops(ops, dialect)? {
         match op {
             Op::CreateTable {
                 name,
@@ -346,7 +360,7 @@ fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMe
         }
     }
 
-    metadata
+    Ok(metadata)
 }
 
 fn render_runtime_descriptor_v1(
@@ -423,7 +437,7 @@ pub fn render_artifacts(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    let metadata = runtime_metadata_from_ops(ops);
+    let metadata = runtime_metadata_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
     let authoring_tables = authoring_tables_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
@@ -2213,7 +2227,8 @@ mod tests {
         }];
         let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
             .expect("confined descriptor resolves");
-        let metadata = runtime_metadata_from_ops(&ops);
+        let metadata = runtime_metadata_from_ops(&ops, SqlDialect::Postgres)
+            .expect("confined descriptor ops carry no dialectal wrapper");
         let value = render_runtime_descriptor_v1(
             &ops,
             SqlDialect::Postgres,
