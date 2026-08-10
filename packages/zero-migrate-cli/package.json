@@ -57,7 +57,7 @@
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit",
     "test:docs": "NODE_ENV=test node --import tsx --test tests/doc-examples.test.ts",
-    "test:host": "NODE_ENV=test node --import tsx --test tests/host/*.test.ts"
+    "test:host": "NODE_ENV=test node --import tsx --import ./tests/host/addon.ts --test tests/host/*.test.ts"
   },
   "dependencies": {
     "zero-migrate": "workspace:*",
