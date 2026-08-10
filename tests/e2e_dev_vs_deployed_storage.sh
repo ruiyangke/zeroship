@@ -474,10 +474,51 @@ fi
 KEEP="$(mktemp -d /tmp/storage-probe-XXXXXX)"
 cp "$WORK/dev.txt" "$KEEP/dev.txt" 2>/dev/null || true
 cp "$WORK/deployed.txt" "$KEEP/deployed.txt" 2>/dev/null || true
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran. This repo has shipped three
+#     gates that passed over zero tests (#102/#103/#112).
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified (DEPLOYED_STORAGE=s3, the default) against the compose Postgres on
+# :5440 and an ephemeral MinIO:
+#
+#     env.storage dev vs deployed: 54 passed, 0 failed        (exit 0)
+#
+# CROSS-CHECKED against a second, independent instrument: CALL SITES in the
+# source rather than outcomes in the run. 10 top-level `pass` sites (.zship
+# built, 14 server functions, auth postures, dev reachable, dev probe, MinIO
+# ready, three services healthy, deployed, deployed reachable, deployed probe)
+# + 1 section-3b CONTROL + 42 unconditional `want`/`idem`/`eqfields`
+# invocations at column 0 + 1 section-4 diff = 54. Dynamic and static agree,
+# and they fail differently: the dynamic count moves when a tier stops
+# answering, the static one when an assertion leaves the file.
+#
+# 53 IS THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where a floor
+# has to sit -- the same reasoning golden_path.sh applies to its ZEROSHIP_TOKEN
+# arm. `DEPLOYED_STORAGE=file` skips the "MinIO ready" pass and yields 53; the
+# default s3 mode yields 54. CI runs the s3 mode, so CI sits one above the
+# floor, and that one is the only headroom here.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total unchanged. Nothing here can see that; review can.
+STORAGE_MIN_PASSED="${STORAGE_MIN_PASSED:-53}"
+
 echo ""
 echo "  results kept at $KEEP/{dev,deployed}.txt"
-echo "  env.storage dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  env.storage dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $STORAGE_MIN_PASSED)"
 echo "  MUTATIONS (diff half): MUTATE=no-storage-url and MUTATE=no-config must both turn this RED"
 echo "  MUTATIONS (absolute half): MUTATE=text-no-ctype | list-prefix-broad | stream-corrupt"
 echo "    -- each must leave the DIFF green and turn its own section-3b verdict RED"
-[ "$FAIL" -eq 0 ]
+
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$STORAGE_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $STORAGE_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: either the deployed capture lost" >&2
+  echo "      rows or an assertion was removed. If the removal was deliberate, lower" >&2
+  echo "      STORAGE_MIN_PASSED in the same change and say why; do not treat the gap" >&2
+  echo "      as slack." >&2
+  rc=1
+fi
+exit "$rc"

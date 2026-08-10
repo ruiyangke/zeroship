@@ -555,8 +555,54 @@ echo ""
 echo "  --- observations (not diffed: a clock and a scheduler race) ---"
 echo "  dev:      $(tr '\n' '; ' < "$WORK/dev.obs")"
 echo "  deployed: $(tr '\n' '; ' < "$WORK/deployed.obs")"
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran. This repo has shipped three
+#     gates that passed over zero tests (#102/#103/#112).
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified against the compose Postgres on :5440 and an ephemeral Redis:
+#
+#     dev vs deployed (workflows): 44 passed, 0 failed        (exit 0)
+#
+# CROSS-CHECKED against a second, independent instrument: CALL SITES in the
+# source, with each loop multiplied out.
+#   14  setup: .zship built, auth postures, 6 manifest-declares-workflow rows
+#       (the `for wf in BasicCase … DoubleChild` loop), dev probe, Redis ready,
+#       services healthy, deployed, workflows enabled, deployed probe
+#    9  `dwant` invocations (basic x5, sleep x1, signal x3)
+#    3  the sleep-really-suspended and two signal-observation verdicts
+#    6  the `for side in dev deployed / for c in basic sleep signal` completion
+#       loop -- ONE call site, six outcomes, which is exactly the kind of thing
+#       a naive `grep -c 'pass "'` gets wrong
+#    1  the section-4 diff
+#    2  the child-case pins (dev refuses, deployed completes)
+#    9  the compensate-case pins
+#   = 44. Dynamic and static agree, and they fail differently.
+#
+# NO HEADROOM: the total is fixed by the source, not discovered at run time.
+# Two of the five cases are KNOWN-divergent and PINNED rather than excluded, so
+# a dev tier that grows child workflows or compensation turns those pins RED --
+# that is the signal to delete the pin, and the floor must be raised in the
+# same change rather than treated as slack.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total at 44. Nothing here can see that; review can.
+WORKFLOWS_MIN_PASSED="${WORKFLOWS_MIN_PASSED:-44}"
+
 echo ""
-echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $WORKFLOWS_MIN_PASSED)"
 echo "  MUTATIONS: MUTATE=no-sleep | signal-payload-dropped | basic-step-drift"
 echo "    each must leave the diff GREEN and turn its own section-3b verdict RED"
-[ "$FAIL" -eq 0 ]
+
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$WORKFLOWS_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $WORKFLOWS_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: a case that never started still" >&2
+  echo "      produces an empty row, and an empty row silences its pins rather than" >&2
+  echo "      failing them. If an assertion was removed deliberately, lower" >&2
+  echo "      WORKFLOWS_MIN_PASSED in the same change and say why." >&2
+  rc=1
+fi
+exit "$rc"

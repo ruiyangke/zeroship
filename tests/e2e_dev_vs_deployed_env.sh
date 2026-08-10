@@ -226,7 +226,42 @@ DEV_CODE="$(probe "http://localhost:$DEV_PORT" "$WORK/dev.json")"
 DEV_CHILD="$(pgrep -f "zeroship serve .*--port=$DEV_PORT" | head -1)"
 if [ -n "$DEV_CHILD" ] && [ -r "/proc/$DEV_CHILD/cmdline" ]; then
   pass "dev tier IS the CLI serve vector: $(tr '\0' ' ' < "/proc/$DEV_CHILD/cmdline")"
-  if tr '\0' '\n' < "/proc/$DEV_CHILD/environ" | grep -qF "$CANARY_KEY=$CANARY_VAL"; then
+  # NOT `tr ... | grep -q`, and the reason is a LATENT size-dependence rather
+  # than an observed failure -- stated that way round because the numbers below
+  # do not support the stronger claim this comment used to make.
+  #
+  # THE HAZARD. `grep -q` exits on the FIRST match. If `tr` is still writing at
+  # that moment it takes SIGPIPE (141), and `set -o pipefail` promotes 141 to the
+  # pipeline's status -- so the `if` takes the else arm EXACTLY WHEN THE CANARY IS
+  # PRESENT. But `tr` is only still writing if the data exceeds what the pipe
+  # buffer can absorb, so the inversion is CONDITIONAL ON INPUT SIZE.
+  #
+  # MEASURED 2026-08-10 on this machine, same pipeline, match at the FRONT, only
+  # the input size varying:
+  #     17 KB -> 0     52 KB -> 0     69 KB -> 0     134 KB -> 141  INVERTED
+  #     34 KB -> 0     63 KB -> 0     71 KB -> 0     538 KB -> 141  INVERTED
+  # Threshold is between 71 KB and 134 KB, consistent with a 64 KB pipe buffer
+  # plus tr's own buffering.
+  #
+  # AND THE REAL INPUTS ARE UNDER IT. `wc -c < /proc/PID/environ` on live
+  # processes of exactly the classes these two sites read: 50605, 50605, 50917,
+  # 49455 bytes. So this pipeline does NOT invert here today -- confirmed by
+  # running it: reverted to the pipeline form, the assertion below still reported
+  # the canary PRESENT. Roughly 1.5x of headroom, and this box has an unusually
+  # fat environment, so a leaner one has more.
+  #
+  # WHY REWRITE IT ANYWAY. A check whose correctness depends on staying under a
+  # buffer threshold is a trap that springs later: more secrets, more app vars, a
+  # CI image with a fatter env, and 50 KB walks toward 134 KB with nothing
+  # failing loudly on the way. Redirecting to a file removes the pipeline and the
+  # size-dependence with it, at no cost.
+  #
+  # NOT ESTABLISHED, and previously asserted here: that this precondition was
+  # ever observed red for this reason. That claim cited three consecutive runs; I
+  # could not reproduce it and the measurements above do not explain it. If those
+  # reds were real they had some other cause, which is still unexplained.
+  tr '\0' '\n' < "/proc/$DEV_CHILD/environ" > "$WORK/dev-child.environ" 2>/dev/null || true
+  if grep -qF "$CANARY_KEY=$CANARY_VAL" "$WORK/dev-child.environ"; then
     pass "the dev runtime child (pid $DEV_CHILD) HAS the canary in its process environment"
   else
     fail "the dev runtime child (pid $DEV_CHILD) does NOT have the canary -- the dev verdict below is unsafe"
@@ -315,7 +350,13 @@ echo "$dep" | grep -q "deploy_hash" && pass "deployed env-probe" \
 worker_pid="$(sed -n '2p' "$PIDFILE")"
 CANARY_IN_WORKER=0
 if [ -n "$worker_pid" ] && [ -r "/proc/$worker_pid/environ" ]; then
-  if tr '\0' '\n' < "/proc/$worker_pid/environ" | grep -qF "$CANARY_KEY=$CANARY_VAL"; then
+  # See the note on the dev-child check above: `tr ... | grep -q` under
+  # `set -o pipefail` reports FAILURE precisely when it matches, because grep -q
+  # exits early and tr dies of SIGPIPE. That made this precondition -- the one
+  # that decides whether every leak verdict below means anything -- unable to
+  # report success at all. No pipeline here.
+  tr '\0' '\n' < "/proc/$worker_pid/environ" > "$WORK/worker.environ" 2>/dev/null || true
+  if grep -qF "$CANARY_KEY=$CANARY_VAL" "$WORK/worker.environ"; then
     CANARY_IN_WORKER=1
     pass "PRECONDITION: the deployed worker (pid $worker_pid) HAS $CANARY_KEY=$CANARY_VAL in its own process environment -- there is something to leak"
   else
@@ -545,6 +586,76 @@ for (const s of ["processEnv","globalEnv","appEnv"]) {
 console.log(JSON.stringify(r,null,1).split("\n").map(l=>"  "+l).join("\n"));
 ' "$WORK/dev.json"
 
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran. That matters more here than in
+#     the sibling harnesses, because almost every verdict in this file is an
+#     ABSENCE ("the canary is ABSENT from this surface") and an absence is what
+#     an empty response also looks like. The preconditions and the positive
+#     control exist to separate those two; the floor is what notices when the
+#     preconditions themselves stop running. This repo has shipped three gates
+#     that passed over zero tests (#102/#103/#112).
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified:
+#
+#     env dev vs deployed: 40 passed, 0 failed, 0 leaks        (exit 0)
+#
+# (38/2 before the same day's fix to the two /proc preconditions, which could
+# never report success -- see the notes at those two call sites.)
+#
+# CROSS-CHECKED against a second, independent instrument: CALL SITES in the
+# source, with every loop multiplied out.
+#    1  CONTROL_KEY unset in this shell
+#    1  built app.zship
+#    3  the `for pair in CANARY_KEY CONTROL_KEY FIXTURE_MARKER` fixture-agreement loop
+#    1  envp.report is anon in the manifest
+#    1  dev app reachable
+#    1  dev tier IS the CLI serve vector
+#    1  the dev child HAS the canary
+#    7  tests/lib/e2e_stack.sh `_stk_ok` sites (PG, init.sql, migrations,
+#       control, worker, gateway, pat+jwt) -- these live in a SHARED library and
+#       are the reason a naive `grep -c 'pass "' ` on this file alone under-counts
+#    1  created app
+#    1  deployed app var
+#    2  the `for k in EXPOSED HIDDEN` stored-secret loop
+#    1  opted into the expose list
+#    1  deployed env-probe
+#    1  the /proc PRECONDITION
+#    1  gateway routes to the deployed app
+#    1  TRANSPORT CONTROL
+#    4  POSITIVE CONTROL, once per surface
+#    4  the secret opt-in gate, once per surface (appEnv takes the MERGE INTACT
+#       arm, the other three take OPT-IN GATE HOLDS -- different arms, always
+#       exactly four outcomes)
+#    1  EXPOSED HALF DELIVERS
+#    2  INSTRUMENT, once per tier
+#    4  the canary-ABSENT verdict, once per surface
+#   = 40. Dynamic and static agree, and they fail differently: the dynamic count
+#   moves when a tier stops answering, the static one when an assertion leaves
+#   the source.
+#
+# NO HEADROOM: the total is fixed by the source, not discovered at run time.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total at 40. Nothing here can see that; review can.
+ENV_MIN_PASSED="${ENV_MIN_PASSED:-40}"
+
 echo ""
-echo "  env dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed surfaces leaking a host variable"
-[ "$FAIL" -eq 0 ]
+echo "  env dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed surfaces leaking a host variable  (floor $ENV_MIN_PASSED)"
+
+# A MUTATION run is EXPECTED to fail (MUTATE=no-worker-canary must turn the
+# precondition red, MUTATE=deploy-canary must turn the leak verdicts red), so
+# the floor is what still has to hold there.
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$ENV_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $ENV_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident. Nearly every verdict here is an" >&2
+  echo "      ABSENCE, and an absence reads the same as a response that never came," >&2
+  echo "      so a shrinking count is the signal that the controls stopped running." >&2
+  echo "      If an assertion was removed deliberately, lower ENV_MIN_PASSED in the" >&2
+  echo "      same change and say why; do not treat the gap as slack." >&2
+  rc=1
+fi
+exit "$rc"
