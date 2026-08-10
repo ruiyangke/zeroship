@@ -105,3 +105,52 @@ fn an_unguarded_create_role_keeps_its_down() {
         .expect("an unguarded create owns its drop");
     assert!(down.contains("DROP ROLE"), "{down}");
 }
+
+// The guarded create-role pushes a SECOND statement for search_path, whose down
+// is `RESET`. RESET discards whatever search_path the role carried before this
+// migration, which is only an inverse if this migration created the role. Under
+// the guard it may not have, so no statement in the batch may claim a down.
+#[test]
+fn a_guarded_create_role_with_search_path_synthesises_no_down_at_all() {
+    let op = Op::CreateRole {
+        name: "app_reader".to_string(),
+        login: None,
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: None,
+        in_role: None,
+        set_search_path: Some(vec!["app".to_string()]),
+        if_not_exists: Some(true),
+    };
+    let stmts = render_vendor_op(&op, "app").expect("render");
+    assert!(stmts.len() >= 2, "expected the search_path statement too");
+    for s in &stmts {
+        assert!(
+            s.down.is_none(),
+            "{} must carry no down under the guard: {:?}",
+            s.name,
+            s.down
+        );
+    }
+}
+
+// Control: unguarded, the role really was created, so RESET is a true inverse.
+#[test]
+fn an_unguarded_create_role_with_search_path_keeps_both_downs() {
+    let op = Op::CreateRole {
+        name: "app_reader".to_string(),
+        login: None,
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: None,
+        in_role: None,
+        set_search_path: Some(vec!["app".to_string()]),
+        if_not_exists: None,
+    };
+    let stmts = render_vendor_op(&op, "app").expect("render");
+    assert!(stmts.iter().all(|s| s.down.is_some()), "both downs survive");
+}

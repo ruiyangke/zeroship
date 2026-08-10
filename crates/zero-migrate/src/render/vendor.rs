@@ -389,7 +389,14 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                             "ALTER ROLE {qname} SET search_path = {}",
                             search_path_list(sp)?
                         ),
-                        down: Some(format!("ALTER ROLE {qname} RESET search_path")),
+                        // RESET restores the prior search_path only if this migration made
+                        // the role. Under the guard it may have found one already
+                        // carrying a pinned path, and RESET would discard it.
+                        down: if if_not_exists.unwrap_or(false) {
+                            None
+                        } else {
+                            Some(format!("ALTER ROLE {qname} RESET search_path"))
+                        },
                     });
                 }
             }
