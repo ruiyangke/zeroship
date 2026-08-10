@@ -405,6 +405,11 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         // MySQL, where an unbounded `TEXT` cannot be a key. Typing them here (not
         // just at render) keeps every path — validate, both injection resolvers, the
         // collection/query renderer — consistent.
+        //
+        // The `text` arm in `render::declarative::mysql_ddl_type` maps an UNBOUNDED
+        // text column to `VARCHAR(191)` and never sees these columns: that function
+        // returns the declared length first, so a column already bounded at 255
+        // renders as `VARCHAR(255)`. The two mappings share a token, not a path.
         "text" => ColType::String { length: 255 },
         "timestamptz" | "timestamp with time zone" => ColType::Timestamp,
         "integer" | "int" => ColType::Int,
