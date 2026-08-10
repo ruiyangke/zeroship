@@ -460,11 +460,55 @@ else
   echo "  docs/pilot/e2e-scenarios.md before weakening anything above."
 fi
 
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran. The section-4 helpers are the
+#     specific hazard: `want`/`reject`/`band`/`idem` all read `drow "$label"`,
+#     so a label renamed on one side alone makes the row empty -- and `reject`
+#     PASSES on an empty row, because the string it forbids is indeed not there.
+#     A capture that went entirely missing would therefore turn some verdicts
+#     green rather than red. This repo has shipped three gates that passed over
+#     zero tests (#102/#103/#112).
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified against the compose Postgres on :5440 and an ephemeral Redis:
+#
+#     dev vs deployed: 44 passed, 0 failed        (exit 0)
+#
+# CROSS-CHECKED against a second, independent instrument: counting CALL SITES in
+# the source rather than outcomes in the run. 7 top-level `pass` sites before
+# section 4 (.zship built, auth postures, dev probe, Redis ready, three services
+# healthy, deployed, deployed probe) + 1 section-4 CONTROL + 35 unconditional
+# `want`/`reject`/`band`/`idem` invocations at column 0 + 1 section-5 diff = 44.
+# The two agree, and they fail differently: the dynamic count moves when a tier
+# stops answering, the static one when an assertion leaves the file.
+#
+# NO HEADROOM, deliberately -- the total is fixed by the source, not discovered
+# at run time, so adding an assertion passes untouched and removing one costs a
+# deliberate edit here.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total at 44. Nothing here can see that; review can.
+KV_MIN_PASSED="${KV_MIN_PASSED:-44}"
+
 echo ""
-echo "  dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $KV_MIN_PASSED)"
 echo "  MUTATIONS: MUTATE=rate-never-limits | cache-recompute | ttl-clamped | delete-noop"
 echo "  each must leave section 5 GREEN and turn its own section-4 verdicts RED"
 echo ""
 echo "  --- raw deployed bodies (verbatim) ---"
 cut -c1-220 "$WORK/deployed.raw" | sed 's/^/  /'
-[ "$FAIL" -eq 0 ]
+
+# A MUTATION run is EXPECTED to fail section-4 verdicts, so the floor is what
+# still has to hold there: a mutation should flip verdicts, not remove them.
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$KV_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $KV_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: either the deployed capture lost" >&2
+  echo '      rows (in which case reject verdicts are passing on EMPTY rows and mean' >&2
+  echo "      nothing) or an assertion was removed. If the removal was deliberate," >&2
+  echo "      lower KV_MIN_PASSED in the same change and say why." >&2
+  rc=1
+fi
+exit "$rc"

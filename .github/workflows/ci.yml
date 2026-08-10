@@ -679,3 +679,238 @@ jobs:
             tail -60 "$f"
             echo "::endgroup::"
           done
+
+  # The dev-vs-deployed family: run ONE identical operation sequence against
+  # `pnpm dev` and against the same app deployed behind the gateway, then diff
+  # the RESULTS. These are the only tests in the repo that can see a SEAM -
+  # every crate suite drives one side and is blind by construction to "both
+  # tiers answer, and they answer differently".
+  #
+  # FOUR of the nine are wired here. The other five are NOT, and they are held
+  # back for three DIFFERENT reasons, which is worth keeping straight:
+  #
+  #   auth   RED on a real finding - 20 of 48 probed rows diverge (2026-08-10).
+  #   login  RED on a real finding - 11 of 15 rows diverge: dev accepts a
+  #          replayed session after signout, skips the X-ZS-Auth and Origin
+  #          checks, and returns `scopes` the deployed tier omits.
+  #   db     NOT a finding at all - it never gets far enough to compare. It
+  #          aborts in setup: `dev did not apply migrations` -> `dev server never
+  #          answered` -> `SEED FAILED, probe aborted`, with no summary line.
+  #          ee2c352aa removed the boot-time schema apply from the dev server and
+  #          split it into a separate `zeroship-dev-migrate` step, and updated no
+  #          harness (`grep -rl zeroship-dev-migrate tests/` finds nothing). So
+  #          `pnpm dev` no longer creates the schema and the harness never runs
+  #          the step that now does. That is a stale harness, tracked as #262 -
+  #          NOT a dev-vs-deployed disagreement, and it must not be read as one.
+  #
+  #   storage    GREEN when idle, RED under host load, deterministically.
+  #   workflows  same, with three different timing failures. Both are documented
+  #              at the point where their steps would otherwise sit, below.
+  #
+  # Wiring auth or login would mean weakening an assertion to match; they go
+  # green by FIXING the divergence. db goes green by teaching the harness the
+  # new dev-migration contract. storage and workflows go green by sizing their
+  # CPU and readiness budgets for a loaded host.
+  #
+  # WHY LOAD IS A WIRING CRITERION AT ALL, and not fussiness: a GitHub-hosted
+  # runner is 2-4 shared vCPUs, so "green on an idle 16-core workstation" is not
+  # the question CI asks. Each candidate was therefore run twice: idle, and
+  # against 12 busy cores. The four wired below held green in BOTH; the two
+  # above went red only in the second. That is a discriminating test rather than
+  # a stress test - it separates a harness that measures the product from one
+  # that measures the host it ran on.
+  #
+  # The four wired here are unaffected by ee2c352aa, checked rather than assumed:
+  # none of the fixture apps (stream-probe, kv-dashboard, error-probe, env-probe)
+  # has a `migrations/` directory or a single `env.db` reference, so there is no
+  # dev schema for the removed step to have created.
+  # Checked the other way too, because "no migrations" is an argument and a
+  # deleted directory is evidence: every app's `.zeroship` state directory was
+  # moved aside and all of them re-run from nothing. Same counts for these four.
+  # So none of the four is green on state left behind by an earlier run - which
+  # is the specific false green that motivated looking.
+  #
+  # ONE JOB, SEQUENTIAL STEPS, not six jobs. The prerequisite - `pnpm build`
+  # plus two cargo release builds - is the expensive part, and Swatinem's cache
+  # is keyed per job, so six jobs would each pay a cold Rust build. A red tick
+  # still names the failing step. The cost is that a failure stops the steps
+  # after it; that is the trade taken, and re-running reports the next one.
+  dev-vs-deployed:
+    runs-on: ubuntu-latest
+    # A bound for the same reason golden-path carries one: a service that never
+    # binds, or a `pnpm build` that stalls, hangs rather than fails and would
+    # otherwise burn the 6h default. The four harnesses measured 39s, 38s, 39s
+    # and 30s locally; with a cold Rust build that sits far inside 90 minutes,
+    # and the margin is deliberate because a 2-vCPU runner is much slower than
+    # the box those numbers came from.
+    #
+    # NOT a retry, deliberately. A flaky step is a defect to diagnose; re-running
+    # until green is how a real intermittent failure becomes invisible.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      # lsof only, and the omissions are deliberate rather than an oversight.
+      # Every one of these six frees its ports with `lsof -ti :$PORT`; without it
+      # each such call returns empty and a stale listener survives into the run.
+      # NOT postgresql-client: unlike golden_path.sh, every psql call in this
+      # family goes through `docker exec <container> psql`, which uses the
+      # client inside the image. NOT zstd: nothing here unpacks a .zship.
+      - name: Install harness prerequisites
+        run: sudo apt-get update && sudo apt-get install -y lsof
+      # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
+      # container NAME is the reason: stream/kv/storage/workflows create and drop
+      # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
+      # (default `compose-postgres-1`, matching the dev compose stack). GitHub
+      # generates the name of a `services:` container, so `docker exec` by name
+      # cannot reach it. Same reasoning as golden-path and billing-gate.
+      #
+      # errors and env do NOT use this one - they call stack_pg_up, which starts
+      # its OWN postgres:16 container on its own port per harness. That is why
+      # they need docker but not this step.
+      - name: Start Postgres
+        run: |
+          docker run -d --name compose-postgres-1 -p 5440:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
+            postgres:17
+          for i in $(seq 1 40); do
+            if docker exec compose-postgres-1 pg_isready -U postgres; then exit 0; fi
+            sleep 3
+          done
+          echo "postgres failed to become ready" >&2; docker logs compose-postgres-1; exit 1
+      - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/ and the vite-plugin imports it, so it
+      # has to be built before the SDKs. Same ordering as the `sdk` job.
+      - run: pnpm --filter zero-migrate build
+      # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
+      # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      - run: pnpm build
+      # dev-provision (from -p zeroship-control --bins) is what stream/kv/storage/
+      # workflows deploy with; `-p zeroship` produces the binary `pnpm dev` runs
+      # as the dev tier on every one of the six.
+      - name: Build the release binaries the harnesses start
+        run: |
+          cargo build --release -p zeroship-control -p zeroship-worker \
+            -p zeroship-gateway -p zeroship --bins
+          cargo build --release -p zeroship-migrate-adapter \
+            --features platform-cli --bin zeroship-platform-migrate
+      # ZS_FRESHNESS_STRICT=1 addresses the hazard tests/lib/binary_freshness.sh
+      # describes: the dev tier runs `target/release/zeroship` and the deployed
+      # tier runs the three server binaries, so a partial rebuild leaves the two
+      # sides at different commits and the harness reports the VERSION SKEW as a
+      # dev-vs-deployed divergence. That has already cost a full debugging cycle
+      # once (a worker predating a list-shape change produced an error that read
+      # exactly like an S3 defect).
+      #
+      # BE PRECISE ABOUT WHAT THIS FLAG CURRENTLY BUYS, because the obvious
+      # reading is wrong. `zs_check_binary_freshness` returns 1 for "stale AND
+      # strict" and 2 for "cannot answer", and all six of these harnesses call it
+      # as `|| { [ "$?" -eq 2 ] && exit 2; }` - which acts on 2 and DISCARDS 1.
+      # So in this family the flag makes the check WARN LOUDLY; it does not make
+      # it refuse. Verified by running the caller pattern directly: a callee
+      # returning 1 leaves the script running, one returning 2 exits 2. The
+      # library function is right and its own selftest asserts rc==1; the six
+      # callers drop it. Setting the variable is still correct - it is what makes
+      # the warning appear at all, and it is what the refusal arm will read once
+      # wired - but do not read a green run here as proof the binaries matched.
+      # (golden-path is different: golden_path.sh has its own inline dist check
+      # that really does `exit 1` under this flag.)
+      #
+      # `set -o pipefail` before each tee: GitHub's default shell is `bash -e`
+      # WITHOUT pipefail, so `script | tee` reports tee's status - 0 whenever tee
+      # could write - and a failing harness would sail through as a pass.
+      #
+      # Each harness carries its own anti-hollow-gate floor (a MEASURED minimum
+      # passed-assertion count, cross-checked against an independent static count
+      # of the call sites in its source) and exits non-zero if the floor is
+      # breached, so a run that asserted nothing cannot report as a pass. The
+      # derivation is written out at the bottom of each script.
+      - name: Streaming (SSE chunk boundaries survive the gateway)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_vs_deployed_stream.sh 2>&1 | tee "$RUNNER_TEMP/dvd-stream.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+          PG_CONTAINER: compose-postgres-1
+          PG_USER: postgres
+      - name: env.kv (redb dev vs Redis deployed)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_vs_deployed_kv.sh 2>&1 | tee "$RUNNER_TEMP/dvd-kv.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+          PG_CONTAINER: compose-postgres-1
+          PG_USER: postgres
+      # tests/e2e_dev_vs_deployed_storage.sh IS NOT WIRED HERE, and the reason is
+      # a measurement rather than a suspicion. It carries a floor of 53 and scores
+      # 54/0 on an idle machine - but its deployed 1 MiB chunked streamGet dies on
+      # the worker's per-request CPU budget as soon as the host is contended:
+      #
+      #   idle machine     6 runs, 6 green   (54 passed, 0 failed)
+      #   12 busy cores    2 runs, 2 RED     (48 passed, 6 failed), every time
+      #                    `streamGet {"message":"CPU time limit exceeded"}`
+      #
+      # Same signature both times, so this is a deterministic sensitivity to host
+      # load, not a random flake. A GitHub-hosted runner is 2-4 shared vCPUs, so
+      # wiring it would produce a red that is about the runner rather than about
+      # the product - and the honest fix is neither a retry (this repo's stance:
+      # a flaky step is a defect to diagnose) nor a lowered floor. Two things are
+      # worth separating for whoever picks this up: the harness may be asking for
+      # more CPU than a 1 MiB read should need, AND a real creator streaming a
+      # 1 MiB object off a busy node gets a 500, which is a platform question in
+      # its own right. Wire it once that is settled.
+      # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
+      # same measured reason as storage and with a messier signature:
+      #
+      #   idle machine     3 runs, 3 green   (44 passed, 0 failed)
+      #   12 busy cores    3 runs, 3 RED, and a DIFFERENT failure each time -
+      #                    "dev server never answered" (the runtime missed the
+      #                    25 x 2s readiness window), then `sleep` answering
+      #                    `internal error` with the diff going red behind it,
+      #                    then "platform migrations failed" before anything ran
+      #
+      # Three modes, one cause: every one is a timing budget, and under contention
+      # a different one loses first. That is worse for CI than storage's single
+      # deterministic failure, because each mode reads like a different product
+      # bug. Not wired until the budgets are sized for a loaded host.
+      # Asserts ABSOLUTELY on the deployed body, not only relatively: production
+      # shipped Error.stack to anonymous callers for weeks while the auth harness
+      # stayed green, because dev leaked the same stack and the diff was empty.
+      # PG_CONTAINER is deliberately NOT set - this one starts its own.
+      - name: Error envelopes (does production leak Error.stack?)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_vs_deployed_errors.sh 2>&1 | tee "$RUNNER_TEMP/dvd-errors.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+      # Same: starts its own Postgres. Asserts that a variable present in the
+      # shell that launched the server, and never deployed, cannot be read by app
+      # code - having first PROVEN off /proc that the variable was in the live
+      # worker's environment to be leaked.
+      - name: Environment surface (host vars must not reach app code)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_vs_deployed_env.sh 2>&1 | tee "$RUNNER_TEMP/dvd-env.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+      # The service logs these harnesses leave behind are where a failure is
+      # actually diagnosable; without them a red run reports only which assertion
+      # went red. They live in per-run mktemp dirs that the harness deletes on
+      # exit, so what survives is the tee'd transcript - which carries the raw
+      # deployed bodies each script prints on the way out.
+      - name: Harness transcripts
+        if: failure()
+        run: |
+          for f in "$RUNNER_TEMP"/dvd-*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            tail -120 "$f"
+            echo "::endgroup::"
+          done

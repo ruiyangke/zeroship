@@ -289,7 +289,29 @@ pass "deployed error-probe ($APP_ID)"
 # set this var -- assert that rather than assume it, by reading the live process.
 worker_pid="$(sed -n '2p' "$PIDFILE")"
 if [ -n "$worker_pid" ] && [ -r "/proc/$worker_pid/environ" ]; then
-  if tr '\0' '\n' < "/proc/$worker_pid/environ" | grep -q '^AUTH_INSECURE_DEV='; then
+  # NOT `tr ... | grep -q`, for a LATENT size-dependence rather than an observed
+  # failure. See the long note at the same site in e2e_dev_vs_deployed_env.sh for
+  # the measurements; the short form:
+  #
+  # `grep -q` exits on the FIRST match. If `tr` is still writing then, it takes
+  # SIGPIPE (141) and `set -o pipefail` promotes 141 to the pipeline's status --
+  # so the `if` takes the else arm EXACTLY WHEN THE VALUE IS PRESENT. But `tr` is
+  # only still writing when the data exceeds what the pipe buffer absorbs, so the
+  # inversion is CONDITIONAL ON INPUT SIZE. Measured 2026-08-10: it appears
+  # between 71 KB and 134 KB, while real `/proc/PID/environ` on the processes
+  # this site reads is ~50 KB (50605 / 50917 / 49455 bytes measured). So it does
+  # not fire here today; the margin is about 1.5x, and more app vars or a fatter
+  # CI image eat it with nothing failing loudly on the way. Removing the pipeline
+  # removes the size-dependence at no cost, which is the whole reason to do it.
+  #
+  # NOT ESTABLISHED, and asserted here before: that this check was ever OBSERVED
+  # reporting a worker clean while AUTH_INSECURE_DEV was set. That claim cited a
+  # positive control I could not reproduce, and the sizes above do not explain
+  # it. If it was real it had another cause, still unexplained -- which matters,
+  # because this assertion is the one standing between a dev-only escape hatch
+  # and the deployed tier.
+  tr '\0' '\n' < "/proc/$worker_pid/environ" > "$WORK/worker.environ" 2>/dev/null || true
+  if grep -q '^AUTH_INSECURE_DEV=' "$WORK/worker.environ"; then
     fail "the DEPLOYED worker (pid $worker_pid) has AUTH_INSECURE_DEV set -- it is not running the production rail"
   else
     pass "deployed worker (pid $worker_pid) has NO AUTH_INSECURE_DEV (production rail confirmed on the live process)"
@@ -392,6 +414,48 @@ sed 's/^/  /' "$WORK/deployed.raw"
 echo "  --- raw dev bodies (verbatim, stacks truncated to 200 chars) ---"
 cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran. The hazard is sharp here: the
+#     headline verdict is "the deployed body ships NO stack", which an EMPTY
+#     body satisfies perfectly. `err.ok` is the control for that on one row; the
+#     floor is the control for the run as a whole. This repo has shipped three
+#     gates that passed over zero tests (#102/#103/#112).
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified:
+#
+#     errors dev vs deployed: 24 passed, 0 failed, 0 leaks        (exit 0)
+#
+# CROSS-CHECKED against a second, independent instrument: CALL SITES in the
+# source, with loops multiplied out. 12 unconditional top-level `pass` sites
+# (AUTH_INSECURE_DEV unset here, .zship built, leak marker matches the fixture,
+# all 5 procedures anon, dev reachable, dev probe, dev-vs-dev self-diff empty,
+# deployed, the live-process rail check, gateway routes, deployed probe, the
+# err.ok CONTROL) + 4 from the `for p in err.plain err.status4xx
+# err.status4xxCode err.publicCode5xx` no-stack loop + 1 section-5 diff = 17,
+# PLUS the 7 `_stk_ok` sites in the SHARED tests/lib/e2e_stack.sh (PG, init.sql,
+# migrations, control, worker, gateway, pat+jwt), which increment the same
+# counter and are why counting `pass "` in this file alone under-counts by
+# exactly 7. 17 + 7 = 24. Dynamic and static agree, and they fail differently.
+#
+# NO HEADROOM: the total is fixed by the source, not discovered at run time.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
+# easier one keeps the total at 24. Nothing here can see that; review can.
+ERRORS_MIN_PASSED="${ERRORS_MIN_PASSED:-24}"
+
 echo ""
-echo "  errors dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed rows leaking a stack"
-[ "$FAIL" -eq 0 ]
+echo "  errors dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed rows leaking a stack  (floor $ERRORS_MIN_PASSED)"
+
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$ERRORS_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $ERRORS_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident, and 'no stack in the body' is a" >&2
+  echo "      verdict an EMPTY body also satisfies -- so a shrinking count is exactly" >&2
+  echo "      the shape a silently-broken run takes here. If an assertion was removed" >&2
+  echo "      deliberately, lower ERRORS_MIN_PASSED in the same change and say why." >&2
+  rc=1
+fi
+exit "$rc"

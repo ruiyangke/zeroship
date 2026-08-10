@@ -315,11 +315,58 @@ sed 's/^/  /' "$WORK/deployed.txt"
 echo "  --- deployed response headers ---"
 tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 
+# --- The floor: a MEASURED minimum, and the guard against a green run over ---
+#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
+#     assertion passed and when NO assertion ran -- a stack that never came up,
+#     a `drive` that wrote an empty file, a rename that stopped `judge` being
+#     called. This repo has shipped three gates that passed over zero tests
+#     (#102/#103/#112); a job that cannot fail is worse than no job.
+#
+# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
+# unmodified against the compose Postgres on :5440:
+#
+#     streaming: 24 passed, 0 failed        (exit 0)
+#
+# CROSS-CHECKED against a second, independent instrument, because a count read
+# out of the run it is meant to guard proves only that the run was self-
+# consistent. Counting `ok "` CALL SITES in this file and multiplying by the
+# number of times each function is invoked: judge() 3, frames() 3, headers() 3,
+# each called once per tier = (3+3+3) x 2 = 18, plus 6 top-level setup sites
+# (built .zship, 2 server functions, dev reachable, stack healthy, deployed
+# stream-probe, deployed reachable) = 24. The dynamic 24 and the static 24
+# agree, and they disagree for different reasons if either is wrong: the
+# dynamic one moves when a tier stops answering, the static one when an
+# assertion is deleted from the source.
+#
+# NO HEADROOM, deliberately. This total is not DISCOVERED (unlike a cargo run,
+# where feature resolution and host capabilities move the count); it is the
+# number of ok()/no() sites this file reaches, fixed by the source. Adding an
+# assertion passes untouched (25 >= 24); removing one costs a deliberate edit
+# here. That asymmetry is the whole point.
+#
+# WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
+# an easier one keeps the total at 24. Nothing here can see that; review can.
+STREAM_MIN_PASSED="${STREAM_MIN_PASSED:-24}"
+
 echo ""
-echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE)"
+echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $STREAM_MIN_PASSED)"
 echo "  MUTATION: re-run with MUTATE_BUFFERED=1 to drop curl -N; both sides must then FAIL"
 echo "  MUTATIONS (wire format): MUTATE=no-terminator | no-sse-ctype -- each edits"
 echo "    sdks/bootstrap/src/fetch-handler.ts; the DEPLOYED side carries the defect"
 echo "    and exactly the named verdict must go RED while the tick/timing rows stay"
 echo "    green (dev keeps its prebuilt dev-bootstrap.js -- see the header note)"
-[ "$FAIL" -eq 0 ]
+
+# A MUTATION run is EXPECTED to fail assertions, so the floor is the only thing
+# that still has to hold there: the point of MUTATE_BUFFERED=1 is that the
+# timing rows go red, not that fewer rows run.
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$PASS" -lt "$STREAM_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $STREAM_MIN_PASSED this gate expects." >&2
+  echo "      Assertions do not vanish by accident: either a tier stopped being probed" >&2
+  echo "      (judge/frames/headers are each called once per side) or one was removed." >&2
+  echo "      If the removal was deliberate, lower STREAM_MIN_PASSED in the same change" >&2
+  echo "      and say why; do not treat the gap as slack." >&2
+  rc=1
+fi
+exit "$rc"
