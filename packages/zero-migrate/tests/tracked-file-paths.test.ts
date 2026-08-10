@@ -55,8 +55,25 @@ const SCANNED = /\.(rs|ts|tsx|mts|js|mjs|cjs|json|toml|yml|yaml|nix|sh)$/;
 
 /** A home directory on Linux or macOS, followed by a user component. `/home/` alone
  *  would reject the string "/home/" appearing as a prefix constant; requiring the user
- *  segment is what makes it a real path rather than a mount point. */
+ *  segment is what makes it a real path rather than a mount point. The trailing slash
+ *  is load-bearing for a second reason: a test asserting that a leak does NOT happen
+ *  may hold a deliberately fake `"/home/leak"`, which is not a path into anyone's home. */
 const HOME_PATH = /(?:\/home\/|\/Users\/)[A-Za-z0-9._-]+\//;
+
+/** `http`/`https` only, and the exclusion of `file:` is the whole point. `home` is an
+ *  ordinary path segment on the web - a URL like `apple.com/v/iphone/home/<id>/images`
+ *  carries a `/home/<segment>/` run that is not a home directory - so a web URL must be
+ *  removed from the line before the match. (Spelled with a placeholder here on purpose:
+ *  a real example inside this comment is itself a hit, which is how this line was first
+ *  written and how the gate caught its own documentation.) A `file:` URL is the opposite
+ *  case - `file:` followed by `///home/<user>/...` IS a machine-specific path
+ *  IS a machine-specific path, and it is the exact shape that prompted this gate, so
+ *  stripping it would blind the gate to its own founding instance.
+ *
+ *  Order matters. Stripping runs BEFORE the match, never as a filter after it: a line
+ *  carrying both a web URL and a real home path must still be reported, and a
+ *  match-then-discard pass would drop it. */
+const WEB_URL = /\bhttps?:\/\/\S+/g;
 
 /** The floor exists because this gate's failure mode is a FALSE GREEN: a scan that
  *  enumerates nothing and a scan that enumerates everything and finds nothing are
@@ -86,7 +103,7 @@ test("no tracked source or config file hardcodes a home directory", () => {
   for (const relative of scanned) {
     const text = readFileSync(join(repoRoot, relative), "utf8");
     for (const [index, line] of text.split("\n").entries()) {
-      const hit = HOME_PATH.exec(line);
+      const hit = HOME_PATH.exec(line.replace(WEB_URL, ""));
       if (hit) offenders.push(`${relative}:${index + 1}: ${hit[0]}`);
     }
   }
