@@ -101,10 +101,18 @@ pub struct ErrorExtras<'a> {
 /// Build the JSON body for an error response.
 ///
 /// Always emitted: `message`, `name`. Optionally appended in this order:
-/// `stack`, `code`, `details`, `retryable`. The wire shape matches the
-/// JS-side `errorResponse()` in `init.rs::BOOTSTRAP_JS` so a procedure
-/// throw produces the same body whether the kernel's RPC fast path
-/// caught the exception or the slow path's JS handler did.
+/// `stack`, `code`, `details`, `retryable`.
+///
+/// The FIELD SET matches the JS-side `errorResponse()` in
+/// `init.rs::BOOTSTRAP_JS`. The BEHAVIOUR does not, and this comment used to
+/// say it did — "so a procedure throw produces the same body whether the
+/// kernel's RPC fast path caught the exception or the slow path's JS handler
+/// did". That is false at 5xx and the difference is the whole point of this
+/// function: `errorResponse` has no sanitization rail at all, so it forwards
+/// `err.message` verbatim at any status. It is reachable only from
+/// `fallbackFetch`'s `user.index()` catch, not from the RPC path — see the
+/// ticket for the exposure. Do not restore the equivalence claim; if the two
+/// are ever made to agree, say which one moved.
 ///
 /// Two independent rails, both client-visible boundaries:
 ///
