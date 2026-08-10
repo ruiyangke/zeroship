@@ -30,6 +30,18 @@
 //! by different means - this test pins what the ENGINE emits, and the table above
 //! records what the SERVER does with that shape. Neither half is inferred.
 //!
+//! What makes this a defect rather than a test artifact: the VALIDATOR ADMITS this
+//! shape. MEASURED BY ME by calling `validate_ir` directly on the same op -
+//! `Dialect::Mysql` returns `Ok`, as does `Dialect::Postgres`. So nothing upstream
+//! refuses it and the renderer's output is what a caller gets.
+//!
+//! The contrast that proves the validator is not simply absent here: the same probe
+//! on a TEXT column carrying a plain literal default returns, for MySQL only,
+//! "column \"label\" declares the literal default 'plain' but renders as MySQL TEXT
+//! storage; MySQL refuses a literal DEFAULT on TEXT, BLOB, JSON, and GEOMETRY
+//! columns". So the engine DOES gate MySQL default legality - it just does not gate
+//! this shape.
+//!
 //! This is a pin on a known defect, not an endorsement. It is written to fail once
 //! the renderer learns to wrap, which is the fix it is waiting for.
 //!
