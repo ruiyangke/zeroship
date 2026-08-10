@@ -137,11 +137,43 @@ fi
 echo "=== 5. RPC round-trip (server function executes) ==="
 RPC=$(curl -s "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
   -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
-if echo "$RPC" | grep -q "Build locally"; then
-  pass "getMessages RPC executed in the worker and returned the seeded messages"
+# Assert the SHAPE, not one substring. `grep -q "Build locally"` passed on any
+# response that happened to contain that text -- an error envelope quoting the
+# seed data, a truncated array, a single message, an object instead of a list.
+# The dev-vs-deployed comparison below is structural, but it is RELATIVE: it
+# cannot see a defect both tiers share. This is the absolute half, and it is the
+# only assertion here that pins what the deployed worker actually returned.
+#
+# examples/starter/src/server.ts seeds exactly two messages, ids 1 and 2, each
+# with a numeric createdAt. Asserting the count is what catches a partial
+# result; asserting createdAt is a number is what catches the field arriving as
+# a string through a serialiser change.
+rpc_shape() {
+  node -e '
+const raw = process.argv[1];
+let v;
+try { v = JSON.parse(raw); } catch { console.log("not JSON"); process.exit(0); }
+if (v && !Array.isArray(v) && v.json !== undefined) v = v.json;
+if (!Array.isArray(v)) { console.log("not an array"); process.exit(0); }
+if (v.length !== 2) { console.log(`expected 2 messages, got ${v.length}`); process.exit(0); }
+const ids = v.map((m) => m && m.id).join(",");
+if (ids !== "1,2") { console.log(`expected ids 1,2 got ${ids}`); process.exit(0); }
+if (!v.every((m) => typeof m.text === "string" && m.text.length > 0)) {
+  console.log("a message has no text"); process.exit(0);
+}
+if (!v.every((m) => typeof m.createdAt === "number")) {
+  console.log("createdAt is not a number on every message"); process.exit(0);
+}
+if (!v[0].text.includes("Build locally")) { console.log("seed text missing"); process.exit(0); }
+console.log("ok");
+' "$1"
+}
+shape=$(rpc_shape "$RPC")
+if [ "$shape" = "ok" ]; then
+  pass "getMessages returned the 2 seeded messages, ids 1,2, with numeric createdAt"
 else
   echo "  RPC response: ${RPC:0:200}"
-  fail "RPC round-trip (getMessages did not return the expected data)"
+  fail "RPC round-trip: $shape"
 fi
 
 # --- 6. The DEV half of the golden path, and it must agree with deployed ---
