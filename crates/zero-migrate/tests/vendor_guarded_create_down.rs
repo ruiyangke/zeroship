@@ -57,3 +57,51 @@ fn an_unguarded_create_schema_keeps_its_down() {
         .expect("an unguarded create owns its drop");
     assert!(down.contains("DROP SCHEMA"), "{down}");
 }
+
+// A role is CLUSTER-wide: not scoped to the schema, not even to the database. A
+// guarded create-role against an existing role makes nothing, so a DROP ROLE down
+// would remove a principal other databases depend on, cascading through every
+// grant and ownership it holds. Same reasoning as the schema arm, wider blast.
+#[test]
+fn a_guarded_create_role_synthesises_no_down() {
+    let op = Op::CreateRole {
+        name: "app_reader".to_string(),
+        login: None,
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: None,
+        in_role: None,
+        set_search_path: None,
+        if_not_exists: Some(true),
+    };
+    let stmts = render_vendor_op(&op, "app").expect("render");
+    assert!(
+        stmts[0].down.is_none(),
+        "a guarded create-role may have created nothing: {:?}",
+        stmts[0].down
+    );
+}
+
+#[test]
+fn an_unguarded_create_role_keeps_its_down() {
+    let op = Op::CreateRole {
+        name: "app_reader".to_string(),
+        login: None,
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: None,
+        in_role: None,
+        set_search_path: None,
+        if_not_exists: None,
+    };
+    let stmts = render_vendor_op(&op, "app").expect("render");
+    let down = stmts[0]
+        .down
+        .as_deref()
+        .expect("an unguarded create owns its drop");
+    assert!(down.contains("DROP ROLE"), "{down}");
+}

@@ -371,7 +371,14 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             let mut out = vec![VendorStatement {
                 name: format!("create_role_{name}"),
                 up: up_create,
-                down: Some(format!("DROP ROLE IF EXISTS {qname}")),
+                // A role is cluster-wide, so dropping one this migration may not have
+                // created reaches outside the project entirely. The probe above means
+                // the up can be a no-op, and the engine cannot tell which happened.
+                down: if if_not_exists.unwrap_or(false) {
+                    None
+                } else {
+                    Some(format!("DROP ROLE IF EXISTS {qname}"))
+                },
             }];
             // The `ALTER ROLE … SET search_path` the platform needs (×17, 0025).
             if let Some(sp) = set_search_path {
