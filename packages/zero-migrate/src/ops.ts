@@ -350,8 +350,6 @@ interface Recorder {
   nextSelectorId: number;
 }
 
-type RecorderPhase = "up" | "down";
-
 let active: Recorder | null = null;
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
@@ -361,8 +359,8 @@ function structuredError(code: string, message: string, extra?: Record<string, u
   return err;
 }
 
-/** Begin a fresh recording buffer (the build evaluator calls this before a phase). */
-export function __begin(_phase: RecorderPhase = "up"): void {
+/** Begin a fresh recording buffer (the build evaluator calls this before `up()`). */
+export function __begin(): void {
   active = {
     ops: [],
     pending: new Map(),
@@ -407,8 +405,8 @@ function recorder(): Recorder {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "migration operations may only be authored synchronously inside up()/down()",
-      { suggested_fix: "move the operation call inside the migration's up()/down() body" },
+      "migration operations may only be authored synchronously inside up()",
+      { suggested_fix: "move the operation call inside the migration's up() body" },
     );
   }
   return active;

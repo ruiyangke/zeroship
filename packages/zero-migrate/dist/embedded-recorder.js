@@ -108,7 +108,7 @@ function structuredError(code, message, extra) {
   if (extra) Object.assign(err, extra);
   return err;
 }
-function __begin(_phase = "up") {
+function __begin() {
   active = {
     ops: [],
     pending: /* @__PURE__ */ new Map(),
@@ -138,8 +138,8 @@ function recorder() {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "migration operations may only be authored synchronously inside up()/down()",
-      { suggested_fix: "move the operation call inside the migration's up()/down() body" }
+      "migration operations may only be authored synchronously inside up()",
+      { suggested_fix: "move the operation call inside the migration's up() body" }
     );
   }
   return active;

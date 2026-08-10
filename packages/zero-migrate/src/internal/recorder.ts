@@ -41,7 +41,12 @@ export interface IrEnvelope {
 }
 
 /** The two accepted migration-module shapes (mirrors the deploy contract's
- *  discovery order). */
+ *  discovery order).
+ *
+ *  `down` is declared here but absent from the public `Migration` type on
+ *  purpose: this is the shape of what a module MAY arrive carrying, not of what
+ *  may be authored. Dropping it would make the refusal below unable to see the
+ *  thing it refuses. */
 export interface MigrationModule {
   up?: () => void;
   down?: () => void;
@@ -69,6 +74,31 @@ function resolveUp(mod: MigrationModule): () => unknown {
 }
 
 /**
+ * Refuse a migration that authors its own `down()`. The recorder drains a single
+ * op list and {@link IrEnvelope} carries no rollback slot, so an authored body is
+ * dropped on the floor while rollback runs the engine's synthesised inverse. That
+ * is a different rollback from the one written on the page, and nothing downstream
+ * can tell the two apart -- refusing at authoring time is the only point where the
+ * author is still there to be told.
+ */
+function refuseAuthoredDown(mod: MigrationModule): void {
+  const def = mod && mod.default;
+  const authored =
+    typeof mod.down === "function" ||
+    (def && typeof def === "object" && typeof def.down === "function");
+  if (!authored) return;
+  const error = new Error(
+    "migration authors a down() function, which the recorder does not capture; " +
+      "rollback runs the engine's synthesised inverse, so the authored body would " +
+      "never execute",
+  ) as Error & { code: string; suggested_fix: string };
+  error.code = "AUTHORED_DOWN_UNSUPPORTED";
+  error.suggested_fix =
+    "remove down() and let rollback synthesise the inverse from the recorded ops";
+  throw error;
+}
+
+/**
  * Resolve the migration name: explicit `name` export → `default.name` → the
  * caller-supplied fallback (typically a filename-derived label).
  */
@@ -91,7 +121,7 @@ export function resolveMigrationName(mod: MigrationModule, fallback: string): st
  * facade/oracle imports the migration through the same resolution as this module.
  */
 function recordUp(up: () => unknown): unknown[] {
-  __begin("up");
+  __begin();
   try {
     const result = up();
     if (
@@ -134,14 +164,16 @@ export interface BuildEnvelopeOptions {
  * `owner_app` or fold a checksum — the addon does both in Rust.
  *
  * @throws structured recorder errors (`OP_OUTSIDE_RECORDER`,
- *         `SELECTOR_NOT_TERMINATED`, `ASYNC_UP_UNSUPPORTED`) verbatim, and a
- *         plain `Error` for a missing `up()`.
+ *         `SELECTOR_NOT_TERMINATED`, `ASYNC_UP_UNSUPPORTED`,
+ *         `AUTHORED_DOWN_UNSUPPORTED`) verbatim, and a plain `Error` for a
+ *         missing `up()`.
  */
 export function buildEnvelope(
   mod: MigrationModule,
   opts: BuildEnvelopeOptions,
 ): IrEnvelope {
   const up = resolveUp(mod);
+  refuseAuthoredDown(mod);
   const ops = recordUp(up);
   return {
     ir_version: opts.irVersion,

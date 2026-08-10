@@ -3,8 +3,10 @@
 // `2026-06-25-op-dsl-fluent-redesign.md`).
 //
 // A migration is a `.ts` module that imports `{ table, t }`, and exports a single
-// `default { up, down? }` object whose parameterless `up()`/`down()` author
-// against the ambient per-migration recorder via `table()`. Names are plain
+// `default { up }` object whose parameterless `up()` authors against the ambient
+// per-migration recorder via `table()`. There is no authored rollback: a `down()`
+// is refused, because rollback runs an inverse synthesised from the recorded ops
+// and would never execute the authored body. Names are plain
 // strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
 // builder — there is no ad-hoc raw *expression* escape and no `Raw` expr type
 // (property A). The one deliberate escape hatch is the top-level `raw({ sql,

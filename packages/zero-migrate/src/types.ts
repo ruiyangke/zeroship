@@ -1359,9 +1359,13 @@ export interface DeterminismFinding {
   reason: string;
 }
 
-/** The migration module shape: `export default { name?, up, down? }`. */
+/** The migration module shape: `export default { name?, up }`.
+ *
+ *  There is no `down`: rollback runs an inverse the engine synthesises from the
+ *  recorded ops, so a hand-written body would never execute. Declaring it here
+ *  would advertise an authoring surface the recorder refuses with
+ *  `AUTHORED_DOWN_UNSUPPORTED`. */
 export interface Migration {
   name?: string;
   up(): void;
-  down?(): void;
 }
