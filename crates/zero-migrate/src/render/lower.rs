@@ -3148,11 +3148,18 @@ impl IrAuthor {
     /// `enforce_vendor_capability_at_lower` for the charter's capability grants.
     ///
     /// Added by the loading entries and NOT re-run here: the IR-version gate, the
-    /// per-op authoritative validation that is not restated above (embedded
-    /// expressions, guard direction, schema-identifier validity), the whole-IR
+    /// per-Expr DIALECT-STRUCTURAL checks the load walker runs over every expression
+    /// slot, guard direction, schema-identifier validity, the whole-IR
     /// online-rename-sequence, partition-recording and MySQL key-storage checks,
     /// ownership against the deploying app and project registry, the checksum-hint
     /// comparison, and the server stamp that discards a spoofed `owner_app`.
+    ///
+    /// Expression validation splits, so naming it whole would be wrong in both
+    /// directions: the dialect-structural checks are load-only, while `ColRef`
+    /// RESOLUTION is deliberately deferred to the render seam for anything but a
+    /// self-contained `createTable` - which is what
+    /// `validate_column_references_for_lower` above is, and why it runs on both
+    /// entries.
     ///
     /// Prefer the loading entries for anything whose IR did not originate in this
     /// process. The list above is a map, not a guarantee of completeness: it was
