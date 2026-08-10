@@ -179,7 +179,9 @@ pub use apply::executor::{
 };
 // The rollback verb, and the planner that decides every refusal before it runs.
 // Generic over `MigrationBackend`, so unlike `apply` below it is not PG-gated.
-pub use apply::executor::{plan_rollback, rollback, AppliedRecord, RollbackPlan};
+pub use apply::executor::{
+    plan_rollback, rollback, rollback_with_lock, AppliedRecord, RollbackPlan,
+};
 // `apply` is generic over the `SqlSession` seam — on the whole PG
 // seam. `rollback` is still `&Client`-typed (out of v1 scope) — PG-only.
 #[cfg(pg_seam)]

@@ -2646,15 +2646,80 @@ pub fn plan_rollback<'a>(
 /// per-migration leaf lives on that trait: this runs on PostgreSQL, MySQL and
 /// SQLite through the same code.
 ///
-/// This does NOT take the project advisory lock. A caller that runs it alongside a
-/// deploy must serialise them itself, the same way a caller of
-/// [`apply_with_lock_backend`] with [`LockMode::Inherit`] does.
+/// Takes the project advisory lock for the whole unwind, so a rollback and a
+/// concurrent deploy cannot interleave. Use [`rollback_with_lock`] when an outer
+/// operation already holds it.
 ///
 /// # Errors
 /// Any [`RollbackError`]. A selection variant means nothing ran at all. A
 /// [`RollbackError::DownFailed`] names the migration whose `down` failed, and every
 /// migration ahead of it in the plan is already rolled back and journaled.
 pub async fn rollback<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    request: &RollbackRequest,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    guard: &dyn crate::guard::MigrationGuard,
+) -> Result<RollbackOutcome, RollbackError> {
+    rollback_with_lock(
+        backend,
+        cfg,
+        request,
+        migrations,
+        approval,
+        applied_by,
+        guard,
+        LockMode::Acquire,
+    )
+    .await
+}
+
+/// [`rollback`] with an explicit [`LockMode`], for a caller that already holds the
+/// project advisory lock.
+///
+/// The lock is released on the `Acquire` path even when the unwind fails, and the
+/// rollback error is surfaced ahead of any unlock error, matching what `apply` does:
+/// the caller needs the reason the `down` failed, not the reason the unlock did.
+///
+/// # Errors
+/// As [`rollback`], plus [`RollbackError::Backend`] if the lock cannot be taken.
+pub async fn rollback_with_lock<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    request: &RollbackRequest,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    guard: &dyn crate::guard::MigrationGuard,
+    lock_mode: LockMode,
+) -> Result<RollbackOutcome, RollbackError> {
+    if lock_mode == LockMode::Acquire {
+        backend
+            .acquire_project_lock(cfg)
+            .await
+            .map_err(|e| RollbackError::Backend(e.to_string()))?;
+    }
+    let result = rollback_locked(
+        backend, cfg, request, migrations, approval, applied_by, guard,
+    )
+    .await;
+    if lock_mode == LockMode::AlreadyHeld {
+        return result;
+    }
+    let unlock = backend
+        .release_project_lock(cfg)
+        .await
+        .map_err(|e| RollbackError::Backend(e.to_string()));
+    match result {
+        Ok(o) => unlock.map(|()| o),
+        Err(e) => Err(e),
+    }
+}
+
+/// The rollback body, run while holding the project advisory lock.
+async fn rollback_locked<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
     request: &RollbackRequest,
