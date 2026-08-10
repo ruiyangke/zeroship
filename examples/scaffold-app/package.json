@@ -1,0 +1,31 @@
+{
+  "name": "scaffold-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "migrate": "zeroship-dev-migrate",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/db": "workspace:*",
+    "@zeroship/kv": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/storage": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@zeroship/migrate": "workspace:*",
+    "@zeroship/types": "workspace:*",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^8.0.0"
+  }
+}

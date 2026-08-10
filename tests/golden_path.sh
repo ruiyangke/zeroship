@@ -34,6 +34,14 @@ DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 CONTROL_PORT="${CONTROL_PORT:-9390}"
 WORKER_PORT="${WORKER_PORT:-8390}"
 GATE_PORT="${GATE_PORT:-8300}"
+# Step 10 (the scaffold leg) needs the migration service and a Redis, because
+# the app a creator actually receives uses env.db + env.storage + env.kv. A
+# three-service stack could still measure the 401, but it could not tell a
+# platform 401 from "this harness never gave the app a database" -- and a
+# comparison whose deployed side is crippled by the harness proves nothing.
+MIGRATED_PORT="${MIGRATED_PORT:-9490}"
+REDIS_PORT="${REDIS_PORT:-6390}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
 CONTROL_KEY="gp-ck"
 MASTER_KEY="gp-mk"
 # Local dev: run the platform without the production secret set (signing keys,
@@ -56,7 +64,15 @@ SUP_V1="${SUP_V1:-3142}"              # vite, 7a
 SUP_V2="${SUP_V2:-3143}"              # vite, 7b
 DB_V="${DB_V:-3144}"                  # vite, step 9 (db-todos data plane)
 DB_RT="${DB_RT:-3145}"                # dev runtime, step 9 (DB_TODOS_API_PORT)
-DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT"
+SC_V="${SC_V:-3146}"                  # vite, step 10 (scaffold)
+# 3001 is NOT a choice. The scaffold template's vite.config.ts passes no
+# `devServerPort`, so its dev runtime binds the plugin's DEFAULT_DEV_PORT --
+# and pinning it here would mean editing the copy, which is the one thing that
+# must stay byte-identical to what a creator receives. So the harness moves to
+# the template's port rather than moving the template to the harness's, and
+# frees 3001 first like every other port it binds.
+SC_RT="${SC_RT:-3001}"                # dev runtime, step 10 (template default)
+DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT $SC_V $SC_RT"
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -94,7 +110,7 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 # expansion, which zsh does not do. Under zsh the list collapses to one bogus
 # id and the check reports every step missing - loud, not silently green, which
 # is the intended direction for a check that cannot run.
-GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9"
+GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 10"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -123,6 +139,13 @@ cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
   sleep 1
   free_ports $DEV_PORTS
+  docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  # Step 10's CONTROL leg writes a policy file into the scaffold copy and must
+  # not leave it there: the copy's whole value is being byte-identical to the
+  # template, and a leftover config.ts would silently turn the next run's
+  # measurement into the control. Removed here too, not only on the happy path,
+  # because the failure that matters is the one that aborts mid-step.
+  rm -rf "$ROOT/examples/scaffold-app/src/server" 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -239,10 +262,18 @@ else
   fail "manifest rpc ids changed: expected rpc:addMessage,rpc:getMessages got '$GP_IDS'"
 fi
 
-# --- 2. Bring up the stack (control + worker + gateway) ---
+# --- 2. Bring up the stack (control + migrated + worker + gateway) ---
+#
+# FOUR services since step 10 landed, not three. The scaffold template uses
+# env.db, env.storage and env.kv, so measuring its deployed behaviour needs the
+# migration service (to create the creator's schema the way a real deploy does)
+# and the worker's --db/--kv-url/--storage-url. Without them the deployed side
+# is crippled by the harness, and every divergence step 10 reports would be the
+# harness's, not the platform's.
 step 2 "Bring up the stack"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
-rm -rf /tmp/gp-bundles
+for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+rm -rf /tmp/gp-bundles /tmp/gp-storage /tmp/gp-migrated-tmp
+mkdir -p /tmp/gp-storage
 
 # Fresh dedicated DB + the full platform schema (db/migrations-ts JS DSL,
 # recorded to transient IR by zeroship-platform-migrate).
@@ -259,11 +290,58 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regclass('zeroship.apps')" 2>/dev/null | grep -q apps \
   && pass "schema migrated (fresh $PG_DB)" || { fail "schema missing after migrate"; exit 1; }
 
+# Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
+# --kv-url is empty (crates/worker/src/main.rs), by design -- so an app calling
+# @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
+# it, so the harness has to supply one.
+docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/dev/null 2>&1
+for _ in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
+docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
+  && pass "ephemeral Redis on :$REDIS_PORT (env.kv backend)" \
+  || { fail "Redis never became ready on :$REDIS_PORT"; exit 1; }
+
+# One ed25519 key shared by control and migrated: step 10 mints an offline
+# platform-admin PAT signed with it to call migrated's apply endpoint. Pass it
+# to BOTH or the PAT verifies against a key the service never saw and every
+# call comes back 401 "platform token verification failed".
+GP_SIGNING_KEY=/tmp/gp-signing-key.pem
+openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
+chmod 600 "$GP_SIGNING_KEY"
+
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
+"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
+  --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
+  --dev-insecure >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --blob-store /tmp/gp-bundles --poll-interval 2 >/tmp/gp-worker.log 2>&1 & WORKER_PID=$!; PIDS+=($WORKER_PID)
+# ONE definition of the worker command line, because there are TWO places that
+# start it: here, and step 8, which kills it to measure the runtime-unavailable
+# path. Those two drifting apart is not hypothetical -- step 8 killed the worker
+# and never restarted it at all, so every step after it ran against a dead
+# worker. Step 9 is dev-only and never noticed; step 10 drives the DEPLOYED tier
+# and would have reported the gateway's 502 as a platform divergence.
+#
+# --db/--kv-url/--storage-url: without them env.db / env.kv / env.storage are
+# ABSENT on the deployed tier and step 10's app would fail for a reason that
+# has nothing to do with what it is measuring.
+gp_start_worker() {
+  "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+    --control-key "$CONTROL_KEY" --db "$DB_URL" --kv-url "redis://127.0.0.1:$REDIS_PORT" \
+    --storage-url /tmp/gp-storage \
+    --blob-store /tmp/gp-bundles --poll-interval 2 >>/tmp/gp-worker.log 2>&1 &
+  WORKER_PID=$!
+  PIDS+=($WORKER_PID)
+  local i
+  for i in $(seq 1 30); do
+    curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+: >/tmp/gp-worker.log
+gp_start_worker
 sleep 2
 # The gateway refuses to boot without a broker secret; it signs the RP-initiated
 # login handshake, so there is no safe default and no dev fallback.
@@ -278,6 +356,7 @@ sleep 3
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
 curl -sf "http://localhost:$WORKER_PORT/health"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
 curl -sf "http://localhost:$GATE_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
+curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
 
 # --- 3. Create app + deploy the real .zship ---
 step 3 "Create app + deploy"
@@ -724,6 +803,21 @@ else
   fail "dev($SUP_CODE) and deployed($DEP_DOWN_CODE) DIVERGE on runtime-unavailable"
 fi
 
+# PUT IT BACK. This step's method is to break the stack, and a step that breaks
+# the stack owes the ones after it a repair -- otherwise every later deployed
+# assertion is measuring this step's leftovers. Restarting through
+# gp_start_worker (rather than a second copy of the command line) is what keeps
+# the restored worker identical to the original: a repair that quietly dropped
+# --db would leave step 10 reporting a data-plane failure that this step caused.
+if gp_start_worker; then
+  pass "the worker is back up for the steps that follow (a broken stack is not left behind)"
+else
+  fail "the worker did not come back after step 8; every deployed assertion below is
+    measuring this step's leftovers rather than the platform"
+  tail -20 /tmp/gp-worker.log
+fi
+sleep 3   # let the gateway notice it again
+
 # --- 9. The data plane: a migration's own field names must reach the DB ---
 #
 # THE SEAM THIS TESTS. Everything above drives RPC and assets; no step touches
@@ -937,6 +1031,413 @@ else
   fi
 fi
 
+# --- 10. The app a creator ACTUALLY receives, on both tiers ------------------
+#
+# THE SEAM THIS TESTS, and why every step above is blind to it: steps 1-9 build
+# `examples/starter` and `examples/db-todos`. Neither is what `npm create
+# zeroship-app` produces. That command copies
+# `sdks/create-zeroship-app/template/`, and the template differs from the
+# starter in the one place that decides whether a deployed app answers at all --
+# the starter ships `src/server/config.ts` declaring its RPC policy, and the
+# template ships no policy anywhere. A harness that only ever builds the
+# configured app cannot see this by construction, which is exactly why the
+# claim sat on record for a day as an INFERENCE.
+#
+# WHAT THIS ASSERTS, and what it deliberately does NOT. It does not assert 401,
+# and it must not: whether the template SHOULD ship `auth: "anon"` (an
+# anonymous write surface in every new app) or explicit `auth: "user"` (which
+# still 401s, but silences the build's only warning) is an open operator
+# decision, and a gate that pinned either one would be asserting an answer
+# nobody has given. What it asserts is that `pnpm dev` and the deployed app
+# AGREE on each procedure. Divergence is the finding, in whichever direction it
+# points, and the gate stays correct after the operator decides either way.
+#
+# THIS IS RED AT HEAD, BY DESIGN. All six procedures answer 200 in dev and 401
+# deployed. The six failures below are the defect, not a broken test -- the
+# same posture as the publish-list gate. When the template gains a policy they
+# turn green with no edit to this file.
+#
+# THE VEHICLE, and its one honest substitution. `template/` is a directory
+# inside a workspace member, not a package, and must never grow a node_modules
+# (it is copied verbatim to creators -- d6ab0a80a). Installing a scaffolded copy
+# from a registry is blocked by task #265: the published @zeroship/vite-plugin
+# requires zero-migrate@0.1.0, which exists on no registry, so `npm install`
+# dies E404. So `examples/scaffold-app` is the template's real source, produced
+# by running the SHIPPED `bin/create.js`, with ONE class of edit: the
+# `@zeroship/*` dependency specs are `workspace:*` instead of registry semver.
+# PRESERVED: every source byte, all six procedures, the ABSENT policy, the
+# migrations, the generated descriptor, and the real vite-plugin build. CHANGED:
+# dependency resolution only. 10a is what keeps that claim true over time.
+step 10 "Scaffold: the app \`npm create zeroship-app\` produces, on both tiers"
+SCAFFOLD="$ROOT/examples/scaffold-app"
+TEMPLATE="$ROOT/sdks/create-zeroship-app/template"
+SC_APP="scaffoldapp"
+# A crashed earlier run can leave the CONTROL leg's policy file behind, which
+# would silently turn this run's measurement into the control. Remove it before
+# anything reads the tree, not only in cleanup.
+rm -rf "$SCAFFOLD/src/server"
+
+# --- 10a. The vehicle is the template, and stays the template ---------------
+#
+# Without this the whole step is worthless: `examples/scaffold-app` could drift
+# into a hand-tuned app that reproduces nothing, and every green below would be
+# about a file nobody ships. So the harness re-runs the REAL scaffolder into a
+# temp dir and requires byte equality on every file except package.json, plus a
+# structural check that package.json differs ONLY in `name` and in `@zeroship/*`
+# specs.
+#
+# THE EXCLUDE LIST IS NOT MINE. Build and run state has to be excluded from the
+# comparison, but choosing that list by hand is how a real added file gets
+# quietly waved through. So it is read from the TEMPLATE'S OWN `.gitignore`:
+# whatever the template tells a creator not to track is, by the template's own
+# statement, not source. Anything else appearing on either side is drift and
+# fails. That inversion found a defect on the first run -- `pnpm dev` writes a
+# `blob-cache/` directory into the project root and the template's ignore file
+# did not list it, so every scaffolded app got an untracked directory. Invisible
+# inside this monorepo because the ROOT .gitignore covers it (line 12); a
+# creator's repo has only the template's.
+SC_FRESH="$(mktemp -d -t gp-scaffold-XXXXXX)"
+if ( cd "$SC_FRESH" && node "$ROOT/sdks/create-zeroship-app/bin/create.js" scaffold-app ) >/tmp/gp-scaffold-create.log 2>&1; then
+  SC_EXCL=(--exclude=package.json)
+  while IFS= read -r ig; do
+    case "$ig" in ""|"#"*) continue ;; esac
+    SC_EXCL+=("--exclude=${ig%/}")
+  done < "$SC_FRESH/scaffold-app/.gitignore"
+  SC_DIFF="$(diff -r -q "$SC_FRESH/scaffold-app" "$SCAFFOLD" "${SC_EXCL[@]}" 2>&1)"
+  if [ -z "$SC_DIFF" ]; then
+    pass "examples/scaffold-app is byte-identical to the shipped template (source files)"
+  else
+    fail "the scaffold copy has DRIFTED from sdks/create-zeroship-app/template -- it no longer
+    reproduces what a creator receives, so every verdict below is about a different app:
+$(printf '%s' "$SC_DIFF" | sed 's/^/      /')"
+  fi
+  if node -e '
+      const { readFileSync } = require("fs");
+      const [a, b] = process.argv.slice(1).map((p) => JSON.parse(readFileSync(p, "utf8")));
+      const bad = [];
+      // `name` is rewritten by create.js itself; every other top-level key must match.
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+        if (k === "name" || k === "dependencies" || k === "devDependencies") continue;
+        if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) bad.push(`top-level "${k}" differs`);
+      }
+      for (const sect of ["dependencies", "devDependencies"]) {
+        const da = a[sect] || {}, db = b[sect] || {};
+        for (const d of new Set([...Object.keys(da), ...Object.keys(db)])) {
+          if (!(d in da) || !(d in db)) { bad.push(`${sect}: "${d}" present in only one`); continue; }
+          if (da[d] === db[d]) continue;
+          // The ONE permitted substitution, and only for first-party packages.
+          if (d.startsWith("@zeroship/") && db[d] === "workspace:*") continue;
+          bad.push(`${sect}: "${d}" ${JSON.stringify(da[d])} -> ${JSON.stringify(db[d])}`);
+        }
+      }
+      if (bad.length) { console.error(bad.join("; ")); process.exit(1); }
+    ' "$SC_FRESH/scaffold-app/package.json" "$SCAFFOLD/package.json" 2>/tmp/gp-scaffold-pkg.log; then
+    pass "the copy's package.json differs from the template's ONLY in workspace: dep specs"
+  else
+    fail "the scaffold copy substitutes more than dependency resolution: $(cat /tmp/gp-scaffold-pkg.log)"
+  fi
+else
+  fail "could not re-scaffold from bin/create.js (the fidelity check could not run): $(tail -3 /tmp/gp-scaffold-create.log | tr '\n' ' ')"
+fi
+rm -rf "$SC_FRESH"
+
+# --- 10b. Build it, and read the posture out of the ARTIFACT ----------------
+#
+# The build warning and the manifest must say the same thing. Asserting the
+# warning alone would pin today's posture; asserting the manifest alone would
+# miss a build that stops warning. So: whichever rpc ids carry no `auth` in the
+# built manifest are exactly the ids the build warned about. That invariant
+# holds before AND after the operator decides, which is the point.
+SC_ZSHIP="$SCAFFOLD/dist/app.zship"
+
+# THE MUTATION THAT PROVES THIS STEP IS A MEASUREMENT AND NOT A HARD-CODED RED.
+# Six identical failures are what a step wired to fail would also print, so the
+# red below is worth nothing on its own. Setting MUTATE_SCAFFOLD_POLICY=1 gives
+# the scaffold the policy the template lacks, BEFORE the build -- nothing else
+# in the step changes. Under it every assertion here must go GREEN, including
+# the six comparisons and the control (which then flips the other way, removing
+# the policy). Measured 2026-08-10:
+#
+#     unmutated              43 passed,  6 failed   (the six scaffold comparisons)
+#     MUTATE_SCAFFOLD_POLICY 49 passed,  0 failed
+#
+# The delta is exactly the six, and the control fires in BOTH directions, which
+# is what separates "the gateway honours the manifest" from "this harness
+# always 401s".
+if [ "${MUTATE_SCAFFOLD_POLICY:-0}" = "1" ]; then
+  mkdir -p "$SCAFFOLD/src/server"
+  {
+    echo 'import { defineApp } from "@zeroship/server";'
+    echo 'export default defineApp({ resources: {'
+    echo '  "rpc:notes.list": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:notes.add": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:notes.delete": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:files.upload": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:files.list": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:visits.bump": { auth: "anon", publiclyAccessible: true },'
+    echo '} });'
+  } > "$SCAFFOLD/src/server/config.ts"
+  echo "  MUTATION ACTIVE: scaffold given an anon policy before the build"
+fi
+( cd "$SCAFFOLD" && pnpm build ) >/tmp/gp-scaffold-build.log 2>&1
+SC_BUILD_RC=$?
+if [ "$SC_BUILD_RC" -ne 0 ] || [ ! -f "$SC_ZSHIP" ]; then
+  fail "the scaffold template does not build (rc=$SC_BUILD_RC): $(tail -5 /tmp/gp-scaffold-build.log | tr '\n' ' ')"
+else
+  pass "the scaffold template builds through the real vite-plugin (exit 0, $(du -k "$SC_ZSHIP" | cut -f1)KB)"
+fi
+
+# ids with no `auth` key in the manifest, comma-separated and sorted
+sc_unpoliced() {
+  tar --zstd -xOf "$1" manifest.json 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let m; try { m = JSON.parse(s); } catch { process.exit(4); }
+      const r = m.resources || {};
+      const ids = Object.keys(r).filter(k => k.startsWith("rpc:") && r[k].auth === undefined).sort();
+      process.stdout.write(ids.join(","));
+    });'
+}
+sc_all_rpc() {
+  tar --zstd -xOf "$1" manifest.json 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let m; try { m = JSON.parse(s); } catch { process.exit(4); }
+      process.stdout.write(Object.keys(m.resources||{}).filter(k=>k.startsWith("rpc:")).sort().join(","));
+    });'
+}
+SC_UNPOLICED="$(sc_unpoliced "$SC_ZSHIP")"
+# The build's warning lists one `  - "rpc:..."` line per offender.
+SC_WARNED="$(grep -oE '^  - "rpc:[^"]+"' /tmp/gp-scaffold-build.log | tr -d '" ' | sed 's/^-//' | sort | paste -sd, -)"
+if [ "$SC_WARNED" = "$SC_UNPOLICED" ]; then
+  if [ -n "$SC_UNPOLICED" ]; then
+    pass "build warned about exactly the unpoliced ids: $SC_UNPOLICED"
+  else
+    pass "the template declares a policy for every procedure and the build emits no warning"
+  fi
+else
+  fail "the build's fail-closed warning and the manifest disagree.
+      manifest says unpoliced: ${SC_UNPOLICED:-<none>}
+      build warned about     : ${SC_WARNED:-<none>}
+    One of the two is lying about what a creator is shipping."
+fi
+
+# The six probes below are hand-written per procedure. If the template gains or
+# loses one, the honest response is a new probe -- NOT a silently smaller
+# comparison, which is how a scenario stops covering what its title claims.
+SC_EXPECT_IDS="rpc:files.list,rpc:files.upload,rpc:notes.add,rpc:notes.delete,rpc:notes.list,rpc:visits.bump"
+SC_ACTUAL_IDS="$(sc_all_rpc "$SC_ZSHIP")"
+if [ "$SC_ACTUAL_IDS" = "$SC_EXPECT_IDS" ]; then
+  pass "the template still publishes the six procedures this step drives"
+else
+  fail "the template's procedure set changed and the probes below no longer cover it.
+      expected: $SC_EXPECT_IDS
+      got     : $SC_ACTUAL_IDS
+    Add a probe for each new id rather than comparing a subset."
+fi
+
+# --- 10c. Deploy it, and give it a schema the way a real deploy does --------
+SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
+SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
+SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
+SC_READY=0
+if [ -z "$SC_APP_ID" ] || [ -z "$SC_API_KEY" ]; then
+  fail "could not provision the scaffold app: ${SC_OUT:0:200}"
+else
+  # OFFLINE-mint a platform-admin PAT signed with the key control+migrated
+  # share. The .zship carries the DESCRIPTOR only; migrations travel through
+  # zeroship-migrated, which is the real deployed path -- a hand-rolled CREATE
+  # TABLE here would test nothing.
+  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+  SC_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$SC_POLICY")"
+  SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
+  SC_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
+  SC_EXP=$(( $(date +%s) + 86400 ))
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATOR','golden-scaffold-$SC_CREATOR@zeroship.test'::citext,'Golden Scaffold',NOW());
+INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$SC_CREATOR','admin','$SC_CREATOR');
+INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$SC_TOKID','$SC_CREATOR','pat','golden scaffold','$SC_POLICY'::jsonb,'$SC_PHASH',to_timestamp($SC_EXP));
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$SC_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+  GP_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
+  SC_PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$GP_JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$GP_SIGNING_KEY" "$SC_CREATOR" "$SC_TOKID" "$SC_PHASH" "$SC_EXP" 2>/tmp/gp-scaffold-pat.log)"
+  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$SCAFFOLD/migrations" >/tmp/gp-scaffold-ir.json 2>/tmp/gp-scaffold-ir.log <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+  SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
+    "http://localhost:$MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    --data-binary @/tmp/gp-scaffold-ir.json)"
+  SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
+  if [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+    pass "the scaffold's own migrations applied through zeroship-migrated (applied=$SC_APPLIED ops)"
+    SC_READY=1
+  else
+    fail "zeroship-migrated could not apply the scaffold's migrations (http=$SC_APPLY_CODE): $(head -c 200 /tmp/gp-scaffold-apply.json)"
+  fi
+  sleep 5   # gateway route-sync poll
+fi
+
+# --- 10d/e. Drive the SAME six calls on both tiers and diff the RESULTS -----
+#
+# The generated @zeroship/rpc client mints a UUIDv7 Idempotency-Key for every
+# `idempotent: true` write and sends it on BOTH tiers
+# (sdks/rpc/src/transport.ts:131). A probe that omits it is not reproducing the
+# creator's call: measured that way first, the gateway answered 400
+# missing_idempotency_key while dev answered 200, and the "divergence" was the
+# probe's own. It is supplied here for exactly the two ids the manifest marks
+# idempotent, so the comparison is between two tiers, not between two clients.
+sc_call() { # base auth-header method wireid body idem-key -> "<status> <body>"
+  local base="$1" hdr="$2" method="$3" id="$4" body="${5:-}" idem="${6:-}" out st bd
+  if [ "$method" = GET ]; then
+    out=$(curl -s -m 25 -w '\n%{http_code}' ${hdr:+-H "$hdr"} "$base/__zeroship/v1/$id" 2>/dev/null)
+  else
+    out=$(curl -s -m 25 -w '\n%{http_code}' ${hdr:+-H "$hdr"} -X POST -H 'content-type: application/json' \
+      ${idem:+-H "Idempotency-Key: $idem"} "$base/__zeroship/v1/$id" -d "$body" 2>/dev/null)
+  fi
+  st="${out##*$'\n'}"; bd="${out%$'\n'*}"
+  printf '%s %s' "${st:-000}" "$(printf '%s' "$bd" | tr -d '\n' | head -c 300)"
+}
+sc_uuid() { node -e 'console.log(require("crypto").randomUUID())'; }
+sc_tier() { # base auth-header outfile
+  local base="$1" hdr="$2" out="$3"
+  : > "$out"
+  printf 'notes.list\t%s\n'   "$(sc_call "$base" "$hdr" GET  notes.list)" >> "$out"
+  printf 'notes.add\t%s\n'    "$(sc_call "$base" "$hdr" POST notes.add '{"json":{"title":"golden path probe","body":"hello"}}' "$(sc_uuid)")" >> "$out"
+  printf 'notes.delete\t%s\n' "$(sc_call "$base" "$hdr" POST notes.delete '{"json":{"id":"note_definitely_absent"}}')" >> "$out"
+  printf 'files.upload\t%s\n' "$(sc_call "$base" "$hdr" POST files.upload '{"json":{"name":"probe.txt","dataBase64":"aGVsbG8="}}' "$(sc_uuid)")" >> "$out"
+  printf 'files.list\t%s\n'   "$(sc_call "$base" "$hdr" GET  files.list)" >> "$out"
+  printf 'visits.bump\t%s\n'  "$(sc_call "$base" "$hdr" POST visits.bump '{"json":{}}')" >> "$out"
+}
+
+SC_DEP_BASE="http://localhost:$GATE_PORT/apps/$SC_APP"
+SC_DEV_BASE="http://localhost:$SC_V"
+if [ "$SC_READY" -ne 1 ]; then
+  fail "the deployed scaffold never became drivable; the dev-vs-deployed comparison did not run"
+else
+  # dev tier. `pnpm dev` no longer migrates (ee2c352aa), so the dev database is
+  # created by the same separate step a creator now runs.
+  rm -rf "$SCAFFOLD/.zeroship"
+  free_ports "$SC_V" "$SC_RT"
+  ( cd "$SCAFFOLD" && node "$ROOT/sdks/vite-plugin/dist/cli/migrate-dev.js" ) >/tmp/gp-scaffold-devmigrate.log 2>&1
+  ( cd "$SCAFFOLD" && ./node_modules/.bin/vite --port "$SC_V" --strictPort ) >/tmp/gp-scaffold-dev.log 2>&1 &
+  PIDS+=($!)
+  SC_DEV_UP=0
+  for _ in $(seq 1 90); do
+    if [ "$(http_status "$SC_DEV_BASE/__zeroship/v1/notes.list")" != "000" ]; then SC_DEV_UP=1; break; fi
+    sleep 1
+  done
+  if [ "$SC_DEV_UP" -ne 1 ]; then
+    fail "the scaffold's dev server never answered on :$SC_V (dev half could not run): $(tail -3 /tmp/gp-scaffold-dev.log | tr '\n' ' ')"
+  else
+    pass "the scaffold runs under \`pnpm dev\` and answers its own RPCs"
+    sc_tier "$SC_DEV_BASE" ""                        /tmp/gp-scaffold-dev.tsv
+    sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY"  /tmp/gp-scaffold-dep.tsv
+
+    # THE COMPARISON. Statuses are compared exactly; bodies are not, because the
+    # two tiers run different databases (SQLite vs Postgres) and every id and
+    # timestamp in an answer is volatile BY CONSTRUCTION -- comparing them raw
+    # would report a divergence on a platform behaving perfectly. What IS
+    # compared beyond the status is the ENVELOPE KIND: a result (`{"json":`) or
+    # a refusal (a bare `{"code":`/`{"message":`), plus the error code when
+    # there is one. So "dev returned data, deployed returned an error" cannot
+    # hide behind a matching status, and a 200 that carries an error envelope
+    # cannot pass as agreement.
+    sc_kind() { # body -> "ok" | "err:<CODE>" | "other"
+      case "$1" in
+        *'"json":'*) printf 'ok' ;;
+        *'"code":'*) printf 'err:%s' "$(printf '%s' "$1" | sed -nE 's/.*"code":"([^"]+)".*/\1/p')" ;;
+        *'"message":'*) printf 'err:<uncoded>' ;;
+        *) printf 'other' ;;
+      esac
+    }
+    while IFS=$'\t' read -r sc_id sc_dev; do
+      sc_dep="$(grep -m1 "^$sc_id	" /tmp/gp-scaffold-dep.tsv | cut -f2)"
+      sc_dev_st="${sc_dev%% *}"; sc_dev_bd="${sc_dev#* }"
+      sc_dep_st="${sc_dep%% *}"; sc_dep_bd="${sc_dep#* }"
+      sc_dev_v="$sc_dev_st $(sc_kind "$sc_dev_bd")"
+      sc_dep_v="$sc_dep_st $(sc_kind "$sc_dep_bd")"
+      if [ "$sc_dev_v" = "$sc_dep_v" ]; then
+        pass "scaffold $sc_id: dev and deployed agree ($sc_dev_v)"
+      else
+        fail "scaffold $sc_id: dev and deployed DIVERGE -- dev=[$sc_dev_v] deployed=[$sc_dep_v]
+      dev      : ${sc_dev_bd:0:150}
+      deployed : ${sc_dep_bd:0:150}"
+      fi
+    done < /tmp/gp-scaffold-dev.tsv
+
+    # --- 10f. THE CONTROL, and it differs in ONE variable ------------------
+    #
+    # Six identical verdicts are exactly what a harness that broke the deployed
+    # tier for some unrelated reason would also produce -- a stale route, a
+    # missing api key, a gateway that refuses this app whatever its manifest
+    # says. So the same source is rebuilt with the policy posture FLIPPED and
+    # redeployed to the SAME app id, over the SAME schema, through the SAME
+    # gateway. Only the manifest's `auth` differs. If the deployed answers do
+    # not move, the divergence above was never about policy and the six
+    # failures should not be believed.
+    #
+    # The flip is written from the manifest, not hard-coded, so this control
+    # keeps working after the operator decides: policy absent -> add anon;
+    # policy present -> take it away.
+    SC_CTL_DIR="$SCAFFOLD/src/server"
+    if [ -n "$SC_UNPOLICED" ]; then
+      mkdir -p "$SC_CTL_DIR"
+      {
+        echo 'import { defineApp } from "@zeroship/server";'
+        echo 'export default defineApp({ resources: {'
+        printf '%s\n' "$SC_ACTUAL_IDS" | tr ',' '\n' | while read -r rid; do
+          [ -n "$rid" ] && echo "  \"$rid\": { auth: \"anon\", publiclyAccessible: true },"
+        done
+        echo '} });'
+      } > "$SC_CTL_DIR/config.ts"
+      SC_CTL_DESC="policy ADDED (anon)"
+    else
+      rm -rf "$SC_CTL_DIR"
+      SC_CTL_DESC="policy REMOVED"
+    fi
+    if ( cd "$SCAFFOLD" && pnpm build ) >/tmp/gp-scaffold-ctlbuild.log 2>&1 \
+       && "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$SC_APP_ID" \
+            --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
+      sleep 6
+      sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY" /tmp/gp-scaffold-ctl.tsv
+      SC_BEFORE="$(cut -f2 /tmp/gp-scaffold-dep.tsv | cut -d' ' -f1 | paste -sd, -)"
+      SC_AFTER="$(cut -f2 /tmp/gp-scaffold-ctl.tsv | cut -d' ' -f1 | paste -sd, -)"
+      # "The answers moved" is NOT enough, and asserting only that is how this
+      # control passed on its first run over a stack with a DEAD WORKER: the
+      # flip turned 401,401,401,401,401,401 into 502,502,502,502,502,502 and the
+      # check reported success. A 5xx is the stack failing, and a control that
+      # cannot tell a policy change from an outage discriminates nothing. So the
+      # control run must contain no 5xx at all, AND the set of 401s must move.
+      SC_CTL_5XX="$(cut -f2 /tmp/gp-scaffold-ctl.tsv | cut -d' ' -f1 | grep -c '^5' || true)"
+      SC_401_BEFORE="$(awk -F'\t' '{split($2,a," "); if (a[1]=="401") print $1}' /tmp/gp-scaffold-dep.tsv | paste -sd, -)"
+      SC_401_AFTER="$(awk -F'\t' '{split($2,a," "); if (a[1]=="401") print $1}' /tmp/gp-scaffold-ctl.tsv | paste -sd, -)"
+      if [ "$SC_CTL_5XX" -gt 0 ]; then
+        fail "CONTROL is UNINFORMATIVE: $SC_CTL_5XX of 6 control answers are 5xx ($SC_AFTER).
+      That is the stack failing, not the policy taking effect, so it cannot tell a
+      gateway honouring the manifest from one that is simply broken. The six
+      verdicts above are UNPROVEN until this control runs on a healthy stack."
+      elif [ "$SC_401_BEFORE" != "$SC_401_AFTER" ]; then
+        pass "CONTROL: flipping ONLY the policy ($SC_CTL_DESC) moved the 401 set (${SC_401_BEFORE:-<none>} -> ${SC_401_AFTER:-<none>}), no 5xx"
+      else
+        fail "CONTROL: $SC_CTL_DESC left the 401 set unchanged (${SC_401_AFTER:-<none>}); statuses $SC_BEFORE -> $SC_AFTER.
+      The gateway is not discriminating on the manifest policy in this harness, so
+      the six verdicts above measure something else and must not be read as the
+      fail-closed default firing."
+      fi
+    else
+      fail "CONTROL could not be built or deployed, so the verdicts above are unproven:
+      build: $(tail -2 /tmp/gp-scaffold-ctlbuild.log | tr '\n' ' ')
+      deploy: $(tail -2 /tmp/gp-scaffold-ctldeploy.log | tr '\n' ' ')"
+    fi
+    rm -rf "$SC_CTL_DIR"
+  fi
+fi
+
 gp_close_step
 
 # --- The verdict, and the two guards against a green run over nothing -------
@@ -1035,7 +1536,32 @@ gp_close_step
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
 # an easier one keeps the total at 24. Nothing here can see that; review can.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-26}"
+# RE-MEASURED 2026-08-10, after step 10 (the scaffold leg) and step 8's worker
+# restart landed. Full run against the compose Postgres on :5440, no token:
+#
+#     golden path: 43 passed, 6 failed        (exit 1 -- see below)
+#     per step: 1->2  2->6  3->1  4->2  5->1  6->7  7->7  8->3  9->6  10->14 = 49
+#
+# THE SIX FAILURES ARE THE DELIVERABLE, NOT A BROKEN GATE. They are step 10's
+# dev-vs-deployed comparisons: the scaffold template's six procedures answer 200
+# under `pnpm dev` and 401 once deployed, because the template ships no RPC
+# policy and the gateway's default is fail-closed. This gate is RED at HEAD on
+# purpose and goes green with no edit to this file the moment the template
+# declares a policy -- at which point the total is 49.
+#
+# THE FLOOR IS THE PASS COUNT, WHICH IS 43 TODAY. A floor is a lower bound on
+# assertions that FIRED, so it takes the smaller of the two legitimate
+# configurations, exactly as before.
+#
+# THE CALL-SITE CROSS-CHECK NO LONGER APPLIES UNMODIFIED, and saying so is the
+# point of writing it down. `grep -c 'pass "'` outside comments returns 47,
+# fewer than the 49 outcomes a green run produces, because step 10's comparison
+# verdict is ONE call site inside a `while` loop that fires once per procedure.
+# The old derivation (sites minus branch arms) silently assumed one site = one
+# outcome; under a loop it under-counts, and a floor derived from it would sit
+# below the real total and stop catching anything. Both numbers here are read
+# off runs instead: 43 unmutated, 49 under MUTATE_SCAFFOLD_POLICY=1.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-43}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -1058,6 +1584,12 @@ for _s in $GP_EXPECTED_STEPS; do
   printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"
 done
 echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
+echo "  MUTATION: MUTATE_SCAFFOLD_POLICY=1 must turn step 10 fully GREEN (49 passed, 0 failed)"
+if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
+  echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
+  echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
+  echo "        That is the defect, not a broken gate. See docs/pilot/e2e-scenarios.md."
+fi
 echo "============================================"
 
 # Printed on SUCCESS as well as failure: a number nobody sees until the gate has
