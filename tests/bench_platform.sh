@@ -71,16 +71,54 @@ PIDS+=($!)
 PIDS+=($!)
 sleep 4
 
-# Warmup (retry until gateway syncs)
+# Warmup (retry until gateway syncs).
+#
+# THIS LOOP USED TO FALL THROUGH SILENTLY. It had no failure branch: 15 misses
+# and it simply continued, so wrk went on to benchmark whatever the endpoint
+# actually returns and printed throughput and latency for it. A benchmark that
+# cannot tell "the app answered" from "the app 404'd" reports the 404 as a
+# result, and a 404 is CHEAP - so the broken leg looks FAST, flattering the full
+# pipeline against the raw-runtime baseline it is being compared to.
+#
+# That is not hypothetical here. MEASURED 2026-08-10, serving the very artifact
+# this harness benchmarks (examples/bench/dist/server/index.js) under
+# `zeroship serve`, one variable apart:
+#
+#   POST /rpc                 -> 404 "Not Found"      <- what this harness sends
+#   POST /__zeroship/v1/ping  -> 200 {"json":"pong"}  <- what the app serves
+#
+# examples/bench/src/server.ts exports only query/stream procedures and no
+# `fetch`, so the dispatcher's non-/__zeroship/v1/ fallback is a 404 by
+# construction. Whether the GATEWAY rewrites /apps/bench/rpc onto a wireId
+# before it reaches the app is NOT established - bench has no config.ts, so no
+# rewrite is authored, but that leg was not measured.
+#
+# Fail loudly either way. An unreachable warmup means the numbers below measure
+# nothing, and that must not be reported as a benchmark.
+warmed=0
 for i in $(seq 1 15); do
     if curl -sf -X POST http://localhost:8000/apps/bench/rpc \
         -H 'Content-Type: application/json' \
         -H "X-Api-Key: $API_KEY" \
         -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' > /dev/null 2>&1; then
+        warmed=1
         break
     fi
     sleep 1
 done
+if [ "$warmed" -ne 1 ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+        http://localhost:8000/apps/bench/rpc \
+        -H 'Content-Type: application/json' \
+        -H "X-Api-Key: $API_KEY" \
+        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo 000)
+    echo "FAIL: warmup never succeeded against /apps/bench/rpc (last status ${code})." >&2
+    echo "      The gateway leg is NOT serving this request, so any throughput" >&2
+    echo "      printed below would measure the failure path, not app dispatch." >&2
+    echo "      404 => the path does not reach a procedure; the app serves" >&2
+    echo "      /__zeroship/v1/<id>, not /rpc. 000 => nothing is listening." >&2
+    exit 1
+fi
 
 # wrk scripts
 LUA_RPC=$(mktemp)
