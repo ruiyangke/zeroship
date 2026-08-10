@@ -47,7 +47,7 @@ catalogs.
 | 12 | [Billing / Stripe Connect](#12-billing--stripe-connect) | 16 | Stripe Connect ledger end-to-end; usage metering is ingest-only and env.meter is absent. |
 | 13 | [Bundle / .zship / Blob Store](#13-bundle--zship--blob-store) | 36 | The .zship artifact, Manifest types, BlobStore trait, LocalDiskBlobStore; no S3. |
 | 14 | [Vite plugin / build pipeline](#14-vite-plugin--build-pipeline) | 35 | Single zeroship() plugin: use-server discovery, dev runtime bridge, .zship emit. |
-| 15 | [Sandbox / AI build env](#15-sandbox--ai-build-env) | 56 | Isolated microVM build envs: 3 backends, snapshot/restore, preview proxy, HA, admin API. |
+| 15 | [Sandbox / AI build env](#15-sandbox--ai-build-env) | 56 | Isolated microVM build envs: 3 backends, snapshot/restore, preview proxy, HA, admin API. **Extracted to the standalone `zeroship-sandbox` project; no code in this repo.** |
 | 16 | [Worker](#16-worker) | 26 | V8 execution tier: dispatch, per-thread isolate LRU, version/env reconcile. |
 | 17 | [Drivers + core infra](#17-drivers--core-infra) | 51 | compio-postgres, compio-redis, and zeroship-core shared types/crypto/auth/config. |
 | 18 | [CLI + developer experience](#18-cli--developer-experience) | 33 | The zeroship binary, create-zeroship-app, and the vite-plugin dev/build loop. |
@@ -110,7 +110,7 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 | RPC capability enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/runtime/src/rpc/capability.rs` | — | `crates/runtime/tests/capability.rs` | query can't write, mutation can't fetch. |
 | waitUntil / getRequest / getRequestContext | 🟢 | `import { waitUntil, getRequest, ... } from 'zeroship'` | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | getRequest() null on RPC fast-path. |
 | env / runQuery / currentUser etc. | 🟢 | `import { env, runQuery, currentUser, ... } from 'zeroship'` | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | runQuery/runMutation push capability frame. |
-| Native plugin system (env.* namespaces) | 🟢 | `env.db.*` / `env.kv.*` / `env.storage.*` / `env.auth.*` | `crates/runtime/src/core/plugin.rs` | `docs/reference/plugin-system.md` | — | env.meter/assets documented as planned, not registered. |
+| Native plugin system (env.* namespaces) | 🟢 | `env.db.*` / `env.kv.*` / `env.storage.*` / `env.auth.*` / `env.workflows.*` | `crates/runtime/src/core/plugin.rs` | `docs/reference/plugin-system.md` | — | `env.workflows.*` also registered; `env.assets.*` documented as planned; there is no `env.meter`. |
 | AI SDK Data Stream Protocol (SSE) | 🟢 | internal (sseFromAsyncGen) | `crates/runtime/src/core/init.rs` | — | `crates/runtime/tests/ai_sdk_stream.rs` | 0:text 2:object e:error d:done. |
 | WebIDL conversion layer | 🟢 | internal | `crates/runtime/src/webidl/` | — | — | USVString/ByteString/Clamp/EnforceRange/WebIdlDict. |
 | v8_class proc macro | 🟢 | internal (crates/runtime-macros) | `crates/runtime-macros/` | `docs/reference/plugin-system.md` | — | Backs every native class. |
@@ -118,7 +118,7 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 | Streaming fetch request body | 🔵 | `globalThis.fetch(url, { body: stream })` | `crates/runtime/src/web/fetch/mod.rs` | — | — | snapshot_request returns error. |
 | node:zlib stream constructors | 🟠 | `import { createGzip } from 'node:zlib'` | `crates/runtime/src/node/zlib/mod.rs` | — | — | Throwing stubs → gzipSync/CompressionStream. |
 | node:os networkInterfaces / get/setPriority | 🟠 | `import { networkInterfaces } from 'node:os'` | `crates/runtime/src/node/os/mod.rs` | — | — | Throwing stubs; no sandbox OS introspection. |
-| env.meter.* (billing metering primitive) | 🔵 | `env.meter.*` (not registered) | — | `docs/reference/billing-metering.md` | — | Planned/platform-internal per AGENTS.md. |
+| env.meter.* (billing metering primitive) | ⚫ | none (deliberately absent) | — | `docs/reference/billing-metering.md` | — | Not planned: metering is platform-measured infrastructure per AGENTS.md; there is no `env.meter`. |
 | env.assets.* (runtime-emitted assets) | 🔵 | `env.assets.*` (not registered) | — | — | — | Planned/platform-internal only. |
 
 ---
@@ -186,7 +186,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
 | registerModel DDL pipeline | 🟢 | internal (via bootstrap) | `crates/plugin-db/src/register_model/` | `docs/reference/db.md` | `crates/plugin-db/tests/integration.rs` | PG advisory-lock + CONCURRENTLY; SQLite skips mask ops. |
 | Per-app Postgres schema isolation | 🟢 | internal | `crates/plugin-db/src/register_model/bootstrap.rs` | `docs/reference/db.md` | — | app_id runtime-injected; SQLite is one file/app. |
-| System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/plugin-db/src/query.rs`, `crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
+| System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
 | Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
 | Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
 | Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters deleted_at; masked → MaskedValue. |
@@ -199,8 +199,8 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
 | Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears deleted_at, bumps version. |
 | Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
-| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/plugin-db/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
-| Filter operators | 🟢 | Filter<S> on read/write | `crates/plugin-db/src/query.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized; $search → FTS. |
+| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/plugin-db/src/crud/mod.rs`, `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
+| Filter operators | 🟢 | Filter<S> on read/write | `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized; $search → FTS. |
 | Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
 | Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `sdks/db/src/collection/relations.ts` | `docs/reference/db.md` | `sdks/db/tests/relations.test.ts` | v1 single-level; no nested with. |
 | Foreign keys (t.ref) + cross-app rejection | 🟢 | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `crates/plugin-db/src/cross_app_fk.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable; cross-app blocked. |
@@ -215,8 +215,8 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/plugin-db/src/crud/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
 | Mask drift detection cron | 🟡 | internal (no JS surface) | `crates/plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Test-only cfg; cron scheduling not wired. |
 | Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | `crates/plugin-db/src/crud/mask_backfill.rs` | — | — | PG only; SQLite returns backend_unsupported. |
-| Data backfill migrations (@zeroship/migrations) | 🟢 | `import { defineMigration, migrations }` | `sdks/migrations/src/`, `crates/plugin-db/src/migrations.rs` | `docs/reference/db.md` | `sdks/migrations/tests/run.test.ts` | PG-only (advisory lock); dead-letter queue. |
-| Migration sweeper (orphan reaper) | 🟡 | internal (no JS surface) | `crates/plugin-db/src/migration_sweeper.rs` | — | — | No platform cron hook yet. |
+| Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | `@zeroship/migrations` and plugin-db's `migrations.rs` were REMOVED: the online-backfill orchestrator was redundant with the migration engine's own batched/cursor/resumable `.backfill()` op (`sdks/migrate/src/types.ts`, `BackfillArgs`), which is now the only way to backfill data. |
+| Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | Deleted with `@zeroship/migrations`; there is no orphan-migration state left to reap. |
 | In-process CDC broker (openSubscription) | 🟢 | `collection.openSubscription()` / `subscribe(name)` | `crates/plugin-db/src/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | — | `sdks/db/tests/subscribe-close.test.ts` | In-process only; coarse-grained; 1024-event queue. |
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
 | WAL replication consumer | 🟡 | `__platform.startReplicationConsumer()` | `crates/plugin-db/src/wal_consumer.rs`, `replication.rs` | — | — | pgoutput decoder ships; no reconnection/auto-spawn. |
@@ -347,15 +347,15 @@ audit, and a dev-tier parity implementation.
 | RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
 | OIDC backchannel logout (BCL 1.0) | 🟢 | POST /oidc/backchannel-logout (gateway) | `crates/gateway/src/backchannel_logout.rs` | `docs/reference/auth.md` | — | jti replay prevention; per-app + global. |
 | User profile page (/me) | 🟡 | GET /me | `crates/auth/src/ui/me.rs` | `docs/reference/auth.md` | — | Link-a-new-provider deferred ("coming soon"). |
-| JWK rotation cron | 🟢 | internal | `crates/auth/src/cron/jwk_rotation.rs` | — | `crates/runtime/tests/` (jwk_rotation_test) | Daily; EdDSA + RS256. |
+| JWK rollover (operator-driven) | 🟡 | internal | `crates/auth/src/oidc/issuer.rs` (`publish_active_key`), `oidc/metadata.rs` | — | — | Boot reconcile of `AUTH_SIGNING_KEY_FILE` into `zeroship.signing_keys`; the prior active key goes `retiring` and is still served in JWKS. EdDSA only. The daily rotation cron was deleted with the Hydra machinery, so rollover needs an operator key swap + restart, and nothing purges retiring rows. |
 | Audit retention cron | 🟢 | internal | `crates/auth/src/cron/audit_retention.rs` | — | `crates/auth/src/cron/audit_retention.rs` | security 365d / PII 90d / debug 30d. |
 | Token sweep cron | 🟢 | internal | `crates/auth/src/cron/token_sweep.rs` | — | `crates/auth/src/cron/token_sweep.rs` | Expired magic_links/verifications/etc. |
 | Account reaper cron | 🟢 | internal | `crates/auth/src/cron/account_reaper.rs` | — | `crates/auth/src/cron/account_reaper.rs` | Per-user txns; financial-history retention. |
 | Audit log (structured events) | 🟢 | internal | `crates/auth/src/audit.rs`, `store/audit.rs` | — | — | emit() swallows PG fail; emit_strict() propagates. |
 | Rate limiting (leaky token bucket) | 🟢 | internal | `crates/auth/src/ratelimit.rs`, `store/ratelimit.rs` | — | — | Atomic PG upsert; Bucket::* constants. |
-| Mailer abstraction (stdout/SMTP/Resend) | 🟢 | internal | `crates/auth/src/mailer/mod.rs`, `smtp.rs`, `resend.rs`, `stdout.rs` | — | — | Suppression check at trait level. |
-| Email suppression list | 🟢 | POST /webhooks/postmark, /ses-sns | `crates/auth/src/store/suppressions.rs`, `ui/webhooks.rs`, `mailer/bounce.rs`, `mailer/sns.rs` | — | — | Basic auth (Postmark); RSA-SHA1 (SES-SNS). |
-| Relay email forwarding | 🟢 | POST /webhooks/relay-inbound | `crates/auth/src/store/relay.rs`, `mailer/forward.rs`, `mailer/inbound.rs`, `ui/webhooks.rs` | — | `crates/auth/src/mailer/forward.rs` | Real inbox never in headers; loop cap N=3; one-way v1. |
+| Mailer abstraction (stdout/SMTP/Resend) | 🟢 | internal | `crates/mailer/src/lib.rs`, `smtp.rs`, `resend.rs`, `stdout.rs` | — | — | Own crate since the shared-mailer extraction; suppression check at trait level. |
+| Email suppression list | 🟢 | POST /webhooks/postmark, /ses-sns | `crates/mailer/src/suppressions.rs`, `bounce.rs`, `sns.rs`, `crates/auth/src/ui/webhooks.rs` | — | — | Basic auth (Postmark); RSA-SHA1 (SES-SNS). |
+| Relay email forwarding | 🟢 | POST /webhooks/relay-inbound | `crates/auth/src/store/relay.rs`, `ui/webhooks.rs`, `crates/mailer/src/forward.rs`, `inbound.rs` | — | `crates/mailer/src/forward.rs` | Real inbox never in headers; loop cap N=3; one-way v1. |
 | Relay alias minting at consent | 🟢 | internal | `crates/auth/src/store/relay.rs` | — | `crates/auth/src/store/relay.rs` | 62-bit base36; re-grant reuses alias. |
 | env.auth.getUser() | 🟢 | `env.auth.getUser()` | `crates/runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/runtime/tests/auth_plugin.rs` | Per-request keyed; WS fallback. |
 | env.auth.requireUser() | 🟢 | `env.auth.requireUser()` | `crates/runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/runtime/tests/auth_plugin.rs` | Throws → 401; RPC fail-closed (SEC-5). |
@@ -477,7 +477,7 @@ its compiled dist files and the Vite plugin imports it for dev. User code must n
 ## 9. Gateway
 
 The platform's edge layer for the App Runtime. It handles manifest dispatch, multi-arm
-JWT/session/DPoP authentication, CORS, rate/concurrency limiting, idempotent RPC dedup, static
+JWT/session authentication, CORS, rate/concurrency limiting, idempotent RPC dedup, static
 asset serving with tiered cache, OIDC RP for hosted apps, browser-facing BFF auth endpoints,
 back-channel logout, CHWBL worker routing, and the auth.zeroship.ai reverse proxy. All features
 are internally accessed; end-users hit it indirectly via HTTP.
@@ -489,17 +489,17 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | Path canonicalization + traversal rejection (SEC-2) | 🟢 | internal | `crates/gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `tests/e2e_gateway_path_backslash.sh` | Canonical form used for auth match + forward. Rejects `\` (WHATWG folds it to `/`) as well as dot-segments; the 2026-06-09 review's "RPC is not affected" was wrong — the worker's RPC tag match was a substring, now anchored to the path root. |
 | Compiled policy inheritance | 🟢 | internal | `crates/gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | timeout_ms declared but None. |
 | RPC fail-closed default (SEC-5) | 🟢 | internal | `crates/gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | rpc: defaults to User. |
-| Multi-arm per-request auth (cookie/Bearer/DPoP) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/dpop_e2e.rs` | DPoP cnf.jkt binding deferred; fail-closed. |
+| Multi-arm per-request auth (cookie / OP Bearer / BFF token) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Fail-closed. The DPoP arm was removed with the closed-world OP (P5e). |
 | Pairwise subject projection (pws_) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | 503 if no sector_identifier. |
 | Per-app family-marker revocation + cache (R1d) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Fail-closed on cache-miss + DB error. |
 | BFF browser-auth endpoints | 🟢 | /__zeroship/auth/authorize, /popup-callback, /signout | `crates/gateway/src/browser_auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/browser_auth_test.rs` | Same-origin only; strict CSP relay. |
 | BFF session token endpoint | 🟢 | POST/GET /__zeroship/auth/session | `crates/gateway/src/auth_token.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | No JWT in body; reload-storm coalescing. |
 | Stateless signed session cookie | 🟢 | internal | `crates/gateway/src/session_token.rs`, `signing.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Ed25519; verified locally, no DB. |
 | OIDC RP authorize→callback→mint | 🟢 | GET /__zeroship/auth/callback | `crates/gateway/src/oidc_rp.rs`, `router/dispatch.rs` | `docs/reference/auth.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | HMAC-signed stash cookie. |
-| DPoP proof verification + jti replay (RFC 9449) | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `lib.rs` | `docs/reference/auth.md` | `crates/gateway/tests/dpop_e2e.rs` | 120s window; per-app client_id binding. |
+| DPoP proof verification + jti replay (RFC 9449) | ⚫ | none | — | — | — | REMOVED with the closed-world OP (P5e): the platform OP never issues DPoP-bound tokens, and Bearer tokens verify locally against JWKS. The gateway arm, the core proof verifier, and the gateway DPoP e2e test were all deleted. |
 | OIDC back-channel logout webhook | 🟢 | POST /oidc/backchannel-logout | `crates/gateway/src/backchannel_logout.rs` | — | `crates/gateway/tests/backchannel_logout_test.rs` | Revokes app sessions and token families. |
 | auth.zeroship.ai reverse proxy | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | `crates/gateway/tests/oidc_rp_e2e.rs` | XFF re-authored (SEC-3); exact host match. |
-| CSRF origin guard (cookie mutations) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | Mismatch drops cookie; Bearer/DPoP exempt. |
+| CSRF origin guard (cookie mutations) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | Mismatch drops cookie; Bearer-authenticated requests exempt. |
 | Route-level OAuth scope enforcement | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `compiled.rs` | `docs/reference/auth.md` | `crates/gateway/src/sync.rs` | Only User/Admin routes; anon never 403s. |
 | CORS preflight + header injection | 🟢 | internal | `crates/gateway/src/router/cors.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/router/cors.rs` | Wildcard requires no credentials. |
 | Global per-app rate limiting | 🟢 | internal | `crates/gateway/src/enforce.rs` | — | `crates/gateway/src/enforce.rs` | Boot-time bucket; separate from per-resource. |
@@ -524,7 +524,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | Row-level-security tenant isolation | 🟢 | internal | `crates/gateway/src/rls.rs` | — | `crates/gateway/tests/sessions_test.rs` | SET LOCAL GUC; unset fails closed. |
 | Per-thread PostgreSQL pool | 🟢 | internal | `crates/gateway/src/db.rs`, `lib.rs` | — | `crates/gateway/tests/db_pool_smoke.rs` | !Send; None in dev no-DB. |
 | Trust-proxy client IP derivation | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | — | Default false; behind trusted L7 only. |
-| DPoP jti replay cache (tiered) | 🟢 | internal | `crates/gateway/src/lib.rs` (TieredJtiCache) | — | `crates/gateway/tests/dpop_e2e.rs` | 120s window. |
+| DPoP jti replay cache (tiered) | ⚫ | none | — | — | — | REMOVED with the DPoP arm (P5e). The surviving replay cache is `LogoutJtiCache` (back-channel logout), in `crates/core/src/logout_token.rs`. |
 | Insecure-dev mode (HTTP cookies) | 🟢 | internal (--insecure-dev) | `crates/gateway/src/lib.rs`, `main.rs` | — | — | Prod must be false (__Host- needs Secure). |
 | x-wall-time-ms response header | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | — | Informational. |
 | Relay email alias (email-claim swap §7) | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `identities.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | All 3 auth arms; fail-closed empty. |
@@ -577,7 +577,7 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Orphaned-app reaper (cron) | 🟢 | internal | `crates/control/src/cron/orphaned_app_reaper.rs` | — | `crates/control/tests/orphaned_app_reaper_test.rs` | system=true never reaped. |
 | Audit retention sweep (cron) | 🟢 | internal | `crates/control/src/cron/audit_retention.rs` | — | `crates/control/tests/audit_retention_test.rs` | GUC flag cleared on exit. |
 | Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/control/src/rate_limit.rs`, `http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node. |
-| Metering aggregation helpers | 🟠 | internal | `crates/control/src/metering.rs` | — | — | Single-line stub comment; no impl. |
+| Metering aggregation / period snapshots | 🟢 | internal | `crates/control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
 | Control health check | 🟢 | GET /internal/health | `crates/control/src/internal.rs` | — | — | Liveness only. |
 | TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | — | Auth namespace removed (R5); missing admin/PAT wrappers. |
 | Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
@@ -639,9 +639,17 @@ usage-metering pipeline. The Stripe-Connect side is substantially built (account
 webhook-ingest ledger, earnings dashboard, all end-to-end). The usage-metering side exists
 only as schema + an ingest endpoint: the worker never sends data, `env.meter.*` is absent from
 the runtime, and no billing decisions are driven by the counters. Platform fee enforcement is
-purely trust-based. **Note:** a *complete* metering→pricing→spending-limit engine exists in the
-**dead/excluded `crates/platform`** (tokio/axum, can't run — see the rollup) — so this is
-"built then abandoned", not "never built"; reviving it is a from-scratch compio re-implementation.
+purely trust-based.
+
+**STALE (flagged 2026-08-10, metering rows only).** The paragraph above predates the metering
+pipeline landing and was not re-audited during the citation repair; treat its metering claims as
+unverified. Three things are certain: the worker DOES meter (it records the platform counters
+into `zeroship_metering::Meter` - `crates/worker/src/cache.rs`, `handler.rs`), control ingests
+`UsageEvent`s off the durable stream and writes idempotent period snapshots
+(`crates/control/src/metering/mod.rs`), and there is no `POST /internal/usage` endpoint in
+`crates/control/src/internal.rs` anymore. `env.meter` is absent by design, not by omission. The
+former "complete but dead" `crates/platform` tokio/axum monolith has been DELETED from the tree.
+The Stripe-Connect rows below were not part of that flag.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -659,7 +667,7 @@ purely trust-based. **Note:** a *complete* metering→pricing→spending-limit e
 | Usage counter ingest (worker → control) | 🟡 | POST /internal/usage | `crates/control/src/internal.rs` | `docs/reference/billing-metering.md` | — | No worker ever calls it; ingest-only. |
 | Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
 | Usage history / snapshots | 🟠 | internal (DB schema only) | `db/migrations-ts/20260702000200_control_tables.ts` | — | — | Table exists; no code reads/writes it. |
-| env.meter.* native primitive | 🔵 | `env.meter.*` (planned) | `crates/control/src/metering.rs` | — | — | Single-line stub; not registered in runtime. |
+| env.meter.* native primitive | ⚫ | none (deliberately absent) | — | `docs/reference/billing-metering.md` | — | Not planned: metering is infrastructure so app code can neither forge nor suppress it. The worker emits the platform counters and `env.{db,kv,storage}` emit usage metrics into `crates/metering`; no `env.meter` is registered. |
 | Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/control/src/stripe_handlers.rs` | — | — | Fee set by SDK; not re-verified server-side. |
 
 ---
@@ -759,81 +767,90 @@ plugins — the `mode` option selects the build posture.
 | SSR build support | 🟢 | `zeroship()` + build.manifest:true | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | User must set manifest:true. |
 | SSG build support | 🟢 | `zeroship({ mode: 'static' })` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssg-docs/vite.config.ts` | HTML pre-render is user's responsibility. |
 | rpcEndpoint option | ⚫ | `zeroship({ rpcEndpoint })` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | _rpcEndpoint unused; stubs use fixed path. |
-| Stale dist-only files | ⚫ | none | `sdks/vite-plugin/dist/resolve-schema.js` | — | — | Orphaned dist; source deleted, dist not cleaned. |
 
 ---
 
 ## 15. Sandbox / AI build env
 
-Isolated execution environments for AI-generated creator apps. Each sandbox is a microVM (or
-container, dev) running the zeroship-sandbox-agent as PID 1; the controller orchestrates
-lifecycle over an HTTP API with Ed25519-signed requests. Three backends: Docker (dev),
-Kubernetes + libkrun (fleet), Nomad + Cloud Hypervisor (production). The codebase is
+**This subsystem no longer lives in this repository.** The sandbox / preview backend
+(controller, in-VM agent, and the Nomad + Cloud Hypervisor task driver) was extracted to the
+standalone sibling project `zeroship-sandbox`, and the hosted-build environment is deferred (see
+the task router in `AGENTS.md`). Nothing under `crates/sandbox`, `crates/sandbox-agent`, or
+`nomad-driver-ch` is built here anymore, so every **Code** and **Example** cell in this section
+is cleared: the code they used to name is in the other project, and this map does not guess at
+paths there. The control plane reaches the service over HTTP (`SANDBOX_URL` / `SANDBOX_TOKEN`)
+and it shares this deployment's Postgres through the `sandbox_*` roles. The table below is
+retained as a feature inventory of that service, and its **Status** column describes the
+extracted project, not code on disk here.
+
+Each sandbox is a microVM (or container, dev) running the zeroship-sandbox-agent as PID 1; the
+controller orchestrates lifecycle over an HTTP API with Ed25519-signed requests. Three backends:
+Docker (dev), Kubernetes + libkrun (fleet), Nomad + Cloud Hypervisor (production). The service is
 production-shaped for nomad-ch with snapshot/restore, preview proxy, share tokens, HA pg-backed
 state, and an operator admin API; the cold-boot orchestrator is the only remaining stub.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Docker backend | 🟢 | internal (SANDBOX_BACKEND=docker) | `crates/sandbox/src/backend/docker.rs` | `docs/architecture/builder.md` | `crates/sandbox/examples/lifecycle_e2e.rs` | restore_from_sealed Err; no restart-restore. |
-| Kubernetes + libkrun backend | 🟢 | internal (SANDBOX_BACKEND=k8s) | `crates/sandbox/src/backend/k8s.rs` | `docs/runbooks/sandbox-agent.md` | `crates/sandbox-agent/examples/e2e_k3s.rs` | Shells out to kubectl; restore Err. |
-| Nomad + Cloud Hypervisor backend | 🟢 | internal (SANDBOX_BACKEND=nomad-ch) | `crates/sandbox/src/backend/nomad_ch.rs` | `docs/runbooks/sandbox-nomad-ch.md` | `crates/sandbox/examples/lifecycle_e2e.rs` | Production; vm_index free-list; node-pin. |
-| Sandbox create | 🟢 | POST /sandboxes | `crates/sandbox/src/handlers.rs` | `docs/architecture/builder.md` | `crates/sandbox/tests/sandbox_pg_e2e.rs` | Re-attach if alive; retry on stale-agent. |
-| Sandbox list | 🟢 | GET /sandboxes?user_id= | `crates/sandbox/src/handlers.rs` | — | — | Requires user_id (no cross-tenant). |
-| Sandbox get | 🟢 | GET /sandboxes/{id}?user_id= | `crates/sandbox/src/handlers.rs` | — | — | 404 for missing or wrong-owner. |
-| Sandbox stop/delete | 🟢 | DELETE /sandboxes/{id}?user_id= | `crates/sandbox/src/handlers.rs` | — | `crates/sandbox/tests/sandbox_pg_e2e.rs` | CAS-fenced against HA takeover. |
-| In-sandbox command exec | 🟢 | POST /sandboxes/{id}/exec | `crates/sandbox/src/handlers.rs` | — | `crates/sandbox/tests/sandbox_preview_e2e.rs` | 600s cap; env-cleared child. |
-| Workspace file tree | 🟢 | GET /sandboxes/{id}/file-tree | `crates/sandbox/src/handlers.rs` | — | — | truncated flag at cap. |
-| Workspace file CRUD | 🟢 | GET/PUT/DELETE /sandboxes/{id}/files/{path} | `crates/sandbox/src/handlers.rs` | — | `crates/sandbox/tests/sandbox_preview_e2e.rs` | openat2 RESOLVE_BENEATH/NO_SYMLINKS. |
-| Preview HTTP proxy | 🟢 | ANY /sandboxes/{id}/preview/{port}/{path} | `crates/sandbox/src/preview.rs` | `docs/architecture/builder.md` | `crates/sandbox/tests/sandbox_preview_e2e.rs` | Bearer or share-token; port allow-list; 100 MiB. |
-| Preview WebSocket proxy (controller) | 🟢 | TCP SANDBOX_PREVIEW_WS_PORT | `crates/sandbox/src/preview_ws.rs` | — | `crates/sandbox/tests/sandbox_preview_ws_e2e.rs` | Dedicated port; TCP splice. |
-| Preview share token mint/list/revoke | 🟢 | POST/GET/DELETE /sandboxes/{id}/preview/{port}/share | `crates/sandbox/src/preview_share_handlers.rs` | — | `crates/sandbox/tests/sandbox_preview_share_e2e.rs` | HMAC; 100/day; per-token revoke 501. |
-| Share token cookie conversion (?t=) | 🟢 | GET .../preview/{port}/{path}?t= | `crates/sandbox/src/preview.rs` | — | `crates/sandbox/tests/sandbox_preview_share_e2e.rs` | __Host- cookie; Sec-Fetch gate. |
-| sandbox-agent: PID-1 HTTP server | 🟢 | internal (HTTP :7777 in VM) | `crates/sandbox-agent/src/main.rs` | `docs/runbooks/sandbox-agent.md` | `crates/sandbox-agent/examples/e2e_k3s.rs` | Protocol v1; per-route body caps. |
-| sandbox-agent: Ed25519 verification | 🟢 | internal (X-Sbx-* headers) | `crates/sandbox-agent/src/auth.rs` | — | — | 5s skew; 30s nonce LRU; canonical v1/v1.1. |
-| sandbox-agent: command exec (/exec) | 🟢 | internal (POST /exec) | `crates/sandbox-agent/src/exec.rs` | — | `crates/sandbox-agent/examples/e2e_k3s.rs` | nobody:nogroup; SIGKILL group on timeout. |
-| sandbox-agent: proxy HTTP (/proxy) | 🟢 | internal (ANY /proxy/{port}/{path}) | `crates/sandbox-agent/src/proxy.rs` | — | `crates/sandbox/tests/sandbox_preview_e2e.rs` | Port allow-list; Set-Cookie Domain strip. |
-| sandbox-agent: proxy WebSocket (:7778) | 🟢 | internal (TCP :7778) | `crates/sandbox-agent/src/proxy_ws.rs` | — | `crates/sandbox/tests/sandbox_preview_ws_e2e.rs` | TCP splice; proxy.ws-v1. |
-| sandbox-agent: clock resync | 🟢 | internal (POST /_clock_resync) | `crates/sandbox-agent/src/handlers.rs` | — | — | Post-restore; sandbox_id binding. |
-| sandbox-agent: PID-1 zombie reaper | 🟢 | internal | `crates/sandbox-agent/src/reap.rs` | — | — | Idempotent. |
-| sandbox-agent: security audit log | 🟢 | internal (tracing target 'audit') | `crates/sandbox-agent/src/audit.rs` | — | — | Stable event ids. |
-| Sealed-record persistence | 🟢 | internal (SANDBOX_PERSIST_AUTH=1) | `crates/sandbox/src/persist.rs` | — | `crates/sandbox/tests/sandbox_persist_e2e.rs` | XChaCha20-Poly1305; nomad-ch full rehydrate. |
-| Snapshot | 🟢 | POST /admin/sandboxes/{id}/snapshot | `crates/sandbox/src/snapshot_handler.rs` | — | `crates/sandbox/tests/sandbox_pg_e2e.rs` | CAS state machine; nomad-ch only. |
-| Snapshot AEAD encryption | 🟢 | internal (AeadSnapshotStore) | `crates/sandbox/src/snapshot_aead.rs` | — | — | ChaCha20-Poly1305; HKDF per-snapshot DEK. |
-| Snapshot store: local disk (L1) | 🟢 | internal | `crates/sandbox/src/snapshot_store.rs` | — | — | Canonical SHA-256 over 3 files. |
-| Snapshot store: GCS L2 tiered | 🟢 | internal (SANDBOX_SNAPSHOT_USE_GCS) | `crates/sandbox/src/snapshot_store_gcs.rs` | — | — | Fire-and-forget L2; no retry yet. |
-| Wake / restore | 🟢 | POST /admin/sandboxes/{id}/wake | `crates/sandbox/src/restore_handler.rs` | — | `crates/sandbox/tests/sandbox_pg_e2e.rs` | CAS; sync/async modes; checksum verify. |
-| Async wake polling | 🟢 | GET /admin/sandboxes/{id}/wake/{wake_id} | `crates/sandbox/src/admin_handlers.rs` | — | — | wake_jobs table; GC sweep. |
-| Cold boot | 🟠 | POST /admin/sandboxes/{id}/cold-boot | `crates/sandbox/src/admin_handlers.rs` | — | — | Always 501 feature_disabled. |
-| Idle eviction sweep | 🟢 | internal | `crates/sandbox/src/sweep.rs` | — | — | 30-min default; bounded concurrency. |
-| Transient-state takeover sweep | 🟢 | internal | `crates/sandbox/src/sweep.rs` | — | — | 30s scan; defense-in-depth. |
-| wake_jobs GC sweep | 🟢 | internal | `crates/sandbox/src/sweep.rs` | — | — | 60s; 300s retention. |
-| sandbox_events partition provisioner | 🟢 | internal | `crates/sandbox/src/sweep.rs` | — | — | Monthly partitions; DDL role. |
-| HA heartbeat and lease takeover | 🟢 | internal | `crates/sandbox/src/db.rs` | — | `crates/sandbox/tests/sandbox_pg_e2e.rs` | 5s heartbeat; CAS generation guard. |
-| Startup restore from pg + sealed | 🟢 | internal | `crates/sandbox/src/restore.rs` | — | `crates/sandbox/tests/sandbox_persist_e2e.rs` | nomad-ch full; fingerprint probe. |
-| Admin: list all sandboxes | 🟢 | GET /admin/sandboxes | `crates/sandbox/src/admin_handlers.rs` | — | `crates/sandbox/tests/sandbox_admin_e2e.rs` | Cross-tenant; pagination. |
-| Admin: sandbox detail | 🟢 | GET /admin/sandboxes/{id} | `crates/sandbox/src/admin_handlers.rs` | — | `crates/sandbox/tests/sandbox_admin_e2e.rs` | pg row + agent /version. |
-| Admin: per-user sandbox list | 🟢 | GET /admin/users/{user_id}/sandboxes | `crates/sandbox/src/admin_handlers.rs` | — | — | Includes historical rows. |
-| Admin: per-user share list | 🟢 | GET /admin/users/{user_id}/shares | `crates/sandbox/src/admin_handlers.rs` | — | — | Share audit metadata. |
-| Admin: host fleet status | 🟢 | GET /admin/hosts | `crates/sandbox/src/admin_handlers.rs` | — | — | host_id/status/heartbeat_lag. |
-| Admin: GDPR data export | 🟢 | GET /admin/users/{user_id}/export | `crates/sandbox/src/admin_handlers.rs` | — | — | Full bearer; REPEATABLE READ. |
-| Admin: GDPR cascade delete | 🟢 | DELETE /admin/users/{user_id} | `crates/sandbox/src/admin_handlers.rs` | — | — | Full bearer; gdpr pool. |
-| Admin: read-only (RO) bearer role | 🟢 | internal (AdminRole) | `crates/sandbox/src/admin_handlers.rs` | — | `crates/sandbox/tests/sandbox_admin_e2e.rs` | HTTP gate; DB role deferred. |
-| Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/sandbox/src/admin_handlers.rs` | — | — | Process-global atomics. |
-| Sandbox in-memory registry | 🟢 | internal | `crates/sandbox/src/registry.rs` | — | — | (user,project)→sbx; 60s secret grace. |
-| Pg-backed sandbox state | 🟢 | internal (SANDBOX_DATABASE_URL) | `crates/sandbox/src/db.rs` | — | `crates/sandbox/tests/sandbox_pg_e2e.rs` | 3 pg roles; per-thread Pool cache. |
-| detach_isolated task isolation | 🟢 | internal | `crates/sandbox/src/detach.rs` | — | — | Dedicated OS thread + compio runtime. |
-| GCP cluster provisioning scripts | 🟢 | bash scripts | `crates/sandbox/scripts/provision-gcp-cluster.sh` | `docs/runbooks/sandbox-nomad-ch.md` | — | provision/bootstrap/teardown. |
-| Nomad ch Go task driver | 🟢 | internal (driver 'ch') | `nomad-driver-ch/` | `docs/runbooks/sandbox-nomad-ch.md` | — | RecoverTask + TaskStats; Exec=false. |
-| sandbox-base image / bake-rootfs | 🟢 | bash/Dockerfile | `crates/sandbox/docker/Dockerfile.sandbox-base` | — | — | seccomp-io-uring profile. |
-| typed_id sbx/usr/prj validation | 🟢 | internal | `crates/sandbox/src/handlers.rs` | — | `crates/sandbox/tests/sandbox_typed_id_e2e.rs` | pg CHECK; path-traversal boundary. |
-| Lifecycle e2e example | 🟢 | cargo --example lifecycle_e2e | `crates/sandbox/examples/lifecycle_e2e.rs` | — | — | — |
-| Stress e2e example | 🟢 | cargo --example stress_e2e | `crates/sandbox/examples/stress_e2e.rs` | — | — | — |
-| Per-token share revoke | 🟠 | DELETE .../share/{token_id} | `crates/sandbox/src/preview_share_handlers.rs` | — | — | 501; bulk revoke works. |
-| sandbox_admin_ro pg role | 🔵 | internal | `crates/sandbox/src/db.rs` | — | — | HTTP gate ships; DB role deferred. |
-| Per-operator JWT admin auth | 🔵 | internal | `crates/sandbox/src/admin_handlers.rs` | — | — | Replaces shared-bearer; deferred. |
-| GCS L2 upload retry / metric | 🔵 | internal | `crates/sandbox/src/snapshot_store_gcs.rs` | — | — | Fire-and-forget warn only. |
-| LRU eviction + refcount pinning (L1) | 🔵 | internal | `crates/sandbox/src/snapshot_store.rs` | — | — | Planned. |
-| Docker/K8s restart-restore | 🟡 | internal | `crates/sandbox/src/backend/mod.rs` | — | — | nomad-ch only; Docker/K8s return Err. |
+| Docker backend | 🟢 | internal (SANDBOX_BACKEND=docker) | — | `docs/architecture/builder.md` | — | restore_from_sealed Err; no restart-restore. |
+| Kubernetes + libkrun backend | 🟢 | internal (SANDBOX_BACKEND=k8s) | — | — | — | Shells out to kubectl; restore Err. |
+| Nomad + Cloud Hypervisor backend | 🟢 | internal (SANDBOX_BACKEND=nomad-ch) | — | — | — | Production; vm_index free-list; node-pin. |
+| Sandbox create | 🟢 | POST /sandboxes | — | `docs/architecture/builder.md` | — | Re-attach if alive; retry on stale-agent. |
+| Sandbox list | 🟢 | GET /sandboxes?user_id= | — | — | — | Requires user_id (no cross-tenant). |
+| Sandbox get | 🟢 | GET /sandboxes/{id}?user_id= | — | — | — | 404 for missing or wrong-owner. |
+| Sandbox stop/delete | 🟢 | DELETE /sandboxes/{id}?user_id= | — | — | — | CAS-fenced against HA takeover. |
+| In-sandbox command exec | 🟢 | POST /sandboxes/{id}/exec | — | — | — | 600s cap; env-cleared child. |
+| Workspace file tree | 🟢 | GET /sandboxes/{id}/file-tree | — | — | — | truncated flag at cap. |
+| Workspace file CRUD | 🟢 | GET/PUT/DELETE /sandboxes/{id}/files/{path} | — | — | — | openat2 RESOLVE_BENEATH/NO_SYMLINKS. |
+| Preview HTTP proxy | 🟢 | ANY /sandboxes/{id}/preview/{port}/{path} | — | `docs/architecture/builder.md` | — | Bearer or share-token; port allow-list; 100 MiB. |
+| Preview WebSocket proxy (controller) | 🟢 | TCP SANDBOX_PREVIEW_WS_PORT | — | — | — | Dedicated port; TCP splice. |
+| Preview share token mint/list/revoke | 🟢 | POST/GET/DELETE /sandboxes/{id}/preview/{port}/share | — | — | — | HMAC; 100/day; per-token revoke 501. |
+| Share token cookie conversion (?t=) | 🟢 | GET .../preview/{port}/{path}?t= | — | — | — | __Host- cookie; Sec-Fetch gate. |
+| sandbox-agent: PID-1 HTTP server | 🟢 | internal (HTTP :7777 in VM) | — | — | — | Protocol v1; per-route body caps. |
+| sandbox-agent: Ed25519 verification | 🟢 | internal (X-Sbx-* headers) | — | — | — | 5s skew; 30s nonce LRU; canonical v1/v1.1. |
+| sandbox-agent: command exec (/exec) | 🟢 | internal (POST /exec) | — | — | — | nobody:nogroup; SIGKILL group on timeout. |
+| sandbox-agent: proxy HTTP (/proxy) | 🟢 | internal (ANY /proxy/{port}/{path}) | — | — | — | Port allow-list; Set-Cookie Domain strip. |
+| sandbox-agent: proxy WebSocket (:7778) | 🟢 | internal (TCP :7778) | — | — | — | TCP splice; proxy.ws-v1. |
+| sandbox-agent: clock resync | 🟢 | internal (POST /_clock_resync) | — | — | — | Post-restore; sandbox_id binding. |
+| sandbox-agent: PID-1 zombie reaper | 🟢 | internal | — | — | — | Idempotent. |
+| sandbox-agent: security audit log | 🟢 | internal (tracing target 'audit') | — | — | — | Stable event ids. |
+| Sealed-record persistence | 🟢 | internal (SANDBOX_PERSIST_AUTH=1) | — | — | — | XChaCha20-Poly1305; nomad-ch full rehydrate. |
+| Snapshot | 🟢 | POST /admin/sandboxes/{id}/snapshot | — | — | — | CAS state machine; nomad-ch only. |
+| Snapshot AEAD encryption | 🟢 | internal (AeadSnapshotStore) | — | — | — | ChaCha20-Poly1305; HKDF per-snapshot DEK. |
+| Snapshot store: local disk (L1) | 🟢 | internal | — | — | — | Canonical SHA-256 over 3 files. |
+| Snapshot store: GCS L2 tiered | 🟢 | internal (SANDBOX_SNAPSHOT_USE_GCS) | — | — | — | Fire-and-forget L2; no retry yet. |
+| Wake / restore | 🟢 | POST /admin/sandboxes/{id}/wake | — | — | — | CAS; sync/async modes; checksum verify. |
+| Async wake polling | 🟢 | GET /admin/sandboxes/{id}/wake/{wake_id} | — | — | — | wake_jobs table; GC sweep. |
+| Cold boot | 🟠 | POST /admin/sandboxes/{id}/cold-boot | — | — | — | Always 501 feature_disabled. |
+| Idle eviction sweep | 🟢 | internal | — | — | — | 30-min default; bounded concurrency. |
+| Transient-state takeover sweep | 🟢 | internal | — | — | — | 30s scan; defense-in-depth. |
+| wake_jobs GC sweep | 🟢 | internal | — | — | — | 60s; 300s retention. |
+| sandbox_events partition provisioner | 🟢 | internal | — | — | — | Monthly partitions; DDL role. |
+| HA heartbeat and lease takeover | 🟢 | internal | — | — | — | 5s heartbeat; CAS generation guard. |
+| Startup restore from pg + sealed | 🟢 | internal | — | — | — | nomad-ch full; fingerprint probe. |
+| Admin: list all sandboxes | 🟢 | GET /admin/sandboxes | — | — | — | Cross-tenant; pagination. |
+| Admin: sandbox detail | 🟢 | GET /admin/sandboxes/{id} | — | — | — | pg row + agent /version. |
+| Admin: per-user sandbox list | 🟢 | GET /admin/users/{user_id}/sandboxes | — | — | — | Includes historical rows. |
+| Admin: per-user share list | 🟢 | GET /admin/users/{user_id}/shares | — | — | — | Share audit metadata. |
+| Admin: host fleet status | 🟢 | GET /admin/hosts | — | — | — | host_id/status/heartbeat_lag. |
+| Admin: GDPR data export | 🟢 | GET /admin/users/{user_id}/export | — | — | — | Full bearer; REPEATABLE READ. |
+| Admin: GDPR cascade delete | 🟢 | DELETE /admin/users/{user_id} | — | — | — | Full bearer; gdpr pool. |
+| Admin: read-only (RO) bearer role | 🟢 | internal (AdminRole) | — | — | — | HTTP gate; DB role deferred. |
+| Prometheus metrics endpoint | 🟢 | GET /metrics | — | — | — | Process-global atomics. |
+| Sandbox in-memory registry | 🟢 | internal | — | — | — | (user,project)→sbx; 60s secret grace. |
+| Pg-backed sandbox state | 🟢 | internal (SANDBOX_DATABASE_URL) | — | — | — | 3 pg roles; per-thread Pool cache. |
+| detach_isolated task isolation | 🟢 | internal | — | — | — | Dedicated OS thread + compio runtime. |
+| GCP cluster provisioning scripts | 🟢 | bash scripts | — | — | — | provision/bootstrap/teardown. |
+| Nomad ch Go task driver | 🟢 | internal (driver 'ch') | — | — | — | RecoverTask + TaskStats; Exec=false. |
+| sandbox-base image / bake-rootfs | 🟢 | bash/Dockerfile | — | — | — | seccomp-io-uring profile. |
+| typed_id sbx/usr/prj validation | 🟢 | internal | — | — | — | pg CHECK; path-traversal boundary. |
+| Lifecycle e2e example | 🟢 | cargo --example lifecycle_e2e | — | — | — | — |
+| Stress e2e example | 🟢 | cargo --example stress_e2e | — | — | — | — |
+| Per-token share revoke | 🟠 | DELETE .../share/{token_id} | — | — | — | 501; bulk revoke works. |
+| sandbox_admin_ro pg role | 🔵 | internal | — | — | — | HTTP gate ships; DB role deferred. |
+| Per-operator JWT admin auth | 🔵 | internal | — | — | — | Replaces shared-bearer; deferred. |
+| GCS L2 upload retry / metric | 🔵 | internal | — | — | — | Fire-and-forget warn only. |
+| LRU eviction + refcount pinning (L1) | 🔵 | internal | — | — | — | Planned. |
+| Docker/K8s restart-restore | 🟡 | internal | — | — | — | nomad-ch only; Docker/K8s return Err. |
 
 ---
 
@@ -887,27 +904,27 @@ observability, and OIDC/OAuth protocol primitives.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| PG client — connect + Client/Connection split | 🟢 | internal | `crates/compio-postgres/src/connect.rs`, `client.rs`, `connection.rs` | — | `crates/compio-postgres/tests/integration.rs` | tokio-postgres port; NoTls only. |
-| PG client — query/execute/query_* variants | 🟢 | internal | `crates/compio-postgres/src/client.rs`, `query.rs` | — | `crates/compio-postgres/tests/integration.rs` | query_text_params for JSON builders. |
-| PG client — prepared statements | 🟢 | internal | `crates/compio-postgres/src/prepare.rs`, `statement.rs` | — | `crates/compio-postgres/tests/integration.rs` | CachedTypeInfo per connection. |
-| PG client — transactions + savepoints | 🟢 | internal | `crates/compio-postgres/src/transaction.rs`, `transaction_builder.rs` | — | `crates/compio-postgres/tests/integration.rs` | Drop fires ROLLBACK; dirty-flag barrier. |
-| PG client — simple_query / batch_execute | 🟢 | internal | `crates/compio-postgres/src/simple_query.rs` | — | `crates/compio-postgres/tests/integration.rs` | Text protocol; pool dirty barrier. |
-| PG client — COPY IN / COPY OUT | 🟢 | internal | `crates/compio-postgres/src/copy_in.rs`, `copy_out.rs`, `binary_copy.rs` | — | `crates/compio-postgres/tests/integration.rs` | Binary copy helper port. |
-| PG client — portals (bind-execute) | 🟢 | internal | `crates/compio-postgres/src/portal.rs`, `bind.rs` | — | `crates/compio-postgres/tests/integration.rs` | Cursor-like partial fetch. |
-| PG client — async LISTEN/NOTIFY | 🟢 | internal | `crates/compio-postgres/src/connection.rs`, `lib.rs` | — | `crates/compio-postgres/tests/integration.rs` | AsyncMessage Notification/Notice. |
-| PG client — cancel token | 🟢 | internal | `crates/compio-postgres/src/cancel_token.rs`, `cancel_query.rs` | — | — | Deprecated wrappers delegate. |
-| PG client — TLS negotiation | 🟡 | internal | `crates/compio-postgres/src/connect_tls.rs`, `tls.rs`, `config.rs` | — | — | Full code exists; only NoTls exported. |
-| PG client — pipelining | 🟢 | internal | `crates/compio-postgres/src/connection.rs`, `client.rs` | — | — | Unbounded channel FIFO. |
-| PG client — logical replication (pgoutput) | 🟢 | internal | `crates/compio-postgres/src/replication.rs` | — | — | Own CopyBoth framer; single-host. |
-| PG connection pool | 🟢 | internal | `crates/compio-postgres/src/pool.rs` | — | `crates/compio-postgres/tests/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
-| PG test-utils feature | 🟢 | internal (feature=test-utils) | `crates/compio-postgres/src/test_utils.rs` | — | — | Excluded from prod builds. |
-| PG config — connection string parser | 🟢 | internal | `crates/compio-postgres/src/config.rs` | — | — | DSN parser; Unix socket support. |
-| Redis single-node client | 🟢 | internal (plugin-kv) | `crates/compio-redis/src/client.rs` | — | `crates/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
-| Redis reply size cap (64 MB) | 🟢 | internal | `crates/compio-redis/src/client.rs` | — | `crates/compio-redis/src/client.rs` | OOM guard; array-bomb rejected. |
-| Redis dirty-barrier for pool reuse | 🟢 | internal | `crates/compio-redis/src/client.rs`, `pool.rs` | — | `crates/compio-redis/src/pool.rs` | Cross-tenant desync prevention. |
-| Redis cluster client | 🟢 | internal (plugin-kv) | `crates/compio-redis/src/cluster.rs` | — | `crates/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
-| Redis connection pool | 🟢 | internal | `crates/compio-redis/src/pool.rs` | — | `crates/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
-| Redis — no TLS | 🔵 | internal | `crates/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
+| PG client — connect + Client/Connection split | 🟢 | internal | `libs/compio-postgres/src/connect.rs`, `client.rs`, `connection.rs` | — | `libs/compio-postgres/tests/integration.rs` | tokio-postgres port; NoTls only. |
+| PG client — query/execute/query_* variants | 🟢 | internal | `libs/compio-postgres/src/client.rs`, `query.rs` | — | `libs/compio-postgres/tests/integration.rs` | query_text_params for JSON builders. |
+| PG client — prepared statements | 🟢 | internal | `libs/compio-postgres/src/prepare.rs`, `statement.rs` | — | `libs/compio-postgres/tests/integration.rs` | CachedTypeInfo per connection. |
+| PG client — transactions + savepoints | 🟢 | internal | `libs/compio-postgres/src/transaction.rs`, `transaction_builder.rs` | — | `libs/compio-postgres/tests/integration.rs` | Drop fires ROLLBACK; dirty-flag barrier. |
+| PG client — simple_query / batch_execute | 🟢 | internal | `libs/compio-postgres/src/simple_query.rs` | — | `libs/compio-postgres/tests/integration.rs` | Text protocol; pool dirty barrier. |
+| PG client — COPY IN / COPY OUT | 🟢 | internal | `libs/compio-postgres/src/copy_in.rs`, `copy_out.rs`, `binary_copy.rs` | — | `libs/compio-postgres/tests/integration.rs` | Binary copy helper port. |
+| PG client — portals (bind-execute) | 🟢 | internal | `libs/compio-postgres/src/portal.rs`, `bind.rs` | — | `libs/compio-postgres/tests/integration.rs` | Cursor-like partial fetch. |
+| PG client — async LISTEN/NOTIFY | 🟢 | internal | `libs/compio-postgres/src/connection.rs`, `lib.rs` | — | `libs/compio-postgres/tests/integration.rs` | AsyncMessage Notification/Notice. |
+| PG client — cancel token | 🟢 | internal | `libs/compio-postgres/src/cancel_token.rs`, `cancel_query.rs` | — | — | Deprecated wrappers delegate. |
+| PG client — TLS negotiation | 🟡 | internal | `libs/compio-postgres/src/connect_tls.rs`, `tls.rs`, `config.rs` | — | — | Full code exists; only NoTls exported. |
+| PG client — pipelining | 🟢 | internal | `libs/compio-postgres/src/connection.rs`, `client.rs` | — | — | Unbounded channel FIFO. |
+| PG client — logical replication (pgoutput) | 🟢 | internal | `libs/compio-postgres/src/replication.rs` | — | — | Own CopyBoth framer; single-host. |
+| PG connection pool | 🟢 | internal | `libs/compio-postgres/src/pool.rs` | — | `libs/compio-postgres/tests/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
+| PG test-utils feature | 🟢 | internal (feature=test-utils) | `libs/compio-postgres/src/test_utils.rs` | — | — | Excluded from prod builds. |
+| PG config — connection string parser | 🟢 | internal | `libs/compio-postgres/src/config.rs` | — | — | DSN parser; Unix socket support. |
+| Redis single-node client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
+| Redis reply size cap (64 MB) | 🟢 | internal | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/src/client.rs` | OOM guard; array-bomb rejected. |
+| Redis dirty-barrier for pool reuse | 🟢 | internal | `libs/compio-redis/src/client.rs`, `pool.rs` | — | `libs/compio-redis/src/pool.rs` | Cross-tenant desync prevention. |
+| Redis cluster client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
+| Redis connection pool | 🟢 | internal | `libs/compio-redis/src/pool.rs` | — | `libs/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
+| Redis — no TLS | 🔵 | internal | `libs/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
 | typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/core/src/typed_id.rs` | — | `crates/core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
 | Wire types — AppRecord/RouteEntry/... | 🟢 | internal | `crates/core/src/types.rs` | `docs/architecture/gateway-routing.md` | — | env_version monotonic counter. |
 | Wire types — UsageReport/AppUsage/ControlEvent | 🟢 | internal | `crates/core/src/types.rs` | — | — | CommonError enum. |
@@ -926,12 +943,12 @@ observability, and OIDC/OAuth protocol primitives.
 | Config — loopback URL check | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | Literal-only; no DNS. |
 | Config — bootstrap_or_exit | 🟢 | internal | `crates/core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
 | Observability — tracing subscriber init | 🟢 | ZEROSHIP_LOG_FORMAT / --log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
-| OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/core/tests/oidc_verify_test.rs` | 5-min TTL; stale-on-error; RS/ES algos. |
+| OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/core/src/oidc_verify.rs` (inline `mod tests`) | 5-min TTL; stale-on-error; RS/ES algos. |
 | OIDC — BCL logout_token verifier | 🟢 | internal (auth BCL) | `crates/core/src/logout_token.rs` | — | — | events claim; nonce-absent. |
-| DPoP — RFC 9449 proof verifier | 🟢 | internal (auth Bearer+DPoP) | `crates/core/src/dpop.rs` | — | — | RFC 7638 thumbprint; HMAC/none blocked. |
+| DPoP — RFC 9449 proof verifier | ⚫ | none | — | — | — | Deleted with the gateway DPoP arm (P5e); the closed-world OP omits DPoP. |
 | PKCE — RFC 7636 verifier + S256 | 🟢 | internal | `crates/core/src/pkce.rs` | — | — | 43-char verifier. |
 | Native OP client + LRU cache | 🟢 | internal (gateway/control authz) | `crates/gateway/src/op_client.rs`, `crates/control/src/authz_guard.rs` | — | `crates/gateway/tests/op_breaker_test.rs` | SHA-256(token) cache key; 5-min TTL. |
-| Wrapper revocation — per-app family marker | 🟢 | internal (gateway/auth signout) | `crates/core/src/wrapper_revocation.rs` | `docs/reference/auth.md` | — | Per-app scope; 24h retention. |
+| Wrapper revocation — per-app family marker | 🟢 | internal (gateway/auth signout) | `crates/authz/src/wrapper_revocation.rs` | `docs/reference/auth.md` | — | Lives in `zeroship-authz` since the crate-boundary reorg, not `core`. Per-app scope; 24h retention. |
 | SuperJSON — wire-compatible encode/decode | 🟢 | internal (RPC) | `crates/core/src/superjson.rs` | `docs/reference/rpc.md` | `crates/core/tests/superjson_test.rs` | npm superjson@2 wire; 17 fixtures. |
 | Preview port allowlist / denylist | 🟢 | internal (sandbox) | `crates/core/src/preview_ports.rs` | — | `crates/core/src/preview_ports.rs` | HARDCODED_DENY + DEFAULT_DENY; shared. |
 
@@ -1092,23 +1109,24 @@ completeness critic).
 
 ## Cross-cutting status rollup
 
-Totals across **20** areas (≈745 catalogued features; the §20 packages + the corrected
-`crates/platform` dead-crate entry were added 2026-06-11):
+Totals across **20** areas, counted by table row across sections 1-20 (recounted 2026-08-10, when the
+citation repair changed several statuses; the per-area counts in the Index above predate this
+recount and run low):
 
 | Status | Count | Share |
 | --- | --- | --- |
-| 🟢 shipped | 634 | 86.5% |
-| 🟡 partial | 52 | 7.1% |
-| 🟠 stub | 18 | 2.5% |
-| 🔵 planned | 22 | 3.0% |
-| ⚫ dead | 7 | 1.0% |
-| **Total** | **733** | 100% |
+| 🟢 shipped | 676 | 87.7% |
+| 🟡 partial | 46 | 6.0% |
+| 🟠 stub | 15 | 1.9% |
+| 🔵 planned | 20 | 2.6% |
+| ⚫ dead | 14 | 1.8% |
+| **Total** | **771** | 100% |
 
 ### Notable STUB / DEAD / PLANNED features
 
 **Metering & billing is the largest cluster of incomplete work:**
-- 🔵 `env.meter.*` native primitive — listed as planned in AGENTS.md; `crates/control/src/metering.rs` is a one-line stub; never registered in the runtime.
-- 🟠 Metering aggregation helpers (`crates/control/src/metering.rs`) — single-line stub comment, no impl.
+- ⚫ `env.meter.*` native primitive - deliberately absent, not planned: AGENTS.md and `docs/reference/billing-metering.md` both state the billing signal is platform-measured, so no `env.meter` will be registered.
+- (resolved) Metering aggregation is no longer a stub - `crates/control/src/metering/mod.rs` + `metering/provider/` implement stream ingest and idempotent period snapshots.
 - 🟡 Worker → control usage pipeline — `POST /internal/usage` is implemented but **no worker ever calls it**; usage read returns empty maps in real deploys.
 - 🟠 Usage history snapshots (`app_usage_history`) — table exists; no code reads or writes it.
 - 🟡 Platform fee enforcement — the application fee is set by the SDK and read from the Stripe payload, never re-computed server-side.
@@ -1135,15 +1153,14 @@ Totals across **20** areas (≈745 catalogued features; the §20 packages + the 
 - 🟡 `subscription()` procedures — transport works and is tested, but the public RPC client proxy is **UNIMPLEMENTED** (Vite stub fails at runtime); use `stream()` for shipped live feeds.
 
 **Other notable dead / partial:**
-- ⚫ `crates/platform` (`zeroship-platform`) — **EXISTS but is DEAD/excluded**: ~5,800 LOC / 35 files (core/plan/enforcement/metering/billing/control/server) **excluded from the workspace** (`Cargo.toml` `exclude`), built on tokio + axum + sqlx (violating the zero-tokio invariant), depended on by nothing, last touched 2026-05-06. It holds a **complete-but-unrunnable metering + billing + spending-limit implementation** (`core/meter_store.rs` MeterStore trait w/ InMemory/Sqlite/Redis/Postgres/Mmap backends, `core/billing.rs`, `metering/` flush+rollover) — superseded by the live `control`+`gateway`+`worker`, which have only the 1-line `metering.rs` stub (see §12). "Not built" is wrong; "built, then abandoned, can't run" is the truth — and the reason re-implementing metering/billing in the compio stack is from-scratch work, not a port.
+- (gone) `crates/platform` (`zeroship-platform`) - the ~5,800-LOC tokio + axum + sqlx monolith that held a complete-but-unrunnable metering + billing + spending-limit implementation was **DELETED** from the tree (`chore(billing): PR7 — delete dead crates/platform tokio monolith`). Nothing in this repo depends on it and no path under `crates/platform` resolves; the live metering/billing implementation is `crates/metering` + `crates/control/src/metering/`.
 - ⚫ `zeroship build` / `zeroship inspect` CLI commands — removed in the artifact-layout redesign (build path is `@zeroship/vite-plugin`).
 - ⚫ `manifest.exports.schema` / `ManifestExports.handlers` — deprecated Stage 5c; kept on the wire for archive upgrade only.
 - ⚫ Worker WebSocket-upgrade-via-/dispatch — returns 500 (gateway uses a separate WS path).
 - ⚫ `rpcEndpoint` Vite option — accepted but non-effectful; stubs use the fixed `/__zeroship/v1/<id>` path.
-- ⚫ Vite plugin stale dist-only files (`resolve-schema.js`, `ts-to-json-schema.js`, `zsapp.js`) — orphaned.
 - 🟡 App suspension (control) — flag is written but the gateway does not act on it; a suspended app keeps serving.
 - 🟡 Gateway WS subscription proxy (multi-node) — returns 501; affinity selection runs but proxy not wired (use `zeroship serve` single-tenant).
-- 🟠 Sandbox cold-boot endpoint (501) and per-token share revoke (501).
+- 🟠 Sandbox cold-boot endpoint (501) and per-token share revoke (501) - both in the standalone `zeroship-sandbox` project, not this repo.
 - 🟡 Per-procedure `timeout` — manifested but `timeout_ms` hardcoded `None` in the gateway; not enforced.
 - 🟠 Per-procedure `middleware` list — carried in the manifest but the runtime middleware chain is not wired.
 - 🟡 compio-postgres TLS — full negotiation code exists but only `NoTls` is exported.
@@ -1232,7 +1249,8 @@ the `client-manifest` type shim, SSR/SSG build modes, the `ZEROSHIP_BIN` overrid
 resources, the custom node polyfills, function-level `"use server"`, the `.dotenv` parser, and the
 `zeroship login`/`logout`/`whoami`/`secret`/`var` commands and `create-zeroship-app`.
 
-**Sandbox:** the entire HTTP API (sandbox + preview + share-token), the agent Ed25519 protocol +
+**Sandbox** (documentation owed by the standalone `zeroship-sandbox` project, not this repo):
+the entire HTTP API (sandbox + preview + share-token), the agent Ed25519 protocol +
 `/version` capability negotiation, sealed-record + snapshot artifact formats, the admin API,
 the HA lease/heartbeat/takeover protocol, the wake state machine, the `sandbox_events` partition
 schema, the Nomad `ch` driver TaskConfig + VM layout, agent body caps, the mint rate limiter, and
@@ -1246,8 +1264,8 @@ the SEC-7 env rotation, the per-thread cyper client, and SSG-only handling.
 **Drivers + core:** `compio-postgres` and `compio-redis` have **no reference doc** (architecture,
 wire format, pool config, TLS gaps); `typed_id`, the wire types, the AES-256-GCM at-rest crypto
 (and the per-app HKDF gap), the auth utils (ZeroShip-User header, pairwise, HMAC), the
-`urn:zeroship:` secret system (vault/awssm unresolvable), observability log formats, the DPoP /
-BCL verifiers, the native OP client, SuperJSON (Rust side), the preview port allowlist, and
+`urn:zeroship:` secret system (vault/awssm unresolvable), observability log formats, the BCL
+verifier, the native OP client, SuperJSON (Rust side), the preview port allowlist, and
 wrapper revocation.
 
 **@zeroship/ui:** every component, layout, block, and section is documented **only in Storybook**;

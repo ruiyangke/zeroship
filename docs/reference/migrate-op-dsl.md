@@ -720,7 +720,8 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > TOCTOU window. `decide` is pure Rust over the snapshot, never a SQL-level
 > conditional. On `SatisfiedNoop` the version still lands (a journaled completed row)
 > so a re-deploy skips it via normal pending computation; on `FailDrift` the txn is
-> rolled back and nothing is applied or journaled. (`crates/zeroship-migrate/src/guard_probe.rs`,
+> rolled back and nothing is applied or journaled.
+> (`third_party/zero-migrate/crates/zero-migrate/src/render/existence_probe.rs`,
 > `executor.rs` PG `apply_transactional`, `backend_sqlite/mod.rs` SQLite
 > `apply_up_transactional`.)
 >
@@ -991,13 +992,14 @@ admitting it on **both** backends — is:
 
 This envelope is enforced across **two layers**, not one:
 
-- The record-time JS grammar lint (`sdks/migrate/src/ops.ts:698-712`, the
-  `splitPartGrammarLint`; mirrored at
-  `crates/zeroship-migrate/src/frontend/migrate_ops.js:1106-1127`) rejects only the
+- The record-time JS grammar lint (`splitPartGrammarLint`,
+  `sdks/migrate/src/ops.ts:4486-4500`) rejects only the
   *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
   and a non-integer or non-positive `n`. It does **not** check single-ASCII,
-  multi-character, or the `1 ≤ n ≤ 8` bound (the recorder twin's own comment is
-  explicit, `migrate_ops.js:1097-1104`).
+  multi-character, or the `1 ≤ n ≤ 8` bound. There is exactly one recorder to
+  keep in step: the engine-embedded recorder and the SDK recorder are the same
+  build output (`sdks/migrate/src/embedded-recorder.ts` bundles `ops.ts`), so
+  the lint has no twin that can drift away from it.
 - The single-ASCII delimiter and the SQLite-leg `1 ≤ n ≤ 8` bound are enforced
   by the **Rust validator**: a multi-character / non-ASCII delimiter or `n > 8`
   is *admitted on Postgres* (`dialect_scope = PgOnly`) and is a hard
@@ -1075,8 +1077,8 @@ lowers to a dual-dialect online change:
 
 Both lowerings are implemented and covered by tests (the PG expand-contract and
 the SQLite rebuild apply end-to-end in
-`crates/zeroship-migrate/tests/ir_rename_pr2_pg.rs` /
-`ir_rename_pr2_sqlite.rs`).
+`third_party/zero-migrate/crates/zero-migrate/tests/pg_scenarios.rs` /
+`ir_rename_sqlite_basic.rs`).
 
 **What is not yet wired for routine production deploy.** Creator-app Postgres
 migrations are applied by the standalone `zeroship-migrated` service, not by the
@@ -1306,22 +1308,20 @@ byte-identically on PG and SQLite from this one artifact.
 
 This is the one place authors see the IR — you never hand-write it; the build
 evaluator records it from your `.ts`. It is shown here so the "one script, both
-backends" claim is concrete and so the CI gate has a doc-sourced artifact to
-apply.
+backends" claim is concrete.
 
-**What the doc-example gates do and do not prove.** Two gates keep this doc
-honest. The TS leg (`sdks/migrate/tests/doc-examples.test.ts`) compiles every
-runnable typed snippet against the real `@zeroship/migrate` types (the
+**What the doc-example gate does and does not prove.** The gate that keeps this
+doc honest is the TS leg (`sdks/migrate/tests/doc-examples.test.ts`): it compiles
+every runnable typed snippet against the real `@zeroship/migrate` types (the
 signature-listing blocks, which use bare param names, are excepted), so a
 renamed op or a changed signature fails CI — but it only proves
 **type-correctness**; the
 snippets compile inside never-executed function bodies, so it does **not**
 exercise record-time runtime checks (the `splitPartGrammarLint` throw, `del`'s
 mandatory-`where` reject). Those runtime invariants are covered separately by
-`sdks/migrate/tests/ops.test.ts` and by the Rust apply gate
-(`crates/zeroship-migrate/tests/doc_hero_apply.rs`), which applies the appendix
-IR byte-identically on real PG + SQLite. Do not read a green TS gate as proof a
-snippet would also survive record-time.
+`sdks/migrate/tests/ops.test.ts`. No gate applies the appendix IR against a live
+database, so do not read a green TS gate as proof a snippet would also survive
+record-time or apply.
 
 ## Further reading
 

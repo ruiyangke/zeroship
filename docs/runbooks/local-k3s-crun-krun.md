@@ -2,11 +2,7 @@
 
 Use this when you already have a k3s node whose `RuntimeClass` `kvm-sandbox` points at a libkrun-capable `crun` handler such as `crun-krun`.
 
-This repo does **not** currently version the host-side k3s/crun/libkrun flake or startup scripts. The repo-backed assets for this workflow are:
-
-- `crates/sandbox-agent/k8s/podtemplate.yaml`
-- `crates/sandbox-agent/k8s/networkpolicy.yaml`
-- `crates/sandbox-agent/examples/e2e_k3s.rs`
+This repo does **not** currently version the host-side k3s/crun/libkrun flake or startup scripts, and it no longer versions the sandbox-agent assets either: the sandbox/preview backend (controller, in-VM agent, and its k8s pod template, NetworkPolicy, and `e2e_k3s` harness) was extracted to the standalone `zeroship-sandbox` project. Everything below is host-side setup plus a self-contained smoke test; the agent-backed verification steps run from that project's checkout.
 
 ## Preconditions
 
@@ -57,21 +53,14 @@ The guest kernel should differ from the host kernel. That is the quick proof tha
 
 - `kubectl exec` into a libkrun pod is expected to fail with `the handler does not support exec`.
 - k3s with flannel does not enforce `NetworkPolicy`; use a CNI such as Calico or Cilium if you need policy enforcement.
-- The checked-in `podtemplate.yaml` is a template, not a ready-to-apply manifest. Fill in the image digest, ConfigMap name, and per-sandbox metadata first.
+- The sandbox-agent pod template is a template, not a ready-to-apply manifest. Fill in the image digest, ConfigMap name, and per-sandbox metadata first.
 
-## Repo-backed verification
+## Agent-backed verification
 
-Apply the checked-in policy once your cluster has a CNI that enforces it:
-
-```bash
-kubectl apply -f crates/sandbox-agent/k8s/networkpolicy.yaml
-```
-
-Run the checked-in end-to-end harness against the cluster:
-
-```bash
-cargo run --release -p zeroship-sandbox-agent --example e2e_k3s
-```
+The sandbox-agent NetworkPolicy and the `e2e_k3s` end-to-end harness are not in
+this repo. Run them from a `zeroship-sandbox` checkout against the cluster you
+just verified above; this runbook only establishes that the host's
+`kvm-sandbox` `RuntimeClass` really boots a microVM.
 
 ## Teardown
 

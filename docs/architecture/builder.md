@@ -1,98 +1,68 @@
 # Builder sandbox architecture
 
-This worktree's builder-side infrastructure is the sandbox service in `crates/sandbox`. It owns live dev sandboxes, preview proxying, and the snapshot/restore control flow used by the builder stack.
+**Status: the sandbox/preview backend is not built by this repo.** It was
+extracted to the standalone `zeroship-sandbox` project (sibling repository),
+which owns the sandbox controller, the in-VM agent, and the Nomad +
+Cloud-Hypervisor task driver. Nothing under `crates/` here builds or ships it,
+and there is no `sandbox` service in `deploy/compose/docker-compose.yml`.
 
-## Current scope
+This page describes only the seam that remains on this side: how the platform
+reaches that external service, and what this repo still configures.
 
-The current implementation is platform-side only:
+## What lives where
 
-- sandbox lifecycle and file/exec APIs
-- preview HTTP and WebSocket forwarding
-- pg-backed sandbox metadata
-- sealed-record persistence
-- snapshot, wake, and cold-boot admin flows
-
-This file does not describe any separate `zeroship/editor` repository or a Docker-only preview architecture; the shipping code is the sandbox controller in this repo.
-
-## Relevant files
-
-- [crates/sandbox/src/main.rs](../../crates/sandbox/src/main.rs): HTTP surface and service boot
-- [crates/sandbox/src/handlers.rs](../../crates/sandbox/src/handlers.rs): creator-facing sandbox API
-- [crates/sandbox/src/backend/mod.rs](../../crates/sandbox/src/backend/mod.rs): backend enum
-- [crates/sandbox/src/backend/nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs): Nomad + Cloud Hypervisor backend
-- [crates/sandbox/src/preview.rs](../../crates/sandbox/src/preview.rs): HTTP preview proxy
-- [crates/sandbox/src/preview_ws.rs](../../crates/sandbox/src/preview_ws.rs): WebSocket preview forwarder
-- [crates/sandbox/src/admin_handlers.rs](../../crates/sandbox/src/admin_handlers.rs): admin, snapshot, wake, and cold-boot routes
-
-## Backends
-
-`Backend` currently supports three runtime shapes:
-
-| Backend | Role today |
+| Concern | Where it lives |
 | --- | --- |
-| `docker` | local/dev sandbox runtime |
-| `k8s` | pod-backed sandbox runtime |
-| `nomad-ch` | Nomad job per sandbox using the Go `ch` task driver and `cloud-hypervisor` |
+| Sandbox lifecycle, file/exec APIs, preview HTTP + WebSocket proxy, snapshot/wake/cold-boot, pg-backed sandbox state, backend drivers (`docker`, `k8s`, `nomad-ch`) | the standalone `zeroship-sandbox` project |
+| The console/builder app that calls it | extracted out of this monorepo too; control ingests it as a prebuilt `.zship` via `--bootstrap-console --console-zship` |
+| Reaching the sandbox controller over HTTP (`SANDBOX_URL`, `SANDBOX_TOKEN`) | this repo |
+| The Postgres schema and least-privilege roles the sandbox connects as (`sandbox_app` / `sandbox_audit` / `sandbox_gdpr`) | this repo, in `db/migrations-ts/` |
 
-The recent sandbox snapshot/restore work is wired against the `nomad-ch` path. The current bare-metal VM backend is the Go-plugin Nomad task driver described in `nomad_ch.rs`, not the older wrapper-driven model.
+## The seam
 
-## HTTP surface
+The sandbox controller is a plain HTTP dependency reached by URL and bearer
+token. Two settings carry it:
 
-Creator-facing routes in `main.rs`:
+- `SANDBOX_URL` - the sandbox/preview backend base URL (non-secret config)
+- `SANDBOX_TOKEN` - the controller bearer token (credential)
 
-- `POST /sandboxes`
-- `GET /sandboxes`
-- `GET /sandboxes/{id}`
-- `DELETE /sandboxes/{id}`
-- `POST /sandboxes/{id}/exec`
-- `GET /sandboxes/{id}/file-tree`
-- `GET|PUT|DELETE /sandboxes/{id}/files/{path}*`
+Control seeds both onto the console app's server-side env when it bootstraps the
+console, alongside `OPENAI_API_KEY` and `ZEROSHIP_SDK_REGISTRY`. The list of
+seeded keys and their secret/non-secret classification is in
+[bootstrap_console.rs](../../crates/control/src/bootstrap_console.rs). The
+compose stack sets both on the `control` service in
+`deploy/compose/docker-compose.yml`, where the commented-out `sandbox` service
+block records the same extraction.
 
-Preview routes:
+## Shared database, separate deployment
 
-- HTTP proxy: `ANY /sandboxes/{id}/preview/{port}/{path}*`
-- WebSocket proxy: separate listener from `preview_ws.rs`
-- share-token routes under `/sandboxes/{id}/preview/{port}/share`
+The sandbox uses this deployment's shared Postgres rather than its own. The
+schema and the least-privilege roles it connects as are defined here:
 
-Operator/admin routes include sandbox listing, per-user export/delete, host listing, snapshot, wake, wake polling, and cold boot.
+- `db/migrations-ts/20260702000100_schema_roles_extensions.ts` - roles and schema
+- `db/migrations-ts/20260702000900_grants.ts` - the grants
 
-## Preview path
+The external controller connects **as** those roles; this repo never opens the
+sandbox tables itself.
 
-Preview is controller-driven:
+## Not on the request hot path
 
-```text
-client
-  -> sandbox controller preview route
-  -> controller authorizes the request
-  -> controller forwards to the sandbox agent/runtime
-```
+Sandbox work never touches end-user app serving. The gateway and worker have no
+dependency on the sandbox controller, so an unavailable or absent sandbox
+backend degrades the builder experience only - deployed creator apps keep
+serving. See [Distributed architecture](../architecture/distributed.md).
 
-The controller always supports path-shaped preview URLs. Current preview helpers also synthesize hostnames of the form `preview-<slug>-<port>.preview.zeroship.dev` for forwarded headers and share links.
+## Historical detail
 
-## Persistence and restore
+The design and operational notes written while the sandbox still lived here are
+kept for history and are **not** a description of this tree:
 
-The sandbox service now owns:
-
-- in-memory registry state
-- optional PostgreSQL-backed sandbox state
-- sealed-record persistence
-- snapshot storage wiring
-- startup restore and wake flows
-
-Snapshot/wake behavior is feature-gated by sandbox config. The admin handlers and `nomad-ch` backend are the places to read first when changing that flow.
-
-## Where to start
-
-| Working on | Start here |
-| --- | --- |
-| sandbox API behavior | [handlers.rs](../../crates/sandbox/src/handlers.rs) |
-| backend selection | [backend/mod.rs](../../crates/sandbox/src/backend/mod.rs) |
-| Nomad + CH runtime | [nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs) |
-| preview proxy | [preview.rs](../../crates/sandbox/src/preview.rs), [preview_ws.rs](../../crates/sandbox/src/preview_ws.rs) |
-| snapshot/restore | [admin_handlers.rs](../../crates/sandbox/src/admin_handlers.rs), `docs/runbooks/sandbox-nomad-ch.md` |
+- [Nomad + Cloud Hypervisor driver](../archive/nomad-driver-ch.md)
+- [Sandbox pg-backed state](../archive/sandbox-pg-state.md)
+- [Sandbox snapshot/restore](../archive/sandbox-snapshot-restore.md)
+- [Sandbox preview URLs](../archive/sandbox-preview-urls.md)
 
 ## Related docs
 
-- [Architecture overview](../architecture/overview.md) — the entry point and system map.
-- [Distributed architecture](../architecture/distributed.md) — why the sandbox sits off the end-user request hot path.
-- [Nomad + Cloud Hypervisor runbook](../runbooks/sandbox-nomad-ch.md) — operating the `nomad-ch` backend.
+- [Architecture overview](../architecture/overview.md) - the entry point and system map.
+- [Distributed architecture](../architecture/distributed.md) - why the sandbox sits off the end-user request hot path.

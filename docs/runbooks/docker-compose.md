@@ -10,7 +10,7 @@ the `-f` from every call):
 
 ```bash
 # Build everything ahead (so `up` never builds): the single shared image
-# (control/gateway/worker/auth/sandbox + the `zeroship` CLI) plus the external
+# (control/gateway/worker/auth/platform-migrate + the `zeroship` CLI) plus the external
 # images (postgres, caddy, verdaccio, redpanda).
 docker compose -f deploy/compose/docker-compose.yml build   # all Dockerfile-based services
 docker compose -f deploy/compose/docker-compose.yml pull     # external images
@@ -71,7 +71,6 @@ point; these raw ports remain mapped for direct debugging):
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
 - `auth` (`zeroship-auth`) → `localhost:9092`
-- `sandbox` (`zeroship-sandbox`) → `localhost:9091`
 - `redpanda` (Kafka-wire billing stream) → `REDPANDA_BROKERS=127.0.0.1:19092`
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
@@ -79,11 +78,16 @@ point; these raw ports remain mapped for direct debugging):
 The one-shot `migrate` service runs to completion and exits; `verdaccio`
 publishes loopback-only on `localhost:4873`.
 
+There is no `sandbox` service here: the sandbox/preview backend lives in the
+standalone `zeroship-sandbox` project and is run from there. The `control`
+service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
+
 ### Image build
 
 The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
-`zeroship-gate`, `zeroship-worker`, `zeroship-auth`, `zeroship-sandbox`, and the
-`zeroship` CLI) in three stages:
+`zeroship-gate`, `zeroship-worker`, `zeroship-auth`, the `zeroship` CLI, and
+`zeroship-platform-migrate` - the platform DB migration one-shot the `migrate`
+service runs) in three stages:
 
 1. **`sdks` (node:22)** runs `pnpm install --frozen-lockfile && pnpm build` to
    emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
@@ -95,8 +99,8 @@ The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
 2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
    `deploy/policies/` tree (`crates/authz/build.rs` parses
    `../../deploy/policies/*.cedar` at build time) and compiles the six binaries.
-3. The runtime stage copies all six binaries plus the docker CLI (for the
-   sandbox's Docker-out-of-Docker).
+3. The runtime stage (ubuntu:24.04) copies all six binaries plus the prebuilt
+   console `.zship`.
 
 Because the SDK dist files are gitignored and absent from a fresh checkout, the
 image must be (re)built with `--build` the first time; `docker compose -f deploy/compose/docker-compose.yml build`
@@ -286,7 +290,7 @@ tearing it down never touches the main stack or the billing tests.
 It stands up the minimal real OpenMeter pipeline — Kafka + ClickHouse + Redis +
 Postgres + the OpenMeter API + a sink-worker — with a single `compute_units`
 meter pre-provisioned in `deploy/ops/openmeter-config.yaml` to match exactly what
-`crates/control/src/metering/provider/openmeter.rs` emits (`eventType` /
+`crates/control/src/metering/provider/adapters/openmeter.rs` emits (`eventType` /
 `slug` = `compute_units`, `aggregation: SUM` over `$.value`).
 
 ```bash
@@ -334,5 +338,5 @@ schema. See [Database migrations](db-migrations.md) for the layout,
 
 - [Database migrations](db-migrations.md) — platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
 - [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
-- [Nomad + Cloud Hypervisor sandbox](../runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
+- [Builder sandbox](../architecture/builder.md) - where the sandbox/preview backend lives now and how `control` reaches it.
 - [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.

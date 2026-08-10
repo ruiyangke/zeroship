@@ -23,7 +23,8 @@ worker (`crates/worker`)
   -> V8 runtime cache
 
 builder / operator
-  -> sandbox controller (`crates/sandbox`)
+  -> sandbox controller (external: the standalone `zeroship-sandbox` project,
+     reached over HTTP via SANDBOX_URL / SANDBOX_TOKEN)
 ```
 
 ## Current coordination model
@@ -70,13 +71,18 @@ This is request-boundary eventual propagation. There is no cross-service transac
 
 ## Builder sandbox path
 
-The builder stack is outside the app-serving hot path:
+The builder stack is outside the app-serving hot path, and it is no longer part
+of this repo:
 
-- `crates/sandbox` exposes sandbox lifecycle, preview, and admin endpoints
-- the current bare-metal VM backend is `nomad-ch` in [nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs)
-- operator details live in `docs/runbooks/sandbox-nomad-ch.md`
+- the sandbox controller, its in-VM agent, and the Nomad + Cloud-Hypervisor
+  backend live in the standalone `zeroship-sandbox` project (sibling repo)
+- this deployment reaches it over HTTP only, via `SANDBOX_URL` / `SANDBOX_TOKEN`
+- it shares this deployment's Postgres, connecting as the least-privilege
+  `sandbox_*` roles created by `db/migrations-ts/`
 
-Snapshot, restore, wake, and cold-boot flows are part of the sandbox service, not the gateway/worker request path.
+Snapshot, restore, wake, and cold-boot flows belong to that external service,
+not to the gateway/worker request path. See
+[Builder sandbox](../architecture/builder.md).
 
 ## Current boundaries
 

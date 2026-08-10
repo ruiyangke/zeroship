@@ -16,6 +16,14 @@
 #   - with it removed the script exits zero
 # A gate that always fails is as useless as one that always passes.
 #
+# TWO PROBES, ONE PER CORPUS, and that is not redundancy. The scan reads source
+# files for source citations AND doc files for source citations, through
+# separate patterns, separate scope rules and separate resolution rules. A
+# source-only probe passes with the entire doc half deleted - which is exactly
+# the state the tree was in before the doc half existed, and the state it would
+# silently return to if the doc pattern, the exclusion filter or the root *.md
+# arm ever stopped matching. Each probe is planted in the corpus it controls.
+#
 # Exits 0 when the gate behaves correctly, 1 otherwise.
 
 set -uo pipefail
@@ -28,7 +36,17 @@ SCAN=tests/source_citation_scan.sh
 PROBE=crates/core/src/zz_citation_selftest_probe.rs
 CITATION="crates/core/src/this_file_does_not_exist_zz.rs"
 
-cleanup() { rm -f "$PROBE"; }
+# The doc-side probe. In `docs/reference/` rather than at the docs root on
+# purpose: a probe in a directory the exclusion list names would be filtered out
+# and the test would then pass by never being scanned, which looks identical to
+# passing because the gate works. `reference/` is inside the enforced scope and
+# is not date-prefixed, so this probe is subject to every rule a real citation
+# is. The citation is written with a `../` prefix so the doc-relative resolution
+# arm is what has to reject it - the arm that does not exist on the source side.
+DOC_PROBE=docs/reference/zz-citation-selftest-probe.md
+DOC_CITATION="../../crates/core/src/this_doc_citation_does_not_exist_zz.rs"
+
+cleanup() { rm -f "$PROBE" "$DOC_PROBE"; }
 trap cleanup EXIT
 
 fail() { echo "::error::source-citation gate self-test: $1"; exit 1; }
@@ -60,4 +78,24 @@ if ! bash "$SCAN" > /dev/null 2>&1; then
   fail "the gate stayed red after the probe was removed; it is not tracking the tree"
 fi
 
-echo "source-citation gate self-test: detects a planted citation, exits non-zero on it, and returns to green"
+# --- Direction 4: the same three assertions for the DOC corpus. --------------
+# Run against a clean tree that direction 3 just re-established.
+printf '# Self-test probe\n\nSee [probe](%s).\n' "$DOC_CITATION" > "$DOC_PROBE"
+
+doc_out="$(bash "$SCAN" 2>&1)"
+doc_rc=$?
+
+if [ "$doc_rc" -eq 0 ]; then
+  fail "planted an unresolvable citation in a doc and the gate still exited 0 - the doc half detects nothing, or it reports without failing"
+fi
+case "$doc_out" in
+  *"$DOC_CITATION"*) : ;;
+  *) fail "the gate exited non-zero but never named the planted doc citation; it may be failing for an unrelated reason" ;;
+esac
+
+rm -f "$DOC_PROBE"
+if ! bash "$SCAN" > /dev/null 2>&1; then
+  fail "the gate stayed red after the doc probe was removed; it is not tracking the doc tree"
+fi
+
+echo "source-citation gate self-test: detects a planted citation in BOTH corpora (source and docs), exits non-zero on each, and returns to green"

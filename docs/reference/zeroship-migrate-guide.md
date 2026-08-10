@@ -12,7 +12,12 @@ platform apply instructions live in [Database migrations](../runbooks/db-migrati
 and the current creator build path is documented in
 [Vite plugin](./vite-plugin.md#migration-first-type-generation-gen-types).
 
-All file:line citations are relative to the repo root and were read from the source tree for this guide so every claim is checkable.
+**How to read the citations.** An unqualified `file:line` citation names a path
+inside the former `crates/zeroship-migrate/` crate and records what was read
+there when this guide was written; it is a historical reference, not a live
+pointer. A citation that begins with `third_party/zero-migrate/`, `sdks/`, or
+`crates/` resolves against the tree as it stands today, and names the file that
+carries the claim now.
 
 ---
 
@@ -39,7 +44,7 @@ All file:line citations are relative to the repo root and were read from the sou
 
 ### 1.1 The one-paragraph definition
 
-Per the crate's own module doc (`crates/zeroship-migrate/src/lib.rs:1-19`), `zeroship-migrate` is:
+Per the crate's own module doc (`lib.rs:1-19`), `zeroship-migrate` was:
 
 - a **security core** — the migration data types, the parse-time SQL security guard (deny-list + cross-schema confinement), and defense-in-depth trust profiles;
 - a **migration unit + executor** — an append-only tamper-evident journal, a per-project advisory lock, and a transactional / two-phase-non-transactional apply flow with idempotent crash recovery and drift/tamper checksum verification, all run under a least-privilege `migrator` role;
@@ -105,7 +110,7 @@ author -> plan (lint) -> gate (approval) -> executor::apply (guard + role)
 
 The engine's portability and integrity both rest on a **single canonical intermediate representation** — a frozen, dialect-neutral wire shape (full treatment in [§6](#6-the-ir--its-wire-contract)):
 
-- **One IR, two front doors.** The TypeScript authoring surface lives in `sdks/migrate/src/`; its engine-side twin — the recorder the Rust runtime evaluates in V8 — lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit the identical dialect-neutral op objects; the canonical IR shape is the frozen contract (`migrate-op-dsl.md:29-34`).
+- **One IR, one recorder.** The TypeScript authoring surface lives in `sdks/migrate/src/`. Its engine-side twin, a hand-kept `migrate_ops.js` the Rust runtime evaluated in V8, was collapsed into the same build output as `ops.ts`, so there is no second copy to drift: `sdks/migrate/src/embedded-recorder.ts` is the bundle entry the engine maps as `@zeroship/migrate`. The canonical IR shape is the frozen contract (`migrate-op-dsl.md:29-34`).
 - **The IR is a closed discriminated union.** `MigrationIr` + the closed `Op` enum derive `schemars` JSON Schema, emitting `op-ir.schema.json` — the discriminated union the JS builder targets.
 - **Canonicalization defends the checksum.** Because `checksum = hash(up + down)` (or `Checksum::of_ir` over the neutral op-list) is the tamper-evidence anchor, the IR serializes *canonically* — `IrScalar::Bytes` stored decoded and re-encoded canonical base64; declared column ORDER preserved through the fold.
 - **Dialect-neutral, engine-owned rendering.** One script lowers per-dialect to Postgres, SQLite, and MySQL; the author describes DDL/DML once and the engine owns 100% of per-dialect rendering. A construct with no native realization on a target **fails closed** at validate (`DIALECT_UNSUPPORTED`), never silently degrading.
@@ -143,7 +148,7 @@ A migration module is a single default-exported `{ name?, up, down? }`. `up()` i
 
 ## §2 Crate architecture
 
-The crate's own one-line self-description (`crates/zeroship-migrate/Cargo.toml:5`):
+The former crate's own one-line `Cargo.toml` self-description:
 
 > "zeroship's versioned DB migration engine — native Postgres fast path plus V8-backed JS authoring front-end"
 
@@ -291,7 +296,7 @@ This section documents the TypeScript authoring surface a creator imports to des
 
 ### 3.1 Architecture in one paragraph
 
-`ops.ts` is the typed TS peer of the engine-embedded recorder (`crates/zeroship-migrate/src/frontend/migrate_ops.js`, which Rust `include_str!`s into V8). Both emit **byte-identical** dialect-neutral op objects that the closed Rust `Op` enum / `op-ir.schema.json` deserialize; the `.ir.json` wire shape is frozen and the golden corpus plus `Checksum::of_ir` round-trip are the contract (`ops.ts:15-29`). Every terminal on a handle **records eagerly and synchronously** onto an ambient per-migration recorder and returns the handle, so handles are reusable and chainable.
+`ops.ts` *is* the engine-embedded recorder: `sdks/migrate/src/embedded-recorder.ts` bundles it into the single artifact the engine maps as `@zeroship/migrate` (the former hand-kept `migrate_ops.js` twin, which Rust `include_str!`d into V8, was deleted when the two collapsed into one build output). It emits the dialect-neutral op objects that the closed Rust `Op` enum / `op-ir.schema.json` deserialize; the `.ir.json` wire shape is frozen and the golden corpus plus `Checksum::of_ir` round-trip are the contract (`ops.ts:15-29`). Every terminal on a handle **records eagerly and synchronously** onto an ambient per-migration recorder and returns the handle, so handles are reusable and chainable.
 
 ### 3.2 One import root
 
@@ -776,7 +781,7 @@ The platform's authoring layer holds a creator's **declared schema** — the per
 1. **`desired_snapshot(...)`** reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
 2. **`DeclarativeAuthor::diff(...)`** introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
 
-**Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test (`tests/declarative_pg.rs`) guards the two copies against drift (`declarative.rs:28-45`).
+**Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test guards the two copies against drift (`declarative.rs:28-45`); it survives in the standalone engine as `third_party/zero-migrate/crates/zero-migrate/tests/pg_declarative.rs`.
 
 ### 5.2 `generate --schema` and `DeclarativeDeployPlan`
 
@@ -824,7 +829,7 @@ it, `installSchema` *installs* it. See
 
 ## §6 The IR & its wire contract
 
-A `zeroship-migrate` migration authored in the JS `op.*` DSL never ships SQL. It ships a small, **dialect-neutral, checksummed JSON document** — the `.ir.json` — whose Rust mirror is `MigrationIr`. The engine loads that document, lowers each `Op` to per-dialect SQL ([§8](#8-one-ir-three-dialects-render--portability)) at apply time, and hashes the *neutral* op-list so a single portable migration has exactly **one** identity checksum across every render target. IR types live in `crates/zeroship-migrate/src/model/ir.rs`, the expression AST in `model/expr.rs`, the migration unit + checksum in `model/migration.rs`. `CURRENT_IR_VERSION` is **6** (`ir.rs:91`).
+A `zeroship-migrate` migration authored in the JS `op.*` DSL never ships SQL. It ships a small, **dialect-neutral, checksummed JSON document** — the `.ir.json` — whose Rust mirror is `MigrationIr`. The engine loads that document, lowers each `Op` to per-dialect SQL ([§8](#8-one-ir-three-dialects-render--portability)) at apply time, and hashes the *neutral* op-list so a single portable migration has exactly **one** identity checksum across every render target. IR types lived in `model/ir.rs`, the expression AST in `model/expr.rs`, the migration unit + checksum in `model/migration.rs`; all three now sit in the engine's leaf wire-contract crate, `third_party/zero-migrate/crates/zero-migrate-ir/src/`. `CURRENT_IR_VERSION` is **6** (`ir.rs:91`).
 
 ### 6.1 The core concept: a dialect-neutral, checksummed IR
 
@@ -842,7 +847,7 @@ Several invariants are baked into the *types themselves* (`ir.rs:1-45`):
 
 ### 6.2 Every `Op` variant (53)
 
-The `Op` enum (`ir.rs:2429-3394`) is closed, internally tagged on `"op"`, camel-cased, `deny_unknown_fields`. There are **53 variants** — the exhaustiveness gate `every_op_variant_has_a_fixture` hard-asserts this count (`tests/op_round_trip.rs:233-237`). Every table-targeting variant carries optional `schema: Option<String>` and, where guardable, `existence_guard: Option<ExistenceGuard>` (`ifNotExists`/`ifExists`) — both omitted-when-absent. For the per-dialect support of each op, see [§8.3](#8-one-ir-three-dialects-render--portability).
+The `Op` enum (`ir.rs:2429-3394`) is closed, internally tagged on `"op"`, camel-cased, `deny_unknown_fields`. There are **53 variants** — the exhaustiveness gate `every_op_variant_has_a_fixture` hard-asserted this count (`op_round_trip.rs:233-237`; §12.1 records where that corpus check lives now). Every table-targeting variant carries optional `schema: Option<String>` and, where guardable, `existence_guard: Option<ExistenceGuard>` (`ifNotExists`/`ifExists`) — both omitted-when-absent. For the per-dialect support of each op, see [§8.3](#8-one-ir-three-dialects-render--portability).
 
 **Table / column DDL:** `createTable` (`CreateTable@2431`), `dropTable@2533`, `renameTable@2559` (fast catalog rename, NOT expand-contract), `setTableOptions@2522` (metadata-only, no SQL but folds), `addColumn@2573`, `dropColumn@2626`, `setColumnType@2716` (`using: Option<Expr>` cast), `setColumnNotNull@2735`, `dropColumnNotNull@2748`, `setColumnDefault@2761`, `dropColumnDefault@2777`, `renameColumn@2790` (carries post-rename `type` for re-derivation).
 
@@ -910,7 +915,7 @@ The op-list checksum region is produced by `CanonicalOpList<'a>(pub &'a [Op])` (
 
 Two checksum front doors share a `fold_common` tail (`migration.rs:500-542`): **`Checksum::of`** over rendered `(up, down)` SQL, and **`Checksum::of_ir`** over the canonical op-list region prefixed with domain tag `b"zeroship-migrate/of_ir/v1"`. The single-checksum invariant is enforced by construction: `of_ir` **takes no dialect parameter** — it must be passed the dialect-neutral derived-then-overridden flags, never per-dialect *lowered* flags (SQLite forcing `transactional:true` / dropping `concurrently` is a render-time divergence that must not enter the identity hash). The tail folds `flags`, `owner_app`, `depends_on`, `supersedes`, `preconditions`, each length-prefixed so `down: Some("")` ≠ `down: None`.
 
-**Value-equality vs byte-equality.** The load-bearing cross-impl gate (`tests/op_round_trip.rs:20-24`) does *not* require byte-identical JSON between JS and Rust; it folds *both* through `Checksum::of_ir` and asserts the two **checksums are equal** — typed-VALUE equality, invariant under any JCS-formatting difference. See [§12.1](#12-testing--operating).
+**Value-equality vs byte-equality.** The load-bearing cross-impl gate (`op_round_trip.rs:20-24`) does *not* require byte-identical JSON between JS and Rust; it folds *both* through `Checksum::of_ir` and asserts the two **checksums are equal** — typed-VALUE equality, invariant under any JCS-formatting difference. See [§12.1](#12-testing--operating).
 
 ### 6.6 The advisory `checksum` hint
 
@@ -951,7 +956,7 @@ The IR is a canonical example of the AGENTS.md wire-format discipline. `ir_versi
 
 ## §7 The validate gate & error taxonomy
 
-The **validate gate** is the authoritative *structural* layer: a purely in-memory allow-list walk over a deserialized `MigrationIr` that runs **before any DB connection, before checksum, before lower/render**. It lives in `crates/zeroship-migrate/src/model/validate.rs` and produces a single machine-actionable rejection envelope — `AuthoringError` — so the author/AI loop gets a stable `code`, a human `reason`, and a `suggested_fix`. It is placed here (before render/apply in [§8](#8-one-ir-three-dialects-render--portability)–[§9](#9-the-apply-engine--durability)) because it is the pre-connect gate.
+The **validate gate** is the authoritative *structural* layer: a purely in-memory allow-list walk over a deserialized `MigrationIr` that runs **before any DB connection, before checksum, before lower/render**. It lives in `third_party/zero-migrate/crates/zero-migrate/src/model/validate.rs` (which re-exports the structural half from the `zero-migrate-ir` leaf crate) and produces a single machine-actionable rejection envelope — `AuthoringError` — so the author/AI loop gets a stable `code`, a human `reason`, and a `suggested_fix`. It is placed here (before render/apply in [§8](#8-one-ir-three-dialects-render--portability)–[§9](#9-the-apply-engine--durability)) because it is the pre-connect gate.
 
 ### 7.1 Why validate is structural, not a SQL parser
 
@@ -1049,7 +1054,7 @@ The one deliberate exception (A3): raw view-body validation calls the guard's re
 
 ### 7.9 Advisory analysis — non-blocking lint (contrast with the hard gate)
 
-Distinct from the hard `AuthoringError` gate above, `crates/zeroship-migrate/src/analysis/analyze.rs` is an Atlas-style **advisory** lint suite. Its module doc is emphatic (`analyze.rs:10-21`): "*These are ADVISORY, NEVER load-bearing for security … Nothing here denies, blocks, or gates anything.*" An analyzer false-negative is a quality regression, not a security hole; the guard + role + approval gate remain the security boundary. It flags operationally-risky-but-not-a-threat migrations (data loss, backward-incompatible renames, lock-heavy DDL, full-table rewrites, un-validated constraints, missing FK indexes) and attaches a safer expand-contract suggestion.
+Distinct from the hard `AuthoringError` gate above, `analysis/analyze.rs` (today `third_party/zero-migrate/crates/zero-migrate-guard/src/analysis/analyze.rs`) is an Atlas-style **advisory** lint suite. Its module doc is emphatic (`analyze.rs:10-21`): "*These are ADVISORY, NEVER load-bearing for security … Nothing here denies, blocks, or gates anything.*" An analyzer false-negative is a quality regression, not a security hole; the guard + role + approval gate remain the security boundary. It flags operationally-risky-but-not-a-threat migrations (data loss, backward-incompatible renames, lock-heavy DDL, full-table rewrites, un-validated constraints, missing FK indexes) and attaches a safer expand-contract suggestion.
 
 **Two severities** (`Severity`, `analyze.rs:41-49`): `Warning` (downtime/data-loss/breaking — the migration still applies, a heads-up) and `Notice` (softer performance/footprint note). An `Advisory` (`analyze.rs:58-69`) carries a stable `rule: &'static str`, a `severity`, a human `message`, and an optional `suggestion` — mirroring the guard's `denylist::rule` "data-not-logic" convention.
 
@@ -1127,13 +1132,13 @@ pub enum Disposition {
 ```
 `Disposition::is_supported()` is "everything except `Unsupported`" (`support.rs:20-22`).
 
-> **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' crates/zeroship-migrate/src/model/dialect_table.rs` returns **91**, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself has **89 row literals**, and `grep -cE 'kind: "'` returns **89**, so it covers **89 `(kind, variant)` dispositions**. These 89 dispositions are **not** the same as the **54 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "89 disposition rows" and "54 op kinds" are different axes and must not be conflated.
+> **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' src/model/dialect_table.rs` returned **91** when this guide was written, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself had **89 row literals**, and `grep -cE 'kind: "'` returned **89**, so it covered **89 `(kind, variant)` dispositions**. (Both totals have moved since; re-measure against the current table rather than quoting these.) These 89 dispositions are **not** the same as the **54 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "89 disposition rows" and "54 op kinds" are different axes and must not be conflated.
 
 **Generation & freshness gate.** The table is emitted from a hand-authored sidecar `dialect-support.toml` by `sdks/migrate/scripts/gen-dialect-table.mjs`, which writes **two** artifacts (the Rust const + the TS mirror `sdks/migrate/src/generated/dialect-table.ts`). Regenerate with `pnpm --filter @zeroship/migrate gen:dialect-table`. A regenerate-and-byte-diff CI gate pins both artifacts against the sidecar.
 
 `Op::support()` **reads** `DIALECT_TABLE` at runtime keyed on `Op::op_kind_and_variant()` (`ir.rs:3412-3425`); `support_cell` maps `Unsupported → unsupported(CODE_UNSUPPORTED, reason)` and `Portable|Vendor|TransparentDegradable → supported(render_mode)`. Only the dialect gate is table-sourced; the *render strategy* (`RenderMode::Offline` vs `LiveResolved`) and diagnostic wording stay in Rust because they are not dialect truth.
 
-`tests/dialect_table_faithfulness.rs:6-8` pins that `Op::support` and the generated table agree.
+`third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs` pins that `Op::support` and the generated table agree.
 
 **Notable dispositions** (P=Portable, V=Vendor, U=Unsupported, TD=TransparentDegradable), `dialect_table.rs:59-146`:
 
@@ -1168,14 +1173,14 @@ The per-target refusal lives in `validate_op_support` (`validate.rs:1912`): it f
 
 ### 8.5 How ops render — the lower phase (`render/lower.rs`)
 
-The `render/lower.rs` `IrAuthor` (the largest file in the crate) is the DDL **Lower** phase (§6/§6.4/§6.5). `IrAuthor::lower` compiles a validated, ownership-checked `MigrationIr` into the same `Migration` shape the declarative differ produces — it is the IR-path peer of `DeclarativeAuthor::diff` ([§5.1](#5-authoring-declarative-desired-state--the-fold)). Its **single-source-of-truth mandate** (§6.5, `render/lower.rs:7-19`): `IrAuthor` does **not** hand-construct snapshots and does **not** re-spell the default/system-field/encryption/comment-sentinel logic — it routes every op's fields through the **shared** dialect-parameterized snapshot-builder `render::declarative::build_table_snapshot` (the SAME builder the differ's `desired_snapshot_for_dialect` calls) and renders the resulting `TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot` through the SAME render methods (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`). So the emitted SQL is byte-identical to the declarative path **by construction**, guarded by the §6.4 cross-path golden (`tests/ir_author_render_parity.rs`).
+The `render/lower.rs` `IrAuthor` (the largest file in the crate) is the DDL **Lower** phase (§6/§6.4/§6.5). `IrAuthor::lower` compiles a validated, ownership-checked `MigrationIr` into the same `Migration` shape the declarative differ produces — it is the IR-path peer of `DeclarativeAuthor::diff` ([§5.1](#5-authoring-declarative-desired-state--the-fold)). Its **single-source-of-truth mandate** (§6.5, `render/lower.rs:7-19`): `IrAuthor` does **not** hand-construct snapshots and does **not** re-spell the default/system-field/encryption/comment-sentinel logic — it routes every op's fields through the **shared** dialect-parameterized snapshot-builder `render::declarative::build_table_snapshot` (the SAME builder the differ's `desired_snapshot_for_dialect` calls) and renders the resulting `TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot` through the SAME render methods (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`). So the emitted SQL is byte-identical to the declarative path **by construction**, guarded by the §6.4 cross-path golden (`third_party/zero-migrate/crates/zero-migrate/tests/ir_author_render_parity.rs`).
 
 A lowered plan is a sequence of `PlanStep` (`render/step.rs:48`). The dialect-distinct shapes:
 
 - A **rename** lowers to `RenameStep::PgExpandContract(ExpandContractPlan)` on PG vs `RenameStep::SqliteRebuild(SqliteRebuild)` on SQLite (`render/step.rs:23-27`). The PG expand-contract path is non-destructive (`PlanStep::OnlineRename(PgExpandContract) → destructive == false`, `step.rs:87`); the SQLite 12-step rebuild carries the migration's own `destructive` flag (`step.rs:86`).
 - **DML** routes through one of three renderer singletons — `POSTGRES_DML_RENDERER` / `SQLITE_DML_RENDERER` / `MYSQL_DML_RENDERER` (`render/renderer.rs:164`).
 
-Every `PlanStep` carries a `DialectScope` facet (§8.6). The offline `render_plan_sql` / `--sql` preview (`render/sql_preview.rs`) surfaces exactly this lowered SQL — a surfacing layer, not a reimplementation (proven byte-identical against `IrAuthor::lower_steps` by `tests/sql_preview.rs`), and DB-state-dependent ops emit a `-- [runtime-resolved]` label rather than fabricated SQL.
+Every `PlanStep` carries a `DialectScope` facet (§8.6). The offline `render_plan_sql` / `--sql` preview (`render/sql_preview.rs`) surfaces exactly this lowered SQL — a surfacing layer, not a reimplementation (proven byte-identical against `IrAuthor::lower_steps` by `third_party/zero-migrate/crates/zero-migrate/tests/sql_preview.rs`), and DB-state-dependent ops emit a `-- [runtime-resolved]` label rather than fabricated SQL.
 
 ### 8.6 `dialect_scope` — fail-closed off-target + `PgOnly` opt-in
 
@@ -1210,7 +1215,7 @@ The runtime `plugin-db` divergences (vector metrics, full-text scoring, `ST_DWit
 
 ### 8.8 Why this shape
 
-One IR gated per target keeps authoring portable-by-default while letting PG-native power surface through an explicit journaled `PgOnly` opt-in rather than silent lowest-common-denominator emulation; the generated dialect table from a hand-reviewed sidecar makes "which token is supported where" a single reviewable source of truth (proven consistent with the live engine by `tests/dialect_table_faithfulness.rs`); the `MigrationBackend` static-dispatch seam lets Postgres remain the richest regression bar while SQLite and MySQL provide dialect-specific behavior without forking the generic executor; and zero `compio-mysql` keeps MySQL a network-confined, TLS-pinned, timeout-poisoned JS-driver isolate inside the platform security boundary.
+One IR gated per target keeps authoring portable-by-default while letting PG-native power surface through an explicit journaled `PgOnly` opt-in rather than silent lowest-common-denominator emulation; the generated dialect table from a hand-reviewed sidecar makes "which token is supported where" a single reviewable source of truth (proven consistent with the live engine by `third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs`); the `MigrationBackend` static-dispatch seam lets Postgres remain the richest regression bar while SQLite and MySQL provide dialect-specific behavior without forking the generic executor; and zero `compio-mysql` keeps MySQL a network-confined, TLS-pinned, timeout-poisoned JS-driver isolate inside the platform security boundary.
 
 ---
 
@@ -1547,7 +1552,7 @@ the committed `.ts` corpus (no SQL/Flyway/Liquibase, no committed `.ir.json`):
 | `20260702000800_policies_rls.ts` | `policies_rls` | `setRls` + tenant-isolation `policy()` on 9 tables |
 | `20260702000900_grants.ts` | `grants` | per-role `grant`/`revoke` |
 
-**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `sdks/vite-plugin/src/migrations.ts:55` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The nine files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
+**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `sdks/vite-plugin/src/gen-types/recorder.ts:37` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The nine files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
 
 ### 11.2 The "explicit `{schema}`" convention — the key confined-vs-platform difference
 
@@ -1639,15 +1644,23 @@ platform-runner commands in §12.10 for appbase.
 
 ### 12.1 The three-gate golden/round-trip model (`op_round_trip.rs`)
 
-The load-bearing anti-drift mechanism is `tests/op_round_trip.rs` because the IR wire shape is consumed by **two independent implementations** (the JS `op.*` builder and the Rust engine/loader) that must never drift. A corpus of paired fixtures drives it: `tests/op_fixtures/<name>.mig.js` (authored source) + `<name>.golden.json` (committed canonical IR). The corpus includes fixtures such as `ddl_create`, `ddl_alter`, `fluent_ddl`, `fluent_dml`, `dml_upsert`, `enums_domains`, `partition`, `pg_vendor`, `sequences_exclusion`, `views`, `in_list_scalars`, `edge_scalars`, `runtime_options`, and `p2a_facets`. Three gates:
+The load-bearing anti-drift mechanism was `op_round_trip.rs` because the IR wire shape is consumed by **two independent implementations** (the JS `op.*` builder and the Rust engine/loader) that must never drift. A corpus of paired fixtures drives it: `tests/op_fixtures/<name>.mig.js` (authored source) + `<name>.golden.json` (committed canonical IR). The corpus includes fixtures such as `ddl_create`, `ddl_alter`, `fluent_ddl`, `fluent_dml`, `dml_upsert`, `enums_domains`, `partition`, `pg_vendor`, `sequences_exclusion`, `views`, `in_list_scalars`, `edge_scalars`, `runtime_options`, and `p2a_facets`. Three gates:
 
 - **Gate 1 — golden byte-stability** (`corpus_is_byte_stable_and_value_equal`, `:125-179`): each `.mig.js` is recorded through the REAL V8 recorder (`record_migration_to_json_unsandboxed`), run through `resolve_create_table_policy(ir, &PolicyProfile::confined())`, pretty-printed, and compared byte-for-byte against the golden.
 - **Gate 2 — JS↔Rust value-checksum round-trip** (`:169-177`): both the fresh IR and the golden are folded through the SAME `Checksum::of_ir(&CanonicalOpList(&ir.ops), &MigrationFlags::default(), &ir.owner_app, &[], &[], &ir.preconditions)` and asserted equal — the *authoritative* check, comparing typed **values**, invariant under JCS-formatting differences.
 - **Gate 3 — variant exhaustiveness** (`every_op_variant_has_a_fixture`, `:208-260`): reads `op-ir.schema.json`, extracts every `Op` discriminant, asserts the fixtures cover the whole set, and hard-codes the count: `assert_eq!(expected.len(), 53, "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition")` (`:235-236`). Adding an `Op` without a corpus fixture fails CI.
 
-In the former tree, the corpus regeneration test was `op_round_trip`. Run the
-corresponding test from the standalone project's own workspace when changing
-that corpus; the removed appbase package cannot be selected with `cargo -p`.
+In the former tree, the corpus regeneration test was `op_round_trip`. The
+standalone engine splits its job in two, each half running in the job that
+already has the toolchain it needs, joined through a committed
+`op_fixtures/recorded.json`: the JS half executes every `.mig.js` through the
+production recorder
+(`third_party/zero-migrate/packages/zero-migrate/tests/recorded-corpus.test.ts`)
+and the Rust half resolves those recorded ops through the real policy resolver
+and compares against `<stem>.golden.json`
+(`third_party/zero-migrate/crates/zero-migrate/tests/op_fixture_goldens.rs`).
+Run them from the standalone project's own workspace when changing that corpus;
+the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.2 The IR-schema golden (`op_ir_schema.rs`)
 
@@ -1655,7 +1668,7 @@ that corpus; the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.3 The full-surface behavioral suite (`full_surface.rs`)
 
-`tests/full_surface.rs` (63 KB) pins individual DSL semantics that would silently regress (where `op_round_trip.rs` proves whole-fixture bytes/checksums). It records inline sources via `record_migration_to_ir_unsandboxed` and asserts on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `concatWs(...)` records a `fnSynth(concatWs)` node. This is the file to read to learn what the fluent surface does op-by-op.
+`full_surface.rs` (63 KB) pinned individual DSL semantics that would silently regress (where `op_round_trip.rs` proved whole-fixture bytes/checksums). It recorded inline sources via `record_migration_to_ir_unsandboxed` and asserted on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `concatWs(...)` records a `fnSynth(concatWs)` node. That suite moved to the recorder's own language when the engine dropped V8: its successor is `third_party/zero-migrate/packages/zero-migrate/tests/ops.test.ts`, which drives the recorder's `__begin`/`__drain` seam directly and is the file to read to learn what the fluent surface does op-by-op.
 
 ### 12.4 The embedded-`.ts`/`.js`-in-Rust-string gotcha
 
@@ -1669,11 +1682,11 @@ that corpus; the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.6 Sandboxed-child corpus parity + the recorder sandbox
 
-`op_round_trip.rs`'s sandboxed-child corpus parity test (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output, including fixtures that exercise rooted Postgres vendor exports. `tests/recorder_sandbox_e2e.rs` proves the sandbox at the kernel level: it spawns the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserts on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only.
+`op_round_trip.rs`'s sandboxed-child corpus parity test (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output, including fixtures that exercise rooted Postgres vendor exports. `recorder_sandbox_e2e.rs` proved the sandbox at the kernel level: it spawned the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserted on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only. Both tests went with the V8 recorder host: the standalone engine runs authoring in the Node process over the `zero-migrate-node` napi bridge and ships no sandboxed recorder child, so neither has a successor there.
 
 ### 12.7 Other golden/preview gates
 
-- **SQL preview goldens** (`tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. `UPDATE_PREVIEW_GOLDENS=1` regenerates.
+- **SQL preview goldens** (`third_party/zero-migrate/crates/zero-migrate/tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. `UPDATE_PREVIEW_GOLDENS=1` regenerates.
 - **Golden execution traces** (`golden_trace_pg.rs`/`golden_trace_sqlite.rs` → `tests/golden-traces/*.txt`): capture a full apply trace + resulting schema against live PG/SQLite. `assert_frozen` panics if the fixture is absent (a first-run capture is reviewed + committed, never self-blessed). The PG destructive-refusal trace is asserted identical across an oracle leg and a live leg.
 - **Generated-TS `.d.ts` goldens** (`gen_types_dts_golden.rs`) + a `tsc` gate (`gen_types_dts_tsc_gate.rs`).
 

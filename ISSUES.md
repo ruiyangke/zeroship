@@ -29,7 +29,7 @@ builder.
 
 | Tier | Issues |
 |---|---|
-| **T0** monetization | ISS-18 metering pipeline ✅ · ISS-31 billing/spend engine ✅ (dead `crates/platform` retired) · ISS-29 server-enforced fee + ISS-30 Stripe onboarding → Stream 2 (creator-payments epic) |
+| **T0** monetization | ISS-18 metering pipeline ✅ · ISS-31 billing/spend engine ✅ (dead `crates/platform` retired) · ISS-29 server-enforced fee ✅ (billing G1) · ISS-30 Stripe onboarding → Stream 2 (creator-payments epic) |
 | **T1** launch infra | ISS-32 prod object storage (S3/R2) · ISS-33 backups/DR · ISS-34 prod TLS/edge · ISS-35 DB connection proxy |
 | **T2** GA | ISS-15 deploy history+rollback · ISS-36 custom domains · ISS-37 edge observability · ISS-38 CD + prod orchestration · ISS-39 prod secrets backend · ISS-40 dynamic worker fleet · ISS-43 WebSocket-in-gateway |
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
@@ -57,25 +57,33 @@ builder.
 direct charges settle to them); the platform *cannot* collect its cut, and there is no usage
 billing at all.
 
-### ISS-18 · No metering pipeline (`env.meter` + usage producer)
-**Status:** SHIPPED (billing epic PR1–3) · **Effort:** L · **Tier:** T0
+### ISS-18 · No metering pipeline (usage producer + aggregation)
+**Status:** SHIPPED (billing epic PR1-3), producer reshaped since · **Effort:** L · **Tier:** T0
 
-`MeterPlugin` (`crates/plugin-meter`) now registers `env.meter` and a per-worker atomic meter;
-a compio flush task POSTs idempotent `UsageReport`s (`(worker_id, sequence)` dedup) to
-`/internal/usage`, where `crates/control/src/metering.rs` ingests + aggregates per
-`(app_id, calendar-month, metric)` in Postgres. The five fixed counters + an open `custom`
-map are live. See `docs/reference/billing-metering.md`.
+Metering is infrastructure, not a creator surface: there is no `env.meter` and no
+`plugin-meter`, because a signal app code can call is a signal app code can forge or
+suppress. `crates/metering/src/meter.rs` holds the per-`(app, metric)` atomic counters and
+`crates/metering/src/outbox.rs` the compio flush task; the worker emits the five platform
+counters per dispatch and the trusted data primitives (`env.db`/`env.kv`/`env.storage`) emit
+their usage metrics at the op boundary. Usage reaches control as `UsageEvent`s on the durable
+stream (`crates/stream`), not over an HTTP report endpoint - there is no `/internal/usage`
+and no `(worker_id, sequence)` dedup ledger. The control-side snapshot writer is
+`crates/control/src/cron/spend_recompute.rs`, which overwrites `zeroship.usage_aggregates`
+per `(app_id, billing period, metric)`; `crates/control/src/metering/mod.rs` carries that
+table's types and the custom-metric cap. See `docs/reference/billing-metering.md`.
 
 ### ISS-29 · Platform fee (15%) not server-enforced
-**Status:** open — re-scoped to Stream 2 (creator-payments epic) · **Effort:** M · **Tier:** T0 · ref CT-B1
+**Status:** SHIPPED (billing G1, Stream 2) · **Effort:** M · **Tier:** T0 · ref CT-B1
 
-The fee is a client-side default in creator-controlled code (`sdks/payments/checkout.ts`,
-`applicationFeePercent ?? 15`), overridable to 0 / bypassable; the webhook only records what
-Stripe reports (no floor, no creator↔account binding). **Fix (Stream 2, after Stream-1 infra
-billing):** a server-controlled, per-creator `FeePolicy { Fixed | Percent + cap + floor }`
-(default 15%) stamped server-side on the Connect charge so creator code cannot bypass it. The
-fee is **not dropped** — only the bypassable fixed client default is. Breaks the
-`@zeroship/payments` SDK contract (pre-launch — rewrite it onto Connect).
+The fee used to be a client-side default in creator-controlled code (`applicationFeePercent ??
+15` in the old `@zeroship/payments` checkout), overridable to 0 and bypassable; the webhook
+only recorded what Stripe reported, with no floor and no creator-to-account binding. It is now
+server-authoritative: `crates/control/src/fee_policy.rs` holds the per-creator
+`FeePolicy { Fixed | Percent + cap + floor }` (default 15%) in `zeroship.creator_fee_policy`,
+with an operator-only write, and `crates/control/src/stripe_handlers.rs` stamps
+`application_fee_amount` on the Connect PaymentIntent. The SDK was rewritten as a thin client
+over those endpoints (`sdks/payments/src/connect.ts`): no method takes a fee parameter, and the
+stamped value comes back read-only as `applicationFeeCents`.
 
 ### ISS-30 · Stripe Connect onboarding is a placeholder
 **Status:** open — re-scoped to Stream 2 (creator-payments epic) · **Effort:** M · **Tier:** T0 · ref CT-B4
@@ -553,7 +561,7 @@ missing SMTP host. `config_check_e2e.sh` auth cases 4/4 pass.
 ---
 
 ### ISS-69 · CSR example's client-side RPC is anon, so it 401s through the gateway under the SEC-5 fail-closed default — FIXED
-**Status:** fixed (2026-06-11) · **Tier:** T2 (browser/client contract) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts` + `streaming.spec.ts`)
+**Status:** fixed (2026-06-11) · **Tier:** T2 (browser/client contract) · Surfaced by the browser-level E2E (`tests/e2e_browser/specs/csr.spec.ts` + `streaming.spec.ts`)
 
 **Fix:** csr-todo now declares its two read-only demo procedures public in
 `examples/csr-todo/src/server/config.ts` — `defineApp({ resources: { "rpc:listTodos":
@@ -598,7 +606,7 @@ client-RPC-through-the-gateway path (per-user procedures) remains ISS-64 (needs 
 Hydra dev-auth session for headless E2E).
 
 ### ISS-70 · CRITICAL: the gateway drops the URL query string when forwarding to the worker — FIXED
-**Status:** fixed (2026-06-11, TDD) · **Tier:** T1 (correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts`)
+**Status:** fixed (2026-06-11, TDD) · **Tier:** T1 (correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/specs/csr.spec.ts`)
 
 When the gateway forwards a request to a worker it rebuilt the URL from the ntex
 `{tail*}` path extractor **without re-appending the query string**
@@ -619,10 +627,10 @@ Never caught before because the curl harnesses POST envelopes straight to the wo
 same over `/dispatch` → 200. **Fix:** `forward_url(scheme, host, tail, req.uri().query())`
 re-appends the raw query. Regression tests: `forward_url_preserves_query_string` +
 `forward_url_omits_empty_or_absent_query` (gateway lib), and the now-green
-`tests/e2e_browser/csr.spec.ts` listTodos round-trip is the real-edge regression.
+`tests/e2e_browser/specs/csr.spec.ts` listTodos round-trip is the real-edge regression.
 
 ### ISS-71 · Runtime stream-lifecycle: the Nth streamed response on an isolate stalled after one frame — FIXED
-**Status:** FIXED (2026-06-11, TDD) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
+**Status:** FIXED (2026-06-11, TDD) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/specs/streaming.spec.ts`)
 
 **Fix:** the streamed-dispatch outcome path didn't wake the runtime pump. The `Pending`
 (async non-stream) path called `self.notify_pump()` before returning, but the `Stream`
