@@ -80,16 +80,20 @@ jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{co
 # Build a worker /dispatch request envelope for an RPC procedure `id`,
 # carrying `{json: <args>}` as the body. The worker maps the URL path
 # /__zeroship/v1/<id> to the procedure by its declared `{ id }`.
-envelope() {
-  local id="$1" args="$2"
-  node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/"+process.argv[1],headers:[["content-type","application/json"]],body:JSON.stringify({json:JSON.parse(process.argv[2])})}))' "$id" "$args"
-}
+# The worker decodes a length-prefixed binary frame, not a JSON envelope with
+# the body inline. This used to build the latter, so every dispatch below was
+# refused with "dispatch metadata too large" and neither env.kv nor
+# env.storage was ever exercised over the edge.
+# shellcheck source=tests/lib/dispatch_frame.sh
+. "$ROOT/tests/lib/dispatch_frame.sh"
 
 # POST an envelope to the worker /dispatch for $APP_ID; echo "<body>\n<code>".
 dispatch() {
   local app="$1" id="$2" args="$3"
+  local frame="$WORK/frame-$$.bin"
+  zs_rpc_frame "$frame" "$id" "$args"
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
-    -H 'content-type: application/json' -d "$(envelope "$id" "$args")"
+    -H 'content-type: application/octet-stream' --data-binary @"$frame"
 }
 
 echo "============================================"
@@ -118,8 +122,22 @@ docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
   -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
   postgres:16 -c max_connections=300 >/dev/null
-for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
+# Readiness = three CONSECUTIVE successful queries, not one pg_isready. There
+# is a window where pg_isready reports ready and a query still fails, because
+# the entrypoint tears down its initdb-phase server and restarts it; a single
+# check lets a run through that window and it fails later as "PG never became
+# ready". Same fix as stack_pg_up in tests/lib/e2e_stack.sh, which measured it.
+PG_OK=0
+for i in $(seq 1 60); do
+  if docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+    PG_OK=$((PG_OK + 1))
+    [ "$PG_OK" -ge 3 ] && break
+  else
+    PG_OK=0
+  fi
+  sleep 1
+done
+[ "$PG_OK" -ge 3 ] && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; docker logs "$PG_CONTAINER" 2>&1 | tail -20; exit 1; }
 
 docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/dev/null
