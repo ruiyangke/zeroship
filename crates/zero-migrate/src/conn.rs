@@ -219,8 +219,14 @@ impl ExecutorConfig {
     ///
     /// The caller-authored policy is preserved exactly. Trusted test configs differ
     /// only by their explicit host-selected [`GuardMode`](crate::guard::GuardMode).
+    ///
+    /// Public because [`rollback_with_lock`](crate::rollback_with_lock) takes its
+    /// guard as an argument, so an out-of-crate driver has to be able to build the
+    /// one this config implies. Composing a `GuardConfig` by hand from the same
+    /// policy would drop the host-selected mode, and the resulting guard would
+    /// admit what the executor's own guard sites deny.
     #[must_use]
-    pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
+    pub fn guard_config(&self) -> crate::guard::GuardConfig {
         crate::guard::GuardConfig::from_policy_with_mode(
             self.effective.clone(),
             crate::SqlDialect::Postgres,

@@ -9,7 +9,7 @@
 //! this logic is covered by tests that execute rather than only type-check.
 
 use zero_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
-use zero_migrate::apply::executor::{ApplyOutcome, LockMode};
+use zero_migrate::apply::executor::{ApplyOutcome, LockMode, RollbackOptions, RollbackTarget};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
@@ -18,7 +18,7 @@ use zero_migrate::{LiveSchema, MigrationEngine, SqlDialect};
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
-    PlanStatusStepDto, ProjectLockHolderDto, StatusReply, UnexpectedJournalEntryDto,
+    PlanStatusStepDto, ProjectLockHolderDto, RollbackReply, StatusReply, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -399,6 +399,173 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             "{error}; additionally failed to release project lock: {release_error}"
         )),
     }
+}
+
+/// The authored set a rollback reverses, plus the journaled identities it could
+/// not represent.
+struct RollbackSet {
+    /// One `Migration` per artifact that lowered to exactly ONE DDL step.
+    migrations: Vec<Migration>,
+    /// Journaled step identity to the authored migration that owns it, for every
+    /// step of a plan that lowered to more than one. These are the identities the
+    /// engine refuses as `MissingFromSet`, and the map is what turns that refusal
+    /// from an opaque derived version into a name the operator authored.
+    unrepresentable: std::collections::BTreeMap<String, String>,
+}
+
+/// Project the lowered artifacts into the authored migration set `rollback` takes.
+///
+/// The engine reverses `Migration`s, and a `Migration` is the journaled identity of
+/// exactly one DDL step. A plan that lowers to several steps journals a separate
+/// identity per step, and its DML, backfill, identity-synchronisation and
+/// online-rename steps carry no `down` at all. Handing the engine only the DDL
+/// steps of such a plan would present it as fully reversible while silently
+/// dropping the steps a rollback must refuse to cross.
+///
+/// So a multi-step plan contributes NOTHING here. That is safe rather than lax:
+/// the planner refuses any selected version absent from the supplied set with
+/// `MissingFromSet` before a single `down` runs, so the omission ends the rollback
+/// instead of hiding inside it.
+fn rollback_migration_set(
+    artifacts: &[zero_migrate::LoweredArtifact],
+) -> std::result::Result<RollbackSet, String> {
+    let mut set = RollbackSet {
+        migrations: Vec::with_capacity(artifacts.len()),
+        unrepresentable: std::collections::BTreeMap::new(),
+    };
+    for artifact in artifacts {
+        if let Ok(migration) = artifact.plan.single_step_migration() {
+            set.migrations.push(migration.clone());
+            continue;
+        }
+        // The manifest is the one walker that already enumerates every step
+        // variant's journal identity, so the refusal can name the step kind
+        // without teaching this module the shape of each variant.
+        let manifest = PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+            .map_err(|error| error.to_string())?;
+        for step in &manifest.steps {
+            set.unrepresentable.insert(
+                step.version.as_str().to_string(),
+                format!("{} ({} step)", manifest.name, step.kind.as_str()),
+            );
+        }
+    }
+    Ok(set)
+}
+
+/// Unwind applied migrations inside one project-lock bracket.
+///
+/// The lock is taken WITH waiting, unlike `status`: a rollback writes, so it is a
+/// peer of the deploy it is undoing rather than a reader that can decline and
+/// report busy. Giving up on contention would leave the operator to retry an
+/// unwind by hand while the schema sits half-migrated.
+///
+/// The live catalog is read after the lock for the same reason `apply` reads it
+/// there: lowering the authored envelopes against a snapshot taken before the lock
+/// would reconstruct the `down` SQL from state a concurrent deploy has since moved.
+pub async fn rollback_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    charter_layers: &[String],
+    target: RollbackTarget,
+    options: RollbackOptions,
+    approval: Approval,
+    applied_by: &str,
+) -> std::result::Result<RollbackReply, String> {
+    let charter_refs = charter_layer_refs(charter_layers);
+    backend
+        .ensure_journal(cfg)
+        .await
+        .map_err(|error| error.to_string())?;
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        let snapshot = backend
+            .snapshot_schema(cfg)
+            .await
+            .map_err(|error| format!("live schema introspection failed: {error}"))?;
+        let journal_entries = backend
+            .applied(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        let resolved_contracts = match backend.pending_contracts() {
+            Some(capability) => capability
+                .resolved_pending_contracts(cfg)
+                .await
+                .map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        };
+        let artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
+            envelope_json,
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            &charter_refs,
+            snapshot,
+            &journal_entries,
+            &resolved_contracts,
+        )?;
+        let set = rollback_migration_set(&artifacts)?;
+        let request = zero_migrate::RollbackRequest::new(target).with_options(options);
+        // The guard the engine's own apply sites use. Composing one from the same
+        // charter here would drop the config's host-selected mode.
+        let guard = zero_migrate::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
+        let outcome = zero_migrate::rollback_with_lock(
+            backend,
+            cfg,
+            &request,
+            &set.migrations,
+            approval,
+            applied_by,
+            guard.as_ref(),
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .map_err(|error| describe_rollback_error(&error, &set))?;
+        Ok::<RollbackReply, String>(RollbackReply {
+            rolled_back: outcome.rolled_back,
+            skipped_irreversible: outcome.skipped_irreversible,
+        })
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
+/// Name the authored migration behind a refusal the engine can only report as a
+/// derived version, so the operator is told which file to look at.
+fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSet) -> String {
+    let zero_migrate::RollbackError::MissingFromSet { version } = error else {
+        return error.to_string();
+    };
+    set.unrepresentable.get(version.as_str()).map_or_else(
+        || error.to_string(),
+        |owner| {
+            format!(
+                "{error}. That version is {owner}, and a plan that lowers to more than \
+                 one journaled step cannot be reversed from its authored envelope: its \
+                 data steps carry no reverse SQL. Roll forward with a compensating \
+                 migration instead"
+            )
+        },
+    )
 }
 
 /// Lower and reconcile authored plans while holding the same project lock across

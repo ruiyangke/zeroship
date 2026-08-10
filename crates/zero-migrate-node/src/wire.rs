@@ -314,6 +314,27 @@ pub struct ApplyReply {
     pub pending_contracts: Vec<ApplyPendingContractDto>,
 }
 
+/// The typed reply for `rollback` (the projected [`RollbackOutcome`]).
+///
+/// Deliberately NOT [`ApplyReply`]. The two verbs answer different questions, and
+/// a shared shape would make every rollback carry three fields it can never fill
+/// and every apply carry one it never fills. A host reading `applied` off a
+/// rollback reply would read an empty list as "nothing happened".
+///
+/// [`RollbackOutcome`]: zero_migrate::RollbackOutcome
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct RollbackReply {
+    /// Versions whose `down` ran and were journaled `rolled_back`, in the order
+    /// they were unwound: reverse topological order of `depends_on`, so each
+    /// version came down before anything it depends on.
+    pub rolled_back: Vec<String>,
+    /// Versions crossed WITHOUT running a `down`, because they declare none and
+    /// the request carried both the force flag and the backup acknowledgement.
+    /// Empty on every request that did not force.
+    pub skipped_irreversible: Vec<String>,
+}
+
 /// One outstanding online-rename contract returned after apply.
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]

@@ -1,0 +1,271 @@
+//! Behavioral integration test for the addon's `rollback` verb body: deploy an
+//! authored envelope onto a real temp-file SQLite database, then drive
+//! `verbs::rollback_with_locked_backend` over the SAME backend and read the
+//! catalog to see whether the table actually went away.
+//!
+//! Real SQLite rather than a mock host driver, because the question this verb
+//! raises is not "does the projection compile" but "does the `down` the verb
+//! reconstructs from the authored envelope reverse what apply did". A canned
+//! rowset would answer neither.
+//!
+//! What it pins:
+//!
+//! 1. a rollback driven through the verb removes the object the deploy created,
+//!    and names the journaled version it unwound;
+//! 2. the project lock is taken and released around the whole unwind, so a
+//!    second acquisition succeeds afterwards -- SQLite refuses a same-instance
+//!    re-acquire, which is what makes the release observable in-process;
+//! 3. a version the journal holds but the supplied envelopes do not describe is
+//!    REFUSED before any `down` runs, rather than skipped. That refusal is the
+//!    whole reason the verb may leave a plan out of the migration set it builds;
+//! 4. a plan carrying a data step is refused by the name its author gave it, not
+//!    by the derived version the journal keys it under.
+
+mod support;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use tempfile::TempDir;
+use zero_migrate::apply::executor::{RollbackOptions, RollbackTarget};
+use zero_migrate::approval::Approval;
+use zero_migrate::conn::ExecutorConfig;
+use zero_migrate::{MigrationEngine, MigrationIr, SqlDialect, SqliteBackend};
+
+use zero_migrate_node::verbs::rollback_with_locked_backend;
+
+const OWNER_APP: &str = "app_rollback_host";
+const PROJECT_SCHEMA: &str = "app_rollback_host";
+
+/// One authored envelope that lowers to a single DDL step, which is the shape the
+/// verb can reverse from its authored source.
+const CREATE_NOTES: &str = r#"{"ir_version":1,"name":"create_notes","ops":[
+    {"op":"createTable","name":"notes","columns":[
+        {"name":"id","type":"bigInt","nullable":false},
+        {"name":"title","type":"text","nullable":false}
+    ],"primaryKey":["id"]}
+]}"#;
+
+/// One authored envelope that lowers to a DDL step AND a DML step, which is the
+/// shape the verb leaves out of the migration set it builds.
+const SEED_NOTES: &str = r#"{"ir_version":1,"name":"seed_notes","ops":[
+    {"op":"createTable","name":"seeds","columns":[
+        {"name":"id","type":"bigInt","nullable":false}
+    ],"primaryKey":["id"]},
+    {"op":"insert","table":"seeds","columns":["id"],"rows":[[1]]}
+]}"#;
+
+struct Paths {
+    _dir: TempDir,
+    app: PathBuf,
+    journal: PathBuf,
+}
+
+fn paths(app_id: &str) -> Paths {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(format!("zs-{app_id}.sqlite"));
+    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
+}
+
+fn backend(p: &Paths) -> SqliteBackend {
+    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+}
+
+fn exec_cfg() -> ExecutorConfig {
+    ExecutorConfig::new(
+        PROJECT_SCHEMA,
+        PROJECT_SCHEMA,
+        support::no_inject(PROJECT_SCHEMA),
+    )
+}
+
+async fn table_exists(be: &SqliteBackend, name: &str) -> bool {
+    let rows = be
+        .actor()
+        .query(&format!(
+            "SELECT name FROM main.sqlite_master WHERE type='table' AND name='{name}'"
+        ))
+        .await
+        .expect("catalog probe");
+    !rows.is_empty()
+}
+
+/// Deploy the authored envelopes the same way the addon's in-process SQLite apply
+/// does, so the journal this test rolls back is the one that path writes.
+async fn deploy(be: &SqliteBackend, envelopes: &[&str]) -> Vec<String> {
+    let parsed: Vec<MigrationIr> = envelopes
+        .iter()
+        .map(|envelope| serde_json::from_str(envelope).expect("envelope parses as MigrationIr"))
+        .collect();
+    let policy = support::no_inject(PROJECT_SCHEMA);
+    MigrationEngine::new()
+        .deploy_envelopes(
+            &parsed,
+            be,
+            &policy,
+            SqlDialect::Sqlite,
+            PROJECT_SCHEMA,
+            OWNER_APP,
+            &BTreeMap::new(),
+            Approval::Approved,
+            &exec_cfg(),
+        )
+        .await
+        .expect("the authored envelopes deploy")
+        .applied
+}
+
+#[test]
+fn a_rollback_driven_through_the_verb_removes_the_table_the_deploy_created() {
+    let p = paths("rb_verb_roundtrip");
+    let charter = support::no_inject_charter_toml(PROJECT_SCHEMA);
+
+    let (reply, still_there, lock_free_after) = futures::executor::block_on(async {
+        let be = backend(&p);
+        let applied = deploy(&be, &[CREATE_NOTES]).await;
+        assert!(
+            table_exists(&be, "notes").await,
+            "the deploy must create the table this test then unwinds"
+        );
+
+        let reply = rollback_with_locked_backend(
+            &be,
+            &exec_cfg(),
+            &[CREATE_NOTES.to_string()],
+            OWNER_APP,
+            PROJECT_SCHEMA,
+            "sqlite",
+            "{}",
+            std::slice::from_ref(&charter),
+            RollbackTarget::All,
+            RollbackOptions::default(),
+            Approval::Approved,
+            "operator",
+        )
+        .await;
+
+        // A same-instance re-acquire is refused while the lock is held, so this
+        // succeeding is the evidence the verb released what it took.
+        let lock_free_after = {
+            use zero_migrate::MigrationBackend;
+            be.acquire_project_lock(&exec_cfg()).await.is_ok()
+        };
+        (
+            reply.map(|reply| (reply, applied)),
+            table_exists(&be, "notes").await,
+            lock_free_after,
+        )
+    });
+
+    let (reply, applied) = reply.expect("the verb rolls the authored envelope back");
+    assert_eq!(
+        reply.rolled_back, applied,
+        "the verb unwinds exactly the versions the deploy journaled"
+    );
+    assert!(
+        reply.skipped_irreversible.is_empty(),
+        "nothing was forced, so nothing may be skipped as irreversible"
+    );
+    assert!(
+        !still_there,
+        "the rolled-back table is gone from the catalog"
+    );
+    assert!(
+        lock_free_after,
+        "the project lock is released whichever way the unwind went"
+    );
+}
+
+#[test]
+fn a_journaled_version_the_supplied_envelopes_do_not_describe_is_refused() {
+    let p = paths("rb_verb_missing");
+    let charter = support::no_inject_charter_toml(PROJECT_SCHEMA);
+
+    let (error, still_there) = futures::executor::block_on(async {
+        let be = backend(&p);
+        deploy(&be, &[CREATE_NOTES]).await;
+
+        // The operator asks to unwind everything while handing over no authored
+        // source at all -- the same position the verb is in when a plan lowered
+        // to more than one journaled step and was left out of the set.
+        let error = rollback_with_locked_backend(
+            &be,
+            &exec_cfg(),
+            &[],
+            OWNER_APP,
+            PROJECT_SCHEMA,
+            "sqlite",
+            "{}",
+            std::slice::from_ref(&charter),
+            RollbackTarget::All,
+            RollbackOptions::default(),
+            Approval::Approved,
+            "operator",
+        )
+        .await
+        .expect_err("a version with no authored source has no reverse SQL to run");
+
+        (error, table_exists(&be, "notes").await)
+    });
+
+    assert!(
+        error.contains("absent from the supplied set"),
+        "the refusal must say the version is absent from the set, got: {error}"
+    );
+    assert!(
+        still_there,
+        "the refusal happens before any down runs, so the table survives"
+    );
+}
+
+#[test]
+fn a_plan_with_a_data_step_is_refused_by_the_name_its_author_gave_it() {
+    let p = paths("rb_verb_multistep");
+    let charter = support::no_inject_charter_toml(PROJECT_SCHEMA);
+
+    let (error, still_there) = futures::executor::block_on(async {
+        let be = backend(&p);
+        deploy(&be, &[SEED_NOTES]).await;
+
+        // The authored source IS supplied here. It is the verb that leaves the plan
+        // out, because a plan whose steps include a DML identity cannot be handed
+        // over as a reversible `Migration`.
+        let error = rollback_with_locked_backend(
+            &be,
+            &exec_cfg(),
+            &[SEED_NOTES.to_string()],
+            OWNER_APP,
+            PROJECT_SCHEMA,
+            "sqlite",
+            "{}",
+            std::slice::from_ref(&charter),
+            RollbackTarget::All,
+            RollbackOptions::default(),
+            Approval::Approved,
+            "operator",
+        )
+        .await
+        .expect_err("a plan carrying a data step has no reverse SQL to run");
+
+        (error, table_exists(&be, "seeds").await)
+    });
+
+    assert!(
+        error.contains("seed_notes"),
+        "the refusal must name the migration the operator authored, not only the \
+         derived version, got: {error}"
+    );
+    assert!(
+        error.contains("more than one journaled step"),
+        "the refusal must say why the plan could not be reversed, got: {error}"
+    );
+    assert!(
+        still_there,
+        "the refusal happens before any down runs, so the table survives"
+    );
+}
