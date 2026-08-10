@@ -326,6 +326,24 @@ interface Recorder {
 type RecorderPhase = "up" | "down";
 
 let active: Recorder | null = null;
+// Ops authored at MODULE SCOPE, before any recorder is active — the three
+// `deferrable: true` producers (`createEnum`, `createDomain`, `createSequence`),
+// which a migration may declare at the top of the file rather than inside
+// `up()`. `__begin("up")` clones them into the fresh recording; `__begin("down")`
+// deliberately does NOT, because these are up-intent object creations and
+// replaying them as a down recording would invert their meaning.
+// 
+// THIS BUFFER IS NEVER CLEARED, and that is safe only because of a property of
+// the CALLER, not of this module: `author_v1_envelope`
+// (crates/zeroship-migrate-adapter/src/platform/author.rs) builds a fresh
+// `Runtime` per migration, so each authoring run gets its own V8 isolate, its
+// own module map, and therefore its own instance of this array. One migration
+// per isolate is what bounds its lifetime.
+// 
+// If anything ever batches several migrations through one isolate — an obvious
+// thing to try for build speed — migration A's module-scope enum/domain/sequence
+// ops would replay into migration B's recording, silently and with no error.
+// Clear this buffer in `__begin` before doing that.
 const deferredUpOps: Node[] = [];
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
