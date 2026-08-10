@@ -325,6 +325,82 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
   }
 });
 
+/** The same two migrations, except the CREATE is guarded. A guarded create can journal
+ *  `completed` while its `IF NOT EXISTS` skipped the work, so its definition is not
+ *  evidence that the object was ever made this way -- and rebuilding from it would
+ *  invent a schema nobody created. */
+function scaffoldGuardedSchemaDrop(projectSchema: string, authored: string): string {
+  const dir = mkdtempSync(join(HERE, "rollback-live-guarded-"));
+  writeFileSync(
+    join(dir, "20260101000000_create_guarded.ts"),
+    `import { schema } from "zero-migrate";
+export const name = "create_guarded";
+export function up() {
+  schema(${JSON.stringify(authored)}).create({ ifNotExists: true });
+}
+`,
+  );
+  writeFileSync(
+    join(dir, "20260101000001_drop_guarded.ts"),
+    `import { schema } from "zero-migrate";
+export const name = "drop_guarded";
+export function up() {
+  schema(${JSON.stringify(authored)}).drop({});
+}
+`,
+  );
+  writeFileSync(join(dir, "policy.toml"), createSchemaPolicy(projectSchema, authored));
+  return dir;
+}
+
+test("PostgreSQL: a guarded create is not trusted to rebuild what a later drop removed", async (t) => {
+  const client = await connectLivePg(t);
+  if (!client) return;
+
+  const schemaName = uniqueSchema("rb_live_grd");
+  const metaSchema = `${schemaName}_migrations`;
+  const authored = `${schemaName}_guarded`;
+  const authoredExists = async (): Promise<boolean> => {
+    const result = await client.query(
+      `SELECT 1 FROM information_schema.schemata WHERE schema_name = $1`,
+      [authored],
+    );
+    return result.rows.length > 0;
+  };
+
+  let dir: string | undefined;
+  try {
+    await client.query(`CREATE SCHEMA "${schemaName}"`);
+    dir = scaffoldGuardedSchemaDrop(schemaName, authored);
+
+    const applied = spawnCli([...baseArgs(schemaName, pgUrl()), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+    assert.equal(await authoredExists(), false, "the guarded create ran and the drop removed it");
+
+    const rolledBack = spawnCli(
+      [...baseArgs(schemaName, pgUrl()), "rollback", "--steps", "1", "--approve"],
+      dir,
+    );
+    assert.notEqual(
+      rolledBack.status,
+      0,
+      "a drop whose create was guarded has no trustworthy definition to rebuild from",
+    );
+    // The refusal is the SAFE one: no inverse was synthesised at all, rather than one
+    // synthesised from a definition that may describe an object the create never made.
+    assert.match(rolledBack.stderr, /is irreversible \(down: None\); rollback refuses by default/);
+    assert.equal(await authoredExists(), false, "the refusal leaves the catalog untouched");
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${authored}" CASCADE; DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
 test("MySQL: the CLI rolls an applied migration back and leaves it pending", async (t) => {
   if (!MYSQL_URL) {
     t.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL rollback skipped");
