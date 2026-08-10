@@ -128,7 +128,7 @@ source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
   "crates/runtime/src crates/worker/src crates/gateway/src crates/control/src crates/core/src sdks/auth/src sdks/bootstrap/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
-  || { [ "$?" -eq 2 ] && exit 2; }
+  || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 echo "=== env.auth: dev vs deployed (auth-probe) ==="
 echo "  mutation: $MUTATE"
