@@ -361,8 +361,22 @@ const BAD_REQUEST_RESPONSE: &[u8] =
 /// `large_client_header_buffers`. Triggers 431 Request Header Fields Too Large.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 
-/// Max bytes in a single request body. Covers JSON-RPC dispatch and the
-/// HTTP envelope from the gateway. Triggers 413 Content Too Large.
+/// Max bytes in a single request body on the STANDALONE server. Triggers 413
+/// Content Too Large. Measured: 1 048 576 is accepted, 1 048 577 is refused --
+/// the check is `>`, not `>=`.
+///
+/// This cap does NOT govern deployed traffic, and the difference is 4x. A
+/// gateway never speaks to this server: it encodes a dispatch frame
+/// (`encode_dispatch_frame`, `gateway/src/proxy.rs`) and POSTs it to the
+/// worker's `/dispatch/{app_id}` route, which is ntex with its own
+/// `PayloadConfig` (`worker/src/handler.rs`). The only caller of
+/// `serve::start_server` is `zeroship serve` (`cli/src/main.rs`). Deployed
+/// bodies are bounded by `MAX_REQUEST_BODY_BYTES` (4 MiB) at the gateway
+/// instead.
+///
+/// So `pnpm dev` refuses bodies that production accepts, which fails in the
+/// safe direction but makes a local 413 useless as evidence about the platform.
+/// See `docs/reference/runtime-limits.md`.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Max bytes buffered in `data` before we give up waiting for the request
