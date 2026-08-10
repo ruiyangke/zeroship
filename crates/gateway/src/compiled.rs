@@ -172,14 +172,42 @@ pub(crate) fn is_dot_segment(seg: &str) -> bool {
     is_single_dot_segment(seg) || is_double_dot_segment(seg)
 }
 
+/// Bytes the WHATWG URL parser REWRITES inside a path, so a request carrying
+/// one is read differently by the gateway (which splits on `/` only) and by the
+/// worker (whose `new URL(request.url).pathname` is ada-backed):
+///
+/// * `\` (0x5C) — folded to `/` for special schemes, so `pub\..\admin`
+///   is ONE segment to the gateway and THREE to the worker. Measured
+///   end to end through a running gateway on 2026-08-10
+///   (`tests/e2e_gateway_path_backslash.sh` T4): `GET /pub\..\admin/secret`
+///   was authorized against the anon catch-all (200) while the worker's
+///   handler served `/admin/secret`, the `auth: user` resource that answers
+///   401 on its own URL.
+/// * TAB / LF / CR (0x09/0x0A/0x0D) — STRIPPED by the parser before parsing,
+///   so `adm<TAB>in` reads as `admin` to the worker. Belt-and-braces only:
+///   the same harness (T8) measured that the HTTP layer already answers 400
+///   for a raw tab in the request target, so this arm has NOT been shown to
+///   be reachable. It is here so a future change to the HTTP parser cannot
+///   silently open the same hole.
+///
+/// A conforming client percent-encodes all four (`%5C`, `%09`, …), and the
+/// gateway does not decode those (T6), so rejecting the raw bytes costs no
+/// legitimate request.
+const WHATWG_PATH_REWRITE_BYTES: [char; 4] = ['\\', '\t', '\n', '\r'];
+
 /// True if the raw request path is NOT already in canonical form because it
-/// carries a dot-segment (`.`/`..`, literal or `%2e`-encoded) or an empty
-/// interior segment (`//`). These are exactly the forms a browser's WHATWG
-/// `new URL` rewrites, so forwarding the raw path while matching auth on a
-/// different normalization is the SEC-2 bypass. The dispatch layer rejects
-/// such requests (400) rather than guess which normalization the worker will
-/// pick.
+/// carries a dot-segment (`.`/`..`, literal or `%2e`-encoded), an empty
+/// interior segment (`//`), or one of [`WHATWG_PATH_REWRITE_BYTES`]. These are
+/// the forms a browser's WHATWG `new URL` rewrites, so forwarding the raw path
+/// while matching auth on a different normalization is the SEC-2 bypass. The
+/// dispatch layer rejects such requests (400) rather than guess which
+/// normalization the worker will pick.
 pub(crate) fn path_has_traversal_or_empty_segment(path: &str) -> bool {
+    // Checked before segmentation: a `\` never survives to become its own
+    // segment (that is exactly why splitting on `/` alone misses it).
+    if path.contains(WHATWG_PATH_REWRITE_BYTES) {
+        return true;
+    }
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     // A lone trailing slash (`/api/admin/`) is a benign single-slash-policy
     // case, normalized — not rejected. Only an EMPTY INTERIOR segment (`//`)
@@ -208,15 +236,25 @@ pub(crate) fn path_has_traversal_or_empty_segment(path: &str) -> bool {
 /// * single-dot segments (`.`) and empty segments (`//`) are dropped,
 /// * double-dot segments (`..`) pop the previous segment, clamped at root
 ///   (never escaping above `/`),
+/// * a literal `\` is a segment separator, matching the WHATWG fold, so
+///   `/pub\..\admin` canonicalizes to `/admin` and not to a single opaque
+///   segment that would fall through to a permissive catch-all,
 /// * a single trailing slash is stripped (`/a/b/` → `/a/b`); root stays `/`.
 ///
 /// Only the dot-segment-relevant `%2e` is decoded — every other percent-escape
 /// is preserved byte-for-byte so the canonical form still round-trips through
 /// the worker's URL parser unchanged.
+///
+/// The `\` fold is defence in depth for the callers that do NOT go through
+/// dispatch's 400 guard (the per-resource rate-limit keying and the CORS
+/// preflight lookup): those match without rejecting, and they must land on the
+/// STRICTER resource rather than the catch-all. Dispatch itself rejects a
+/// backslash path before it ever reaches here, so this fold never decides what
+/// gets forwarded to the worker.
 pub(crate) fn canonicalize_path(path: &str) -> String {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let mut out: Vec<&str> = Vec::new();
-    for seg in trimmed.split('/') {
+    for seg in trimmed.split(['/', '\\']) {
         if seg.is_empty() || is_single_dot_segment(seg) {
             // Drop empty (`//`) and single-dot (`.`) segments.
             continue;
