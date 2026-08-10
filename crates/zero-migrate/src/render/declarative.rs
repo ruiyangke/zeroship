@@ -4637,6 +4637,29 @@ pub enum DeclarativeError {
     /// migrations - neither uses this error.)
     #[error("the declarative differ does not generate this change: {0}; author it as an explicit migration instead")]
     UnsupportedInV1(String),
+    /// An existing MySQL column needs a type or nullability change, which this
+    /// differ renders as PostgreSQL `ALTER COLUMN` DDL that MySQL cannot execute.
+    ///
+    /// MySQL is not missing the capability - `MODIFY COLUMN` does this work - but
+    /// it requires the COMPLETE column specification restated and silently drops
+    /// every facet omitted. Emitting it from a diff that knows only the changed
+    /// facet would discard the column's default, charset and comment, so the diff
+    /// refuses and says which column it stopped on.
+    #[error(
+        "cannot change column {table}.{column} ({change}) on MySQL: the differ \
+         renders alter-column DDL in PostgreSQL syntax, and MySQL's MODIFY COLUMN \
+         needs the whole column definition restated (omitting any part of it \
+         silently drops that part). Author the change as an explicit migration \
+         with the SQL you want."
+    )]
+    MysqlAlterColumnUnsupported {
+        /// The table holding the column the diff stopped on.
+        table: String,
+        /// The column whose change cannot be rendered.
+        column: String,
+        /// Which facet moved, so the message names the change and not just the site.
+        change: &'static str,
+    },
     /// A declared field used a DSL type token the differ does not map. This
     /// covers both out-of-scope parameterised/extension types
     /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
@@ -5731,6 +5754,31 @@ impl DeclarativeAuthor {
                                 )));
                             }
                             continue;
+                        }
+                        // MySQL reaches the PostgreSQL renderers below, whose output
+                        // it cannot execute. Refuse before rendering, naming the
+                        // column, for the reason on the error variant. This mirrors
+                        // the IR lane's `require_alter_column_rendering`, so an
+                        // authored change and a declarative one refuse alike rather
+                        // than one lane silently planning invalid DDL.
+                        if self.dialect == SqlDialect::Mysql
+                            && (lc.data_type != c.data_type
+                                || lc.case_sensitive != c.case_sensitive
+                                || lc.nullable != c.nullable)
+                        {
+                            let change = if lc.nullable != c.nullable
+                                && lc.data_type == c.data_type
+                                && lc.case_sensitive == c.case_sensitive
+                            {
+                                "nullability"
+                            } else {
+                                "type"
+                            };
+                            return Err(DeclarativeError::MysqlAlterColumnUnsupported {
+                                table: table.clone(),
+                                column: c.name.clone(),
+                                change,
+                            });
                         }
                         if lc.data_type != c.data_type || lc.case_sensitive != c.case_sensitive {
                             out.push(self.render_alter_column_type(table, c));
@@ -7639,20 +7687,37 @@ impl DeclarativeAuthor {
         )
     }
 
+    /// The `(table, column)` references an `ALTER COLUMN {SET|DROP} DEFAULT`
+    /// statement uses, quoted for the target dialect.
+    ///
+    /// These two statements are spelled the same way on all three dialects -
+    /// MEASURED on MySQL 8.4.11, which accepts `ALTER TABLE t ALTER COLUMN `c` SET
+    /// DEFAULT 'new'` and the matching `DROP DEFAULT` and reports the new value in
+    /// `information_schema.COLUMNS.COLUMN_DEFAULT`. Only the identifier quoting
+    /// differed, which is why these two are corrected rather than refused like the
+    /// type and nullability changes: MySQL has no `ALTER COLUMN ... TYPE`, but it
+    /// does have this.
+    ///
+    /// Follows the shape `render_add_fk` already uses, which is the convention in
+    /// this file for a renderer that has to care about the dialect.
+    fn alter_column_refs(&self, table: &str, col: &str) -> (String, String) {
+        match self.dialect {
+            SqlDialect::Mysql => (
+                mysql_qualified(&self.project_schema, table),
+                mysql_quote_ident(col),
+            ),
+            SqlDialect::Postgres => (self.qualified(table), quote_ident(col)),
+            SqlDialect::Sqlite => (quote_ident(table), quote_ident(col)),
+        }
+    }
+
     /// Render an `ALTER TABLE … ALTER COLUMN … SET DEFAULT …` from a pre-rendered
     /// literal default expression. Synth defaults are rejected before this seam.
     fn render_set_column_default(&self, table: &str, col: &str, default_sql: &str) -> Migration {
-        let up = format!(
-            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-            self.qualified(table),
-            quote_ident(col),
-            default_sql
-        );
-        let down = format!(
-            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-            self.qualified(table),
-            quote_ident(col)
-        );
+        let (table_ref, col_ref) = self.alter_column_refs(table, col);
+        let up =
+            format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} SET DEFAULT {default_sql}");
+        let down = format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} DROP DEFAULT");
         self.make(
             &format!("set_column_default_{table}_{col}"),
             up,
@@ -7666,11 +7731,8 @@ impl DeclarativeAuthor {
     /// is not present in the op payload, so the down migration is intentionally
     /// absent.
     fn render_drop_column_default(&self, table: &str, col: &str) -> Migration {
-        let up = format!(
-            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-            self.qualified(table),
-            quote_ident(col)
-        );
+        let (table_ref, col_ref) = self.alter_column_refs(table, col);
+        let up = format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} DROP DEFAULT");
         self.make(
             &format!("drop_column_default_{table}_{col}"),
             up,

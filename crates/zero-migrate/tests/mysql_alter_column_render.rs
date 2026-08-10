@@ -1,31 +1,37 @@
-//! What the declarative differ emits for a MySQL column type / nullability change.
+//! MySQL alter-column ops: two are refused, two are corrected. The split is the
+//! point of this file.
 //!
-//! The existing-table branch of `diff` special-cases SQLite and fails closed there,
-//! because SQLite has no `ALTER COLUMN` at all and its rebuild detector is supposed
-//! to have caught the change earlier. MySQL has no such branch: it falls through to
-//! the same renderers PostgreSQL uses, which emit `ALTER COLUMN ... TYPE ... USING
-//! ...::...` and `ALTER COLUMN ... SET NOT NULL`. MySQL accepts neither spelling -
-//! it uses `MODIFY COLUMN`, and has no `USING` cast - and quotes identifiers with
-//! backticks rather than double quotes.
-//!
-//! This measures what comes out rather than asserting from the renderer's source, so
-//! the record is the emitted string. MEASURED, with the MySQL author:
+//! Every one of these renderers used to emit PostgreSQL syntax with double-quoted
+//! identifiers on all three dialects, so nothing here executed on MySQL:
 //!
 //!     ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" TYPE INT USING "nickname"::INT
 //!     ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" SET NOT NULL
 //!
-//! Note the TABLE is double-quoted as well, not just the column: the statement is
-//! PostgreSQL end to end rather than a mix of the two dialects. Reading the renderer
-//! alone suggested otherwise, because the qualifier helper does have a MySQL arm -
-//! which is a reason to measure rather than to reason about it.
+//! Note the TABLE is double-quoted too: PostgreSQL end to end, not a mix of the
+//! two dialects.
 //!
-//! It is a pin on a KNOWN DEFECT, not an endorsement: the assertions below say what
-//! is emitted today and name what MySQL would need instead, so whoever fixes it sees
-//! the test fail and reads why.
+//! REFUSED - type and nullability. MySQL does these with `MODIFY COLUMN`, which
+//! requires the COMPLETE column specification restated and silently DISCARDS every
+//! facet left out. The op does not carry one: `Op::SetColumnType` builds its
+//! snapshot through `add_column_snapshot(.., None, None, None, None, None, None,
+//! None)`, called "a one-field descriptor" in its own comment. Rendering `MODIFY
+//! COLUMN` from that would take an authored `setColumnType` and quietly drop the
+//! column's default, its NOT NULL, its charset and its comment. Today's failure is
+//! loud and loses nothing; that would lose data definition silently.
 //!
-//! Note what this is NOT. Refusing this shape would not reject a migration that works
-//! today, because the emitted statement cannot execute on MySQL at all. That is why
-//! the usual objection to tightening a gate does not apply here.
+//! CORRECTED - `SET DEFAULT` and `DROP DEFAULT`. MySQL spells these exactly the
+//! way PostgreSQL does, so only the quoting was wrong. Refusing them would have
+//! removed a capability MySQL has - the failure mode that has reversed several
+//! fixes in this review - so they now render with backticks instead.
+//!
+//! Both lanes are covered because both reach the same renderers: the IR lane
+//! through `Op::SetColumnType` / `SetColumnNotNull` / `DropColumnNotNull`
+//! (authorable as `setColumnType`, `setColumnNotNull`, `dropColumnNotNull`), and
+//! the declarative differ through its existing-table branch.
+//!
+//! PostgreSQL is asserted alongside every refusal. Without that half these tests
+//! would still pass if the ops were refused on EVERY dialect, which would be a
+//! regression rather than a fix.
 
 mod support;
 
@@ -35,7 +41,10 @@ use zero_migrate::model::snapshot::SchemaSnapshot;
 use zero_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
 };
-use zero_migrate::SqlDialect;
+use zero_migrate::render::lower::IrAuthor;
+use zero_migrate::{
+    ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, SqlDialect, CURRENT_IR_VERSION,
+};
 
 const PROJECT: &str = "app";
 const APP: &str = "app_test";
@@ -61,25 +70,143 @@ fn descriptor(ty: &str, required: bool) -> CollectionDescriptor {
 fn live_with(
     ty: &str,
     required: bool,
+    dialect: SqlDialect,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> SchemaSnapshot {
-    let desired = desired_snapshot_for_dialect(
-        PROJECT,
-        &[descriptor(ty, required)],
-        SqlDialect::Mysql,
-        effective,
-    )
-    .expect("live-side desired snapshot");
-    desired.snapshot
+    desired_snapshot_for_dialect(PROJECT, &[descriptor(ty, required)], dialect, effective)
+        .expect("live-side desired snapshot")
+        .snapshot
 }
 
-fn mysql_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Mysql)
+fn one_op_ir(op: Op) -> MigrationIr {
+    MigrationIr {
+        ir_version: CURRENT_IR_VERSION,
+        name: "alter_nickname".to_string(),
+        owner_app: APP.to_string(),
+        ops: vec![op],
+        flags: IrFlagsOverride::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn lower_for(dialect: SqlDialect, op: Op) -> Result<(), String> {
+    let author = IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter());
+    author
+        .lower_steps(&one_op_ir(op), &LiveSchema::default())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn set_column_type_op() -> Op {
+    Op::SetColumnType {
+        table: "accounts".to_string(),
+        column: "nickname".to_string(),
+        to_type: ColType::Int,
+        using: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn set_column_not_null_op() -> Op {
+    Op::SetColumnNotNull {
+        table: "accounts".to_string(),
+        column: "nickname".to_string(),
+        schema: None,
+        existence_guard: None,
+    }
 }
 
 #[test]
-fn a_mysql_column_type_change_emits_postgres_alter_column_syntax() {
+fn the_ir_lane_refuses_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
+    let refused = lower_for(SqlDialect::Mysql, set_column_type_op())
+        .expect_err("MySQL must refuse rather than emit PostgreSQL ALTER COLUMN syntax");
+    assert!(
+        refused.contains("setColumnType"),
+        "the refusal names the authored op so the author knows what to change: {refused}"
+    );
+    assert!(
+        refused.to_lowercase().contains("mysql"),
+        "and names the dialect it applies to: {refused}"
+    );
+
+    // The control. Refusing on every dialect would satisfy the assertions above
+    // while breaking PostgreSQL, so the fix is only correct if this still lowers.
+    lower_for(SqlDialect::Postgres, set_column_type_op())
+        .expect("PostgreSQL still lowers a column type change");
+}
+
+#[test]
+fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgres() {
+    let refused = lower_for(SqlDialect::Mysql, set_column_not_null_op())
+        .expect_err("MySQL must refuse rather than emit PostgreSQL SET NOT NULL");
+    assert!(
+        refused.contains("setColumnNotNull"),
+        "the refusal names the authored op: {refused}"
+    );
+
+    lower_for(SqlDialect::Postgres, set_column_not_null_op())
+        .expect("PostgreSQL still lowers a nullability change");
+}
+
+// The other half of the scope decision. `SET DEFAULT` / `DROP DEFAULT` are NOT
+// refused, because MySQL spells them exactly the way PostgreSQL does and only the
+// identifier quoting was wrong. MEASURED on MySQL 8.4.11:
+//
+//     ALTER TABLE zm87.t ALTER COLUMN `c` SET DEFAULT 'new'   accepted, COLUMN_DEFAULT = new
+//     ALTER TABLE zm87.t ALTER COLUMN `c` DROP DEFAULT        accepted, COLUMN_DEFAULT NULL
+//
+// Refusing these would have removed a capability MySQL has, which is the failure
+// mode this review has reversed fixes for before.
+#[test]
+fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        SqlDialect::Mysql,
+        &support::confined_charter(),
+    );
+    let steps = author
+        .lower_steps(
+            &one_op_ir(Op::SetColumnDefault {
+                table: "accounts".to_string(),
+                column: "nickname".to_string(),
+                value: zero_migrate::IrDefault::Literal {
+                    value: zero_migrate::IrScalar::Str("new".to_string()),
+                },
+                schema: None,
+                existence_guard: None,
+            }),
+            &LiveSchema::default(),
+        )
+        .expect("MySQL renders a default change rather than refusing it");
+
+    let up = steps
+        .iter()
+        .filter_map(|step| match step {
+            zero_migrate::render::step::PlanStep::Ddl(m) => Some(m.up.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(";\n");
+
+    assert!(
+        up.contains("ALTER COLUMN `nickname` SET DEFAULT"),
+        "the column is backtick-quoted, which is what MySQL accepts: {up}"
+    );
+    assert!(
+        !up.contains('"'),
+        "no double-quoted identifier survives on the MySQL leg: {up}"
+    );
+}
+
+#[test]
+fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_postgres() {
     let effective = support::confined_charter();
+
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         &[descriptor("integer", true)],
@@ -87,78 +214,31 @@ fn a_mysql_column_type_change_emits_postgres_alter_column_syntax() {
         &effective,
     )
     .expect("desired snapshot");
-    let live = live_with("string", true, &effective);
+    let live = live_with("string", true, SqlDialect::Mysql, &effective);
 
-    let plan = mysql_author()
+    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Mysql)
         .diff(&desired, &live, &HashMap::new(), &[], &effective)
-        .expect("the differ accepts a MySQL type change rather than refusing it");
+        .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
+    let text = err.to_string();
+    assert!(
+        text.to_lowercase().contains("mysql"),
+        "the refusal names the dialect: {text}"
+    );
+    assert!(
+        text.contains("accounts") && text.contains("nickname"),
+        "and names the table and column so the operator can act on it: {text}"
+    );
 
-    let alter = plan
-        .all_migrations()
-        .into_iter()
-        .find(|m| m.name.starts_with("alter_column_type_"))
-        .expect("a type change emits an alter-column migration on MySQL");
-
-    // MEASURED, and wrong for this dialect on three counts.
-    assert!(
-        alter.up.contains("ALTER COLUMN"),
-        "today's emitted SQL, for the record: {}",
-        alter.up
-    );
-    assert!(
-        alter.up.contains("TYPE ") && alter.up.contains("USING "),
-        "MySQL has no `ALTER COLUMN ... TYPE ... USING`; it needs MODIFY COLUMN and no \
-         cast clause. Emitted: {}",
-        alter.up
-    );
-    assert!(
-        alter.up.contains('"'),
-        "MySQL quotes identifiers with backticks, not double quotes. Emitted: {}",
-        alter.up
-    );
-    assert!(
-        !alter.up.contains("MODIFY COLUMN"),
-        "when this starts failing the renderer has been taught MySQL syntax, which is \
-         the fix this pin is waiting for: {}",
-        alter.up
-    );
-}
-
-#[test]
-fn a_mysql_nullability_change_emits_postgres_set_not_null_syntax() {
-    let effective = support::confined_charter();
-    let desired = desired_snapshot_for_dialect(
+    // The same control on the declarative side.
+    let pg_desired = desired_snapshot_for_dialect(
         PROJECT,
-        &[descriptor("string", true)],
-        SqlDialect::Mysql,
+        &[descriptor("integer", true)],
+        SqlDialect::Postgres,
         &effective,
     )
     .expect("desired snapshot");
-    let live = live_with("string", false, &effective);
-
-    let plan = mysql_author()
-        .diff(&desired, &live, &HashMap::new(), &[], &effective)
-        .expect("the differ accepts a MySQL nullability change rather than refusing it");
-
-    let alter = plan
-        .all_migrations()
-        .into_iter()
-        .find(|m| m.name.starts_with("alter_column_null_"))
-        .or_else(|| {
-            plan.all_migrations()
-                .into_iter()
-                .find(|m| m.up.contains("NOT NULL") && m.up.contains("ALTER COLUMN"))
-        })
-        .expect("a nullability change emits an alter-column migration on MySQL");
-
-    assert!(
-        alter.up.contains("SET NOT NULL") || alter.up.contains("DROP NOT NULL"),
-        "today's emitted SQL, for the record: {}",
-        alter.up
-    );
-    assert!(
-        !alter.up.contains("MODIFY COLUMN"),
-        "when this starts failing the renderer has been taught MySQL syntax: {}",
-        alter.up
-    );
+    let pg_live = live_with("string", true, SqlDialect::Postgres, &effective);
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Postgres)
+        .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
+        .expect("PostgreSQL still diffs a column type change");
 }

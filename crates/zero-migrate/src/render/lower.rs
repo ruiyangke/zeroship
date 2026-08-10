@@ -1305,6 +1305,20 @@ pub enum IrLowerError {
     /// DDL ops; DML / online-intent ops compile elsewhere). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only)")]
     UnsupportedOp(&'static str),
+    /// An alter-column op reached the renderer with MySQL as the target. The
+    /// renderers behind these ops emit PostgreSQL `ALTER COLUMN` syntax on every
+    /// dialect, which MySQL cannot execute. MySQL's own spelling, `MODIFY COLUMN`,
+    /// requires the COMPLETE column specification restated and silently discards
+    /// every facet left out, and the op carries only the facet being changed - so
+    /// rendering it would drop the column's default, nullability, charset and
+    /// comment rather than fail. Refuse instead. Carries the authored op name.
+    #[error(
+        "{0} is not supported on MySQL: the engine renders alter-column DDL in \
+         PostgreSQL syntax, and MySQL's MODIFY COLUMN needs the whole column \
+         definition restated (omitting any part of it silently drops that part). \
+         Author the change as an explicit migration with the SQL you want."
+    )]
+    MysqlAlterColumnUnsupported(&'static str),
     /// A PG/MySQL create-time FK was correctly withheld from a forward
     /// reference, but no matching target-table CREATE appeared later in the
     /// selected artifact leg. Emitting the ALTER anyway would only fail later at
@@ -4846,11 +4860,12 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
+                self.refuse_mysql_alter_column("setColumnType")?;
                 vec![decl.lower_alter_column_type(table, &col)]
             }
             Op::SetColumnNotNull { table, column, .. } => {
                 // Same SQLite rebuild constraint as setColumnType.
-                self.require_capability_for(Capability::NativeAlterColumn, "setColumnNotNull")?;
+                self.require_alter_column_rendering("setColumnNotNull")?;
                 // setColumnNotNull ifExists: presence-only.
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
@@ -4864,7 +4879,7 @@ impl IrAuthor {
             }
             Op::DropColumnNotNull { table, column, .. } => {
                 // Same SQLite rebuild constraint as setColumnType.
-                self.require_capability_for(Capability::NativeAlterColumn, "dropColumnNotNull")?;
+                self.require_alter_column_rendering("dropColumnNotNull")?;
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
                         schema: eff_schema.clone(),
@@ -7339,6 +7354,40 @@ impl IrAuthor {
         } else {
             Err(IrLowerError::SqliteRebuildOnly(op))
         }
+    }
+
+    /// The gate every alter-column op passes, covering two different limits that
+    /// happen to meet here.
+    ///
+    /// [`Capability::NativeAlterColumn`] is a claim about the DATABASE: SQLite has
+    /// no `ALTER COLUMN`, so it routes through the differ's table rebuild instead.
+    /// MySQL answers `true` and the claim is correct - it has `MODIFY COLUMN` - but
+    /// the limit here is OURS: these ops render PostgreSQL syntax on every dialect,
+    /// and MySQL's spelling needs the whole column definition restated, which the
+    /// op does not carry. Keeping the two apart matters because the capability also
+    /// feeds the published support matrix, where "MySQL: no native alter column"
+    /// would be a false statement about MySQL.
+    ///
+    /// One definition, called from every alter-column arm, so the rule cannot be
+    /// added to one op and missed on its siblings.
+    fn require_alter_column_rendering(&self, op: &'static str) -> Result<(), IrLowerError> {
+        self.require_capability_for(Capability::NativeAlterColumn, op)?;
+        self.refuse_mysql_alter_column(op)
+    }
+
+    /// The MySQL half of [`Self::require_alter_column_rendering`], separable
+    /// because `setColumnType` must refuse an unrepresentable named type FIRST.
+    ///
+    /// An `enum`/`domain` target on MySQL is refused with `NamedTypeUnsupported`,
+    /// which is the more useful answer: that type cannot exist on MySQL at all, so
+    /// it is not fixable by hand-authoring the SQL, whereas an alter-column change
+    /// is. Running this check first would replace the specific diagnosis with the
+    /// general one.
+    fn refuse_mysql_alter_column(&self, op: &'static str) -> Result<(), IrLowerError> {
+        if self.dialect == SqlDialect::Mysql {
+            return Err(IrLowerError::MysqlAlterColumnUnsupported(op));
+        }
+        Ok(())
     }
 
     fn lower_sqlite_add_fk_rebuild(
