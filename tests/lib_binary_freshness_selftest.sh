@@ -88,6 +88,39 @@ case "$out" in
   *) no "stale binary was masked by a fresh sibling: $out" ;;
 esac
 
+# --- case 6: the verdict is PUBLISHED, not just printed --------------------
+# Why this exists, from a real run (2026-08-10, tests/e2e_dev_vs_deployed_db.sh):
+# the check fired correctly, named `dispatch.rs`, and warned that six binaries
+# predated it. The run then reported a three-row dev-vs-deployed divergence, two
+# rows of which were exactly the predicted skew. I read the diff at the BOTTOM of
+# a 160-line log and never saw the warning at the top, and spent the next several
+# minutes proving the skew by hand from binary mtimes.
+#
+# A warning is only useful where the reader is. The reader is at the divergence.
+# So the function must leave its verdict in a variable the caller can re-print
+# beside the diff, rather than only echoing it once at boot.
+#
+# Deliberately asserts on the COUNT and the NAMES separately: a caller that only
+# knows "something was stale" cannot tell the reader which side to distrust.
+unset ZS_FRESHNESS_STALE_COUNT ZS_FRESHNESS_STALE_NAMES
+zs_check_binary_freshness "$WORK" "$WORK/bin" "crates/demo/src" "fresh-bin demo-bin" >/dev/null 2>&1
+[ "${ZS_FRESHNESS_STALE_COUNT:-unset}" = "1" ] \
+  && ok "the stale COUNT is published for the caller to re-report" \
+  || no "ZS_FRESHNESS_STALE_COUNT is '${ZS_FRESHNESS_STALE_COUNT:-unset}', want 1"
+case "${ZS_FRESHNESS_STALE_NAMES:-}" in
+  *demo-bin*) ok "the stale NAMES are published, so the caller can say which side" ;;
+  *) no "ZS_FRESHNESS_STALE_NAMES is '${ZS_FRESHNESS_STALE_NAMES:-unset}', want it to name demo-bin" ;;
+esac
+
+# The all-fresh case must publish ZERO, not leave a previous run's value
+# standing. A stale variable here would make an honest run advertise a
+# staleness that had already been fixed -- the inverse error, equally wrong.
+touch "$WORK/bin/fresh-bin" "$WORK/bin/demo-bin"
+zs_check_binary_freshness "$WORK" "$WORK/bin" "crates/demo/src" "fresh-bin demo-bin" >/dev/null 2>&1
+[ "${ZS_FRESHNESS_STALE_COUNT:-unset}" = "0" ] \
+  && ok "an all-fresh run publishes 0, and does not leak the prior count" \
+  || no "after a fresh run ZS_FRESHNESS_STALE_COUNT is '${ZS_FRESHNESS_STALE_COUNT:-unset}', want 0"
+
 echo ""
 echo "  binary-freshness selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

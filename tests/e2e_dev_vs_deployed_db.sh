@@ -1060,6 +1060,13 @@ else
   fail "dev and deployed DIVERGE -- results below (< dev, > deployed)"
   diff "$WORK/dev.txt" "$WORK/deployed.txt" | cut -c1-400 | head -60
   echo ""
+  # Repeat the staleness verdict HERE, not only at boot. Measured 2026-08-10:
+  # this run reported three divergence rows, two of which were version skew
+  # from a partial rebuild. The freshness check had said so correctly in its
+  # first eight lines -- and those lines were 150 lines above the diff, so they
+  # were not read, and the skew was re-derived by hand from binary mtimes.
+  # A warning belongs where the reader is, and the reader is right here.
+  zs_report_staleness_here
   echo "  A divergence here is the finding, not a flaky test. Both backends are"
   echo "  individually plausible; disagreeing on one contract is the defect."
   echo "  See docs/pilot/e2e-scenarios.md before weakening anything above."

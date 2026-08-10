@@ -48,6 +48,12 @@ zs_check_binary_freshness() {
   local root="$1" bin="$2" srcdirs="$3" binaries="$4"
   local strict="${ZS_FRESHNESS_STRICT:-0}"
 
+  # Published for the caller to RE-REPORT beside its own findings. Reset on
+  # every call so an all-fresh run cannot inherit a previous run's count.
+  # See the note above `stale_names` for the run that motivated this.
+  ZS_FRESHNESS_STALE_COUNT=0
+  ZS_FRESHNESS_STALE_NAMES=""
+
   local existing=() d
   for d in $srcdirs; do
     [ -d "$root/$d" ] && existing+=("$root/$d")
@@ -76,7 +82,19 @@ zs_check_binary_freshness() {
   rel="${newest_src#"$root"/}"
   crate="$(printf '%s' "$rel" | cut -d/ -f1-2)"
 
-  local stale=0 b missing=0
+  # `stale_names` exists because a warning is only useful WHERE THE READER IS.
+  # Measured 2026-08-10 on tests/e2e_dev_vs_deployed_db.sh: this check fired
+  # correctly, named `dispatch.rs`, and warned that six binaries predated it.
+  # The run then reported a three-row dev-vs-deployed divergence, two rows of
+  # which were precisely that skew -- formatted identically to the one real
+  # backend divergence. The warning was at line 1 of a 160-line log; the diff
+  # was at the bottom, which is where a reader looks. The warning was not read,
+  # and the skew was re-derived by hand from binary mtimes instead.
+  #
+  # So the verdict is published rather than only echoed, and callers that print
+  # a diff are expected to repeat it there. Names as well as a count: "something
+  # was stale" does not tell a reader WHICH side of the comparison to distrust.
+  local stale=0 b missing=0 stale_names=""
   for b in $binaries; do
     if [ ! -x "$bin/$b" ]; then
       echo "  FRESHNESS: missing $bin/$b -- see the prereqs in the calling script's header" >&2
@@ -85,9 +103,14 @@ zs_check_binary_freshness() {
     fi
     if [ "$newest_src" -nt "$bin/$b" ]; then
       stale=$((stale+1))
+      stale_names="${stale_names:+$stale_names }$b"
       echo "  WARN $b is OLDER than $crate ($(basename "$newest_src"))"
     fi
   done
+
+  ZS_FRESHNESS_STALE_COUNT="$stale"
+  ZS_FRESHNESS_STALE_NAMES="$stale_names"
+  ZS_FRESHNESS_STALE_CRATE="$crate"
 
   [ "$missing" -gt 0 ] && return 2
 
@@ -101,6 +124,28 @@ zs_check_binary_freshness() {
 
   echo "  ok   both sides built after the newest source under $crate"
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Re-report the staleness verdict AT THE POINT OF A FINDING.
+#
+# Call this from inside a diff/divergence branch, after
+# `zs_check_binary_freshness` has run. Prints nothing when everything was
+# fresh, so it is safe to call unconditionally.
+#
+# Why it is a function and not three copies: the three dev-vs-deployed
+# harnesses that print a diff all need it, and a copied block is the same
+# hand-mirrored shape that has already produced several defects here -- one
+# copy gets updated, the others quietly stop matching, and nothing fails.
+zs_report_staleness_here() {
+  [ "${ZS_FRESHNESS_STALE_COUNT:-0}" -gt 0 ] || return 0
+  echo "  !! ${ZS_FRESHNESS_STALE_COUNT} BINARY(S) WERE STALE when this ran:" \
+       "${ZS_FRESHNESS_STALE_NAMES}"
+  echo "     (older than ${ZS_FRESHNESS_STALE_CRATE:-a changed crate})."
+  echo "     Some rows above may be VERSION SKEW between the two sides rather"
+  echo "     than a backend divergence -- they are indistinguishable in this"
+  echo "     diff. Rebuild and re-run before believing any row."
+  echo ""
 }
 
 # ---------------------------------------------------------------------------
