@@ -82,7 +82,7 @@ app-level `Env.db` augmentation moved to generated code.
 Collection names created by migrations become physical table names. Keep them
 ASCII alphanumeric plus underscores, at most 63 bytes, and avoid the reserved
 prefixes `pg_` and `__zeroship`. Invalid names are refused at deploy time by
-the validator in `crates/plugin-db/src/query.rs`.
+the validator in `crates/zeroship-schema/src/query.rs`.
 
 ## Two return contracts
 
@@ -368,7 +368,7 @@ Override with `t.ref("users", { onDelete: "cascade" })` for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
 FKs stay inside the calling app. See
-`sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`, and
+`sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`, and
 `crates/plugin-db/src/cross_app_fk.rs`.
 
 ## Collection CRUD
@@ -1196,7 +1196,7 @@ The full design lives in `docs/archive/platform-system-fields.md` (shipped; arch
 
 Implementation anchors:
 
-- System columns and implicit indexes are emitted in `crates/plugin-db/src/query.rs`.
+- System columns and implicit indexes are emitted in `crates/zeroship-schema/src/query.rs`.
 - Read filtering, soft delete, restore, and purge dispatch live in `crates/plugin-db/src/crud/mod.rs`.
 - Schema revalidation treats platform system fields as desired physical columns before diffing, so persistent dev databases under `.zeroship/` do not look destructive after a restart.
 
@@ -1423,9 +1423,9 @@ apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`, and `crates/plugin-db/src/crud/mask_backfill.rs`.
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`, and `crates/plugin-db/src/crud/mask_backfill.rs`.
 
-Every masked field uses the sibling-column model: the platform emits `<field>_masked` next to the parent column, writes both columns atomically, and routes default reads through the masked representation instead of plaintext (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`). `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`).
+Every masked field uses the sibling-column model: the platform emits `<field>_masked` next to the parent column, writes both columns atomically, and routes default reads through the masked representation instead of plaintext (`crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`). `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`).
 
 On writes, `apply_mask_on_write` computes the sibling value from plaintext, not from a later read-path decrypt. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values do not emit a sibling write, and `kind: "none"` skips the sibling entirely (`crates/plugin-db/src/crud/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`).
 
@@ -1435,4 +1435,4 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the six shipped classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`), stores a single pending role-to-classification map for bootstrap to flush, and replaces rather than merges when called again in the same isolate (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`). `__zsmask:kind=<kind>,classification=<class>` is the schema/introspection sentinel attached to `<field>_masked`, so the diff and backfill paths can recover mask metadata from the live database definition (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_backfill.rs`).
+Two sentinel formats are shipped. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`). `__zsmask:kind=<kind>,classification=<class>` is the schema/introspection sentinel attached to `<field>_masked`, so the diff and backfill paths can recover mask metadata from the live database definition (`crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_backfill.rs`).

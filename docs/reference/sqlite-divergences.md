@@ -38,6 +38,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 - [crates/plugin-db/src/backend/sqlite/session.rs](../../crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
 - [crates/plugin-db/src/backend/sqlite/error.rs](../../crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
 - [crates/plugin-db/src/v8_classes/transaction.rs](../../crates/plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
+- [crates/zeroship-schema/src/query.rs](../../crates/zeroship-schema/src/query.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
 - [crates/plugin-db/src/crud/mod.rs](../../crates/plugin-db/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
 - [crates/plugin-db/src/backend/sqlite/dialect.rs](../../crates/plugin-db/src/backend/sqlite/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
 
