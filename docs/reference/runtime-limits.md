@@ -99,10 +99,20 @@ dev/benchmark entrypoint whose limits are static by design, and the gateway is
 where an operator tunes the real ones. But it means the two tiers disagree by 4x,
 and the direction matters:
 
-| tier | request body cap |
+| tier | request body cap | how established |
+| --- | --- | --- |
+| `pnpm dev` / `zeroship serve` | 1 MiB | measured |
+| deployed (gateway → worker) | 4 MiB | read from source |
+
+The dev boundary is exact, and a body of precisely 1 MiB is accepted — the check
+is `>`, not `>=`:
+
+| body bytes | response |
 | --- | --- |
-| `pnpm dev` / `zeroship serve` | 1 MiB |
-| deployed (gateway → worker) | 4 MiB |
+| 1 048 575 | `200` |
+| 1 048 576 | `200` |
+| 1 048 577 | `413` |
+| 2 097 152 | `413` |
 
 **Dev is the stricter tier**, so this fails in the safe direction: a body your
 app accepts locally will be accepted in production. The trap is the reverse
