@@ -890,6 +890,27 @@ const { data, error } = await db.transaction(async (tx) => {
   error — there is no Result envelope.
 - The transaction is rolled back automatically when the callback throws
   or when the runtime drops the wrapper without commit/rollback.
+- A transaction owns exactly **one** connection, so its operations cannot
+  overlap: `await` each call inside the callback before starting the next.
+  `Promise.all([tx.a.insert(...), tx.b.insert(...)])` runs them concurrently
+  on that one connection and the losing branch is refused with
+  `TRANSACTION_CONNECTION_BUSY`.
+- Everything a callback starts must also **finish** inside it. A promise the
+  callback never awaits keeps running after the transaction settles, and the
+  database calls it then makes belong to a transaction that no longer exists;
+  they are refused with `TRANSACTION_SCOPE_EXPIRED` rather than being committed
+  on their own.
+- Which transaction an operation belongs to is decided by where the call was
+  made, not by what happens to be open at the time. A plain `db.<table>.*`
+  call is its own unit of work even while another request holds a transaction
+  open for the same app, and a call made inside a callback still belongs to
+  that transaction on any branch of the callback's own async work.
+  The previous bullet holds on the deployed tier. On `pnpm dev` it does not
+  yet: SQLite runs the whole app on one connection, so an ordinary write
+  issued while a transaction is open executes inside that transaction and is
+  undone by its rollback. Do not rely on `pnpm dev` to tell you whether
+  concurrent transactional work is correct — see
+  [sqlite-divergences.md](./sqlite-divergences.md#current-differences).
 - `isolationLevel` accepts `"read uncommitted"`, `"read committed"` (default),
   `"repeatable read"` or `"serializable"` — the SQL spellings, with a space.
   This page documented `"readCommitted"` / `"repeatableRead"` until 2026-08-10;

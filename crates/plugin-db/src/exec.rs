@@ -13,9 +13,29 @@
 //! - `exec_mutation_with_emit` — write path + broker wakeup on backends
 //!   that still need SDK-local publication.
 //!
-//! All four route through `run_sql`, which transparently uses the
-//! per-isolate TX client (`IsolateDbContext::tx_conn`) when an explicit
-//! transaction is active and the pool otherwise.
+//! All four route through `run_sql`, which uses the per-isolate TX
+//! client (`IsolateDbContext::tx_conns`) when the DISPATCH THAT STARTED
+//! THIS OP was issued inside the app's own `db.transaction(fn)` callback,
+//! and the pool otherwise.
+//!
+//! ## Why the entry points take `&TxRoute` and not `app_id: &str`
+//!
+//! Until 2026-08-10 the three routing sites here read ambient state —
+//! `context::with(|c| c.has_tx_for(app_id))`, "does this app have a
+//! transaction open RIGHT NOW". That is a temporal test standing in for a
+//! structural one. An ORDINARY write with no transaction anywhere in its
+//! call chain, merely overlapping a stranger's transaction on the same
+//! isolate, was routed onto that stranger's connection and destroyed by
+//! its ROLLBACK — while reporting success. Measured on both tiers by
+//! `tests/e2e_dev_vs_deployed_db.sh` (`cxPlain`).
+//!
+//! The decision is now [`crate::tx_route::TxRoute`], captured
+//! synchronously in the `dispatch_*` prelude while `scope` is still live
+//! (it reads V8's continuation-preserved slot, which is the structural
+//! test) and moved into the spawned future. `TxRoute`'s only production
+//! constructor takes `&mut v8::PinScope`, so a dispatch site that forgets
+//! to capture has nothing to pass here and fails to compile rather than
+//! silently defaulting to the pool.
 //!
 //! ## Error rail
 //!
@@ -39,6 +59,7 @@ use crate::context::TxConnection;
 use crate::context;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
+use crate::tx_route::TxRoute;
 use crate::v8_bridge::rows_to_json_value;
 
 /// Raw usage metrics a db op emits in its SUCCESS arm (metering-as-
@@ -100,21 +121,74 @@ async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Poo
     })
 }
 
-/// Execute SQL with text params — uses TX connection if active, otherwise pool.
+/// The op was dispatched inside a `db.transaction(fn)` callback whose
+/// transaction has since settled — a continuation that outlived its
+/// transaction (typically a promise the callback started and never
+/// awaited).
+///
+/// Refused rather than silently autocommitted on a pooled connection.
+/// Falling back to the pool would let work the creator wrote INSIDE a
+/// transaction commit on its own after that transaction rolled back,
+/// which is the mirror image of the defect `TxRoute` fixes. Mirrors
+/// `transaction::transaction_dispatch`'s `transaction_scope_expired`.
+fn tx_scope_expired() -> DbError {
+    DbError::validation_hinted(
+        "transaction_scope_expired",
+        "db: this operation was issued inside a transaction that has already settled".to_string(),
+        "Every env.db call started inside a db.transaction(...) callback must be awaited before \
+         the callback returns; work left running past the callback has no transaction to run on.",
+    )
+}
+
+/// The route says "in transaction" and the transaction is still open, but
+/// its connection is checked out by another in-flight op for the same
+/// app. A transaction owns exactly ONE connection, so two of its
+/// operations cannot be in flight at once.
+///
+/// Split from [`tx_scope_expired`] deliberately: an empty tx slot has two
+/// causes and they call for opposite fixes (await your calls vs. do not
+/// leak work past the callback). Before this split both arrived as
+/// `DbError::internal("db: transaction connection lost")`, which named
+/// neither. `tx_claimed_by` is the discriminator — the top-level claim is
+/// held for the whole transaction, including the window where the client
+/// is checked out.
+fn tx_connection_busy() -> DbError {
+    DbError::validation_hinted(
+        "transaction_connection_busy",
+        "db: another operation is already using this transaction's connection".to_string(),
+        "A transaction has one connection, so its operations cannot overlap. Await each env.db \
+         call inside the db.transaction(...) callback before starting the next — a Promise.all \
+         over several tx operations runs them concurrently on that one connection.",
+    )
+}
+
+/// Which of the two empty-slot causes applies for `app_id`.
+fn tx_slot_unavailable(app_id: &str) -> DbError {
+    if context::with(|c| c.tx_claimed_by(app_id)) {
+        tx_connection_busy()
+    } else {
+        tx_scope_expired()
+    }
+}
+
+/// Execute SQL with text params — uses the app's TX connection when this
+/// dispatch was issued inside that transaction, otherwise the pool.
 pub(crate) async fn run_sql(
-    app_id: &str,
+    route: &TxRoute,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    // Check if there's an active transaction *owned by this app*.
-    // SEC-1: a tx parked by a co-resident app must NOT capture this
-    // app's SQL — `has_tx_for(app_id)` reads `false` for another app's
-    // slot, so we fall through to this app's own autocommit path.
-    let has_tx = context::with(|c| c.has_tx_for(app_id));
-    if has_tx {
+    let app_id = route.app_id();
+    // Structural, not temporal: `route.in_tx()` was frozen at the V8
+    // dispatch frame from the continuation-preserved transaction scope,
+    // so it is true only for ops issued INSIDE this app's own
+    // `db.transaction(fn)` callback. SEC-1 falls out of the same
+    // comparison: a co-resident app's callback plants ITS app_id, so this
+    // app reads `false` and takes its own autocommit path.
+    if route.in_tx() {
         // Use this app's transaction connection
         let client = context::with_mut(|c| c.take_tx_client_for(app_id))
-            .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
+            .ok_or_else(|| tx_slot_unavailable(app_id))?;
         let result = match &client {
             TxConnection::Postgres(client) => client.query_text_params(sql, params).await,
             TxConnection::Sqlite(_) => {
@@ -141,15 +215,16 @@ pub(crate) async fn run_sql(
 /// take a single row without paying for an intermediate serialise +
 /// reparse round-trip. The final JSON string is materialised once at
 /// the V8 boundary (`ResolveValue::Json`).
-pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+    let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
         // Success arm only: one read op. Unforgeable (emitted by the primitive).
         emit_db_metric(app_id, DB_READS, 1);
         return Ok(rows);
     }
-    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
+    let rows = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_READS, 1);
     Ok(rows_to_json_value(&rows))
 }
@@ -159,10 +234,11 @@ pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value
 /// Returns the raw integer; callers wrap into the appropriate
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
-pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbError> {
+pub(crate) async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
+    let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
         // Success arm only: a count is a read op.
         emit_db_metric(app_id, DB_READS, 1);
         return Ok(rows
@@ -171,7 +247,7 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
             .and_then(Value::as_i64)
             .unwrap_or(0));
     }
-    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
+    let rows = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_READS, 1);
 
     Ok(rows
@@ -188,16 +264,17 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
 /// to build broker events without paying for a JSON parse of its own
 /// output; the CRUD resolver chain then serialises once at the V8
 /// boundary.
-pub(crate) async fn exec_mutation(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+    let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
         // Success arm only: one write op + the affected/RETURNING row count.
         emit_db_metric(app_id, DB_WRITES, 1);
         emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
         return Ok(rows);
     }
-    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
+    let rows = run_sql(route, &bq.sql, &param_refs).await?;
     let values = rows_to_json_value(&rows);
     emit_db_metric(app_id, DB_WRITES, 1);
     emit_db_metric(app_id, DB_ROWS_WRITTEN, values.len() as u64);
@@ -273,22 +350,29 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
 }
 
 async fn exec_sqlite_json(
-    app_id: &str,
+    route: &TxRoute,
     backend: &crate::backend::sqlite::SqliteBackend,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    // SEC-1: only this app's parked tx routes its SQL through the tx
-    // client; a co-resident app's tx is invisible here and we use the
-    // shared autocommit path instead.
-    let has_tx = context::with(|c| c.has_tx_for(app_id));
-    if !has_tx {
+    // Same discriminator as `run_sql`: the route was frozen at the V8
+    // dispatch frame, so only ops issued inside THIS app's own
+    // `db.transaction(fn)` callback take the tx client. SEC-1 falls out of
+    // it, and so does the `cxPlain` case (an ordinary overlapping write
+    // stays on the shared autocommit path).
+    if !route.in_tx() {
         #[cfg(test)]
         tests::record_sqlite_shared_route();
         return backend.query_json(sql, params).await;
     }
 
-    let client = context::TxClientSlotGuard::take(app_id)?;
+    // `take` has exactly one failure mode — an empty slot — which under a
+    // route that says "in transaction" means either the transaction has
+    // settled or another op holds its connection. Re-typed so the creator
+    // sees the same coded errors the Postgres arm produces.
+    let client =
+        context::TxClientSlotGuard::take(route.app_id())
+            .map_err(|_| tx_slot_unavailable(route.app_id()))?;
     let result = match client.client() {
         TxConnection::Sqlite(client) => {
             #[cfg(test)]
@@ -324,7 +408,7 @@ async fn exec_sqlite_json(
 /// the result `Value`.
 pub(crate) async fn exec_mutation_with_emit(
     bq: BuiltQuery,
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     op: crate::broker::ChangeOp,
 ) -> Result<Vec<Value>, DbError> {
@@ -334,8 +418,8 @@ pub(crate) async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
-    let rows = exec_mutation(app_id, bq).await?;
-    emit_for_rows(&rows, app_id, collection, op);
+    let rows = exec_mutation(route, bq).await?;
+    emit_for_rows(&rows, route, collection, op);
     Ok(rows)
 }
 
@@ -380,10 +464,11 @@ fn backend_publishes_committed_changes() -> bool {
 /// consumer's same conservative-true contract.
 fn emit_for_rows(
     rows: &[Value],
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     op: crate::broker::ChangeOp,
 ) {
+    let app_id = route.app_id();
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
         // matching filter falls here; subscribers should not see a
@@ -444,7 +529,7 @@ fn emit_for_rows(
         };
         #[cfg(test)]
         tests::record_tuple_built();
-        queue_or_emit(app_id, collection, op, pk, columns, tuple);
+        queue_or_emit(route, collection, op, pk, columns, tuple);
     }
 }
 
@@ -453,19 +538,22 @@ fn emit_for_rows(
 /// path to drain on COMMIT. Otherwise (autocommit), fire it
 /// immediately. Subscribers no longer observe pre-commit state.
 fn queue_or_emit(
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     op: crate::broker::ChangeOp,
     pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    // SEC-1: queue only while THIS app's tx is open. If a co-resident
-    // app holds the only parked tx, this app is effectively in
-    // autocommit and must emit immediately (its event would otherwise
-    // sit unfired — there is no settle path for it).
-    let in_tx = context::with(|c| c.has_tx_for(app_id));
-    if !in_tx {
+    let app_id = route.app_id();
+    // Queue only when THIS write actually ran on THIS app's transaction —
+    // the same route that decided which connection the SQL used, so the
+    // event's fate cannot disagree with the row's. A write that merely
+    // overlapped someone else's transaction is in autocommit and must emit
+    // immediately; queueing it would park the event on a settle path that
+    // belongs to a different unit of work (previously it was both routed
+    // onto and queued behind a stranger's transaction).
+    if !route.in_tx() {
         crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
     }
@@ -533,6 +621,13 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> 
 /// `IsolateDbContext::tx_conns` (via
 /// [`crate::install_tx_marker_for_tests`]) when the test wants the
 /// queueing path to fire.
+///
+/// The route is derived from the ambient parked-tx slot rather than from
+/// a V8 scope, because there is no isolate here. That is exactly the
+/// discriminator production no longer uses; it is sound ONLY because a
+/// test drives one unit of work at a time, and it is why this helper
+/// cannot stand in for the `cxPlain` coverage in
+/// `tests/e2e_dev_vs_deployed_db.sh`.
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_mutation_with_emit_for_tests(
@@ -541,9 +636,22 @@ pub async fn exec_mutation_with_emit_for_tests(
     collection: &str,
     op: crate::broker::ChangeOp,
 ) -> Result<Vec<Value>, String> {
-    exec_mutation_with_emit(bq, app_id, collection, op)
+    let route = ambient_route_for_tests(app_id);
+    exec_mutation_with_emit(bq, &route, collection, op)
         .await
         .map_err(DbError::into_string)
+}
+
+/// Reconstruct a [`TxRoute`] from the ambient parked-tx slot, for the
+/// no-isolate test helpers only. See the note on
+/// [`exec_mutation_with_emit_for_tests`].
+#[cfg(any(test, feature = "test-helpers"))]
+fn ambient_route_for_tests(app_id: &str) -> TxRoute {
+    if context::with(|c| c.has_tx_for(app_id)) {
+        TxRoute::tx_for_tests(app_id)
+    } else {
+        TxRoute::pool_for_tests(app_id)
+    }
 }
 
 /// **Test-only**: exec a read query through the same shared
@@ -555,7 +663,8 @@ pub async fn exec_query_for_tests(
     app_id: &str,
     bq: crate::query::BuiltQuery,
 ) -> Result<Vec<Value>, String> {
-    exec_query(app_id, bq).await.map_err(DbError::into_string)
+    let route = ambient_route_for_tests(app_id);
+    exec_query(&route, bq).await.map_err(DbError::into_string)
 }
 
 #[cfg(test)]
@@ -668,7 +777,7 @@ mod tests {
         crate::wal_consumer::suppress_app("app_suppressed");
 
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, "app_suppressed", "messages", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_suppressed"), "messages", ChangeOp::Insert);
 
         assert_eq!(
             tuple_built_count(),
@@ -688,7 +797,7 @@ mod tests {
         // No subscribers, no suppression — the build should still
         // short-circuit because the broker would discard the event.
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, "app_no_subs", "ghosts", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_no_subs"), "ghosts", ChangeOp::Insert);
 
         assert_eq!(
             tuple_built_count(),
@@ -741,7 +850,7 @@ mod tests {
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
         queue_or_emit(
-            "app_active",
+            &ambient_route_for_tests("app_active"),
             "messages",
             ChangeOp::Insert,
             Some("9".to_string()),
@@ -845,7 +954,7 @@ mod tests {
         let sub = crate::broker::subscribe("app_active", "messages");
 
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, "app_active", "messages", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
 
         assert_eq!(
             tuple_built_count(),
@@ -890,7 +999,7 @@ mod tests {
             let sub = crate::broker::subscribe("app_active", "messages");
 
             let rows = vec![synthetic_row()];
-            emit_for_rows(&rows, "app_active", "messages", ChangeOp::Insert);
+            emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
 
             assert_eq!(
                 tuple_built_count(),
@@ -911,7 +1020,7 @@ mod tests {
         let sub = crate::broker::subscribe("app_active", "messages");
 
         let rows = vec![synthetic_typed_id_row()];
-        emit_for_rows(&rows, "app_active", "messages", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
 
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
@@ -968,7 +1077,7 @@ mod tests {
             });
 
             reset_sqlite_route();
-            let inserted = exec_mutation("app_exec", BuiltQuery {
+            let inserted = exec_mutation(&ambient_route_for_tests("app_exec"), BuiltQuery {
                 sql: r#"INSERT INTO "app_exec"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
                     .to_string(),
@@ -987,7 +1096,7 @@ mod tests {
             );
 
             reset_sqlite_route();
-            let count = exec_count("app_exec", BuiltQuery {
+            let count = exec_count(&ambient_route_for_tests("app_exec"), BuiltQuery {
                 sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
                 params: vec![],
             })
@@ -1001,7 +1110,7 @@ mod tests {
             assert_eq!(count, 1);
 
             reset_sqlite_route();
-            let rows = exec_query("app_exec", BuiltQuery {
+            let rows = exec_query(&ambient_route_for_tests("app_exec"), BuiltQuery {
                 sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
                 params: vec![],
             })
@@ -1072,7 +1181,7 @@ mod tests {
             });
 
             // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
-            exec_mutation(app_id, BuiltQuery {
+            exec_mutation(&ambient_route_for_tests(app_id), BuiltQuery {
                 sql: format!(
                     r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
                 ),
@@ -1082,7 +1191,7 @@ mod tests {
             .expect("insert");
 
             // 1 query (read) → db_reads +1.
-            exec_query(app_id, BuiltQuery {
+            exec_query(&ambient_route_for_tests(app_id), BuiltQuery {
                 sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
                 params: vec![],
             })
@@ -1090,7 +1199,7 @@ mod tests {
             .expect("select");
 
             // 1 count (read) → db_reads +1.
-            exec_count(app_id, BuiltQuery {
+            exec_count(&ambient_route_for_tests(app_id), BuiltQuery {
                 sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
                 params: vec![],
             })
@@ -1098,7 +1207,7 @@ mod tests {
             .expect("count");
 
             // A FAILED op (bad SQL) must emit NOTHING.
-            let bad = exec_query(app_id, BuiltQuery {
+            let bad = exec_query(&ambient_route_for_tests(app_id), BuiltQuery {
                 sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
                 params: vec![],
             })
@@ -1186,7 +1295,7 @@ mod tests {
             // Co-resident app_b now runs a plain (non-transactional)
             // query on the same thread.
             reset_sqlite_route();
-            let rows = exec_query("app_b", BuiltQuery {
+            let rows = exec_query(&ambient_route_for_tests("app_b"), BuiltQuery {
                 sql: "SELECT 'b' AS title".to_string(),
                 params: vec![],
             })
@@ -1274,7 +1383,7 @@ mod tests {
 
             let gate = arm_next_command_gate_for_tests();
             let task = compio::runtime::spawn(async {
-                exec_query("app_exec_cancel", BuiltQuery {
+                exec_query(&ambient_route_for_tests("app_exec_cancel"), BuiltQuery {
                     sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
                     params: vec![],
                 })
@@ -1292,7 +1401,7 @@ mod tests {
                 "dropping the in-flight future must restore the tx slot"
             );
 
-            let rows = exec_query("app_exec_cancel", BuiltQuery {
+            let rows = exec_query(&ambient_route_for_tests("app_exec_cancel"), BuiltQuery {
                 sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
                 params: vec![],
             })

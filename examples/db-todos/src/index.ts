@@ -674,6 +674,101 @@ export const txPlainWrite = mutation(
   { id: "todos.txPlainWrite" },
 );
 
+/** Do writes on PARALLEL BRANCHES inside one transaction callback still
+ *  belong to that transaction?
+ *
+ *  Every other tx probe awaits its writes in a straight line, so all of them
+ *  would still pass if the platform decided "in a transaction" from ambient
+ *  state. This one branches: `Promise.all` inside the callback creates two
+ *  continuations that fork off the callback frame, and the routing decision is
+ *  now taken per dispatch from the async context (`crates/plugin-db/src/
+ *  tx_route.rs`). If a branch did NOT inherit the callback's scope it would be
+ *  routed to the pool, autocommit on its own, and SURVIVE the abort below.
+ *
+ *  Contract: the callback throws, so `countAfter == 0` -- both branch writes
+ *  are rolled back with everything else. `countAfter == 2` means the branches
+ *  escaped the transaction; `1` means only one did. */
+export const txBranchWrites = mutation(
+  async ({ userId, tag }: TxInput) => {
+    const uid = userIdFromWire(userId);
+    const title = `${tag}-br`;
+    const r = await db.transaction(async (tx) => {
+      // Two writes with no `await` between them: both promises are created
+      // in the callback frame and settle on separate continuations.
+      await Promise.all([
+        tx.todos.insert({ userId: uid, title }),
+        tx.todos.insert({ userId: uid, title }),
+      ]);
+      const seen = await tx.todos.count({ userId: uid, title });
+      throw Object.assign(new Error("branch probe aborts"), {
+        code: "PROBE_BRANCH_ABORT",
+        seen,
+      });
+    });
+    const after = await db.todos.count({ userId: uid, title });
+    return { error: errShape(r.error), countAfter: after.data ?? null };
+  },
+  { id: "todos.txBranchWrites" },
+);
+
+/** A write issued from a continuation that OUTLIVED its transaction.
+ *
+ *  The callback starts a promise and never awaits it; the transaction commits
+ *  and releases its connection; the promise then wakes up and issues a write
+ *  that was dispatched inside the (now dead) transaction scope.
+ *
+ *  There is no right connection for that write. The one outcome that must NOT
+ *  happen is a silent success: work the creator wrote inside a transaction
+ *  committing on its own after the transaction is gone. Contract: an error,
+ *  and `countAfter == 0`. Reported verbatim so the ANSWER is measured rather
+ *  than asserted into shape. */
+export const txOrphanedWrite = mutation(
+  async ({ userId, tag, holdMs }: TxInput & { holdMs: number }) => {
+    const uid = userIdFromWire(userId);
+    const titleTx = `${tag}-oa`;
+    const titleOrphan = `${tag}-oo`;
+    // Held in an array, not a `let`: TypeScript's control-flow analysis does
+    // not see an assignment made inside a callback, so a `let orphan = null`
+    // would still read as `null` at the await below.
+    const orphans: Promise<{ data?: unknown; error?: unknown }>[] = [];
+    const r = await db.transaction(async (tx) => {
+      await tx.todos.insert({ userId: uid, title: titleTx });
+      // Deliberately NOT awaited: it resolves after the callback returns and
+      // after the COMMIT has released the tx connection.
+      orphans.push(
+        (async () => {
+          await sleep(holdMs);
+          return await db.todos.insert({ userId: uid, title: titleOrphan });
+        })(),
+      );
+      return { committed: true };
+    });
+    let orphanError: ReturnType<typeof errShape> = null;
+    let orphanThrew: ReturnType<typeof errShape> = null;
+    let orphanInserted = false;
+    const orphanStarted = orphans.length;
+    try {
+      const o = orphans.length > 0 ? await orphans[0] : null;
+      orphanError = errShape(o?.error ?? null);
+      orphanInserted = o?.data !== null && o?.data !== undefined;
+    } catch (e) {
+      orphanThrew = errShape(e);
+    }
+    const txAfter = await db.todos.count({ userId: uid, title: titleTx });
+    const orphanAfter = await db.todos.count({ userId: uid, title: titleOrphan });
+    return {
+      error: errShape(r.error),
+      orphanStarted,
+      orphanError,
+      orphanThrew,
+      orphanInserted,
+      txAfter: txAfter.data ?? null,
+      orphanAfter: orphanAfter.data ?? null,
+    };
+  },
+  { id: "todos.txOrphanedWrite" },
+);
+
 /** ONE half of a cross-REQUEST write-write race. The harness fires two of
  *  these at the same `tag` concurrently.
  *

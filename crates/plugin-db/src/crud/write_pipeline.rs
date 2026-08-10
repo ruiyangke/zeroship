@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::error::DbError;
 use crate::exec::exec_query;
 use crate::query;
+use crate::tx_route::TxRoute;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use std::cell::RefCell;
@@ -11,9 +12,16 @@ pub(crate) enum ApplyMode<'a> {
     Insert { actor_id: Option<&'a str> },
     InsertMany { actor_id: Option<&'a str> },
     Update { row_pk: &'a str },
+    /// The only write mode whose PRE-pass issues SQL of its own: the
+    /// deterministic-encryption conflict probe reads the existing row's
+    /// id. That read has to land on the same connection the upsert
+    /// itself will, so the variant carries the dispatch's
+    /// [`TxRoute`] — a field, so an upsert site that has not captured a
+    /// route cannot construct the mode at all.
     Upsert {
         actor_id: Option<&'a str>,
         conflict_fields: &'a Value,
+        route: &'a TxRoute,
     },
 }
 
@@ -141,7 +149,13 @@ pub(crate) async fn apply(
         ApplyMode::Upsert {
             actor_id,
             conflict_fields,
+            route,
         } => {
+            debug_assert_eq!(
+                route.app_id(),
+                app_id,
+                "the upsert route must belong to the app being written"
+            );
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload,
                 app_id,
@@ -150,7 +164,7 @@ pub(crate) async fn apply(
             );
             rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
-                app_id,
+                route,
                 collection,
                 conflict_fields,
                 schema.as_ref(),
@@ -272,12 +286,20 @@ pub(crate) struct TargetRowId {
     pub(crate) row_pk: String,
 }
 
+/// Resolve the ids the pending write will touch.
+///
+/// Takes the dispatch's [`TxRoute`] rather than an `app_id`: this read
+/// MUST see the rows the same transaction is about to update, so it has
+/// to run on the same connection the update will. Reading it off the pool
+/// while the update ran in a transaction would resolve pre-transaction
+/// ids.
 pub(crate) async fn resolve_target_row_ids(
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
 ) -> Result<Vec<TargetRowId>, DbError> {
+    let app_id = route.app_id();
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut sql_filter);
@@ -292,7 +314,7 @@ pub(crate) async fn resolve_target_row_ids(
         Some(&select),
     )
     .map_err(DbError::from)?;
-    let rows = exec_query(app_id, built).await?;
+    let rows = exec_query(route, built).await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -404,11 +426,12 @@ fn update_target(patch: &mut Value) -> &mut Value {
 
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     doc: &mut Value,
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     conflict_fields: &Value,
     schema: Option<&Value>,
 ) -> Result<(), DbError> {
+    let app_id = route.app_id();
     if !upsert_requires_conflict_probe(app_id, collection, doc).await? {
         return Ok(());
     }
@@ -458,7 +481,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         super::current_sql_dialect(),
     )
     .map_err(DbError::from)?;
-    let rows = exec_query(app_id, built).await?;
+    let rows = exec_query(route, built).await?;
     let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
         Some(Value::String(id)) => Some(id.clone()),
         Some(Value::Number(n)) => Some(n.to_string()),
@@ -564,6 +587,8 @@ mod tests {
 
     use base64::Engine as _;
     use serde_json::Value;
+
+    use crate::tx_route::TxRoute;
 
     use super::{apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode};
     use crate::backend::sqlite::SqliteBackend;
@@ -924,6 +949,10 @@ mod tests {
                 ApplyMode::Upsert {
                     actor_id: Some("usr_upsert"),
                     conflict_fields: &conflict_fields,
+                    // No isolate in a unit test: this path is exercised
+                    // outside any transaction, which is what the pool
+                    // route means.
+                    route: &TxRoute::pool_for_tests(app_id),
                 },
             )
             .await
