@@ -342,8 +342,13 @@ echo "=== Scenario 5b: node-compat (openai-demo — node:buffer/Buffer/process) 
 # any RPC to dispatch — and it constructs `new OpenAI({ apiKey:
 # process.env.OPENAI_API_KEY })` at MODULE TOP LEVEL, so the OpenAI constructor
 # throws "Missing credentials" during evaluate unless OPENAI_API_KEY is set.
-# We set it as an app SECRET (the runtime surfaces app secrets on process.env)
-# BEFORE deploy, so the isolate hydrates env with the key, the module
+# We set it as an app SECRET before deploy. NOTE: setting a secret is NOT
+# enough to surface it — secrets are opt-in, and only names put into the
+# expose list via `PUT /api/apps/:id/env/expose` reach the isolate
+# (crates/control/src/env_handlers.rs:265). This harness never calls that
+# endpoint, so the key is absent on the worker BY DESIGN, and the 503 below
+# is an app that cannot initialise without it rather than a delivery defect.
+# so the isolate would hydrate env with the key, the module
 # initializes through the node-shimmed code, and `ping` (kind:query → "pong",
 # no network) confirms node-compat module init succeeded end to end.
 #
@@ -421,7 +426,7 @@ else
         pass "node-compat: openai-demo ping → 200 'pong' over the worker (openai SDK + node:buffer/Buffer/process initialized in V8 with the OPENAI_API_KEY secret)"
       elif [ "$SERVE_OK" = "yes" ]; then
         pass "node-compat PROVEN GOOD: openai-demo ping → 200 'pong' under \`zeroship serve\` with OPENAI_API_KEY in env (openai SDK + node:buffer/Buffer/process init clean in V8)"
-        known "FINDING (env-hydration, NOT node-compat): the same bundle over the WORKER path → HTTP $OAI_CODE. App vars/secrets set via the control /api/apps/{id}/secrets API are NOT injected into the worker isolate's process.env — crates/worker/src/cache.rs load_app seeds only APP_ID. Apps reading process.env.<USER_SECRET> get undefined on the multi-node worker. body: $(echo "$OAI_BODY" | head -c 120)"
+        known "EXPECTED (not a defect): the same bundle over the WORKER path → HTTP $OAI_CODE, because this harness sets the secret but never opts it into the expose list (PUT /api/apps/{id}/env/expose). Secrets are opt-in by design, so the key is absent on the worker and the app cannot initialise. To turn this into a real test of the expose layer, add the key to the expose list and assert it arrives, with a second unexposed secret as the control. body: $(echo "$OAI_BODY" | head -c 120)"
       else
         ERR="$(grep -iEo "Cannot find module '[^']*'|node:[a-z]+ .*not|ReferenceError: [A-Za-z]+ is not defined|Missing credentials" "$WORK/worker.log" "$WORK/oai_serve.log" 2>/dev/null | tail -1)"
         known "node-compat: openai-demo ping → worker HTTP $OAI_CODE, serve=$SERVE_OK; ${ERR:-$(echo "$OAI_BODY" | head -c 140)} — module-init finding for the pilot"
