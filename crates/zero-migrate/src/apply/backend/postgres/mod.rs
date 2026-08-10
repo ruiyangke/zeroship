@@ -266,6 +266,74 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         crate::apply::precondition::evaluate_all(self.conn, cfg, m).await
     }
 
+    /// The blocking-dependency predicate, MEASURED against a live server by
+    /// `tests/pg_column_drop_dependency_oracle.rs` (10 shapes, 10 agreements).
+    ///
+    /// Refuse iff a NORMAL dependency exists, or an AUTO dependency from an index
+    /// a constraint internally owns exists WITHOUT that constraint also depending
+    /// on the column. The obvious "any NORMAL dependency" filter is WRONG: it
+    /// misses an EXCLUDE whose expression reads the column, which reports AUTO and
+    /// is still refused, because the exclusion's index is internally owned by its
+    /// constraint. Where the constraint ALSO depends on the column directly,
+    /// PostgreSQL drops the whole constraint and the drop succeeds - which is why
+    /// an exclusion naming the column both plainly and in an expression is
+    /// droppable while the expression-only form is not.
+    ///
+    /// `pg_describe_object` renders each blocker the way PostgreSQL's own error
+    /// DETAIL does, so the refusal names what the server would have named.
+    async fn blocking_column_dependents(
+        &self,
+        cfg: &ExecutorConfig,
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<String>, ApplyError> {
+        let rows = self
+            .conn
+            .query(
+                "WITH dep AS (
+                   SELECT d.deptype, d.classid, d.objid, d.objsubid
+                     FROM pg_attribute att
+                     JOIN pg_class c ON c.oid = att.attrelid
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     LEFT JOIN pg_depend d
+                            ON d.refobjid = att.attrelid
+                           AND d.refobjsubid = att.attnum
+                           AND d.refclassid = 'pg_class'::regclass
+                    WHERE n.nspname = $1 AND c.relname = $2 AND att.attname = $3
+                      AND att.attnum > 0 AND NOT att.attisdropped
+                 )
+                 SELECT pg_describe_object(classid, objid, objsubid) AS blocker
+                   FROM dep
+                  WHERE deptype = 'n'
+                     OR (
+                       deptype = 'a' AND classid = 'pg_class'::regclass
+                       AND EXISTS (
+                         SELECT 1 FROM pg_depend i
+                          WHERE i.classid = 'pg_class'::regclass AND i.objid = dep.objid
+                            AND i.deptype = 'i' AND i.refclassid = 'pg_constraint'::regclass
+                       )
+                       AND NOT EXISTS (
+                         SELECT 1 FROM dep other
+                          WHERE other.deptype = 'a'
+                            AND other.classid = 'pg_constraint'::regclass
+                       )
+                     )
+                  ORDER BY blocker",
+                &[
+                    cfg.project_schema.as_str().into(),
+                    table.into(),
+                    column.into(),
+                ],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                row.try_get::<_, String>("blocker")
+                    .map_err(ApplyError::from)
+            })
+            .collect()
+    }
+
     async fn record_squash(
         &self,
         cfg: &ExecutorConfig,

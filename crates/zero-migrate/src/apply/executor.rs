@@ -274,6 +274,28 @@ pub enum ApplyError {
         /// message spells out is the one this deploy would actually read.
         meta_schema: String,
     },
+    /// An online rename would end by dropping a column other objects depend on,
+    /// so its contract could never complete. Refused before the expand half runs.
+    ///
+    /// The check is deliberately NOT a CASCADE: `DROP COLUMN ... CASCADE` removes
+    /// the dependents too, which for a rename would destroy objects the operator
+    /// never named inside a step approved for one column.
+    #[error(
+        "renaming {table:?}.{column:?} cannot complete: dropping the old column at the \
+         end of the rename would be refused because {blockers:?} depend on it. The \
+         expand half is not started, because finishing it would leave a contract \
+         obligation that can never be discharged. Drop or redefine the dependents \
+         first, or rename the column by hand with the dependents rebuilt around it"
+    )]
+    RenameSourceHasDependents {
+        /// The table carrying the column being renamed.
+        table: String,
+        /// The old column name, the one the contract step would drop.
+        column: String,
+        /// What the database says depends on it, rendered by `pg_describe_object`
+        /// so the wording matches the server's own error DETAIL.
+        blockers: Vec<String>,
+    },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort.
     ///

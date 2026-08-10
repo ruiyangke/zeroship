@@ -5017,3 +5017,97 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
         drop_schemas(&session, &cfg).await;
     }
 }
+
+// A PostgreSQL rename whose OLD column is read by a generated column is refused
+// BEFORE the expand-contract chain starts, rather than failing at its last step.
+//
+// The chain is five separate journaled migrations - E1 add column, E2 dual-write
+// trigger, E3 backfill, C1 drop trigger, C2 drop the old column. The dependency
+// only stops C2, so without a preflight the first four commit and the operator is
+// left mid-transition: both columns present, the trigger gone, the rename
+// unfinished, and the repair manual.
+//
+// MEASURED on PostgreSQL 18.4, the failure this prevents:
+//
+//     ERROR:  cannot drop column qty of table t because other objects depend on it
+//     DETAIL:  column total of table t depends on column qty of table t
+//
+// CASCADE is not the answer and is not what this asserts: `DROP COLUMN qty
+// CASCADE` reports `drop cascades to column total` and removes a column nobody
+// named, inside a step whose destructive flag was granted for one specific
+// column. See docs/review-log.md F167.
+//
+// The assertion that matters is the SECOND one. "An error came back" is also true
+// of today's mid-chain failure; only "the new column was never added" separates a
+// preflight refusal from a C2 blow-up.
+#[compio::test]
+async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_starts() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".dep_rename_items (\
+                 id bigint PRIMARY KEY, qty int NOT NULL, unit int NOT NULL, \
+                 total int GENERATED ALWAYS AS (qty * unit) STORED\
+             )",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create a table whose generated column reads the rename source");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "dep_rename_items".into(),
+            from: "qty".into(),
+            to: "quantity".into(),
+            ty: "int".into(),
+        })
+        .expect("author the rename");
+    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+
+    let outcome = engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&step),
+            &["dep_rename_items".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await;
+
+    let error = outcome.expect_err("a rename PostgreSQL cannot finish must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("qty") && message.contains("total"),
+        "the refusal names the column being renamed and the dependent that blocks it: {message}"
+    );
+
+    // Nothing ran. This is the whole point: today's failure leaves `quantity`
+    // added and the dual-write trigger dropped.
+    let added = session
+        .query(
+            "SELECT 1 FROM information_schema.columns \
+              WHERE table_schema = $1 AND table_name = 'dep_rename_items' \
+                AND column_name = 'quantity'",
+            &[cfg.project_schema.clone().into()],
+        )
+        .await
+        .expect("read back the table shape");
+    assert!(
+        added.is_empty(),
+        "the refusal happened before E1, so the new column was never added"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}

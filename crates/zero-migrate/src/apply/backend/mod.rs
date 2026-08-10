@@ -528,6 +528,29 @@ pub trait MigrationBackend {
         m: &Migration,
     ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError>;
 
+    /// Describe the objects that would make the database REFUSE a bare
+    /// `DROP COLUMN` of `column` on `table`, or an empty list when the drop would
+    /// be accepted.
+    ///
+    /// Read-only, and called under the apply lock before a plan runs so a rename
+    /// that cannot finish is refused before it opens a contract obligation nothing
+    /// can discharge.
+    ///
+    /// The default answers "nothing blocks it". That is the honest answer for a
+    /// backend with no such dependency concept rather than a stub: SQLite rewrites
+    /// dependent expressions itself during its table rebuild, and the MySQL leg
+    /// does not author expand-contract renames at all. Only the PostgreSQL impl
+    /// consults a catalog, using the predicate
+    /// `tests/pg_column_drop_dependency_oracle.rs` measures against a live server.
+    async fn blocking_column_dependents(
+        &self,
+        _cfg: &ExecutorConfig,
+        _table: &str,
+        _column: &str,
+    ) -> Result<Vec<String>, ApplyError> {
+        Ok(Vec::new())
+    }
+
     // -- squash (DB-coupled supersession journal write) ---------------------
 
     /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running

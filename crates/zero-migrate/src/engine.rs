@@ -1819,6 +1819,33 @@ impl MigrationEngine {
             .await
             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
 
+        // An online rename ends by DROPPING the old column, and a database that
+        // refuses that drop refuses it at the LAST step of the chain. By then the
+        // expand half has committed and opened a contract obligation nothing can
+        // discharge - every later attempt at the contract hits the same refusal.
+        // Ask the database now, while the lock is held and nothing has run, so the
+        // rename is declined instead of started.
+        for step in steps {
+            let PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) = step else {
+                continue;
+            };
+            let crate::render::expand_contract::OnlineIntent::RenameColumn { table, from, .. } =
+                &plan.intent;
+            let blockers = backend
+                .blocking_column_dependents(exec_cfg, table, from)
+                .await
+                .map_err(EngineError::Apply)?;
+            if !blockers.is_empty() {
+                return Err(DeclarativeApplyError::from(EngineError::Apply(
+                    ApplyError::RenameSourceHasDependents {
+                        table: table.clone(),
+                        column: from.clone(),
+                        blockers,
+                    },
+                )));
+            }
+        }
+
         // Reconcile every approval-gated step against the journal before the
         // authored-order loop can execute anything. Per-step DML/backfill gates
         // are still required as defense in depth, but they are too late to make a
