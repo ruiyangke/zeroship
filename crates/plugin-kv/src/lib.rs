@@ -43,6 +43,12 @@ pub use backend::RedbBackend;
 #[cfg(feature = "redis")]
 pub use backend::Redis;
 pub use error::KvError;
+// Gated with the module it comes from. `backend::redb` is `cfg(feature =
+// "redb")`, so an ungated re-export breaks `--no-default-features` while
+// `--all-features` stays green - which is exactly how it got committed the
+// first time.
+#[cfg(feature = "redb")]
+pub use backend::redb::STATE_DIR_LOCK_MARKER;
 pub use holders::{describe_holders, holders_of, Holder};
 pub use v8_class::mint_kv;
 

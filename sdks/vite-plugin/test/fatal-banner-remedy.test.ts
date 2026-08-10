@@ -24,9 +24,13 @@ function status(logTail: string[]) {
 test("a state-dir lock suppresses the port remedy and points at the holder", () => {
   const banner = formatFatalBanner(
     status([
+      // Copied from the shape `RedbBackend::open` builds: redb's own sentence,
+      // then the platform marker, then the holder. The MARKER is what the
+      // banner keys off; the prose around it is here only so the sample looks
+      // like the real line a creator sees.
       "[zeroship] kv: failed to open redb at '.zeroship/kv.redb': " +
         "kv: redb open '.zeroship/kv.redb': Database already open. Cannot acquire lock. " +
-        "-- still held by pid 4242 (zeroship)",
+        "[zs-state-dir-lock] -- still held by pid 4242 (zeroship)",
     ]),
   );
 

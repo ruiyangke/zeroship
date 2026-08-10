@@ -203,11 +203,28 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
  * changes nothing (task #221 - four orphaned `zeroship serve` processes held
  * `.zeroship/kv.redb` across four different ports).
  *
- * Matched on redb's own wording, which `RedbBackend::open` passes through
- * verbatim before appending the holding pid.
+ * Keyed on a marker the PLATFORM emits, not on redb's prose. This used to match
+ * /Database already open|Cannot acquire lock/ - a third-party library's wording,
+ * matched in a different language, with nothing holding the two together. redb
+ * could reword that in a patch release and both test suites would stay green
+ * while this silently reverted to advising a port change.
+ *
+ * The prose match now lives in `crates/plugin-kv/src/backend/redb.rs`, next to
+ * the crate that produces the prose, and what crosses the language boundary is
+ * `STATE_DIR_LOCK_MARKER` - a constant we own on both sides.
+ *
+ * STILL UNGATED, and worth knowing before trusting this: nothing enforces that
+ * the literal below equals the Rust constant. The Rust side asserts the marker
+ * reaches a real second-open error
+ * (`backend::redb::tests::second_open_names_the_holding_process`); this side
+ * asserts the banner keys off it. If someone edits one string only, both suites
+ * pass. That is a smaller drift surface than a library's sentence, not a closed
+ * one.
  */
+const STATE_DIR_LOCK_MARKER = "zs-state-dir-lock";
+
 function looksLikeStateDirLock(tail: readonly string[]): boolean {
-  return tail.some((l) => /Database already open|Cannot acquire lock/i.test(l));
+  return tail.some((l) => l.includes(STATE_DIR_LOCK_MARKER));
 }
 
 export function formatFatalBanner(status: RuntimeStatus): string {

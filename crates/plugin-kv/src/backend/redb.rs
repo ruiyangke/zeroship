@@ -87,6 +87,34 @@ impl std::fmt::Debug for RedbBackend {
     }
 }
 
+/// Stable token marking "the state dir is locked by another process".
+///
+/// THIS EXISTS TO COLLAPSE A CROSS-LANGUAGE SEAM. The dev server has to tell a
+/// state-dir lock apart from a port clash, because the two remedies contradict
+/// each other (task #221). It used to do that by matching redb's own prose in
+/// TypeScript - a library's wording, matched in another language, with nothing
+/// holding the two together. redb could reword its error in a patch release and
+/// both test suites would stay green while the banner silently reverted to
+/// advising a port change.
+///
+/// So the prose match lives HERE, next to the crate that produces the prose,
+/// and what crosses the language boundary is a token we own. `sdks/vite-plugin/
+/// src/dev-server.ts` matches this literal.
+///
+/// The token is still duplicated in two languages and nothing yet enforces that
+/// they agree - see the note in `dev-server.ts`. What changed is WHAT can drift:
+/// a constant we control on both sides rather than a third party's sentence.
+pub const STATE_DIR_LOCK_MARKER: &str = "zs-state-dir-lock";
+
+/// Whether a redb open failure is the exclusive-lock case.
+///
+/// Matches redb's wording, deliberately in this file: it is the only place that
+/// depends on the redb crate, so a reword is a compile-adjacent local fix rather
+/// than a silent cross-repo break.
+fn is_state_dir_lock(text: &str) -> bool {
+    text.contains("Database already open") || text.contains("Cannot acquire lock")
+}
+
 impl RedbBackend {
     /// Open (or create) a redb database at `path`. Takes an exclusive file
     /// lock for the process lifetime — see the module docs. Open/create
@@ -100,14 +128,20 @@ impl RedbBackend {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, KvError> {
         let path = path.as_ref();
         let db = Database::create(path).map_err(|e| {
-            let base = format!("kv: redb open '{}': {e}", path.display());
-            // No holder text when nothing readable holds it: see
-            // `holders::describe_holders` for why silence beats a false
-            // all-clear here.
-            match crate::holders::describe_holders(path) {
-                Some(who) => KvError::connection(format!("{base} -- {who}")),
-                None => KvError::connection(base),
+            let mut msg = format!("kv: redb open '{}': {e}", path.display());
+            if is_state_dir_lock(&msg) {
+                // Emit the stable marker, then the holder scan. The scan is
+                // gated on the lock case so a corrupt file or a missing parent
+                // dir does not pay for a /proc walk it has no use for.
+                msg.push_str(&format!(" [{STATE_DIR_LOCK_MARKER}]"));
+                // No holder text when nothing readable holds it: see
+                // `holders::describe_holders` for why silence beats a false
+                // all-clear here.
+                if let Some(who) = crate::holders::describe_holders(path) {
+                    msg.push_str(&format!(" -- {who}"));
+                }
             }
+            KvError::connection(msg)
         })?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -530,6 +564,15 @@ mod tests {
             msg.contains(&format!("pid {}", std::process::id())),
             "second-open error did not name the holding pid ({}); got: {msg}",
             std::process::id()
+        );
+        // The token the dev server keys off. Asserted on the REAL error rather
+        // than on `is_state_dir_lock` in isolation, so a redb reword that stops
+        // matching fails here instead of silently reverting the banner to the
+        // wrong remedy.
+        assert!(
+            msg.contains(STATE_DIR_LOCK_MARKER),
+            "second-open error carried no `{STATE_DIR_LOCK_MARKER}` marker, so the \
+             dev server cannot tell this from a port clash; got: {msg}"
         );
         assert!(
             msg.contains("will NOT help"),
