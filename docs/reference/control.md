@@ -58,6 +58,44 @@ await control.env.listAudit(appId, { limit: 100 });
 
 ```
 
+### Why `setExpose` follows `setSecret`
+
+Those two lines are one operation, and skipping the second is the most
+common way to end up with a credential the app cannot read.
+
+A stored secret is visible on the `zeroship` `env` object — `env.OPENAI_API_KEY`
+— as soon as it is set. It does **not** appear in `process.env` unless its
+name is on the app's expose list. Vars are unconditional and appear on both.
+
+| | `process.env` | `env` (from `"zeroship"`) |
+| --- | --- | --- |
+| var | always | always |
+| secret | only if exposed | always |
+
+The split is a blast-radius control. Every npm dependency in the bundle can
+read `process.env` without the app author writing a line, so a secret reaches
+it only on request. The `zeroship` `env` object is named explicitly by the
+app's own code, which is a deliberate act.
+
+This matters most for libraries that read the environment themselves. The AI
+SDK's `loadAPIKey` looks up `process.env.OPENAI_API_KEY`, so a key that was
+stored but never exposed reads as `undefined` inside the bundle even though
+`env.OPENAI_API_KEY` is populated. That is the failure the two-line pattern
+above prevents.
+
+`setExpose` **replaces** the whole list rather than appending, so send the
+full set of names each time. Reading the current list first and sending the
+union is what the CLI does:
+
+```bash
+zeroship secret set OPENAI_API_KEY=sk-... --app=<uuid> --expose
+zeroship secret expose-list --app=<uuid>
+```
+
+Prefer a secret over a var for anything credential-shaped: secrets are
+encrypted at rest and are never readable back through the API (`list` returns
+names only), while var values are stored as-is and returned by `listVars`.
+
 There is no auth namespace: control is a pure API resource server (R5
 cutover) — login/identity lives in `@zeroship/auth` against the auth
 service, never against control. See `docs/reference/auth.md`.
