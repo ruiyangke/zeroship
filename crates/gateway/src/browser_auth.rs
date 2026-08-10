@@ -507,6 +507,21 @@ fn signout_cleared(host: &str, insecure_dev: bool) -> HttpResponse {
             "set-cookie",
             anchors::clear_breadcrumb_cookie(host, insecure_dev),
         )
+        // The SESSION cookie, which this function did not clear until
+        // 2026-08-10 despite two doc sites promising it did. A live deployed
+        // signout returned only the anchor and breadcrumb clears, measured by
+        // `tests/e2e_dev_vs_deployed_login.sh`;
+        // `crate::oidc_rp::clear_app_session_cookie` had been written for this
+        // and was referenced by nothing but its own unit test. Server-side
+        // revocation already covered the credential (the same run measured a
+        // `401` on replay), so this is defence in depth — but leaving a stale
+        // credential in the browser after an explicit signout is precisely
+        // what signout exists to prevent. Pinned by
+        // `signout_clears_the_session_cookie_not_just_the_anchor`.
+        .header(
+            "set-cookie",
+            crate::oidc_rp::clear_app_session_cookie(insecure_dev),
+        )
         .finish()
 }
 
@@ -599,6 +614,47 @@ mod tests {
         assert!(csp.contains("frame-ancestors 'self'"), "{csp}");
         // No 'unsafe-inline' — the nonce is the whole point (spec §1.2 r2).
         assert!(!csp.contains("unsafe-inline"), "{csp}");
+    }
+
+    /// Signout must clear the SESSION cookie, not only the anchor and the
+    /// breadcrumb.
+    ///
+    /// This module's docs say "Returns `204` + no-store cookie clears" and
+    /// `signout`'s own doc says "Always 204 + cookie clears". Measured against
+    /// a live deployed app by `tests/e2e_dev_vs_deployed_login.sh`, the
+    /// response carried exactly two clears — `zeroship_app_anchor` and
+    /// `zs.<host>.is.authenticated` — and left the session cookie standing.
+    /// `crate::oidc_rp::clear_app_session_cookie` was written for this and is
+    /// referenced by nothing but its own unit test.
+    ///
+    /// Server-side revocation DOES work (the same run measured a `401` on
+    /// replay), so this is defence in depth rather than an open door. It is
+    /// still worth closing: a stale credential left in the browser after an
+    /// explicit signout is the thing signout exists to prevent, and the
+    /// docs already promise it.
+    ///
+    /// Asserted on the cookie NAME plus `Max-Age=0`, not on the whole header
+    /// string, so a change to `Path`/`SameSite` does not fail this test —
+    /// those belong to `clear_app_session_cookie`'s own test.
+    #[test]
+    fn signout_clears_the_session_cookie_not_just_the_anchor() {
+        for insecure_dev in [false, true] {
+            let resp = signout_cleared("app.example.test", insecure_dev);
+            let cookies: Vec<String> = resp
+                .headers()
+                .get_all("set-cookie")
+                .filter_map(|v| v.to_str().ok())
+                .map(str::to_owned)
+                .collect();
+            let name = crate::oidc_rp::app_session_cookie_name(insecure_dev);
+            let cleared = cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{name}=")) && c.contains("Max-Age=0"));
+            assert!(
+                cleared,
+                "signout must clear the session cookie {name:?} (insecure_dev={insecure_dev}), got: {cookies:?}"
+            );
+        }
     }
 
     #[test]
