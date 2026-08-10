@@ -46,7 +46,133 @@ transliterated. Line references are exact; go to the file for byte-exact text.
 
 ---
 
+## TRIAGE 2026-08-10
+
+Every finding G1-G18 was re-established against HEAD. Verdicts below; each
+finding also carries a `**Status (triage 2026-08-10)**` paragraph in its own
+section with the evidence. To list the per-finding state:
+`grep -n 'Status (triage' docs/reviews/gateway-review-2026-08-09.md` returns
+exactly 18 lines, one per finding.
+
+**Gateway suite at triage time: 472 passed, 0 failed, 1 ignored** (sum of all
+11 `test result:` lines from `cargo test -p zeroship-gateway`). The review-time
+figure of 356 is stale and should not be quoted. The baseline before this
+triage added two tests was 470/0/1.
+
+**Line numbers throughout this document have drifted** (typically +9 in
+`dispatch.rs`, +21 in `auth_token.rs`) because of the post-review commits below.
+Every triage note re-cites the current line. Re-locate by symbol name, not by
+line.
+
+| Label | Verdict | One-line basis |
+| --- | --- | --- |
+| G1 | **PARTLY SHIPPED / PARTLY LIVE** | `ddb9711b8` closed consequence 2 (caller-chosen bucket) by narrowing the bucket readers. Consequence 1 (a lowercase `bearer` credential is not authenticated at all) is untouched and was re-proved red. |
+| G2 | **LIVE** | Re-proved red by execution, with a passing one-variable control. |
+| G3 | **FIXED IN THIS TRIAGE** | Red, fixed, mutation-checked. `append_vary_origin` in `router/cors.rs`. |
+| G4 | **LIVE** | Whole `impl` re-enumerated: `new`/`resolve_rate`/`get_or_create`/`check`, no removal path. |
+| G5 | **LIVE** | Preflight returns at `dispatch.rs:1247`; every gate is inside `execute_resource_tree`, called at `dispatch.rs:1260`. |
+| G6 | **LIVE (all three sub-claims)** | 501 confirmed single-exit; both named symbols have no definition anywhere; docs still silent. See the note on task #179 - it does **not** close G6. |
+| G7 | **LIVE, and it has replicated** | Doc comment unchanged; a fourth wrong site was *added* post-review by `4e4dafce4`. One supporting claim in the finding is **wrong** - see below. |
+| G8 | **LIVE** | 17 functions / 566 lines, all `#[cfg(test)]`; duplication confirmed by actual `diff`, not assertion. Two corrections to the finding's counts. |
+| G9 | **SHIPPED** | `fd54716ec`. Verified on the real binary, not only in a unit test. |
+| G10 | **LIVE (both consequences)** | `grep` for any host allow-list in `crates/gateway/` returns nothing. |
+| G11 | **LIVE (all four legs)** | Each leg read at HEAD and confirmed. Not observed against a live stack. |
+| G12 | **LIVE** | Guard is `want_mint` on both axes; the non-mint fall-through reaches `rotate_family` / `sessions::create` / `sign_session_cookie`. |
+| G13 | **LIVE (all three parts)** | `if let Ok(..) else` intact; both siblings match `NoMatchingKey` only; `refresh()` has no throttle. |
+| G14 | **FIXED IN THIS TRIAGE** | Red, fixed, mutation-checked. `is_safe_oidc_original_path` in `router/dispatch.rs`. |
+| G15 | **LIVE (a and b)** | Both mechanisms intact. The module-doc claim is **split**, not uniformly wrong - correction below. |
+| G16 | **LIVE (all three sub-defects)** | File has exactly one commit; nothing fixed. |
+| G17 | **LIVE (both parts)** | `Stash` still has six fields and no timestamp. |
+| G18 | **doc half LIVE, behaviour half LIVE-BY-DECISION** | `d49abc963` fixed the *inline* comment and left the *rustdoc* saying the original wrong thing. |
+
+**Post-review commits that bear on these findings** (`3d699c54a..HEAD`):
+`ddb9711b8` (G1, partial), `fd54716ec` (G9, complete), `d49abc963` (G18,
+inline comment only), `4e4dafce4` (made G7 worse, not better).
+
+### Two claims in this review that the triage found WRONG
+
+Recorded here because a confidently-written review is not evidence, and both
+were quoted as supporting reasoning rather than as the finding itself.
+
+1. **G7's "The gateway never calls `is_family_revoked_since` at all - the only
+   callers in the tree are `crates/auth/src/oidc/{userinfo,introspect}.rs` and
+   two test files."** False, and it was false when written. `crates/gateway/src/
+   auth_token.rs:1319` calls it, in production, inside
+   `session_cookie_family_revoked` on the `GET /__zeroship/auth/session` fast
+   path - and *that* call really is an uncached `SELECT EXISTS`. The gateway has
+   **two** revocation readers with different caching. G7's actual defect is
+   unaffected and arguably sharper: the doc comment on the *cookie arm* attaches
+   the uncached reader's name to the cached one, so the name is not merely stale,
+   it belongs to a real function ten screens away that behaves as advertised.
+
+2. **G15's reading of the module doc.** The finding says the module doc "names
+   exactly this case as the motivating risk", which is true of `op_client.rs:6`
+   ("slow or 5xx-ing"). But `op_client.rs:28-33` of the same doc states the
+   limitation correctly and deliberately: *"A OP 4xx (e.g. `invalid_grant`) is a
+   VALID upstream response, NOT a breaker failure - only transport errors and
+   timeouts count."* The doc is internally inconsistent, not uniformly wrong.
+   The behaviour defects (a) and (b) are unaffected.
+
+### What this triage could NOT establish
+
+- **No finding was verified by running the same operation against both tiers
+  and diffing the results.** That gap, which the review itself flags for G6, is
+  unchanged. G6's deployed-side 501 is established from a single-exit function;
+  the dev-side half is still asserted from code, not observed. Standing up
+  control+worker+gateway+`pnpm dev` was out of scope for a triage pass.
+- **G11 was not observed against a live stack.** All four legs are read-confirmed
+  at HEAD, spanning `crates/gateway`, `crates/control` and `crates/auth`. The
+  verdict is on the mechanism.
+- **G16(b)'s and G4's operational impact remain deployment-dependent** (whether
+  an L7 proxy fronts the gateway; whether apps declare per-rule limits). The
+  mechanisms are confirmed; the exploitability is not measured.
+
+---
+
 ## G1 - the auth gate only recognises `Authorization: Bearer`, the rate-limit and affinity code also recognise `bearer`
+
+**Status (triage 2026-08-10): PARTLY SHIPPED, PARTLY LIVE.**
+
+Consequence 2 (caller-chosen rate-limit bucket) is **SHIPPED** by `ddb9711b8`,
+which took the option this finding explicitly warned against - it narrowed the
+*bucket readers* rather than widening the gate. Both sites now read
+`auth.strip_prefix("Bearer ")` only (`dispatch.rs:839` in `compute_bucket_id`,
+`dispatch.rs:938` in `subscription_affinity_key`), each carrying the invariant
+in a comment ("Keep this set <= the gate's"). That closes the hole; the commit
+message says so and records the reasoning:
+
+> LEFT FOR THE OPERATOR, deliberately not decided here: RFC 7235 makes the auth
+> SCHEME case-insensitive, so the strictly spec-correct fix is arguably to widen
+> `router/auth.rs` instead. I did not, because widening the gate makes it ACCEPT
+> credentials it currently ignores - a behaviour change on the authentication
+> path, not a hardening.
+
+That commit also found something this review understated: `subscription_affinity_key`
+takes no `identity_verified` parameter at all, so it read the header
+unconditionally - an entirely unauthenticated caller could steer their own CHWBL
+worker.
+
+Consequence 1 is **LIVE**. `crates/gateway/src/router/auth.rs:670` is unchanged:
+
+```rust
+let Some(token) = auth_header.strip_prefix("Bearer ") else {
+    return BearerOutcome::NotBearer;
+};
+```
+
+Re-proved by execution (temporary test at `resolve_bearer_user_header`, since
+removed; one-variable control is the existing
+`bearer_non_jwt_token_is_not_user_session`, changing only the scheme case):
+
+```
+thread 'router::auth::tests::temp_triage_g1_lowercase_bearer_reaches_the_same_arm'
+panicked at crates/gateway/src/router/auth.rs:2062:9:
+RFC 7235 makes the auth scheme case-insensitive: lowercase `bearer` must reach
+the same reserved-scheme arm as `Bearer`, got NotBearer
+```
+
+Not fixed here: it is the contract call the fixing commit deliberately left
+open, and widening an authentication gate is not a small change.
 
 **File / symbol:** `crates/gateway/src/router/auth.rs:670`
 (`resolve_bearer_user_header`) vs `crates/gateway/src/router/dispatch.rs:833-835`
@@ -142,6 +268,29 @@ by making the bucket readers case-sensitive - that leaves consequence 1 intact.
 
 ## G2 - a tightened per-resource rate limit never takes effect on an already-created bucket
 
+**Status (triage 2026-08-10): LIVE.** `get_or_create` is unchanged at
+`crates/gateway/src/enforce.rs:279-292`; the `or_insert_with` still discards the
+`rate`/`burst` of every later `check()`.
+
+Re-proved by execution (temporary test, since removed):
+
+```
+thread 'enforce::tests::temp_triage_g2_tightened_rate_takes_effect_on_existing_bucket'
+panicked at crates/gateway/src/enforce.rs:633:9:
+the SECOND request in the same second must 429 under rps=1; if it passes, the
+pre-existing bucket kept deploy 1's rate and the tightening had no effect
+```
+
+The one-variable control in the same test - a client that did **not** exist
+under deploy 1, same registry, same `rule_idx`, same tightened config, only the
+bucket id differing - asserted *before* the case and passed, so the instrument
+reached the check.
+
+Not fixed here: both fix shapes the finding proposes are entangled with G4.
+Keying on `(rate, burst)` makes the stale bucket immortal, which worsens the
+unbounded map; storing and resetting the parameters on the bucket touches the
+lock-free `TokenBucket` CAS loop. That is a design decision, not a small fix.
+
 **File / symbol:** `crates/gateway/src/enforce.rs:280`
 (`PerRuleRateLimitRegistry::get_or_create`), reached from
 `crates/gateway/src/router/dispatch.rs:1477`.
@@ -205,6 +354,45 @@ anyway.
 ---
 
 ## G3 - CORS injection overwrites `Vary`, dropping `Accept-Encoding` on pre-compressed static assets
+
+**Status (triage 2026-08-10): was LIVE, FIXED IN THIS TRIAGE (main defect).**
+
+The clobber was confirmed still live and then fixed. `inject_cors_response_headers`
+now calls a new `append_vary_origin(headers)` (`crates/gateway/src/router/cors.rs`),
+which reads the existing `Vary`, splits it, adds `Origin` only if absent, and
+writes back one joined header. `Vary: *` is left alone (narrowing it to a list
+would weaken the response's cacheability contract).
+
+Red before the fix, with the fixture precondition asserting first and passing:
+
+```
+thread 'router::cors::tests::cors_injection_appends_to_vary_instead_of_clobbering_it'
+panicked at crates/gateway/src/router/cors.rs:349:9:
+Vary must still list Accept-Encoding after CORS injection, got "Origin"
+```
+
+Mutation check (the test is load-bearing, not merely passing): removing only the
+dedup early-return from `append_vary_origin` - a NARROW mutation, not a delete -
+turns the test red on a different assertion:
+
+```
+assertion `left == right` failed
+  left: Some("Origin, Origin")
+ right: Some("Origin")
+```
+
+**What the new test does NOT cover, stated so the next reader does not
+overestimate it:** it calls `inject_cors_response_headers` directly, so it cannot
+catch the static arm being removed from step 10 of `execute_resource_tree`; and
+it asserts nothing about `build_preflight_response`.
+
+**The "Related, lower severity" item is still LIVE and was deliberately not
+fixed**: the negative CORS answer still emits no `Vary: Origin`
+(`cors.rs`, the `else { return; }` arm) and `build_preflight_response` still sets
+`Vary` only on the allowed branch. Emitting `Vary: Origin` on a *disallowed*
+origin is a cache-behaviour change on a response that currently carries no CORS
+headers at all - a contract decision about what shared caches should key on,
+not a mechanical fix. Left for the operator.
 
 **File / symbol:** `crates/gateway/src/router/cors.rs:83-86`
 (`inject_cors_response_headers`), interacting with
@@ -278,6 +466,25 @@ too.
 
 ## G4 - the per-rule rate-limit bucket map is unbounded and keyed on caller-controlled strings
 
+**Status (triage 2026-08-10): LIVE.** The whole `impl PerRuleRateLimitRegistry`
+(`crates/gateway/src/enforce.rs:249-323`) was re-enumerated: exactly `new`,
+`resolve_rate`, `get_or_create`, `check`. No `remove`, `retain`, `clear`, TTL or
+cap. The only `remove` calls in the file (`enforce.rs:168`, `:371`) are
+`w.remove(app_id)` on the *degraded* `HashSet<Uuid>` of two different registries,
+bounded by app count. The field is private with no accessor; its references
+outside `enforce.rs` are one real construction (`main.rs:723`), the field decl
+(`lib.rs:88`), three test-state constructions, one call site
+(`dispatch.rs:1486`), and two comments.
+
+The contrast the finding draws is real, with a corrected line:
+`crates/authz/src/wrapper_revocation.rs:159` (not 154) is
+`pub const REVOCATION_CACHE_MAX_ENTRIES: usize = 100_000;`, wired through
+`with_ttl_and_capacity` at `:191`.
+
+Not fixed here: adding an LRU with a cap changes the enforcement semantics
+(eviction hands the evicted caller a fresh allowance) and, as the finding itself
+says, has to be designed together with G2. Not small.
+
 **File / symbol:** `crates/gateway/src/enforce.rs:236`
 (`PerRuleRateLimitRegistry.buckets`).
 
@@ -320,6 +527,27 @@ treating them separately.
 
 ## G5 - CORS preflight is answered before every enforcement gate
 
+**Status (triage 2026-08-10): LIVE, ordering unchanged.** The preflight
+short-circuit is now at `crates/gateway/src/router/dispatch.rs:1239-1247`
+(`return build_preflight_response(cors, origin, wall_start);`).
+`execute_resource_tree` is called ten lines later at `dispatch.rs:1260`, and
+every gate is inside it: `check_account` `:1307`, `check_spend` `:1318`,
+`check_rate_limit` `:1341`, `acquire_concurrency` `:1344`. Only route lookup
+(`:1201`) and `canonicalize_dispatch_path` (`:1220`) run before the preflight
+return, and neither gates.
+
+Nothing upstream gates either: `grep -n "\.wrap(\|middleware" crates/gateway/src/main.rs`
+returns nothing - there is no middleware chain at all - and
+`enforce::check_rate_limit` has exactly one non-test call site platform-wide.
+
+No test drives the ordering: the four preflight tests in `router/cors.rs` call
+`build_preflight_response` / `lookup_resource` directly, never `handle_request`.
+
+Not fixed here: moving the preflight branch inside `execute_resource_tree`
+changes what an OPTIONS request costs and when it can 402/429 - a product
+decision about whether preflights are billable and blockable, which is exactly
+the "what the platform SHOULD do" class. Report, do not patch.
+
 **File / symbol:** `crates/gateway/src/router/dispatch.rs:1230-1241`
 (`handle_request`).
 
@@ -361,6 +589,55 @@ the account/spend/rate/concurrency gates and before the auth gate.
 ---
 
 ## G6 - gateway-fronted WebSocket subscriptions return 501; only the comments say otherwise
+
+**Status (triage 2026-08-10): LIVE, all three sub-claims.**
+
+(a) `handle_subscription_dispatch` is now at `dispatch.rs:2281`. It contains no
+`return` statement at all - the sole exit is the tail expression at
+`dispatch.rs:2315-2322` building the 501 `UNIMPLEMENTED` body. The CHWBL work
+before it is real and discarded (`select_with_affinity` `:2307`, `acquire`
+`:2308`, `release` `:2311`). Reached from the only subscription arm,
+`dispatch.rs:1580-1589`. The 426 for a non-upgrade GET is at `:1392-1397`.
+
+(b) Both named symbols still have **no definition anywhere**. A whole-tree
+search over `crates/` and `sdks/` returns exactly two hits, both comments:
+
+```
+crates/gateway/src/router/dispatch.rs:1361:    //    in `proxy_subscription_upgrade` once we get past the rest of
+crates/gateway/src/router/dispatch.rs:1577:            // WS proxy itself is wired in `proxy::forward_subscription`.
+```
+
+`crates/gateway/src/proxy.rs` contains `forward_dispatch`,
+`forward_workflow_advance`, `forward_to_worker_dispatch`, `forward_to_worker_path`,
+`forward_http` and private helpers - no `forward_subscription`. Note that
+`3e98347fa` edited comments nearby on 2026-08-09 and left both phantom-symbol
+comments intact. The function's own doc comment (`dispatch.rs:2270-2275`) *is*
+honest ("gateway-fronted subscriptions return 501"), so the file contradicts
+itself within one screen.
+
+(c) Correction to the finding: `docs/architecture/gateway-routing.md:82-88` is a
+**bullet list, not a table**. `- \`Subscription\`: GET plus WebSocket upgrade
+headers`, with no unimplemented note; grepping both that file and
+`docs/reference/websocket-design.md` for `501|unimplemented|not yet wired|UNIMPLEMENTED`
+returns zero hits. `websocket-design.md:89-99` is worse than silent - it
+affirmatively describes gateway WS-upgrade auth as working, and that paragraph
+was *added* on 2026-08-09 by `f2529c60b`, still gaining no 501 note.
+
+**On the mapping to task #179 - it does NOT close G6, and the mapping should not
+be relied on to do so.** Task #179 exists, is `completed`, and its content is
+accurately remembered: it concluded the 501 makes the CSWSH concern unreachable
+by construction, citing `dispatch.rs:2315`, which matches HEAD exactly. But #179
+is the *CSWSH* finding, and the 501 is its **bound**, not its subject. G6's three
+claims are that the 501 exists (which #179 depends on), that two live comments
+name functions that were never written, and that no doc says so. #179 addresses
+none of them; closing it removed nothing G6 asserts. #179 itself records what
+survives: *"`csrf_origins` will not cover subscriptions when WS proxying is
+wired."*
+
+Not fixed here: sub-claim (b) is a two-line comment correction and (c) is a doc
+line, both cheap - but a comment fix admits no red-before-green test, and the
+underlying gap (build the WS proxy, or declare subscriptions single-tenant-only)
+is the product decision this finding names. Left whole rather than half-fixed.
 
 **File / symbol:** `crates/gateway/src/router/dispatch.rs:2272`
 (`handle_subscription_dispatch`).
@@ -428,6 +705,50 @@ so a creator learns it before building on it, not after deploying.
 
 ## G7 - the cookie arm's doc comment claims an uncached revocation read; the code reads a 5-second cache
 
+**Status (triage 2026-08-10): LIVE, and it has REPLICATED since the review.**
+One supporting claim in this finding is **wrong** - see below.
+
+Site 1 unchanged, `crates/gateway/src/router/auth.rs:912-916`, still says
+`is_family_revoked_since` and still says `(NOT cached)`. The body still calls
+`family_revocation_decision` (`auth.rs:992`), which short-circuits on the cache
+at `auth.rs:99` and only reaches the DB via `revoked_after_for` at `auth.rs:123`.
+
+Site 2 unchanged, `crates/gateway/src/lib.rs:138` still says *"A miss performs
+one `is_family_revoked_since` DB read"*. The miss performs `revoked_after_for`.
+The TTL sentence in the same doc is correct, so this site is a wrong-name defect
+only.
+
+**Site 3 is new and post-review.** Commit `4e4dafce4` (2026-08-10, *after* the
+review) added `crates/gateway/src/sessions.rs:157-159`:
+
+```
+/// marker (`is_family_revoked_since(client_id, pws_, iat)`, an uncached
+/// `SELECT EXISTS` on every request - see
+/// `crate::router::auth::resolve_app_session_user_header_inner`)
+```
+
+That comment cites, by name, the very doc comment this finding says is wrong,
+and its commit message says *"Measured before writing this: the per-request gate
+exists and is uncached"*. The wrong claim was measured against itself and
+copied into a third file. G7 is not merely unfixed; it is spreading, which is
+the strongest possible argument for the finding.
+
+**CORRECTION - this finding's supporting claim is FALSE.** The review states
+*"The gateway never calls `is_family_revoked_since` at all - the only callers in
+the tree are `crates/auth/src/oidc/{userinfo,introspect}.rs` and two test
+files."* It does call it, in production, and did when the review was written:
+`crates/gateway/src/auth_token.rs:1319`, inside `session_cookie_family_revoked`,
+on the `GET /__zeroship/auth/session` fast path - and *that* call really is a
+direct uncached read. So the gateway has **two** revocation readers with
+different caching, and the defect is sharper than stated: the doc comments do not
+name a function that does not exist, they name the *other, genuinely uncached*
+reader, so a reader who checks the name finds a real function that behaves
+exactly as advertised - and stops.
+
+Not fixed here: three doc-comment sites, no red-before-green test is possible
+for a comment. Recommended as the cheapest high-value follow-up, precisely
+because `4e4dafce4` proves an unfixed wrong comment gets re-derived as truth.
+
 **File / symbol:** `crates/gateway/src/router/auth.rs:911-918`, doc comment on
 `resolve_app_session_user_header_inner`.
 
@@ -487,6 +808,40 @@ and state the 5 s TTL, and correct `lib.rs:138` to name `revoked_after_for`.
 
 ## G8 - ~600 lines of workflow step-result normalisation in the gateway are `#[cfg(test)]`-only forks of `plugin-workflow`
 
+**Status (triage 2026-08-10): LIVE.** 17 functions, all individually
+`#[cfg(test)]`, contiguous from `dispatch.rs:209` to `:774` - **566 lines**,
+matching the finding's "~600".
+
+The duplication claim was checked by actually extracting and `diff`ing the
+functions rather than taking "byte-for-byte siblings" on trust:
+
+| function | dispatch.rs | plugin-workflow/src/advance.rs | result |
+| --- | --- | --- | --- |
+| `single_worker_result_to_outcome` | 259-350 | 209-300 | byte-identical, 92 lines |
+| `normalize_workflow_step_result` | 626-689 | 553-616 | byte-identical, 64 lines |
+| `legacy_step_result_to_outcomes` | 521-608 | 451-538 | byte-identical, 88 lines |
+| `parse_iso8601_duration_ms` | 724-766 | 713-755 | byte-identical, 43 lines |
+| `normalize_workflow_outcomes` | 413-519 | 356-450 | 12 comment lines + one local rename (`wn` vs `workflow_name`) |
+
+Four of five sampled are byte-identical; the fifth has already begun to drift,
+which is itself the finding's point.
+
+Unreachability holds: `workflow_advance_internal` (`dispatch.rs:105`) calls only
+`workflow_worker_advance_response` (`dispatch.rs:182`), which is not
+`cfg(test)`. A non-test reference to a `#[cfg(test)]` item is a compile error,
+so the release binary does not contain the fork.
+
+**Two corrections to the finding's counts.** The 10 fork-driving tests are
+confirmed. But the review says only *two* tests drive production; there are
+**three** - `internal_workflow_advance_spend_blocked_app_returns_402`,
+`public_vhost_workflow_advance_path_is_404`, and
+`internal_workflow_advance_routes_to_worker_and_returns_ack`, the last of which
+does exercise the real ack path. `cargo test -p zeroship-gateway --lib workflow_`
+runs 13 tests, 13 passed. The 10:3 ratio still makes the finding's argument.
+
+Not fixed here: deleting 566 lines and 10 tests is not a small change, and
+"delete coverage" is the kind of edit that wants its own reviewed commit.
+
 **File / symbol:** `crates/gateway/src/router/dispatch.rs:209-775`
 (`workflow_worker_result_to_step_result`, `normalize_workflow_outcomes`,
 `legacy_step_result_to_outcomes`, `normalize_workflow_step_result`,
@@ -534,6 +889,29 @@ gateway needs to assert something about the worker's advance ack, test
 ---
 
 ## G9 - `--control` silently ignores the URL scheme: `https://` connects in cleartext on port 80
+
+**Status (triage 2026-08-10): SHIPPED** by `fd54716ec fix(gateway): refuse an
+https --control instead of silently sending the key in cleartext`, which brings
+`--control` to the `--blob-store` bar the finding asked for: validate at boot and
+`exit(2)`.
+
+The commit's own verification is the reason this is credible rather than
+plausible - it proved the validator fires on the **real binary**, not only in a
+unit test, which is the dead-gate failure mode this repo keeps hitting:
+
+```
+--control https://control.internal:9090   exit=2, "unsupported --control
+                                          scheme \"https\": ..."
+```
+
+with a positive control retained (`control_url_accepts_http` passing, so the
+validator refuses only the scheme it cannot serve and compose/local dev keeps
+working).
+
+Note the finding's second site is **not** covered by that commit:
+`crates/gateway/src/proxy.rs` still has the same `unwrap_or(80)` for the worker
+hop. That is intra-cluster and the finding treats it as an aside, but it is
+untouched.
 
 **File / symbol:** `crates/gateway/src/sync.rs:200-207` (`http_get_inner`),
 called from `sync_once:177`.
@@ -591,6 +969,42 @@ implement TLS. Silently downgrading is the one option that should not survive.
 ---
 
 ## G10 - the raw `Host` header is forwarded into the URL the worker's `fetch` sees, with no allow-list
+
+**Status (triage 2026-08-10): LIVE, both consequences.**
+
+The host extraction is now at `dispatch.rs:2434-2439` and unchanged; `forward_url`
+(`dispatch.rs:2384-2389`) interpolates it verbatim into
+`format!("{scheme}://{host}/{tail}?{q}")`.
+
+The decisive check the finding rests on was re-run and is still empty:
+
+```
+$ grep -rn "base_domain\|app_domain\|allowed_host\|host_suffix\|allowed_hosts\|root_domain\|apex_domain" crates/gateway/
+(no output)
+```
+
+The only anchored host check in the crate is `AUTH_HOSTS` (`dispatch.rs:1043`),
+consumed solely by `is_auth_host` to divert the two platform auth hosts.
+`extract_app_name` (`dispatch.rs:49-90`) takes `&host[..dot_pos]` and never looks
+at the suffix; on the path route nothing reads `Host` at all. No middleware is
+mounted (`main.rs:834-919` has zero `.wrap(` calls).
+
+Second consequence also LIVE: `browser_auth.rs:170-174` still builds the expected
+origin as `format!("{scheme}://{host}{path}")`, called at `:122` with
+`&route.host`, which is the raw header (`auth_token.rs:89-94`). `scheme` is fixed,
+so the check constrains only the path. The comment at `browser_auth.rs:114-117`
+still claims the mirror stops a gateway-layer deviation widening the OP's
+allowlist; because both sides derive from the same attacker-controlled header,
+it does not.
+
+Existing coverage anchors `is_auth_host` only
+(`is_auth_host_rejects_unanchored_lookalikes` and three siblings, 4 passed);
+there is no equivalent test for the forwarded-URL host.
+
+Not fixed here: both fix shapes (a configured base domain with a dev bypass, or
+reconstructing the URL from the resolved route's canonical hostname) add
+configuration surface and change what `request.url` says to every deployed app.
+Contract decision.
 
 **File / symbol:** `crates/gateway/src/router/dispatch.rs:2425-2430`
 (`handle_dispatch` -> `forward_url`).
@@ -665,6 +1079,42 @@ request.
 ---
 
 ## G11 - a revoked session is permanently resurrected by anchor reload-recovery
+
+**Status (triage 2026-08-10): LIVE. All four legs re-read at HEAD and confirmed;
+NOT observed against a live stack.**
+
+1. `rotation_started_at` is stamped at `auth_token.rs:1088` (`let
+   rotation_started_at = now_secs();`) at the top of `do_refresh`, before the OP
+   refresh. The re-check at `auth_token.rs:1232-1236` still gates on
+   `revoked_after >= rotation_started_at`, so a marker written *before* the
+   request lands in `Ok(_) => {}`. The comment at `:1223-1226` confirms the
+   intent is the TOCTOU window only - the design is the gap.
+2. `revoke_grant_cascade` (`crates/control/src/oauth_grants_handlers.rs:170-232`)
+   read in full: it deletes the `oauth_grants` row (`:186`), revokes the relay
+   alias (`:194-198`) and inserts `token_revocations` (`:223-225`). It never
+   names `app_session_anchors`. The complete set of non-test writers of that
+   table is `crates/auth/src/identity/password_reset.rs:344` and
+   `crates/gateway/src/anchors.rs:302,328,361` - no control-plane grant path.
+3. `crates/auth/src/oidc/refresh.rs:509-513` gates on `row.revoked_at`,
+   `family_has_revoked_row` (which queries `oauth_refresh_tokens` only,
+   `refresh.rs:1117-1124`) and two expiries. `oauth_grants` has zero hits in the
+   file; `token_revocations` appears only as three INSERTs, never as a read gate.
+4. `family_revoked_at` is at `crates/authz/src/wrapper_revocation.rs:108-110`
+   and is strictly `>`: `revoked_after.is_some_and(|ra| ra > iat)`. Its own doc
+   at `:88-89` states the resurrection property outright: *"A token whose `iat`
+   predates the marker is rejected; one minted after the marker is fine."*
+
+The chain closes: the fall-through at `auth_token.rs:768-769` reaches
+`rotate_family` (`:850`), `sessions::create` (`:903`) and `sign_session_cookie`
+(`:932`), and the fresh cookie's `iat` is `now` (`session_token.rs:190`). The
+comment justifying the fall-through (`auth_token.rs:756-757`, *"ends in
+`login_required` for a revoked family"*) is still there and still false, because
+leg 3 shows the OP check looks at neither the grant nor the marker.
+
+Not fixed here: the finding offers two fixes in different crates (change the
+comparison instant in the gateway, or make `revoke_grant_cascade` revoke the
+anchor in the control plane). Which one is right is a decision about where
+revocation authority lives. Highest-severity LIVE item in this document.
 
 **File / symbol:** `crates/gateway/src/auth_token.rs:1210-1226` (the F4
 post-refresh re-check in the rotation path), reached from
@@ -744,6 +1194,42 @@ already does and is presumably why that path is not affected.
 
 ## G12 - the `/session` CSRF guard is keyed on `mint=1`, but the rotation it protects runs without `mint=1`
 
+**Status (triage 2026-08-10): LIVE.** `session_csrf_guard`
+(`auth_token.rs:277-284`) still passes `want_mint` as *both* `require_custom_header`
+and `require_origin`, and its doc at `:274-276` still says a non-mint GET needs
+neither.
+
+The handler still contradicts it. `want_mint` is computed at
+`auth_token.rs:730-733`, the guard is called once at `:735`, and the fast path
+(`:759-798`) falls out of its block on a missing / expired / tampered /
+non-`pws_` / revoked cookie into reload-recovery, reaching `rotate_family`
+(`:850`), `sessions::create` (`:903`) and `sign_session_cookie` (`:932`) - all
+with `want_mint == false`. The handler's own comment at `:756-757` confirms the
+fall-through is the designed steady state, not an edge.
+
+`Sec-Fetch-Site` is still enforced only when present (`auth_token.rs:247-260`:
+`if let Some(sfs) = ... { if sfs != "same-origin" {`), so absence is a pass.
+
+The finding's "why it matters beyond the modest impact" point was confirmed by
+running the suite it names:
+
+```
+$ cargo test -p zeroship-gateway --lib session_csrf_tests
+test auth_token::session_csrf_tests::non_mint_read_is_lenient ... ok
+test auth_token::session_csrf_tests::mint_without_origin_is_rejected ... ok
+test auth_token::session_csrf_tests::mint_without_custom_header_is_rejected ... ok
+test auth_token::session_csrf_tests::mint_with_foreign_origin_is_rejected ... ok
+test auth_token::session_csrf_tests::legitimate_same_origin_mint_succeeds ... ok
+test result: ok. 5 passed; 0 failed
+```
+
+All five pass, and `non_mint_read_is_lenient` passes *because* it sends neither
+header - it green-lights exactly the property this finding says is the wrong one
+to pin. The module tests the guard, never the handler.
+
+Not fixed here: "run the guard after the fast path decides" restructures the
+handler's control flow on the authentication path. Not small.
+
 **File / symbol:** `crates/gateway/src/auth_token.rs:277-284`
 (`session_csrf_guard`) and `:737-778` / `:794-965` (`session`).
 
@@ -799,6 +1285,46 @@ handler is about to enter reload-recovery.
 ---
 
 ## G13 - `verify_access_jwt` force-refreshes the JWKS on ANY verification error, unauthenticated and unthrottled
+
+**Status (triage 2026-08-10): LIVE, all three parts.**
+
+The `if let Ok(..) else` at `oidc_rp.rs:740-749` is unchanged, and `try_verify`
+(`:706-738`) can yield `NoMatchingKey` (`:711`) *or* `OidcError::Verify` from
+`decode` (`:736`) covering bad signature, `exp`, `nbf`, `iss` and missing spec
+claims - all landing in the same `else`.
+
+Both siblings still match `NoMatchingKey` only:
+`crates/core/src/oidc_verify.rs:476-484` and
+`crates/core/src/logout_token.rs:289-302`, the latter still documenting why.
+The false "mirroring [`zeroship_core::oidc_verify::verify_id_token`]" claim is
+still at `oidc_rp.rs:676-678`.
+
+`JwksCache::refresh` was read end to end (`crates/core/src/oidc_verify.rs:253-362`):
+no single-flight, no minimum interval, no rate limit, no breaker. Its only two
+protections are a per-fetch timeout (`:275`, 5s default) and stale-on-error. The
+struct has no in-flight flag and no last-attempt timestamp - `JwksState` is
+`{ keys, fetched_at }` (`:147-151`) and `fetched_at` is written on **success
+only** (`:355-359`), so failed refreshes leave no throttle trace at all.
+
+**Evidence the finding did not cite, which strengthens it:** `crates/core` already
+contains the exact control test for the correct behaviour -
+`verify_id_token_refreshes_jwks_only_for_missing_key` (`oidc_verify.rs:1129`),
+asserting `mock.hits() == 0` with *"signature-independent failures must not force
+a JWKS refresh"* and `mock.hits() == 1` for `NoMatchingKey`. There is no
+counterpart for `verify_access_jwt`. The property is already written down as
+desirable in this codebase; only the gateway's copy diverges.
+
+Reachability holds: `resolve_bearer_user_header` (`router/auth.rs:655`)
+pre-checks only the unsigned issuer peek (`:675`, `:680`) before
+`verify_access_token` (`:688`).
+
+Not fixed here despite being nearly mechanical (match `NoMatchingKey`, delete or
+honour the doc claim): a red-before-green test needs a JWKS mock wired into the
+gateway's `OidcRp`, which `crates/core` has and `crates/gateway` does not.
+Building that harness is the real work, and shipping the one-line match without
+it would be an untested change on the token-verification path. **Strongest
+candidate for the next fix** - the target behaviour, and its test shape, are
+already written in `crates/core`.
 
 **File / symbol:** `crates/gateway/src/oidc_rp.rs:740-749` (`verify_access_jwt`);
 doc comment at `:676-678`.
@@ -873,6 +1399,42 @@ true.
 
 ## G14 - a colon anywhere in the query string discards the post-login return path
 
+**Status (triage 2026-08-10): was LIVE, FIXED IN THIS TRIAGE.**
+
+`is_safe_oidc_original_path` now ends the first segment at the first `/`, `?` or
+`#` (`crates/gateway/src/router/dispatch.rs`, `path[1..].find(['/', '?', '#'])`),
+with a comment stating why the delimiter set is what it is. The security intent
+is untouched: a colon in the first *path* segment still fails.
+
+Red before the fix, colon-free control asserting first and passing:
+
+```
+thread 'router::dispatch::tests::oidc_original_path_keeps_a_colon_that_lives_in_the_query'
+panicked at crates/gateway/src/router/dispatch.rs:5062:9:
+assertion `left == right` failed: a colon inside the QUERY must not make the path unsafe
+  left: "/"
+ right: "/search?q=https://example.com"
+```
+
+Mutation check: narrowing the fix to `find(['/', '?'])` - dropping only the `#` -
+turns the test red on the fragment case, so every delimiter in the set is
+load-bearing rather than incidentally passing:
+
+```
+assertion `left == right` failed
+  left: "/"
+ right: "/doc#a:b"
+```
+
+The new test carries a negative control (`/foo:bar?q=1` must still sanitise to
+`/`) so a future widening of the check cannot pass by loosening it. The
+pre-existing `oidc_original_path_rejects_protocol_relative_redirects`, including
+its `/foo:bar/baz` case, stays green.
+
+**What this does NOT cover:** it asserts nothing about fragments arriving over
+the wire (browsers never send them) and nothing about the `bytes[1]` alnum gate,
+which the neighbouring test owns.
+
 **File / symbol:** `crates/gateway/src/router/dispatch.rs:2893-2915`
 (`is_safe_oidc_original_path`), via `sanitize_oidc_original_path:2885`.
 
@@ -919,6 +1481,42 @@ stopping the segment at the first `/`, `?`, or `#`.
 
 ## G15 - the OP circuit breaker cannot trip on a 5xx-ing OP, and any completed response re-closes it
 
+**Status (triage 2026-08-10): LIVE (a) and (b). The module-doc claim is SPLIT,
+not uniformly wrong.**
+
+(a) `op_client.rs:394-406` unchanged: `Ok(Ok(resp))` calls `breaker.on_success(is_probe)`
+for any completed response, 2xx through 5xx. The only `on_failure` arms are
+`Ok(Err(e))` (`:412`, transport) and `Err(_elapsed)` (`:420`, timeout). Callers
+inspect status only afterwards (`oidc_rp.rs:275`, `:500`, `:526`).
+
+(b) `op_client.rs:222-230` unchanged: `on_success` stores `Closed`
+unconditionally, never reading `self.state()`; `was_probe` gates only the
+probe-slot release, not the state transition. No test covers the interleaving -
+every test in `op_client.rs:426-625` drives the breaker sequentially on one
+thread, and `shared_breaker_arc_trips_for_all_holders` only `Arc::clone`s and
+asserts shared visibility; it spawns nothing.
+
+**Correction to the finding's reasoning.** It says the module doc "names exactly
+this case as the motivating risk", implying the doc is wrong. Only half of it is.
+`op_client.rs:6` does say *"slow or 5xx-ing"*, but `op_client.rs:28-33` of the
+same doc states the limitation correctly and on purpose: *"A OP 4xx (e.g.
+`invalid_grant`) is a VALID upstream response, NOT a breaker failure - only
+transport errors and timeouts count."* So the module is internally inconsistent
+rather than uniformly mistaken, and part of the behaviour in (a) is a documented
+deliberate choice. The 5xx half is still undefended and (b) is unambiguously a
+defect.
+
+**Narrowing of the attacker-drivable framing.** The finding says
+`/__zeroship/auth/callback` reaches `post_token` with attacker-chosen `code`
+values. True, but each attempt needs a matching stash and verifier
+(`oidc_rp.rs:256` binds `code_verifier` from `stash.verifier`), so the attacker
+must initiate a real login per attempt rather than spray blind codes. Note this
+interacts with G17: a replayable stash removes that per-attempt cost.
+
+Not fixed here: deciding that a 5xx counts as a breaker failure while a 4xx does
+not is a policy change to a deliberately documented rule, and (b) needs a
+compare-exchange state machine plus a concurrency test the module has never had.
+
 **File / symbol:** `crates/gateway/src/op_client.rs:395-405` (`call`) and
 `:223-230` (`CircuitBreaker::on_success`); module doc `:5-7`.
 
@@ -960,6 +1558,45 @@ breaker is explicitly `Arc`-shared across ntex worker threads
 
 ## G16 - the public signal-ingress endpoint has an unbounded limiter map, the wrong client key, and a fresh HTTP client per request
 
+**Status (triage 2026-08-10): LIVE, all three sub-defects.**
+`git log -- crates/gateway/src/signal_ingress.rs` shows a single commit
+(`549e2656e`); nothing has been fixed since the file was written.
+
+(a) `PLACEHOLDER_LIMITER` (`signal_ingress.rs:48`) is still an uncapped
+`HashMap<String, PlaceholderBucket>`; `check_placeholder_rate_limit` (`:56-64`)
+only does `entry(...).or_insert_with(...)`. Grepping the symbol returns exactly
+two lines (48, 58) - no sweeper, no cap, no `remove`/`retain`. And a new key is
+always admitted, because the bucket is born full (`:20` `PLACEHOLDER_BURST: f64
+= 10.0`, `:31` `tokens: PLACEHOLDER_BURST`), so the map grows a permanent entry
+per source *while admitting the request*. The nearby correct pattern is real:
+`backchannel_logout.rs:31` caps at `MAX_INFLIGHT_LOGOUT_JTIS: usize = 50_000`
+with `retain` at `:420` and eviction at `:424-426`.
+
+(b) `source_key` (`:50-53`) still uses `req.peer_addr()`. The proxy-aware helper
+exists (`dispatch.rs:866`, `pub(crate) fn client_ip(req, trust_proxy)`) and
+`trust_proxy` is on the config (`lib.rs:67`); `signal_ingress.rs` never mentions
+it. Impact stays deployment-dependent, as the finding says.
+
+(c) `signal_ingress.rs:103` still constructs `cyper::Client::new()` inside
+`forward_to_control`, once per accepted POST. The rule it violates is verbatim
+in `op_client.rs:17-18`.
+
+Mount sites confirmed at `main.rs:859-871`: both routes attach only a
+`PayloadConfig` body cap. `enforce::check_rate_limit` has exactly one non-test
+call site in the crate (`dispatch.rs:1341`, inside `execute_resource_tree`), and
+`main.rs` has no `.wrap(` at all, so these routes genuinely bypass it.
+
+The module's only test (`placeholder_bucket_enforces_burst`, `:133`) exercises
+`PlaceholderBucket::allow` in isolation and touches neither the map growth nor
+the client key.
+
+Not fixed here: (b) and (c) are each small in isolation, but the module is a
+self-described placeholder ("G5 placeholder - operator-pending durable
+rate-limit store", `:57`) for an unauthenticated public endpoint. Replacing its
+limiter is the operator-pending design decision the comment names, and patching
+the key without the store would make the endpoint look correct while remaining
+unbounded.
+
 **File / symbol:** `crates/gateway/src/signal_ingress.rs:48-65` and `:103`.
 Mounted at `POST /__zeroship/v1/signal` and `POST /__zeroship/signals/v1`
 (`main.rs:851-864`), outside the per-app dispatch path, so
@@ -999,6 +1636,35 @@ deployment-dependent on impact for (b).
 
 ## G17 - the OIDC stash's advertised 10-minute window is never enforced
 
+**Status (triage 2026-08-10): LIVE, both parts.**
+
+`Stash` (`oidc_rp.rs:899-907`) still has exactly six fields and no timestamp.
+`encode` (`:911-918`) signs that JSON and nothing else; `decode` (`:923-942`) is
+split -> HMAC recompute -> constant-time compare -> `from_slice`, with no age
+check. `finish_callback` goes decode (`:227-228`) -> state compare (`:233-235`)
+-> client_id compare (`:244-246`) -> `POST /token` (`:248-273`), and
+`handle_auth_callback` (`dispatch.rs:2621-2715`) adds no freshness check either.
+`STASH_MAX_AGE_SECS` (`:1034`) is used at exactly one non-test site: the cookie's
+`Max-Age` attribute (`:1048`).
+
+**Evidence the finding did not cite:** the platform already implements this
+correctly elsewhere. `crates/auth/src/ui/oauth_stash.rs` has its own
+`STASH_MAX_AGE_SECS` (`:146`) *and* puts it inside the signed blob -
+`oauth_stash.rs:65`: `exp: iat.saturating_add(STASH_MAX_AGE_SECS)`. So this is
+not a missing convention; the gateway's copy dropped the field the sibling
+carries.
+
+The compounding claim is confirmed: `dispatch.rs:996-998` intercepts
+`/__zeroship/auth/callback` and returns `handle_auth_callback` directly;
+`handle_request` is only called at `:1008`, and every gate lives downstream of it
+inside `execute_resource_tree` (account `:1306`, spend `:1319`, rate limit
+`:1341`, concurrency `:1344`). The callback path is reached with none applied.
+
+Not fixed here: adding a field to a signed wire blob is a format change. Cheap
+pre-launch (`AGENTS.md`: break the shape, update every producer and consumer in
+one patch) but it is still a wire-format decision, and it should land with the
+age gate in `decode`, not as a field nothing reads.
+
 **File / symbol:** `crates/gateway/src/oidc_rp.rs:1032-1034`
 (`STASH_MAX_AGE_SECS`), `:899-943` (`Stash`, `encode`, `decode`).
 
@@ -1030,6 +1696,56 @@ authorization code is the genuinely short-lived secret.
 ---
 
 ## G18 - back-channel logout's `sub` fallback fires on "sid matched nothing", not "no sid", and logs the user out everywhere
+
+**Status (triage 2026-08-10): doc half LIVE (NOT shipped), behaviour half
+LIVE-BY-DECISION, "Related" sub-claim LIVE.**
+
+Commit `d49abc963` addressed this finding and deliberately did not change
+behaviour, recording the reasoning - over-revoking is the safe direction for a
+logout signal, and whether an unmatched `sid` should instead be a no-op is a
+contract decision. That is a legitimate outcome and the behaviour half should be
+read as an accepted risk, not an open bug.
+
+**But the doc half is not fixed.** `d49abc963` rewrote the *inline* comment
+inside `handle` (now `backchannel_logout.rs:128-141`, and it is a good rewrite:
+*"the fallback is WIDER than 'sid was absent'"*). It left the **rustdoc on
+`handle`** - the text this finding actually quoted - untouched.
+`crates/gateway/src/backchannel_logout.rs:48-50` at HEAD:
+
+```
+/// Revocation policy: for per-app clients, prefer `sid` and revoke only local
+/// sessions that originated from that OP session. If the logout token lacks
+/// `sid`, fall back to revoking all sessions for the token's `sub` at that app.
+```
+
+That is the original wrong sentence, verbatim, and it is the part `cargo doc`
+and an IDE hover surface first. **This is the same failure mode as G7**: the
+paragraph gets fixed, the structured top-of-item text does not. Two of the
+eighteen findings are now instances of it, and G7 shows the stale version
+getting re-derived as truth a day later.
+
+Code arm unchanged (`backchannel_logout.rs:222-226`, `if users.is_empty()` ->
+`revoke_by_sub` at `:461`).
+
+The "OP always sends both" premise is confirmed:
+`crates/auth/src/oidc/backchannel_logout.rs:158-163` passes `sub: Some(&rp.sub)`
+and `sid: Some(&rp.sid)` from non-nullable `RelyingPartySession` fields, and it
+is the only production caller of `issue_logout_token`. So the "lacks sid" branch
+the rustdoc describes is dead against this OP - which is precisely why leaving
+that rustdoc in place is worse than a normal stale comment: it documents a branch
+that can never run as though it were the policy.
+
+"Related" sub-claim confirmed LIVE: `retryable_processing_error`
+(`:405-409`) returns 503 with no jti burn (the durable
+`logout_jti_cache.insert` at `:326` is reached only after successful revocation;
+every earlier return drops `LogoutJtiClaim`, whose `Drop` at `:446-458` removes
+the in-flight entry), and the sender does not retry - `emit_to_rps`
+(`crates/auth/src/oidc/backchannel_logout.rs:174-184`) makes one pass, warns on
+failure and continues. No queue, no backoff, no outbox.
+
+Not fixed here: the rustdoc correction is a comment (no red-before-green test
+possible), and it should land with G7's three sites as one "stale rustdoc over
+correct inline comment" sweep.
 
 **File / symbol:** `crates/gateway/src/backchannel_logout.rs:209-247`; doc
 comment at `:47-50`.
@@ -1169,6 +1885,9 @@ Stated so the gap is visible rather than implied:
   running the same operation against both tiers and diffing the results** - the
   five EXECUTED findings are in-process red tests at real entry points, not
   cross-tier walks. G6 is the one that most needs that walk.
+  **Still true after the 2026-08-10 triage**, which added in-process red tests
+  for G1's remaining half, G2, G3 and G14 but stood up no stack. Any cross-tier
+  coverage belongs in `tests/golden_path.sh`, not a crate-local suite.
 
 ## Lower-priority items noted while walking the above
 
