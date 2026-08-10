@@ -44,11 +44,76 @@ APP_NAME="starter"
 STARTER="$ROOT/examples/starter"
 ZSHIP="$STARTER/dist/app.zship"
 
+# Dev-server leg ports. The zeroship dev RUNTIME binds a port of its OWN,
+# separate from vite's, and `vite --port N` does not move it -- so a harness
+# that only knows the vite port frees half of what it started and leaves a
+# runtime holding the other half. Every port this script binds is listed here
+# and freed by `cleanup`, runtime ports included.
+DEV_PORT="${DEV_PORT:-3091}"          # vite, step 6
+DEV_RT_PORT="${DEV_RT_PORT:-3140}"    # dev runtime, step 6 (STARTER_API_PORT)
+SUP_RT="${SUP_RT:-3141}"              # dev runtime SHARED by 7a and 7b (the collision)
+SUP_V1="${SUP_V1:-3142}"              # vite, 7a
+SUP_V2="${SUP_V2:-3143}"              # vite, 7b
+DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2"
+
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
-cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
+# `-sTCP:LISTEN` is load-bearing. Plain `lsof -ti :$PORT` matches every socket
+# with that port on EITHER end, so freeing the worker's port also killed the
+# GATEWAY, which merely held a client connection to it -- and the gateway dying
+# turned step 8's "worker unavailable" probe into a connection failure (HTTP
+# 000) that looked like a platform verdict.
+free_ports() { for p in "$@"; do lsof -ti :"$p" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done; }
+# Killing the recorded PIDs is not enough: `( cd x && vite )&` records the
+# subshell, and the dev server in turn forks a `zeroship serve` child that is
+# not in $PIDS at all. Freeing the ports by listener is what actually
+# guarantees the next run of this script starts clean.
+cleanup() {
+  for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  sleep 1
+  free_ports $DEV_PORTS
+  wait 2>/dev/null || true
+}
 trap cleanup EXIT
+
+# --- HTTP probes that separate "listening" from "answered 2xx" -------------
+#
+# `curl -sf` conflates the two: it fails on ANY non-2xx, so an app whose RPC
+# returns 503 BECAUSE its runtime is down reads identically to one where vite
+# never bound a socket. That points the reader at the wrong process -- and,
+# with the dev-runtime supervisor added in step 7, 503 is now the EXPECTED
+# answer for a dead runtime, so a `-sf` readiness loop would spin its full
+# timeout and then report the one thing that is not true.
+# curl PRINTS `000` and ALSO exits non-zero when it cannot connect, so the
+# obvious `curl ... || echo 000` emits `000000` -- which is not equal to `000`,
+# so a "did anything answer?" check reads a dead port as alive. That produced a
+# false PASS ("vite IS serving HTTP (status 000000)") on the first run of this
+# step. Substitute only when curl printed nothing at all.
+http_status() {
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$1" 2>/dev/null)
+  echo "${code:-000}"
+}
+# 0 as soon as anything at all answers (000 == nothing listening / no response).
+wait_listening() {
+  local url=$1 tries=${2:-40}
+  for _ in $(seq 1 "$tries"); do
+    [ "$(http_status "$url")" != "000" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+# 0 only on a 2xx.
+wait_http_ok() {
+  local url=$1 tries=${2:-40} code
+  for _ in $(seq 1 "$tries"); do
+    code=$(http_status "$url")
+    case "$code" in 2??) return 0 ;; esac
+    sleep 1
+  done
+  return 1
+}
 
 echo "============================================"
 echo "  zeroship golden path (build-local → deploy)"
@@ -124,7 +189,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regcl
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 sleep 3
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --blob-store /tmp/gp-bundles --poll-interval 2 >/tmp/gp-worker.log 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --blob-store /tmp/gp-bundles --poll-interval 2 >/tmp/gp-worker.log 2>&1 & WORKER_PID=$!; PIDS+=($WORKER_PID)
 sleep 2
 # The gateway refuses to boot without a broker secret; it signs the RP-initiated
 # login handshake, so there is no safe default and no dev fallback.
@@ -231,20 +296,28 @@ fi
 # server itself and cleanup cannot leave an orphan behind a package-manager
 # wrapper.
 echo "=== 6. Dev server: pnpm dev serves the same app, and agrees with deployed ==="
-DEV_PORT="${DEV_PORT:-3091}"
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-( cd "$STARTER" && ./node_modules/.bin/vite --port "$DEV_PORT" --strictPort ) >/tmp/gp-dev.log 2>&1 &
-PIDS+=($!)
+# STARTER_API_PORT is PINNED rather than left at the 3001 default. Several
+# examples share that default, so an unpinned run here inherits whatever else
+# happens to be on 3001 -- and since the runtime port is not vite's, the old
+# `lsof -ti :$DEV_PORT` cleanup never freed it either way.
+free_ports "$DEV_PORT" "$DEV_RT_PORT"
+( cd "$STARTER" && STARTER_API_PORT="$DEV_RT_PORT" ./node_modules/.bin/vite --port "$DEV_PORT" --strictPort ) >/tmp/gp-dev.log 2>&1 &
+DEV_PID=$!; PIDS+=($DEV_PID)
 
 DEV_RPC=""
-for _ in $(seq 1 25); do
-  DEV_RPC=$(curl -sf -m 3 "http://localhost:$DEV_PORT/__zeroship/v1/getMessages" 2>/dev/null || echo "")
-  [ -n "$DEV_RPC" ] && break
-  sleep 2
-done
+DEV_RPC_URL="http://localhost:$DEV_PORT/__zeroship/v1/getMessages"
+if wait_http_ok "$DEV_RPC_URL" 50; then
+  DEV_RPC=$(curl -s -m 5 "$DEV_RPC_URL" 2>/dev/null || echo "")
+fi
 
 if [ -z "$DEV_RPC" ]; then
-  fail "dev server never answered getMessages on :$DEV_PORT"
+  # Say WHICH of the two failed. "never answered" was reported for both a vite
+  # that never bound and a runtime that was down behind a vite serving 503s.
+  if [ "$(http_status "http://localhost:$DEV_PORT/")" = "000" ]; then
+    fail "vite never bound :$DEV_PORT (the dev server itself did not start)"
+  else
+    fail "vite is serving on :$DEV_PORT but getMessages returned $(http_status "$DEV_RPC_URL"): $(curl -s -m 5 "$DEV_RPC_URL" | head -c 200)"
+  fi
   tail -20 /tmp/gp-dev.log
 else
   pass "dev server executed the same server function"
@@ -282,6 +355,190 @@ else
     echo "    same source through different backends and disagreed. createdAt is"
     echo "    already normalised out, so this is not process-start skew."
   fi
+fi
+
+# --- 7. A dev runtime that never starts must be LOUD, not silently looping ---
+#
+# THE SEAM THIS TESTS, and why it cannot live in a crate suite or a vite-plugin
+# unit test. The zeroship dev runtime binds a port of its OWN (devServerPort,
+# default 3001) while vite binds another. `vite --port N` moves only vite's.
+# Several examples take the 3001 default, so two of them running at once is not
+# an exotic setup -- it is the ordinary consequence of opening a second example.
+# The second runtime then cannot bind, exits in milliseconds, and the dev server
+# re-spawns it. Both halves are individually correct: the runtime is right to
+# refuse a taken port, and re-spawning a crashed runtime is a real feature. The
+# defect is only visible where they meet, WITH VITE STILL SERVING, which is a
+# two-process, two-port condition no single-process test can construct.
+#
+# What made it expensive: the app presents as UP. Vite answers 200 on / the
+# whole time. Measured at HEAD before the fix, with examples/error-probe holding
+# the runtime port, examples/starter's own `getMessages` came back
+#   404 {"message":"Method not found: getMessages","code":"NOT_FOUND"}
+# -- error-probe's runtime answering about a procedure it has never had. The
+# proxy connects successfully, because SOMEBODY is on that port; it is just not
+# your app. Two instances of the same example are worse: HTTP 200 carrying the
+# other instance's data, indistinguishable from working. So this step asserts
+# the runtime's failure is REFUSED at the proxy, not merely logged.
+echo "=== 7. Dev-runtime supervisor: never-starts is terminal + visible at request time ==="
+# Step 6's dev server MUST be gone first, and the reason is a second collision
+# that is not the one under test: two dev servers rooted in the SAME project
+# directory also contend for `.zeroship/kv.redb`, and the loser dies with
+# "Database already open. Cannot acquire lock." The first run of this step left
+# step 6 running, so 7a -- the control -- failed on the redb lock rather than
+# coming up, and every assertion after it was measuring a harness fault. The
+# one variable between 7a and 7b has to be the PORT, so everything else that two
+# dev servers can fight over is removed here.
+kill "$DEV_PID" 2>/dev/null || true
+free_ports "$DEV_PORT" "$DEV_RT_PORT" "$SUP_RT" "$SUP_V1" "$SUP_V2"
+sleep 2
+rm -f /tmp/gp-sup-a.log /tmp/gp-sup-b.log
+
+# 7a. CONTROL. Identical to 7b in every respect except the one variable that
+# matters: this one gets the runtime port to itself. Without it, a 7b that went
+# red because the harness mis-starts dev servers would be indistinguishable from
+# a 7b that went red because the supervisor is broken.
+( cd "$STARTER" && STARTER_API_PORT="$SUP_RT" ./node_modules/.bin/vite --port "$SUP_V1" --strictPort ) >/tmp/gp-sup-a.log 2>&1 &
+PIDS+=($!)
+SUP_A_RPC="http://localhost:$SUP_V1/__zeroship/v1/getMessages"
+if wait_http_ok "$SUP_A_RPC" 50; then
+  pass "7a control: uncontended dev runtime on :$SUP_RT answers 2xx"
+else
+  fail "7a control: uncontended dev runtime never answered (status $(http_status "$SUP_A_RPC")) - 7b below cannot be trusted"
+  tail -20 /tmp/gp-sup-a.log
+fi
+
+# 7b. THE COLLISION. Same example, same runtime port, different vite port.
+( cd "$STARTER" && STARTER_API_PORT="$SUP_RT" ./node_modules/.bin/vite --port "$SUP_V2" --strictPort ) >/tmp/gp-sup-b.log 2>&1 &
+PIDS+=($!)
+
+# Vite must be up -- that is the premise of the whole failure ("the app presents
+# as UP"), and asserting it separately is what keeps a red below from being read
+# as "the second dev server never started".
+if wait_listening "http://localhost:$SUP_V2/" 40; then
+  pass "7b: the colliding dev server's vite IS serving HTTP (status $(http_status "http://localhost:$SUP_V2/"))"
+else
+  fail "7b: second dev server never bound :$SUP_V2"
+  tail -20 /tmp/gp-sup-b.log
+fi
+
+# Terminal within a bounded time. Backoff is 1s+2s+4s over 4 attempts, so ~15s
+# is the expected verdict; 60s is slack for a loaded machine, not a moving goal.
+SUP_FATAL=0
+for _ in $(seq 1 60); do
+  grep -q "DEV RUNTIME FAILED TO START" /tmp/gp-sup-b.log && { SUP_FATAL=1; break; }
+  sleep 1
+done
+if [ "$SUP_FATAL" = "1" ]; then
+  pass "7b: supervisor gave up and printed the terminal banner"
+else
+  fail "7b: no terminal banner after 60s - the runtime is looping silently"
+  echo "    restart lines so far: $(grep -c "runtime exited" /tmp/gp-sup-b.log)"
+  tail -8 /tmp/gp-sup-b.log
+fi
+
+# Bounded, and STAYS bounded. Counting once proves nothing: the unbounded loop
+# also has a finite count at any instant. The second reading 8s later is what
+# separates "gave up" from "still going".
+SUP_N1=$(grep -c "runtime exited" /tmp/gp-sup-b.log)
+sleep 8
+SUP_N2=$(grep -c "runtime exited" /tmp/gp-sup-b.log)
+if [ "$SUP_N1" = "$SUP_N2" ] && [ "$SUP_N2" -le 4 ]; then
+  pass "7b: restarts bounded at $SUP_N2 and stopped (no growth over 8s)"
+else
+  fail "7b: restart count $SUP_N1 -> $SUP_N2 (expected equal and <= 4) - still looping"
+fi
+
+# The half that actually reaches a creator. A log line they have scrolled past
+# is not a signal; the response to the request they just made is.
+SUP_CODE=$(http_status "http://localhost:$SUP_V2/__zeroship/v1/getMessages")
+SUP_BODY=$(curl -s -m 5 "http://localhost:$SUP_V2/__zeroship/v1/getMessages" 2>/dev/null)
+if [ "$SUP_CODE" = "503" ] && printf '%s' "$SUP_BODY" | grep -q "failed to start" \
+   && printf '%s' "$SUP_BODY" | grep -q "already in use"; then
+  pass "7b: server function returns 503 naming the real cause (port in use), not another app's answer"
+else
+  fail "7b: server function returned $SUP_CODE, body: ${SUP_BODY:0:200}"
+  echo "    Expected 503 whose body names the port conflict. A 2xx here, or a 4xx"
+  echo "    about a procedure this app DOES export, means the request was answered"
+  echo "    by whoever else holds :$SUP_RT."
+fi
+
+# 7c. THE FEATURE THAT MUST NOT REGRESS. A runtime that came up, served, and
+# then died is a DIFFERENT event from one that never started, and it must still
+# be restarted. 7a's runtime has been up well past the healthy threshold; kill
+# it with SIGABRT (SIGTERM/SIGKILL are the supervisor's own teardown signals and
+# are ignored on purpose) and it must come back.
+#
+# WHAT THIS DOES NOT CATCH: a runtime killed by the OOM killer arrives as
+# SIGKILL and is therefore NOT restarted. That is pre-existing behaviour, shared
+# with the code before this step existed, and no assertion here would notice it.
+# `-sTCP:LISTEN` again, and here it is not a tidiness point: 7a's VITE process
+# holds a client connection to this port, so a bare `lsof -ti :$SUP_RT` can
+# return the dev server itself and this would SIGABRT the parent rather than the
+# runtime -- testing teardown while claiming to test crash recovery.
+SUP_A_CHILD=$(lsof -ti :"$SUP_RT" -sTCP:LISTEN 2>/dev/null | head -1)
+if [ -z "$SUP_A_CHILD" ]; then
+  fail "7c: could not find the healthy runtime listening on :$SUP_RT"
+else
+  kill -ABRT "$SUP_A_CHILD" 2>/dev/null || true
+  if wait_http_ok "$SUP_A_RPC" 45; then
+    # A 2xx alone does NOT prove a restart happened. If the kill silently did
+    # nothing, the ORIGINAL runtime is still serving and the very first poll
+    # succeeds -- a pass that measures only that the harness failed to kill
+    # anything. The pid having changed is what makes it an assertion.
+    SUP_A_CHILD2=$(lsof -ti :"$SUP_RT" -sTCP:LISTEN 2>/dev/null | head -1)
+    if [ -n "$SUP_A_CHILD2" ] && [ "$SUP_A_CHILD2" != "$SUP_A_CHILD" ]; then
+      pass "7c: runtime respawned as a NEW process ($SUP_A_CHILD -> $SUP_A_CHILD2) and answers again"
+    else
+      fail "7c: :$SUP_RT still served by pid ${SUP_A_CHILD2:-none} (was $SUP_A_CHILD) - the kill did not land, so nothing was tested"
+    fi
+  else
+    fail "7c: mid-session crash was not recovered (status $(http_status "$SUP_A_RPC")) - the legitimate restart path regressed"
+    tail -15 /tmp/gp-sup-a.log
+  fi
+  if grep -q "DEV RUNTIME FAILED TO START" /tmp/gp-sup-a.log; then
+    fail "7c: a single mid-session crash was treated as a never-started failure"
+  else
+    pass "7c: one mid-session crash did not count toward the give-up budget"
+  fi
+fi
+
+# --- 8. The same failure on the DEPLOYED tier, measured rather than assumed ---
+#
+# Step 6 diffs dev vs deployed on the HAPPY path. This is the same diff on the
+# failure path, and the answer is a divergence BY DESIGN rather than a defect:
+# there is no supervisor on the deployed side at all, so "the app's runtime is
+# unavailable" is answered by the gateway, not by a dev-server middleware.
+# Recording what it actually says is the point -- the alternative is assuming
+# it is fine, which is what left the dev side opaque for as long as it was.
+#
+# Runs LAST because it stops the worker.
+echo "=== 8. Deployed tier: the same RPC when the app's runtime is unavailable ==="
+DEP_URL="http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
+DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL" -H "X-Api-Key: $API_KEY")
+# Kill the worker BY PID. Freeing the port by listener is the safer idiom for
+# dev ports, but here the gateway is a CLIENT of this port and an over-broad
+# match takes it down too -- which replaces the platform's answer with a
+# connection failure and makes this step measure nothing.
+kill -9 "$WORKER_PID" 2>/dev/null || true
+sleep 3
+DEP_DOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$DEP_URL" -H "X-Api-Key: $API_KEY")
+DEP_DOWN_BODY=$(curl -s -m 10 "$DEP_URL" -H "X-Api-Key: $API_KEY" 2>/dev/null)
+echo "    deployed, worker up   : HTTP $DEP_OK_CODE"
+echo "    deployed, worker down : HTTP $DEP_DOWN_CODE  body: ${DEP_DOWN_BODY:0:160}"
+echo "    dev, runtime down     : HTTP $SUP_CODE  body: ${SUP_BODY:0:160}"
+case "$DEP_DOWN_CODE" in
+  5??) pass "deployed tier fails CLOSED (HTTP $DEP_DOWN_CODE) when the runtime is unavailable" ;;
+  2??) fail "deployed tier answered 2xx (HTTP $DEP_DOWN_CODE) with no worker - it served something stale" ;;
+  *)   fail "deployed tier returned HTTP $DEP_DOWN_CODE with no worker; expected a 5xx" ;;
+esac
+# The two tiers need not use the same status text -- one is a gateway, the other
+# a dev proxy -- but they must AGREE that the request did not succeed. A tier
+# that returns 2xx while its backend is gone is the failure this whole ticket is
+# about, just moved one layer out.
+if [ "${SUP_CODE:0:1}" = "5" ] && [ "${DEP_DOWN_CODE:0:1}" = "5" ]; then
+  pass "dev and deployed AGREE: runtime unavailable is a 5xx on both tiers"
+else
+  fail "dev($SUP_CODE) and deployed($DEP_DOWN_CODE) DIVERGE on runtime-unavailable"
 fi
 
 echo ""
