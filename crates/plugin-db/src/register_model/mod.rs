@@ -92,6 +92,11 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+// NOT cfg-gated: the SQLite register arm calls `ensure_app_schema` in every
+// build, so the trait must be in scope in the production build too. The
+// `use` below is test-only — putting this there compiles under `cargo test`
+// and fails under `cargo check`, which is how it was first written.
+use crate::backend::NamespaceManager;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::{AuditWriter, DialectBuilder, RegisterBackend};
 use crate::context;
@@ -255,24 +260,37 @@ async fn exec_register_model(
         // descriptor path is PG/`.zship`-only; SQLite dev (below) still receives
         // the declared schema and diffs it against live state.
         (Some(_pg), _) => Ok(()),
-        // SQLite dev tier: drive the security-hardened migration engine
-        // (journal / versioning / drift / 12-step rebuild / baseline / dev
-        // auto-approve), NOT the retired bespoke `run_sqlite_pipeline`. `sqlite`
-        // is the data-plane backend A; `run_sqlite_via_engine` constructs the
-        // hardened migration backend B on the same app file, applies through the
-        // engine, drops B, re-ATTACHes A, and bridges the CDC name-cache — all
-        // inside this awaited body (the ordering barrier, §7b.5). `deploy_id` is
-        // read inside it (from ZEROSHIP_DEPLOY_ID) for journal/audit grouping.
+        // SQLite dev tier — metadata only, NO DDL, exactly like the PG arm
+        // above. The dev server applies the committed migrations to the app
+        // file ahead of the worker (`sdks/vite-plugin/src/gen-types/dev-apply.ts`),
+        // so by the time a request reaches here the schema already exists and
+        // this call has nothing to create.
+        //
+        // WHY THE OLD ARM COULD NOT WORK. It drove the migration engine from
+        // the DESCRIPTOR, and the descriptor already carries the seven injected
+        // system columns (gen-types folds them in at emit). Re-injecting them
+        // here made the collection collide with the platform's own columns:
+        //
+        //   sqlite engine: desired_snapshot failed: invalid descriptor:
+        //   collection 'todos' declares field 'created_at', which collides with
+        //   an injected policy column
+        //
+        // reproduced on examples/db-todos, whose migration declares no system
+        // columns at all. The register also ran PER COLLECTION in registration
+        // order against a partial union, so a foreign key resolved only if its
+        // target happened to register first. Both failures are the same
+        // category error — the runtime doing the migration's job — and both
+        // disappear by construction once the apply happens ahead of time.
+        //
+        // What is still earned here: the dispatch caller stamps readiness
+        // (`mark_model_registered`) and the declared cache (`cache_schema`) on
+        // the returned `Ok(())`, and the CRUD paths read that cache for the
+        // declared-only facets introspection cannot recover (`t.id(prefix)`
+        // idPrefix, encrypted/mask facets). The ATTACH is kept explicitly: the
+        // data plane cannot read the app file it never attached.
         (_, Some(sqlite)) => {
-            sqlite_engine::run_sqlite_via_engine(
-                sqlite,
-                app_id,
-                collection,
-                schema,
-                indexes,
-                declared_collections,
-            )
-            .await
+            let _ = (&schema, &indexes, &declared_collections);
+            sqlite.ensure_app_schema(app_id).await
         }
         // Unknown / future backend surfaces a typed, SDK-visible error rather than
         // aborting the spawned compio task via an `.expect()` panic.
