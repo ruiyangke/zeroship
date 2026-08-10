@@ -360,15 +360,40 @@ for s in appEnv processEnv processEnvIndirect globalEnv; do
 done
 
 # THE OPT-IN SECRET LAYER, measured rather than assumed. Both secrets were
-# stored; only one was opted into the expose list. If the exposed one is absent
-# the layer does not work; if the hidden one is present the opt-in is not a
-# gate. Reported as observations first so a surprise reads as data, not noise.
+# stored; only one was opted into the expose list.
+#
+# THE EXPECTATION DIFFERS BY SURFACE, and reading one rule onto all four is a
+# mistake this loop used to make -- it failed `appEnv` for behaviour the
+# platform deliberately has:
+#
+#   process.env / __env__  vars + ONLY the secrets named in `expose`
+#   zeroship `env`         vars + ALL secrets; `expose` does not apply
+#
+# The split is a blast-radius control, not an app boundary. `process.env` is
+# the Node-compat surface that any npm dependency reads without the creator
+# writing a line, so a secret reaches it only on request. The `zeroship` env
+# is the audited surface the creator's own code names explicitly, and an app
+# reading its own secrets there is the point of storing them. Pinned by
+# `secret_visible_via_zeroship_env` and `secret_does_not_appear_in_process_env`
+# in crates/runtime/tests/call_fetch_handler.rs.
+#
+# So both directions are load-bearing here: a hidden secret appearing in
+# process.env means the opt-in is not a gate, and a hidden secret MISSING from
+# `env` means the documented merge broke.
 for s in appEnv processEnv processEnvIndirect globalEnv; do
   has_exposed="$(node -e 'const r=require(process.argv[1]);const k=(((r.json||r)[process.argv[2]])||{}).keys||[];process.stdout.write(k.includes(process.argv[3])?"yes":"no")' "$WORK/deployed.json" "$s" "$SECRET_EXPOSED_KEY" 2>/dev/null || echo "err")"
   has_hidden="$(node -e 'const r=require(process.argv[1]);const k=(((r.json||r)[process.argv[2]])||{}).keys||[];process.stdout.write(k.includes(process.argv[3])?"yes":"no")' "$WORK/deployed.json" "$s" "$SECRET_HIDDEN_KEY" 2>/dev/null || echo "err")"
   echo "    $s: exposed-secret-present=$has_exposed  hidden-secret-present=$has_hidden"
-  if [ "$has_hidden" = "yes" ]; then
-    fail "OPT-IN BREACH: deployed $s exposes $SECRET_HIDDEN_KEY, which was never added to the expose list"
+  if [ "$s" = "appEnv" ]; then
+    if [ "$has_hidden" = "yes" ]; then
+      pass "MERGE INTACT: deployed $s carries $SECRET_HIDDEN_KEY without an expose entry, which is the documented zeroship-env contract"
+    else
+      fail "MERGE BROKEN: deployed $s omits $SECRET_HIDDEN_KEY. The zeroship env is specified to carry every stored secret regardless of the expose list, so an app can no longer read a secret it stored."
+    fi
+  elif [ "$has_hidden" = "yes" ]; then
+    fail "OPT-IN BREACH: deployed $s exposes $SECRET_HIDDEN_KEY, which was never added to the expose list. This is the Node-compat surface, so the secret is now readable by every npm dependency in the bundle."
+  else
+    pass "OPT-IN GATE HOLDS: deployed $s withholds $SECRET_HIDDEN_KEY (present in the store, absent from the expose list)"
   fi
 done
 EXPOSED_ANY="$(node -e 'const r=require(process.argv[1]);const o=(r.json||r);const k=process.argv[2];process.stdout.write(["appEnv","processEnv","processEnvIndirect","globalEnv"].some(s=>(((o[s])||{}).keys||[]).includes(k))?"yes":"no")' "$WORK/deployed.json" "$SECRET_EXPOSED_KEY" 2>/dev/null || echo "err")"
