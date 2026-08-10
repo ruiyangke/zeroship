@@ -70,12 +70,24 @@
 //! `owner_app` in a creator-supplied artifact inert. Deserializing an artifact
 //! yourself and handing it to an ungated door carries the claimed value instead.
 //!
-//! NOT ESTABLISHED EITHER WAY, and deliberately not asserted: whether the
-//! remaining `validate_ir_authorized` behaviours - invalid schema ident, illegal
-//! guard direction, embedded-expression rejection - have lower-side equivalents.
-//! Confinement and vendor authority BOTH did, and confinement was the most
-//! alarming item on the original list, so absence must not be inferred for the
-//! rest without finding the behaviour rather than the symbol.
+//! ESTABLISHED AS LOAD-ONLY, which is different from unknown: the per-`Expr`
+//! DIALECT-STRUCTURAL checks. The load walker validates every embedded
+//! expression node against the target dialect, and that half does not re-run at
+//! lower.
+//!
+//! But "embedded-expression rejection" is NOT one gate, and splitting it moves
+//! half to the enforced column. The walker's own doc says its `ColRef`
+//! RESOLUTION check runs at load only for a self-contained `createTable`, and
+//! otherwise at the apply/render seam - which is
+//! `validate_column_references_for_lower`, already listed above as one of the six
+//! the ungated doors run. So the same gate appears on both of these lists under
+//! two names, and reading either list alone gives the wrong answer.
+//!
+//! NOT ESTABLISHED EITHER WAY, and deliberately not asserted: invalid schema
+//! ident, and illegal guard direction. Confinement, vendor authority and half of
+//! the expression gate all turned out to be re-enforced, so the prior is that
+//! these are too - but a prior is not a measurement, and absence must not be
+//! inferred for them without finding the behaviour rather than the symbol.
 //!
 //! Deserializing IR directly is fine as a PRE-PASS - `crates/migrated`
 //! deserializes to resolve table-shape policy and re-serializes, then hands the
