@@ -1,0 +1,2 @@
+# Per-run isolated demo state (sqlite + redb) created by src/dev-server.ts.
+.state/

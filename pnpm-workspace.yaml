@@ -1,6 +1,9 @@
 packages:
   - "sdks/*"
   - "examples/*"
+  # Browser-tier e2e suites (vitest + Playwright). One package, not one per
+  # example, so a single run reports every demo's status in one summary.
+  - "tests/e2e-browser"
   # The vendored migration engine. It is in the workspace so the vite-plugin
   # can depend on it by `workspace:*` rather than by an absolute path into a
   # sibling checkout that only exists on one machine - which is what made the
