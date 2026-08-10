@@ -47,24 +47,37 @@ export async function loadRelations(
           { code: "WITH_UNSUPPORTED_VALUE" as const },
         );
       }
+      // A relation is identified by its relation METADATA (`refTarget`), not
+      // by the `type` token, which describes storage.
+      //
+      // This used to require `fieldDef.type === "ref"`, and that made `with`
+      // unusable on the migration-first pipeline — the platform's only schema
+      // path. A committed migration declares a foreign key as
+      // `t.text().references("users", "id")` (the vendored engine DSL has no
+      // `t.ref()`), and the engine's descriptor reports it honestly as
+      // `{ type: "string", refTarget: "users", refColumn: "id" }`. The FK is
+      // created in the database and enforced — measured on
+      // examples/db-todos: an orphan insert fails with `FOREIGN KEY constraint
+      // failed` / `FOREIGN_KEY_VIOLATION` — but `with: { userId: true }` threw
+      //
+      //     "userId" is not a t.ref field on "todos"
+      //
+      // so every eager-load against a migration-declared FK was dead. Only a
+      // hand-written `defineSchema` using `t.ref()` could ever satisfy the old
+      // gate, and that is not how creator schemas are authored.
       const fieldDef = self._schema[field];
-      if (!fieldDef || fieldDef.type !== "ref") {
+      if (!fieldDef || typeof fieldDef.refTarget !== "string" || fieldDef.refTarget.length === 0) {
         throw Object.assign(
           new Error(
-            `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${self._name}"`,
+            `find/get: with: { ${field}: true } — "${field}" is not a reference field on "${self._name}" (no refTarget)`,
           ),
           { code: "WITH_NOT_A_REF_FIELD" as const },
         );
       }
+      // The guard above already established a non-empty string, so the former
+      // separate WITH_MISSING_REF_TARGET arm here could no longer fire and was
+      // removed rather than left as an unreachable branch.
       const targetName = fieldDef.refTarget;
-      if (typeof targetName !== "string" || targetName.length === 0) {
-        throw Object.assign(
-          new Error(
-            `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
-          ),
-          { code: "WITH_MISSING_REF_TARGET" as const },
-        );
-      }
       const resolve = self._resolveCollection;
       if (resolve === null) {
         throw Object.assign(

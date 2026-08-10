@@ -607,7 +607,7 @@ export function model<S extends Record<string, unknown>>(
   name: string,
   schema: S,
   native: NativeDb,
-  namingStrategy: NamingStrategy = naming.snakeCase,
+  namingStrategy: NamingStrategy = naming.asIs,
   softDelete: boolean = false,
   versioning: boolean = false,
   skipRegister: boolean = false,
@@ -1053,7 +1053,34 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
 // ---------------------------------------------------------------------------
 
 export interface InstallSchemaOptions {
-  /** Column naming strategy. Default: `naming.snakeCase`. */
+  /**
+   * Column naming strategy. Default: `naming.asIs` — the descriptor field name
+   * IS the column name.
+   *
+   * This used to default to `naming.snakeCase`, and that was the only renaming
+   * step in the entire migration-first pipeline. Nothing upstream produced the
+   * name it expected:
+   *
+   *   - the engine renders the authored migration field name VERBATIM as the
+   *     column (`userId: t.text()` creates a column spelled `"userId"`);
+   *   - gen-types folds that name into the descriptor verbatim;
+   *   - `render-env-db.ts` performs no case conversion, so the generated
+   *     `env.db` TypeScript field is that same name;
+   *   - and then this mapped it to `user_id` on the wire.
+   *
+   * A creator authoring any camelCase field therefore got an app that builds,
+   * boots, and fails every data call with `table <t> has no column named
+   * <snake_cased>`. It went unnoticed because all 40+ platform migrations
+   * author snake_case, on which the mapping is the identity: measured across
+   * the 17 committed `schema.runtime.json` descriptors, 169 fields, exactly
+   * ONE (`db-todos`'s `todos.userId`) is changed by `snakeCase` at all. So
+   * this change is inert for every other schema in the tree by measurement,
+   * not by argument.
+   *
+   * `collection.ts` already defaults the same construction to `naming.asIs`;
+   * this makes the two agree. Pass `naming: naming.snakeCase` explicitly to opt
+   * into camelCase-field/snake_case-column mapping.
+   */
   naming?: NamingStrategy;
   /**
    * **P9 PR 4** — the platform capability handle the caller already
@@ -1148,7 +1175,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     );
   }
   const native = env;
-  const namingStrategy = options?.naming ?? naming.snakeCase;
+  const namingStrategy = options?.naming ?? naming.asIs;
 
   // **Migration-first cutover (P5 S6)** — descriptor v1 is the only runtime
   // schema source. The declared first argument is ignored. An absent descriptor
