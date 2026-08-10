@@ -191,6 +191,12 @@ pub struct AppliedPlan {
     pub dialect_scope: DialectScope,
     /// `false` if ANY step is `down: None` (Backfill/Dml/incomplete OnlineRename);
     /// surfaced by status/rollback BEFORE attempt.
+    ///
+    /// This answers whether reversing SQL EXISTS, not whether the original state
+    /// can be restored. A dropped column is structurally reversible and its values
+    /// are gone for good, and this still reports `true` - see
+    /// `tests/plan_rollbackable.rs`, which pins both readings. A host presenting
+    /// this to an operator as "safe to undo" is over-reading it.
     pub rollbackable: bool,
     /// The declaring app (server-stamped on the IR path).
     pub owner_app: String,
