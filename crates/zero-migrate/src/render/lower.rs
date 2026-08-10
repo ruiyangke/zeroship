@@ -1305,6 +1305,19 @@ pub enum IrLowerError {
     /// DDL ops; DML / online-intent ops compile elsewhere). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only)")]
     UnsupportedOp(&'static str),
+    /// Two `renameColumn` ops targeted one table in one migration on SQLite, which
+    /// reconciles a rename by rebuilding the table from its verbatim stored
+    /// `CREATE TABLE` text. The second rebuild would still carry the first one's
+    /// pre-rename text, and the engine cannot rewrite that text without the lossy
+    /// SQL rewrite the rebuild exists to avoid. Refused before anything runs, rather
+    /// than failing mid-apply against an intermediate table. Carries the table.
+    #[error(
+        "table {0:?} is renamed twice in one migration, which SQLite cannot apply: \
+         each rename rebuilds the table from its stored CREATE TABLE text, and the \
+         second rebuild would still be built from the first one's. Split the renames \
+         across separate migrations."
+    )]
+    SqliteRepeatRenameTarget(String),
     /// An alter-column op reached the renderer with MySQL as the target. The
     /// renderers behind these ops emit PostgreSQL `ALTER COLUMN` syntax on every
     /// dialect, which MySQL cannot execute. MySQL's own spelling, `MODIFY COLUMN`,
@@ -3161,6 +3174,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
+        self.refuse_repeat_sqlite_rename_target(ir)?;
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut working_live = live.clone();
@@ -4049,6 +4063,44 @@ impl IrAuthor {
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected the op's fields.
     /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
     /// - rename-lowering errors (see [`lower_steps`](Self::lower_steps)).
+    /// Refuse two `renameColumn` ops on ONE table in ONE envelope, on SQLite only.
+    ///
+    /// SQLite reconciles a rename with the 12-step table REBUILD, whose `CREATE` is
+    /// rendered from [`crate::model::snapshot::TableSnapshot::stored_create_sql`] -
+    /// the verbatim `sqlite_master.sql` text. That text is byte-faithful on purpose,
+    /// so the rebuild can hand the identifier rewrite to SQLite's own `ALTER TABLE
+    /// ... RENAME COLUMN` parser and let CHECKs, generated expressions, indexes and
+    /// triggers follow the rename untouched. The engine therefore cannot synthesise
+    /// an updated version of it for a SECOND rebuild in the same envelope without
+    /// doing the lossy SQL rewrite that design avoids.
+    ///
+    /// MEASURED before adding this: the second rebuild kept the first rebuild's
+    /// pre-rename `CREATE` while its value-copy list had moved on, and SQLite
+    /// rejected the mismatch with `table people__zero_migrate_rebuild has no column
+    /// named handle`. The transaction rolls back, so nothing was corrupted - but the
+    /// migration could not apply and the error named an intermediate table rather
+    /// than the repair.
+    ///
+    /// Deliberately NOT "two ops on one table": two `addColumn`s on one table lower
+    /// and apply fine today, and refusing them would reject working migrations. Only
+    /// the shape that was measured to fail is refused. The wider question - that
+    /// several other arms also read live structure an earlier op can invalidate - is
+    /// its own ticket, not this gate.
+    fn refuse_repeat_sqlite_rename_target(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
+        if self.dialect != SqlDialect::Sqlite {
+            return Ok(());
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for op in &ir.ops {
+            if let Op::RenameColumn { table, .. } = op {
+                if !seen.insert(table.as_str()) {
+                    return Err(IrLowerError::SqliteRepeatRenameTarget(table.clone()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn lower_one_op(
         &self,
         op_index: usize,

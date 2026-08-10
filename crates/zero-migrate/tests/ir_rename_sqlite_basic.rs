@@ -818,19 +818,26 @@ fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
     }
 }
 
-// TWO renameColumn ops on ONE table in ONE migration.
+// TWO renameColumn ops on ONE table in ONE migration are refused at lower.
 //
-// Every op in an envelope lowers against the same pre-envelope live snapshot: the
-// engine re-introspects between envelopes, not between the ops inside one. The
-// second rebuild therefore builds its value-copy list from a table shape that the
-// first rebuild has already replaced, and names a column that is no longer there.
+// SQLite reconciles a rename with the 12-step table rebuild, whose CREATE comes
+// from `TableSnapshot::stored_create_sql` - the verbatim `sqlite_master.sql` text.
+// It is byte-faithful on purpose, so the rebuild can hand the identifier rewrite
+// to SQLite's own `ALTER TABLE ... RENAME COLUMN` parser and let CHECKs, generated
+// expressions, indexes and triggers follow untouched. A second rebuild in the same
+// envelope would still be built from the first one's text, and the engine cannot
+// update it without exactly the lossy rewrite that design avoids.
 //
-// This pins the failure as FAIL-CLOSED rather than corrupting. What it does not
-// claim is that the shape is supported: an author who renames two columns of one
-// table in a single migration gets a rebuild error naming an intermediate table,
-// with nothing telling them the repair is to split the migration.
+// MEASURED before this refusal existed: the second rebuild kept the pre-rename
+// CREATE while its copy list had moved on, and SQLite rejected the mismatch with
+// `table people__zero_migrate_rebuild has no column named handle`. That failed
+// mid-apply and named an intermediate table; refusing at lower names the repair.
+//
+// The control below is what keeps the refusal from being read as "two ops on one
+// table are refused" - renaming columns on two DIFFERENT tables in one migration
+// still lowers, because each table's stored text is still its own.
 #[compio::test]
-async fn two_renames_of_one_table_in_one_migration_fail_closed_on_sqlite() {
+async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
     let p = paths("sqlite_two_renames");
     let be = backend(&p);
 
@@ -861,41 +868,36 @@ async fn two_renames_of_one_table_in_one_migration_fail_closed_on_sqlite() {
         existence_guard: None,
     });
 
-    let lowered = author.lower_steps(&ir, &live);
-    let steps = match lowered {
-        Ok(steps) => steps,
-        Err(error) => {
-            // Refusing at lower is an acceptable outcome and a better one: it names
-            // the problem before anything runs. Pin whichever way it behaves so a
-            // change of answer is visible.
-            let message = error.to_string();
-            assert!(
-                message.contains("people"),
-                "a lower-time refusal must name the table it refuses: {message}"
-            );
-            return;
-        }
-    };
-
-    let engine = MigrationEngine::new();
-    let outcome = engine
-        .apply_plan(
-            &steps,
-            Approval::Approved,
-            &be,
-            &exec_cfg(),
-            "deployer",
-            LockMode::Acquire,
-        )
-        .await;
-
-    let error = outcome.expect_err(
-        "two renames of one table in one migration must not report success: the second \
-         rebuild copies from a table the first rebuild already replaced",
-    );
+    let error = author
+        .lower_steps(&ir, &live)
+        .expect_err("two renames of one table must be refused before anything runs");
     let message = error.to_string();
     assert!(
-        message.contains("no such column") || message.contains("nickname"),
-        "the failure names the column the stale copy list still asks for: {message}"
+        matches!(error, IrLowerError::SqliteRepeatRenameTarget(ref t) if t == "people"),
+        "the refusal is the dedicated variant naming the table: {message}"
     );
+    assert!(
+        message.contains("Split the renames across separate migrations"),
+        "and it names the repair, which the apply-time failure never did: {message}"
+    );
+
+    // The control. Two renames of DIFFERENT tables in one migration still lower,
+    // so the refusal is about one table's stored text being consumed twice, not
+    // about a migration carrying more than one rename.
+    let v2 = vec![
+        descriptor2("people", "nickname", "city"),
+        descriptor2("places", "label", "region"),
+    ];
+    let mut two_tables = rename_ir("people", "nickname", "handle", ColType::Text);
+    two_tables.ops.push(Op::RenameColumn {
+        table: "places".into(),
+        from: "label".into(),
+        to: "title".into(),
+        ty: ColType::Text,
+        schema: None,
+        existence_guard: None,
+    });
+    author
+        .lower_steps(&two_tables, &live_schema_for(&v2))
+        .expect("renames on two different tables still lower");
 }
