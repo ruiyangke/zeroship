@@ -667,8 +667,13 @@ fn print_usage() {
     eprintln!("                   Show the signed-in account.");
     eprintln!("  zeroship logout");
     eprintln!("                   Revoke and delete local CLI credentials.");
-    eprintln!("  zeroship secret   set|list|rm  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
+    eprintln!("                   process.env (where any npm dependency can read it) only");
+    eprintln!("                   via `secret set KEY=v --expose` or `secret expose KEY`.");
     eprintln!("  zeroship var      set|list|rm  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("                   PLAINTEXT config, always in both env and process.env.");
+    eprintln!("                   Never put a credential in a var; use a secret.");
     eprintln!();
     eprintln!("Builds go through @zeroship/vite-plugin. There is no `zeroship build`.");
 }
