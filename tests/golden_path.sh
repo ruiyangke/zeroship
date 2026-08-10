@@ -711,6 +711,57 @@ else
   fail "scaffold template has no \`migrate\` script; a creator with migrations/ cannot apply them. scripts: $(node -e 'console.log(Object.keys(require(process.argv[1]).scripts||{}).join(","))' "$TEMPLATE_PKG" 2>/dev/null)"
 fi
 
+# ...and the command that script names has to be PROVIDED by something the
+# template depends on. The check above is a narrow projection: it asks whether a
+# `migrate` key exists, not whether running it would find a binary. Rename the
+# bin in @zeroship/vite-plugin and that check stays green while every scaffolded
+# creator's `npm run migrate` dies with "command not found" -- measured, not
+# assumed: under exactly that mutation the existence check above returned 0.
+#
+# So this one asserts the BINDING, and fails differently: the first token of the
+# migrate script must appear in the `bin` map of some workspace package, and
+# that package must be in the template's declared dependencies. Both arms proven
+# red by mutation (rename the bin -> "no workspace package provides bin"; drop
+# the dep -> "comes from X, which the template does not depend on").
+#
+# It is still STATIC. It does not establish that the bin runs, only that the
+# name a creator is told to type resolves to something we ship. The run itself
+# belongs in tests/external_chain.sh, which installs outside the monorepo where
+# workspace linking cannot paper over a broken package.
+if node -e '
+    const { readFileSync, readdirSync, existsSync } = require("fs");
+    const { join } = require("path");
+    const root = process.argv[1];
+    const tpl = JSON.parse(readFileSync(join(root, "sdks/create-zeroship-app/template/package.json"), "utf8"));
+    const script = (tpl.scripts || {}).migrate;
+    if (!script) { console.error("no migrate script"); process.exit(1); }
+    const cmd = script.trim().split(/\s+/)[0];
+    const declared = new Set([
+      ...Object.keys(tpl.dependencies || {}),
+      ...Object.keys(tpl.devDependencies || {}),
+    ]);
+    const sdks = join(root, "sdks");
+    let provider = null;
+    for (const d of readdirSync(sdks)) {
+      const pj = join(sdks, d, "package.json");
+      if (!existsSync(pj)) continue;
+      const p = JSON.parse(readFileSync(pj, "utf8"));
+      const bins = typeof p.bin === "string"
+        ? { [p.name.split("/").pop()]: p.bin }
+        : (p.bin || {});
+      if (Object.prototype.hasOwnProperty.call(bins, cmd)) { provider = p.name; break; }
+    }
+    if (!provider) { console.error(`no workspace package provides bin "${cmd}"`); process.exit(1); }
+    if (!declared.has(provider)) {
+      console.error(`bin "${cmd}" comes from ${provider}, which the template does not depend on`);
+      process.exit(1);
+    }
+  ' "$ROOT" 2>/tmp/gp-binbind.log; then
+  pass "the template's migrate command resolves to a bin we ship and declare"
+else
+  fail "the scaffold template's migrate command does not resolve: $(cat /tmp/gp-binbind.log)"
+fi
+
 free_ports "$DB_V" "$DB_RT"
 ( cd "$TODOS" && DB_TODOS_API_PORT="$DB_RT" ./node_modules/.bin/vite --port "$DB_V" --strictPort ) \
   >/tmp/gp-dbtodos.log 2>&1 &
