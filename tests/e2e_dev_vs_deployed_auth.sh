@@ -168,6 +168,14 @@ probe() {
   # absolutely. `tests/e2e_dev_vs_deployed_errors.sh` is the harness that
   # asserts the absolute property against the raw deployed bytes; this one
   # cannot, by construction.
+  #
+  # THAT DELEGATION IS CHECKED, not assumed (2026-08-10). "another harness
+  # covers it" is exactly the shape of claim that reads as protection and turns
+  # out to be empty, so it was followed: errors.sh keys its assertion on the
+  # `stack` KEY rather than on a scrubbed value, treats `err.ok` as load-bearing
+  # so a probe that never ran cannot pass, and says so in its own header. The
+  # chain is real. This records ONE READING, not a standing guarantee - re-check
+  # it if either harness is restructured.
   scrub() {
     sed -E \
       -e 's/"(expires_at|exp|iat|auth_time)":[0-9]+/"\1":<V>/g' \
