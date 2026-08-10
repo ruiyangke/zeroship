@@ -69,6 +69,17 @@
 #                         it. The empty-array round-trip IS compared; a
 #                         populated JSON document is NOT, and no procedure in
 #                         db-todos accepts one.
+#   CONCURRENT tx         every transaction probe below is a SINGLE transaction
+#                         at a time. The tx connection lives in a per-app slot
+#                         on the isolate, and a second `transaction()` call
+#                         while one is open NESTS (SAVEPOINT) rather than
+#                         running beside it -- so from inside one request there
+#                         is no way to stage two competing writers. That is
+#                         exactly what an isolation level is FOR, so the
+#                         behavioural half of the isolation-level divergence
+#                         (does SERIALIZABLE actually reject a conflicting
+#                         writer?) remains unmeasured on both tiers. Named as a
+#                         gap, not silently omitted.
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
@@ -319,6 +330,79 @@ probe() {
   distinct="$(grep -E '^mkT[1-6] ' "$RAWFILE" | grep -oE '"created_at":[0-9]+' \
     | sort -u | wc -l)"
   printf '%-10s distinct_created_at=%s of 6\n' tsres "$distinct" >> "$RAWFILE"
+
+  # --- TRANSACTIONS --------------------------------------------------------
+  # Appended at the END on purpose: `countA`, `list`, `listAfter` and the
+  # timestamp rows above assert exact counts for alice, and a tx probe that
+  # wrote into her list would move them. These use their OWN user so the
+  # counts they read are counts of their own rows and nothing else.
+  #
+  # Until 2026-08-10 this app had ZERO `db.transaction()` calls -- both greps
+  # hit comments -- so commit / rollback / savepoint / isolation were walked on
+  # NEITHER tier. `examples/db-e2e` has four real calls but cannot serve: no
+  # migrations/, no generated/zeroship/, so its manifest carries no
+  # runtime_descriptor and boot installs nothing on env.db (#209). The
+  # procedures were ported into db-todos instead; rationale in
+  # examples/db-todos/src/index.ts.
+  # WHAT THE SCRUB HIDES IN THESE ROWS: almost nothing, by construction. The
+  # tx procedures return derived scalars (counts, codes, messages, titles), not
+  # row objects, so `<TS>` touches only `seedTx` and `<IDn>` touches only
+  # `seedTx.id` and `txCommit.aId`. Checked rather than assumed: diffing the
+  # ten tx RESULT rows RAW -- no scrub at all -- leaves exactly one difference,
+  # the minted `aId`, which two separate databases cannot agree on. So a green
+  # comparison here is not an artifact of the normalisation, which is the trap
+  # the kv leg fell into.
+  row seedTx users.seed "{\"email\":\"tx-$RUN@probe.test\",\"name\":\"Tx\",\"handle\":\"tx_$RUN\"}"
+  local txid
+  txid="$(grep -m1 '^seedTx ' "$RAWFILE" | grep -oE '"id":"user_[^"]+"' | head -1 | cut -d'"' -f4)"
+  if [ -z "$txid" ]; then
+    printf '%-10s TX SEED FAILED, tx probes skipped\n' txabort >> "$RAWFILE"
+    return 1
+  fi
+
+  # Commit, plus read-your-own-writes on the tx connection before COMMIT.
+  row txCommit todos.txCommit "{\"userId\":\"$txid\",\"tag\":\"c$RUN\"}"
+  # Throw inside the callback -> ROLLBACK. Carries what the CALLER receives
+  # (the creator's own error, code and message verbatim) and whether the row
+  # is really gone, read back outside the transaction.
+  row txRoll todos.txRollback "{\"userId\":\"$txid\",\"tag\":\"r$RUN\"}"
+  # Nested transaction = SAVEPOINT. Inner throw must roll back ONLY the inner
+  # insert while the outer commits its own row.
+  row txNest todos.txNested "{\"userId\":\"$txid\",\"tag\":\"n$RUN\"}"
+
+  # THE DOCUMENTED DIVERGENCE. docs/reference/sqlite-divergences.md claims PG
+  # emits `BEGIN ISOLATION LEVEL ...` while SQLite validates the string and
+  # runs a plain `BEGIN`. Verified in the source
+  # (crates/plugin-db/src/transaction/mod.rs:356-391), never measured through
+  # the creator surface. These four rows are that measurement: if the two tiers
+  # answer the same for a valid level, the divergence is REAL IN THE SQL and
+  # UNOBSERVABLE through env.db for a single uncontended transaction -- which
+  # is a result, not a non-result. What these rows CANNOT see: anything that
+  # needs two CONCURRENT transactions (lost update, write skew, a
+  # serialization failure), because the tx slot is per-app-per-isolate and a
+  # second transaction() call inside one request NESTS instead of running
+  # alongside. So a creator who relies on SERIALIZABLE to reject a conflicting
+  # writer is still unmeasured here.
+  row txIsoNone todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i0$RUN\",\"level\":null}"
+  row txIsoSer  todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i1$RUN\",\"level\":\"serializable\"}"
+  row txIsoRR   todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i2$RUN\",\"level\":\"repeatableRead\"}"
+  # Rejected BEFORE any SQL runs, by normalize_isolation_level() in
+  # crates/plugin-db/src/v8_classes/db.rs:295 -- so it is backend-independent
+  # by construction and MUST agree. Probed anyway: "must agree by
+  # construction" is the kind of claim that turns out to be wrong.
+  row txIsoBad  todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i3$RUN\",\"level\":\"snapshot\"}"
+
+  # Savepoint depth: MAX_SAVEPOINT_DEPTH = 8, so 9 levels (BEGIN + 8
+  # SAVEPOINTs) is the deepest allowed and 10 must be refused with
+  # `savepoint_depth_exceeded`. 9 also proves SQLite really opens eight
+  # savepoints rather than silently flattening them.
+  row txD9  todos.txDepth "{\"userId\":\"$txid\",\"tag\":\"d9$RUN\",\"levels\":9}"
+  row txD10 todos.txDepth "{\"userId\":\"$txid\",\"tag\":\"da$RUN\",\"levels\":10}"
+
+  # Independent tally of everything the tx probes left behind, read through the
+  # ordinary (non-tx) path. Each procedure reports its own count; this row is
+  # the one the procedures cannot fake.
+  row txTotal todos.count "{\"userId\":\"$txid\"}"
 }
 
 # Render a raw capture into the comparable form. Id aliases are assigned in
@@ -405,9 +489,19 @@ for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 docker rm -f "$PGC" >/dev/null 2>&1 || true
+# `log_statement=all` is what makes the transaction-isolation divergence
+# VISIBLE. `env.db` exposes no way to read `transaction_isolation` (there is no
+# raw-SQL escape, by design), so the isolation clause is invisible in every
+# response body -- the probes below prove the two tiers ANSWER the same, which
+# is a different claim from "they ran the same SQL". The Postgres statement log
+# is the only place in this harness where the actual `BEGIN ...` text can be
+# read. There is no SQLite counterpart, so the dev half of that comparison
+# stays a source-reading claim (transaction/mod.rs:384-391), and section 4 says
+# so where it asserts on this log.
 docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship \
   -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 \
-  -c max_connections=200 >/dev/null || { fail "docker run postgres"; exit 1; }
+  -c max_connections=200 -c log_statement=all >/dev/null \
+  || { fail "docker run postgres"; exit 1; }
 for _ in $(seq 1 40); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 \
   && pass "ephemeral Postgres on :$PG_PORT" || {
@@ -537,7 +631,11 @@ drow() { grep -m1 "^$1 " "$DR" | sed -E "s/^$1 +//"; }
 # THE CONTROL. Without it, a run where the gateway 401'd every call would
 # report a wall of green `reject` verdicts that all mean "never measured".
 # A result envelope is `{"json":...}`; a refusal is a bare `{"message":...}`.
-ROWS_WANT=30
+# 30 pre-transaction rows + 11 transaction rows (seedTx, txCommit, txRoll,
+# txNest, four txIso*, txD9, txD10, txTotal). ALL ELEVEN are result envelopes:
+# every tx procedure catches its own failure and returns it as data, precisely
+# so a rollback reads as a measured value rather than as a wire error.
+ROWS_WANT=41
 rows_got=$(wc -l < "$DR")
 rows_json=$(grep -c ' {"json":' "$DR")
 # SEVEN rows are expected NOT to be result envelopes: `orphan` and `dupEmail`
@@ -633,6 +731,105 @@ want tsres   'six back-to-back inserts get six distinct created_at' 'distinct_cr
 want getDel  'the deleted row is no longer readable' '{"json":null}'
 reject listAfter 'the deleted row is gone from the list' '"title":"buy milk"'
 want countA 'count sees the five todos created for alice' '{"json":5}'
+
+# --- transactions, absolute --------------------------------------------------
+# Expectations come from the CONTRACT (crates/plugin-db/src/transaction/mod.rs
+# and examples/db-todos/src/index.ts), not from a previous run.
+#
+# COMMIT. Two inserts, both visible on the tx connection before COMMIT, both
+# present afterwards through the ordinary pool path.
+want txCommit 'the transaction committed (no error)'          '"error":null'
+want txCommit 'a read inside the open tx sees its own write'  '"seenTitle":"c'
+want txCommit 'the in-tx count sees both uncommitted rows'    '"inTxCount":2'
+want txCommit 'both rows survive the commit'                  '"committedCount":2'
+want txCommit 'a declared default applies inside a tx'        '"bPriority":"high"'
+
+# ROLLBACK. The insert succeeded and was visible inside the tx; the throw must
+# undo it. `visibleAfter` is the half a broken rollback cannot fake.
+want txRoll 'the row was visible inside the tx before the throw' '"inTxCount":1'
+want txRoll "the caller receives the creator's own error code"   '"code":"PROBE_ROLLBACK"'
+want txRoll "the caller receives the creator's own message"      '"message":"probe rollback"'
+want txRoll 'the transaction returned no data'                   '"data":null'
+want txRoll 'the rolled-back row is not in the table'            '"countAfter":0'
+want txRoll 'the rolled-back row is not readable'                '"visibleAfter":0'
+
+# NESTED = SAVEPOINT. The inner throw rolls back to the savepoint only.
+want txNest 'the outer transaction committed'                  '"error":null'
+want txNest "the inner failure surfaces as the inner's own code" '"code":"PROBE_INNER"'
+want txNest 'the outer row is still visible after the savepoint rollback' '"outerSeen":1'
+want txNest 'the inner row is gone from inside the outer tx'   '"innerSeen":0'
+want txNest 'the outer row committed'                          '"outerAfter":1'
+want txNest 'the inner row never committed'                    '"innerAfter":0'
+
+# ISOLATION LEVEL. On the deployed (Postgres) tier a valid level is emitted as
+# `BEGIN ISOLATION LEVEL ...` and must simply work. The INTERESTING half is
+# the relative diff in section 5 -- these rows only pin that a valid level is
+# not silently swallowed and an invalid one is refused.
+want txIsoNone 'no isolationLevel: the tx commits' '"countAfter":1'
+want txIsoSer  'isolationLevel serializable commits'   '"error":null'
+want txIsoSer  'the serializable tx wrote its row'     '"countAfter":1'
+want txIsoRR   'isolationLevel repeatableRead commits' '"countAfter":1'
+# The unknown level is refused before any SQL. It arrives as a rejected Result
+# (`error`), NOT as a thrown exception -- transactionImpl catches the native
+# TypeError. `threw:null` is the load-bearing half of this pair.
+want txIsoBad 'an unknown isolationLevel is refused'          'unknown isolationLevel'
+want txIsoBad 'the refusal arrives as error, not as a throw'  '"threw":null'
+want txIsoBad 'the refused transaction wrote nothing'         '"countAfter":0'
+
+# SAVEPOINT DEPTH. MAX_SAVEPOINT_DEPTH = 8: BEGIN + 8 SAVEPOINTs is legal.
+want txD9  'nine levels open (BEGIN + 8 savepoints)' '"deepestLevel":9'
+want txD9  'nine levels is not refused'              '"refusedAtLevel":null'
+want txD9  'the innermost write committed'           '"countAfter":1'
+want txD10 'the tenth level is refused'              '"refusedAtLevel":10'
+want txD10 'refused with savepoint_depth_exceeded'   '"code":"savepoint_depth_exceeded"'
+want txD10 'the refused nest wrote nothing'          '"countAfter":0'
+
+# THE INDEPENDENT TALLY. 2 (txCommit) + 0 (txRoll) + 1 (txNest outer) + 3
+# (three committing isolation probes) + 0 (txIsoBad) + 1 (txD9) + 0 (txD10).
+# Read through todos.count, which none of the tx procedures can influence.
+want txTotal 'exactly seven tx-probe rows committed in total' '{"json":7}'
+
+# --- the isolation clause and the savepoints, read off the Postgres log ------
+# Everything above measures RESPONSES, and the responses cannot see an
+# isolation level: no `env.db` call reads `transaction_isolation`, and the two
+# tiers answer identically for every level. Without this block the leg would
+# report "dev and deployed agree on transactions" while leaving the one
+# documented transaction divergence completely unprobed.
+#
+# What this establishes: the DEPLOYED tier really emits the clause, and really
+# opens/releases savepoints rather than flattening nested transactions.
+# What it does NOT establish: that dev omits the clause. SQLite has no
+# statement log here, so that half is read from
+# crates/plugin-db/src/transaction/mod.rs:384-391 (`let _ =
+# build_begin_sql(...)` then a literal `"BEGIN"`), not measured.
+PGLOG="$WORK/pg-statements.log"
+docker logs "$PGC" > "$PGLOG" 2>&1
+pgwant() { # <label> <needle> <min-count>
+  local n; n=$(grep -cF "$2" "$PGLOG")
+  if [ "$n" -ge "$3" ]; then pass "pg log: $1 (x$n)"; else fail "pg log: $1 -- found $n of $2, want >= $3"; fi
+}
+# THE MEASUREMENT the divergence row in docs/reference/sqlite-divergences.md
+# never had. One serializable probe, one repeatable-read probe.
+pgwant 'BEGIN ISOLATION LEVEL SERIALIZABLE was emitted'  'BEGIN ISOLATION LEVEL SERIALIZABLE' 1
+pgwant 'BEGIN ISOLATION LEVEL REPEATABLE READ was emitted' 'BEGIN ISOLATION LEVEL REPEATABLE READ' 1
+# A nested transaction is a SAVEPOINT on the same connection, and an inner
+# throw is a partial rollback -- not a full ROLLBACK of the enclosing tx.
+pgwant 'a nested transaction opened SAVEPOINT zs_sp_1'   'SAVEPOINT zs_sp_1' 1
+pgwant 'an inner throw rolled back to the savepoint'     'ROLLBACK TO SAVEPOINT zs_sp_1' 1
+pgwant 'the depth probe really opened eight savepoints'  'SAVEPOINT zs_sp_8' 1
+# The CONTROL for this block: a needle that must NOT be there. Without it a
+# grep against a truncated or empty log would report five confident greens.
+n_absent=$(grep -cF 'BEGIN ISOLATION LEVEL SNAPSHOT' "$PGLOG")
+if [ "$n_absent" -eq 0 ]; then
+  pass "pg log CONTROL: the refused isolation level never reached Postgres"
+else
+  fail "pg log CONTROL: 'snapshot' reached Postgres $n_absent times -- validation is not pre-flight"
+fi
+# And the control that the log is non-empty in the first place. Matched on
+# `LOG:` rather than `statement:` because a driver using the EXTENDED query
+# protocol logs `execute <unnamed>: ...` instead; the needles above grep the
+# SQL text itself for the same reason, so they survive either protocol.
+pgwant 'CONTROL: the statement log is populated' 'LOG:' 50
 
 [ "$ABS_OK" = "1" ] || echo "  (verdicts above are UNSAFE: the control failed)"
 

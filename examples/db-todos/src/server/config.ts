@@ -1,14 +1,16 @@
 import { defineApp } from "@zeroship/server";
 
 // App resource policy. Without this file every procedure in `src/index.ts`
-// resolves to `auth: "user"`, and the gateway refuses all fourteen with
+// resolves to `auth: "user"`, and the gateway refuses all nineteen with
 // `{"code":"UNAUTHENTICATED","message":"authentication required"}` -- which is
 // exactly how this example shipped: green under `pnpm dev` (18 of 19 smoke
 // checks) and 100% unreachable once deployed. Measured by
 // `tests/e2e_dev_vs_deployed_db.sh` on its first run, 2026-08-10.
 //
 // THE BUILD ALREADY SAID SO, in detail, and the example shipped anyway. Deleting
-// this file and rebuilding prints (verified by running it, 2026-08-10):
+// this file and rebuilding printed this when there were fourteen procedures
+// (verified by running it, 2026-08-10; the count is now nineteen, and the count
+// in the message is the only part of it that has changed):
 //
 //   [zeroship:manifest] 14 procedures declare no `auth` policy and will deploy
 //   fail-closed:
@@ -50,6 +52,11 @@ export default defineApp({
     "rpc:todos.archive": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.delete": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.shareToWebhook": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txCommit": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txRollback": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txNested": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txIsolation": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txDepth": { auth: "anon", publiclyAccessible: true },
     "rpc:users.seed": { auth: "anon", publiclyAccessible: true },
     "rpc:users.getPair": { auth: "anon", publiclyAccessible: true },
     "rpc:users.public": { auth: "anon", publiclyAccessible: true },
