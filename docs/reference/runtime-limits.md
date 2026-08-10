@@ -45,10 +45,18 @@ From `builtin_plans` in
 Two consequences worth knowing before you design around them:
 
 - **50 ms is a CPU budget, not a wall-clock one.** Time blocked on I/O — a
-  database round trip, an object fetch — is not supposed to count against it
-  (enforcement is a POSIX timer on `CLOCK_THREAD_CPUTIME_ID`; see the CPU limit
-  section below). What does count is the work your handler does with the bytes:
-  parsing, copying, encoding.
+  database round trip, an object fetch — does not count against it, and neither
+  does time your request spends descheduled on a busy machine (enforcement is a
+  POSIX timer on `CLOCK_THREAD_CPUTIME_ID`, which counts only CPU the thread
+  actually consumed; see the CPU limit section below). What does count is the
+  work your handler does with the bytes: parsing, copying, encoding.
+- **A per-byte JavaScript pass over a 1 MiB payload does not fit.** Measured
+  against a 1 MiB buffer already in memory, a byte-at-a-time loop doing a
+  multiply and a few modulos costs **30–35 ms of CPU** — 60–70% of the free
+  tier's whole budget, before any I/O. Streaming the same megabyte and only
+  counting its length costs under 0.1 ms, so the cost is the per-byte work, not
+  the size of the object. If you need to hash, transform or re-encode payloads
+  of this size, size the plan for it rather than the transfer.
 - **The step from free to pro is 600x**, with nothing between. If a handler
   exceeds 50 ms of CPU there is no intermediate tier to move to.
 
