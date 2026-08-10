@@ -877,11 +877,38 @@ gp_close_step
 #     grep -v '^[[:space:]]*#' tests/golden_path.sh | grep -c 'pass "'
 #
 # The floor is then that count minus 2 (no token) or minus 1 (with one). At HEAD
-# that is 29 - 2 = 27. NOT APPLIED HERE: 27 is derived, and a full four-service
-# run to confirm the dynamic half was not available this pass. Raising a floor
-# from an unconfirmed derivation is the failure mode described two paragraphs
-# up. 26 stays until a clean run reports the dynamic total -- too low is
-# conservative and can never produce a false green.
+# that is 29 - 2 = 27.
+#
+# ENUMERATED SECOND, the way e2e_dev_vs_deployed_env.sh does it, because a
+# pattern count cannot see branching and this file has three kinds:
+#
+#   29  call sites outside comments
+#   -2  step 3 is a three-site either/or: `created app` + `deployed real vite`
+#       fire WITH a token, `dev-provisioned app` fires without. CI has no token,
+#       so one of the three fires and two do not.
+#   ------
+#   27  green, no token   (28 with one)
+#
+# Checked by reading, not inferred, because these are what a grep would get
+# wrong:
+#   - the three `case` arms (deployed-fails-closed, camelCase insert, `with:`
+#     eager-load) each have siblings that call `fail`, never `pass`, so each
+#     contributes exactly one pass on a green run;
+#   - step 9's three data-plane assertions sit behind `DB_UP`, which takes a
+#     `fail` arm when the dev runtime never binds -- correct for a green-run
+#     floor, and it means 27 is the GREEN total rather than a ceiling;
+#   - no assertion of this file lives in tests/lib/e2e_stack.sh (unlike the env
+#     harness, where seven do), so nothing is hiding outside the source.
+#
+# Two instruments, 27 and 27, and they fail differently: the pattern count goes
+# wrong when prose contaminates it or sites move to a shared library; the
+# enumeration goes wrong when someone misreads an arm.
+#
+# STILL NOT APPLIED. 26 stays. Both derivations are static, and neither has been
+# confirmed by a four-service run since the last two assertions landed. CI runs
+# this gate, so a floor that is one too HIGH turns main red on an honest run,
+# while one too low only costs a single assertion of slack. The asymmetry decides
+# it. The next clean run has only to confirm 27, not re-derive it.
 #
 # 24 IS THEREFORE THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where
 # a floor has to sit - the same reasoning run_billing_suite.sh applies to its
