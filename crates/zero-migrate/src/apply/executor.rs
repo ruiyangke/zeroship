@@ -2683,6 +2683,13 @@ pub async fn rollback<B: MigrationBackend>(
 /// rollback error is surfaced ahead of any unlock error, matching what `apply` does:
 /// the caller needs the reason the `down` failed, not the reason the unlock did.
 ///
+/// Pass [`LockMode::AlreadyHeld`] when nesting under an outer holder. It matters more
+/// on SQLite than on the server dialects: `SqliteBackend::acquire_project_lock`
+/// refuses re-entry on the SAME backend instance outright with "sqlite project lock
+/// is already held", where PostgreSQL and MySQL wait on the server. A nested
+/// [`LockMode::Acquire`] therefore fails immediately on SQLite rather than blocking,
+/// and the message reads like a defect rather than a caller mistake.
+///
 /// # Errors
 /// As [`rollback`], plus [`RollbackError::Backend`] if the lock cannot be taken.
 pub async fn rollback_with_lock<B: MigrationBackend>(
