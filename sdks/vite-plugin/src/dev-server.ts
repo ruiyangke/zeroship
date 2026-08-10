@@ -194,7 +194,23 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
  * point - a generic "runtime failed" would leave the creator exactly where the
  * infinite loop did.
  */
-function formatFatalBanner(status: RuntimeStatus): string {
+/**
+ * A runtime whose state dir is locked by an earlier, un-reaped run.
+ *
+ * This matters because the two remedies are mutually exclusive and the banner
+ * used to print the wrong one unconditionally. A state-dir lock is NOT a port
+ * clash: the contended resource is `.zeroship/`, so moving `devServerPort`
+ * changes nothing (task #221 - four orphaned `zeroship serve` processes held
+ * `.zeroship/kv.redb` across four different ports).
+ *
+ * Matched on redb's own wording, which `RedbBackend::open` passes through
+ * verbatim before appending the holding pid.
+ */
+function looksLikeStateDirLock(tail: readonly string[]): boolean {
+  return tail.some((l) => /Database already open|Cannot acquire lock/i.test(l));
+}
+
+export function formatFatalBanner(status: RuntimeStatus): string {
   const rule = "=".repeat(72);
   const lines = [
     rule,
@@ -208,15 +224,29 @@ function formatFatalBanner(status: RuntimeStatus): string {
   ];
   const tail = status.logTail.length > 0 ? status.logTail : ["(no output captured)"];
   for (const line of tail) lines.push(`    | ${line}`);
-  lines.push(
-    "",
-    `  The dev runtime binds :${status.port}, which is SEPARATE from vite's port -`,
-    "  `vite --port N` does not move it. Two apps sharing it collide. Set a",
-    "  different one in vite.config.ts:  zeroship({ devServerPort: <N> })",
-    "",
-    "  Fix the cause above, then restart `pnpm dev`.",
-    rule,
-  );
+  // Exactly one remedy, chosen by what the runtime actually said. Printing the
+  // port advice next to a lock error contradicts the runtime's own output,
+  // which states that moving the port will NOT help.
+  if (looksLikeStateDirLock(tail)) {
+    lines.push(
+      "",
+      "  That is a STATE DIR lock, not a port clash. An earlier run's runtime is",
+      "  still holding `.zeroship/` - changing `devServerPort` will NOT help, and",
+      "  neither will running on a different port.",
+      "",
+      "  The line above names the holding process when this user can see it. Kill",
+      "  it and restart. If no pid was named, the holder belongs to another user",
+      "  or is already gone and the lock file is stale.",
+    );
+  } else {
+    lines.push(
+      "",
+      `  The dev runtime binds :${status.port}, which is SEPARATE from vite's port -`,
+      "  `vite --port N` does not move it. Two apps sharing it collide. Set a",
+      "  different one in vite.config.ts:  zeroship({ devServerPort: <N> })",
+    );
+  }
+  lines.push("", "  Fix the cause above, then restart `pnpm dev`.", rule);
   return lines.join("\n");
 }
 interface FetchInvokePayload {
