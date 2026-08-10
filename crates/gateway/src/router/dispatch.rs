@@ -2916,8 +2916,14 @@ fn is_safe_oidc_original_path(path: &str) -> bool {
         return false;
     }
 
+    // The scheme-lookalike guard: reject `/javascript:alert(1)`, where the
+    // colon sits in the FIRST PATH SEGMENT. The segment therefore ends at the
+    // first `/`, `?` or `#` — a query or fragment is not part of it. Stopping
+    // only at `/` ran the colon scan across the query string, so
+    // `/search?q=https://example.com` was judged unsafe and the user's
+    // destination was silently replaced with `/` after login.
     let first_segment_end = path[1..]
-        .find('/')
+        .find(['/', '?', '#'])
         .map(|idx| idx + 1)
         .unwrap_or(path.len());
     !path[1..first_segment_end].contains(':')
@@ -5038,6 +5044,42 @@ mod tests {
             sanitize_oidc_original_path("/__zeroship/auth/callback"),
             "/__zeroship/auth/callback"
         );
+    }
+
+    /// The scheme-lookalike check exists to reject `/javascript:alert(1)`.
+    /// Its "first segment" must therefore end at the first `/`, `?` or `#` —
+    /// a colon in the QUERY is not a scheme and must not discard the user's
+    /// destination. `start_oidc_redirect` stashes `path_and_query()`, so the
+    /// query is present on every real call.
+    ///
+    /// What this does NOT cover: it asserts nothing about fragments arriving
+    /// over the wire (a browser never sends them) and nothing about the
+    /// `bytes[1]` gate, which `oidc_original_path_rejects_protocol_relative_redirects`
+    /// owns.
+    #[test]
+    fn oidc_original_path_keeps_a_colon_that_lives_in_the_query() {
+        // CONTROL: colon-free query on the same shape. If this ever fails the
+        // instrument never reached the colon logic.
+        assert_eq!(
+            sanitize_oidc_original_path("/search?q=example"),
+            "/search?q=example"
+        );
+        // THE CASE: only the colon's presence in the query differs.
+        assert_eq!(
+            sanitize_oidc_original_path("/search?q=https://example.com"),
+            "/search?q=https://example.com",
+            "a colon inside the QUERY must not make the path unsafe"
+        );
+        assert_eq!(
+            sanitize_oidc_original_path("/agenda?t=12:30"),
+            "/agenda?t=12:30"
+        );
+        // A colon in the fragment is the same class.
+        assert_eq!(sanitize_oidc_original_path("/doc#a:b"), "/doc#a:b");
+        // NEGATIVE CONTROL, and the reason the check exists: a colon in the
+        // first PATH segment still discards the destination even when a
+        // query follows it.
+        assert_eq!(sanitize_oidc_original_path("/foo:bar?q=1"), "/");
     }
 
     /// `render_callback_error` returns a 400 HTML page and escapes

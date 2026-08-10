@@ -60,6 +60,44 @@ pub(super) fn build_preflight_response(
     resp.finish()
 }
 
+/// Add `Origin` to the response's `Vary` list without discarding what is
+/// already there.
+///
+/// `HeaderMap::insert` REPLACES every existing value for the name, so a plain
+/// insert of `Vary: Origin` dropped the `Vary: Accept-Encoding` that
+/// `static_serve` sets on a negotiated pre-compressed variant — the CORS
+/// injection runs on every arm of `execute_resource_tree`, static included.
+/// A shared cache would then key a brotli response on `Origin` alone and
+/// serve those bytes to a client that sent no `Accept-Encoding`. The same
+/// clobber also lost any `Vary` an app set on its own SSR/RPC response.
+///
+/// Emits ONE joined header rather than a repeated one: repeated `Vary` is
+/// legal HTTP, but some intermediaries read only the first.
+fn append_vary_origin(headers: &mut ntex::http::HeaderMap) {
+    use ntex::http::header::{HeaderName, HeaderValue};
+    const VARY: HeaderName = HeaderName::from_static("vary");
+    let existing: Vec<String> = headers
+        .get_all(&VARY)
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if existing.iter().any(|v| v.eq_ignore_ascii_case("origin")) {
+        return;
+    }
+    // `Vary: *` already means "vary on everything"; narrowing it to a list
+    // would weaken the response's cacheability contract.
+    if existing.iter().any(|v| v == "*") {
+        return;
+    }
+    let mut parts = existing;
+    parts.push("Origin".to_string());
+    if let Ok(v) = HeaderValue::from_str(&parts.join(", ")) {
+        headers.insert(VARY, v);
+    }
+}
+
 /// Inject `Access-Control-*` response headers on a non-preflight
 /// response. Mirrors the preflight logic for Allow-Origin/Vary; also
 /// emits `Expose-Headers` and `Allow-Credentials` so the browser exposes
@@ -80,10 +118,7 @@ pub(super) fn inject_cors_response_headers(
         if let Ok(v) = HeaderValue::from_str(origin) {
             headers.insert(HeaderName::from_static("access-control-allow-origin"), v);
         }
-        headers.insert(
-            HeaderName::from_static("vary"),
-            HeaderValue::from_static("Origin"),
-        );
+        append_vary_origin(headers);
     } else {
         // Origin not in allow list → no headers; the browser blocks.
         return;
@@ -311,5 +346,63 @@ mod tests {
             Some("*")
         );
         assert!(resp.headers().get("vary").is_none(), "no Vary on wildcard");
+    }
+
+    /// `static_serve::apply_encoding_headers` sets `Vary: Accept-Encoding`
+    /// when it serves a negotiated pre-compressed variant, and step 10 of
+    /// `execute_resource_tree` runs the CORS injection on EVERY arm including
+    /// `Static`. `HeaderMap::insert` replaces, so injecting `Origin` used to
+    /// drop `Accept-Encoding` and let a shared cache serve brotli bytes to a
+    /// client that never asked for them.
+    ///
+    /// What this does NOT cover: it does not drive `execute_resource_tree`, so
+    /// it cannot catch the static arm being removed from step 10; and it says
+    /// nothing about the preflight builder, which
+    /// `preflight_vary_preserves_other_values` owns.
+    #[test]
+    fn cors_injection_appends_to_vary_instead_of_clobbering_it() {
+        let cors = Cors {
+            allow_origins: vec!["https://app.example.com".into()],
+            allow_methods: vec![HttpMethod::Get],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        // The exact header pair a negotiated pre-compressed asset carries.
+        let mut resp = HttpResponse::Ok()
+            .header("content-encoding", "br")
+            .header("vary", "Accept-Encoding")
+            .finish();
+        // PRECONDITION: the fixture really carries it before injection, so a
+        // failure below is the clobber and not a bad fixture.
+        assert_eq!(header_str(&resp, "vary"), Some("Accept-Encoding"));
+
+        inject_cors_response_headers(resp.headers_mut(), &cors, "https://app.example.com");
+
+        let vary = header_str(&resp, "vary").expect("Vary must survive CORS injection");
+        assert!(
+            vary.contains("Accept-Encoding"),
+            "Vary must still list Accept-Encoding after CORS injection, got {vary:?}"
+        );
+        assert!(
+            vary.contains("Origin"),
+            "CORS still has to add Origin, got {vary:?}"
+        );
+        // Exactly one `Vary` header, not two — a duplicate is legal HTTP but
+        // some intermediaries only read the first.
+        assert_eq!(
+            resp.headers().get_all("vary").count(),
+            1,
+            "Vary must be one joined header, not repeated"
+        );
+        // CONTROL: with no pre-existing Vary the behaviour is unchanged.
+        let mut bare = HttpResponse::Ok().finish();
+        inject_cors_response_headers(bare.headers_mut(), &cors, "https://app.example.com");
+        assert_eq!(header_str(&bare, "vary"), Some("Origin"));
+        // CONTROL: an already-present Origin is not duplicated.
+        let mut dup = HttpResponse::Ok().header("vary", "Origin").finish();
+        inject_cors_response_headers(dup.headers_mut(), &cors, "https://app.example.com");
+        assert_eq!(header_str(&dup, "vary"), Some("Origin"));
     }
 }
