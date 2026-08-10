@@ -70,12 +70,25 @@ function normalizeOps(ops: any[]): any[] {
   });
 }
 
+// This list MIRRORS the engine's confined injection; it does not define it. The
+// charter declares these columns with SQL-ish tokens (`text`, `timestamptz`,
+// `integer`) and the engine's `inject_column_to_ir`
+// (third_party/zero-migrate/.../model/table_shape.rs, the `match column.ty`) is
+// what those tokens MEAN. Read that function, not the charter, when this drifts.
+//
+// The three string columns are BOUNDED `string(255)`, not `text`, and that is
+// deliberate upstream: they hold ids and are keyed (`id` is the primary key,
+// `created_by` carries an audit index), and MySQL cannot key an unbounded TEXT.
+// This mirror said `text` for all three and was WRONG - the golden was right.
+// Established 2026-08-10 by escalating the disagreement to zero-migrate rather
+// than re-blessing the shared fixture; they confirmed the bound is intended and
+// pinned it in rendered DDL on an independent path.
 const confinedSystemColumns = [
-  { name: "id", type: "text", nullable: false },
+  { name: "id", type: { string: { length: 255 } }, nullable: false },
   { name: "created_at", type: "timestamp", nullable: false },
   { name: "updated_at", type: "timestamp", nullable: false },
-  { name: "created_by", type: "text", nullable: true },
-  { name: "updated_by", type: "text", nullable: true },
+  { name: "created_by", type: { string: { length: 255 } }, nullable: true },
+  { name: "updated_by", type: { string: { length: 255 } }, nullable: true },
   { name: "version", type: "int", nullable: false },
   { name: "deleted_at", type: "timestamp", nullable: true },
 ];
