@@ -825,14 +825,18 @@ pub(crate) fn compute_bucket_id(
             client_ip(req, trust_proxy)
         }
         RateLimitPer::User => {
+            // `"Bearer "` ONLY, and it must stay that way: `router/auth.rs`
+            // strips exactly this prefix, so anything else here would be a
+            // subject the gate never looked at. `identity_verified` attests
+            // that SOME credential was verified - the cookie, on this path -
+            // not that this header was, so widening the set would let a
+            // cookie-authenticated caller hand-roll an unsigned JWT and mint
+            // themselves a private bucket. Keep this set <= the gate's.
             if let Some(sub) = req
                 .headers()
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|auth| {
-                    auth.strip_prefix("Bearer ")
-                        .or_else(|| auth.strip_prefix("bearer "))
-                })
+                .and_then(|auth| auth.strip_prefix("Bearer "))
                 .and_then(|jwt| jwt_subject_unverified(jwt.trim()))
             {
                 return format!("sub:{sub}");
@@ -925,8 +929,13 @@ pub(crate) fn subscription_affinity_key(
     insecure_dev: bool,
     trust_proxy: bool,
 ) -> String {
+    // `"Bearer "` ONLY - see the note in `compute_bucket_id`. This function is
+    // stricter-looking but weaker: it takes no `identity_verified`, so it reads
+    // the header unconditionally. Accepting a scheme the gate never validated
+    // would let an entirely UNAUTHENTICATED caller choose their own affinity
+    // key and so steer their own CHWBL worker.
     if let Some(auth) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
-        if let Some(rest) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
+        if let Some(rest) = auth.strip_prefix("Bearer ") {
             if let Some(sub) = jwt_subject_unverified(rest.trim()) {
                 return format!("sub:{sub}");
             }
@@ -3803,6 +3812,58 @@ mod tests {
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::User, false, false, true);
         assert_eq!(id, "sub:usr_alice");
+    }
+
+    #[test]
+    fn compute_bucket_id_ignores_a_bearer_scheme_the_auth_gate_never_validated() {
+        // The auth gate (`router/auth.rs`) strips `"Bearer "` and NOTHING else,
+        // so a lowercase `bearer ` credential is invisible to it: the request
+        // falls through to the cookie arm, authenticates on the cookie, and
+        // arrives here with identity_verified = true.
+        //
+        // If bucketing also accepted `"bearer "`, that flag would be doing work
+        // it never earned - it attests that SOME identity was verified, not
+        // that THIS header was. A caller could then hand-roll an unsigned JWT,
+        // pick any `sub`, and mint themselves a private rate-limit bucket per
+        // request, which is exactly the hole `identity_verified` was added to
+        // close.
+        //
+        // The invariant: the prefix set here must not be WIDER than the gate's.
+        let req = ntex::web::test::TestRequest::default()
+            .header(
+                "authorization",
+                format!("bearer {}", jwt_with_sub("usr_attacker")),
+            )
+            .header("cookie", "__Host-zeroship_app_session=real-session")
+            .to_http_request();
+        let id = compute_bucket_id(&req, RateLimitPer::User, false, false, true);
+        assert_ne!(
+            id, "sub:usr_attacker",
+            "a scheme the auth gate never validated must not choose the bucket"
+        );
+        assert_eq!(
+            id, "sess:real-session",
+            "it should degrade to the credential that WAS verified"
+        );
+    }
+
+    #[test]
+    fn subscription_affinity_key_ignores_the_same_unvalidated_scheme() {
+        // Same defect, second site, and WORSE: this function takes no
+        // `identity_verified` at all, so it reads the header unconditionally.
+        // An entirely unauthenticated caller can therefore choose their own
+        // affinity key and steer their own CHWBL worker.
+        let req = ntex::web::test::TestRequest::default()
+            .header(
+                "authorization",
+                format!("bearer {}", jwt_with_sub("usr_attacker")),
+            )
+            .to_http_request();
+        let key = subscription_affinity_key(&req, false, false);
+        assert!(
+            !key.contains("usr_attacker"),
+            "lowercase bearer must not steer affinity, got {key:?}"
+        );
     }
 
     #[test]
