@@ -31,6 +31,7 @@ use zeroship_runtime::state::{OpResult, ResolveValue};
 use crate::error::DbError;
 use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
+use crate::tx_route::TxRoute;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 // Transparent column-encryption pass. The helpers in
@@ -639,6 +640,8 @@ pub(crate) fn dispatch_find<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -701,7 +704,7 @@ pub(crate) fn dispatch_find<'s>(
                 };
             }
         };
-        match exec_query(&app, bq).await {
+        match exec_query(&route, bq).await {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
                     &app,
@@ -776,6 +779,8 @@ pub(crate) fn dispatch_insert<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     // Read the request-bound actor id at the synchronous
     // boundary BEFORE the async tail starts. The runtime's
@@ -808,7 +813,7 @@ pub(crate) fn dispatch_insert<'s>(
         let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
             }
             Err(e) => Err(DbError::from(e)),
         };
@@ -860,6 +865,8 @@ pub(crate) fn dispatch_insert_many<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -884,7 +891,7 @@ pub(crate) fn dispatch_insert_many<'s>(
             query::build_insert_many_with_dialect(&app, &coll, &docs, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
             }
             Err(e) => Err(DbError::from(e)),
         };
@@ -950,6 +957,8 @@ pub(crate) fn dispatch_update_one<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     // Read actor at the sync boundary (same rationale as
     // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
@@ -1005,7 +1014,7 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         let target_row = if per_row_encrypted_update {
             let target_rows = match write_pipeline::resolve_target_row_ids(
-                &app,
+                &route,
                 &coll,
                 &filter,
                 Some(1),
@@ -1103,7 +1112,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 };
             }
         };
-        match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
+        match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
                     &app,
@@ -1200,6 +1209,8 @@ pub(crate) fn dispatch_update_many<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     // Actor read at sync boundary (mirrors
     // `dispatch_update_one`'s rationale).
@@ -1258,7 +1269,7 @@ pub(crate) fn dispatch_update_many<'s>(
         };
         if per_row_encrypted_update {
             let target_rows =
-                match write_pipeline::resolve_target_row_ids(&app, &coll, &filter, None).await {
+                match write_pipeline::resolve_target_row_ids(&route, &coll, &filter, None).await {
                     Ok(rows) => rows,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -1335,7 +1346,7 @@ pub(crate) fn dispatch_update_many<'s>(
                         };
                     }
                 };
-                match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
+                match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
                     .await
                 {
                     Ok(rows) => affected += rows.len(),
@@ -1408,7 +1419,7 @@ pub(crate) fn dispatch_update_many<'s>(
                 };
             }
         };
-        match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
+        match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
                 // CAS path on updateMany: with `{ id, version: N }` the
                 // RETURNING is at most one row. Same empty-check as
@@ -1468,6 +1479,8 @@ pub(crate) fn dispatch_delete_one<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
@@ -1491,7 +1504,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             // setting `deleted_at`. Subscribers wanting to react
             // to soft-deletes inspect `new_tuple.deleted_at`.
             let rows =
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
                     .await?;
             read_pipeline::apply(&app, &coll, rows, read_pipeline::ApplyOptions::default()).await
         },
@@ -1516,6 +1529,8 @@ pub(crate) fn dispatch_delete_many<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
@@ -1535,7 +1550,7 @@ pub(crate) fn dispatch_delete_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
         },
         row_count_as_f64,
     )));
@@ -1564,6 +1579,8 @@ pub(crate) fn dispatch_purge_one<'s>(
         query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1571,7 +1588,7 @@ pub(crate) fn dispatch_purge_one<'s>(
         built,
         move |bq| async move {
             let rows =
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete)
                     .await?;
             read_pipeline::apply(
                 &app,
@@ -1603,14 +1620,15 @@ pub(crate) fn dispatch_purge_many<'s>(
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built = query::build_delete_many(app_id, collection, &filter);
     let coll = collection.to_string();
-    let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete).await
         },
         row_count_as_f64,
     )));
@@ -1630,6 +1648,8 @@ pub(crate) fn dispatch_restore_one<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
@@ -1651,7 +1671,7 @@ pub(crate) fn dispatch_restore_one<'s>(
         built,
         move |bq| async move {
             let rows =
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
             read_pipeline::apply(
                 &app,
                 &coll,
@@ -1680,6 +1700,8 @@ pub(crate) fn dispatch_restore_many<'s>(
 
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
@@ -1700,7 +1722,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
         },
         row_count_as_f64,
     )));
@@ -1749,6 +1771,8 @@ pub(crate) fn dispatch_aggregate<'s>(
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
     let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
@@ -1766,7 +1790,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows = exec_query(&app, bq).await?;
+            let rows = exec_query(&route, bq).await?;
             read_pipeline::apply(
                 &app,
                 &coll,
@@ -1815,6 +1839,8 @@ pub(crate) fn dispatch_distinct<'s>(
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
     let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
     let distinct_reads_masked_sibling = query::column_is_masked(field, schema_hint.as_ref());
@@ -1833,7 +1859,7 @@ pub(crate) fn dispatch_distinct<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows = exec_query(&app, bq).await?;
+            let rows = exec_query(&route, bq).await?;
             read_pipeline::apply(
                 &app,
                 &coll,
@@ -1894,7 +1920,8 @@ pub(crate) fn dispatch_count<'s>(
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
     let built =
         query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted);
 
@@ -1902,7 +1929,7 @@ pub(crate) fn dispatch_count<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move { exec_count(&app, bq).await },
+        move |bq| async move { exec_count(&route, bq).await },
         |n: i64| {
             #[allow(clippy::cast_precision_loss)]
             ResolveValue::F64(n as f64)
@@ -1931,12 +1958,14 @@ pub(crate) fn dispatch_upsert<'s>(
     let actor_id = system_fields_pass::current_actor_id(&state);
     let coll = collection.to_string();
     let app = app_id.to_string();
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = TxRoute::capture(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut doc = doc;
         if let Err(e) = prepare_upsert_doc_for_write(
             &mut doc,
-            &app,
+            &route,
             &coll,
             actor_id.as_deref(),
             &conflict_fields,
@@ -1964,7 +1993,7 @@ pub(crate) fn dispatch_upsert<'s>(
             // same -- re-fetch. Finer-grained read-set narrowing could
             // distinguish INSERT from UPDATE; this coarser tagging
             // doesn't need to.
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
             }
             Err(e) => Err(DbError::from(e)),
         };
@@ -2548,41 +2577,26 @@ pub async fn runtime_schema_for_tests(
     introspect_schema::runtime_schema_for(app_id, collection).await
 }
 
-#[cfg(not(feature = "test-helpers"))]
+/// Upsert's write-side prep. Unlike its `insert_many` sibling this is
+/// private with no `test-helpers` twin — nothing outside this crate
+/// called the `pub` arm, and the upsert path now needs the dispatch's
+/// [`TxRoute`] (its deterministic-encryption conflict probe issues a
+/// read that must land on the same connection as the write).
 async fn prepare_upsert_doc_for_write(
     doc: &mut Value,
-    app_id: &str,
+    route: &TxRoute,
     collection: &str,
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
     write_pipeline::apply(
-        app_id,
+        route.app_id(),
         collection,
         doc,
         write_pipeline::ApplyMode::Upsert {
             actor_id,
             conflict_fields,
-        },
-    )
-    .await
-}
-
-#[cfg(feature = "test-helpers")]
-pub async fn prepare_upsert_doc_for_write(
-    doc: &mut Value,
-    app_id: &str,
-    collection: &str,
-    actor_id: Option<&str>,
-    conflict_fields: &Value,
-) -> Result<(), DbError> {
-    write_pipeline::apply(
-        app_id,
-        collection,
-        doc,
-        write_pipeline::ApplyMode::Upsert {
-            actor_id,
-            conflict_fields,
+            route,
         },
     )
     .await

@@ -442,6 +442,55 @@ probe() {
 }
 
 # ---------------------------------------------------------------------------
+# THE OTHER DIRECTION: does an op still reach its OWN transaction?
+#
+# `cxPlain` asks whether an unrelated write is wrongly pulled INTO a
+# transaction. These ask the converse, which the same change can break: a
+# write that IS inside a transaction must still route to it.
+#
+# RUN LAST, ON PURPOSE, and appended to the same capture so section 5 still
+# diffs them. `txBranch` deliberately leaves an operation in flight when its
+# transaction aborts, and on the dev tier that strands SQLite's single
+# connection inside an open transaction: every later `db.transaction()` on
+# that server then answers `begin_failed: cannot start a transaction within a
+# transaction`. That is a real defect (`exec_settle_top_level` treats an
+# already-drained slot as settled and issues no ROLLBACK), and it is reported
+# rather than hidden -- but running this probe mid-sequence made an unrelated
+# control, the dev cross-request race, report "no pair overlapped", which is a
+# measurement destroyed rather than a finding. So the destructive probe goes
+# after everything it could contaminate.
+#
+# Its own user, so `cxTotal` stays an exact count.
+# ---------------------------------------------------------------------------
+scope_probe() {
+  local base="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
+  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  call() {
+    curl -sS -m 30 -X POST -H 'content-type: application/json' "${h[@]}" \
+      "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
+  }
+  row() { printf '%-10s %s\n' "$1" "$(call "$2" "${3:-}")" >> "$RAWFILE"; }
+
+  row bxSeed users.seed "{\"email\":\"bx-$RUN@probe.test\",\"name\":\"Bx\",\"handle\":\"bx_$RUN\"}"
+  local bxid
+  bxid="$(grep -m1 '^bxSeed ' "$RAWFILE" | grep -oE '"id":"user_[^"]+"' | head -1 | cut -d'"' -f4)"
+  if [ -z "$bxid" ]; then
+    printf '%-10s BX SEED FAILED, scope probes skipped\n' bxabort >> "$RAWFILE"
+    return 1
+  fi
+  # Writes on PARALLEL branches inside one callback. Every other tx probe
+  # awaits in a straight line, so only this one can tell whether a branched
+  # continuation inherits the transaction.
+  row txBranch todos.txBranchWrites "{\"userId\":\"$bxid\",\"tag\":\"b$RUN\"}"
+  # A write from a continuation that outlived its transaction. The answer is
+  # REPORTED, not assumed -- see the verdicts in section 4.
+  row txOrphan todos.txOrphanedWrite "{\"userId\":\"$bxid\",\"tag\":\"r$RUN\",\"holdMs\":300}"
+  # Independent tally: 0 from txBranch (the callback throws) + 1 from txOrphan
+  # (its in-tx row commits) + 0 from txOrphan's orphaned write = 1.
+  row bxTotal todos.count "{\"userId\":\"$bxid\"}"
+}
+
+# ---------------------------------------------------------------------------
 # The cross-REQUEST write-write race, run N times and CLASSIFIED.
 #
 # Separate from `probe()` and deliberately OUTSIDE the byte-diff: the deployed
@@ -589,13 +638,19 @@ RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
 probe "http://localhost:$DEV_PORT"
 grep -q '^seedA .*"id":"user_' "$WORK/dev.raw" && pass "dev server answered the probe" \
   || { fail "dev server never answered"; tail -25 "$WORK/dev.log"; head -3 "$WORK/dev.raw"; exit 1; }
-render "$WORK/dev.raw" "$WORK/dev.txt"
 
 # --- 2b. dev: the cross-REQUEST race ---------------------------------------
 race "http://localhost:$DEV_PORT" "$WORK/dev.race"
 grep -q '^runs=[1-9]' "$WORK/dev.race" \
   && pass "dev ran the concurrent-writer race ($(head -1 "$WORK/dev.race"))" \
   || { fail "dev race produced no runs"; head -5 "$WORK/dev.race" | sed 's/^/    /'; }
+
+# --- 2c. dev: the transaction-scope probes (destructive; see scope_probe) ---
+RAWFILE="$WORK/dev.raw"
+scope_probe "http://localhost:$DEV_PORT"
+
+# Rendered AFTER the scope probes so their rows reach the section-5 diff.
+render "$WORK/dev.raw" "$WORK/dev.txt"
 
 # --- 3. deployed side ------------------------------------------------------
 echo ""
@@ -730,13 +785,19 @@ RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
 probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
 grep -q '^seedA .*"id":"user_' "$WORK/deployed.raw" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -4 "$WORK/deployed.raw"; tail -20 "$WORK/worker.log"; }
-render "$WORK/deployed.raw" "$WORK/deployed.txt"
 
 # --- 3b. deployed: the cross-REQUEST race -----------------------------------
 race "http://localhost:$GATE_PORT/apps/$APP_NAME" "$WORK/deployed.race" "X-Api-Key: $API_KEY"
 grep -q '^runs=[1-9]' "$WORK/deployed.race" \
   && pass "deployed ran the concurrent-writer race ($(head -1 "$WORK/deployed.race"))" \
   || { fail "deployed race produced no runs"; head -5 "$WORK/deployed.race" | sed 's/^/    /'; }
+
+# --- 3c. deployed: the transaction-scope probes (destructive; see scope_probe) ---
+RAWFILE="$WORK/deployed.raw"
+scope_probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+
+# Rendered AFTER the scope probes so their rows reach the section-5 diff.
+render "$WORK/deployed.raw" "$WORK/deployed.txt"
 
 # ---------------------------------------------------------------------------
 # 4. ABSOLUTE verdicts on the DEPLOYED answers.
@@ -763,12 +824,13 @@ drow() { grep -m1 "^$1 " "$DR" | sed -E "s/^$1 +//"; }
 # A result envelope is `{"json":...}`; a refusal is a bare `{"message":...}`.
 # 30 pre-transaction rows + 11 transaction rows (seedTx, txCommit, txRoll,
 # txNest, four txIso*, txD9, txD10, txTotal) + 5 concurrency rows (cxSeed,
-# cxPar, cxOvl, cxPlain, cxTotal). ALL SIXTEEN are result envelopes: every tx and
-# concurrency procedure catches its own failure and returns it as data,
+# cxPar, cxOvl, cxPlain, cxTotal) + 4 transaction-scope rows (bxSeed, txBranch,
+# txOrphan, bxTotal). ALL TWENTY are result envelopes: every tx, concurrency
+# and scope procedure catches its own failure and returns it as data,
 # precisely so a rollback reads as a measured value rather than as a wire
 # error. A concurrency probe that came back as a bare `{"message":...}` would
 # mean the request itself died, and this control says so.
-ROWS_WANT=46
+ROWS_WANT=50
 rows_got=$(wc -l < "$DR")
 rows_json=$(grep -c ' {"json":' "$DR")
 # SEVEN rows are expected NOT to be result envelopes: `orphan` and `dupEmail`
@@ -991,20 +1053,72 @@ want cxOvl "the overlapping transaction's committed row survived the other's rol
 # THE DEFAULT PATH. Leg B is a plain insert, not a transaction. It must be
 # unaffected by a transaction that merely overlaps it.
 #
-# KNOWN RED as of 2026-08-10, on BOTH tiers, and deliberately left that way:
-# `crates/plugin-db/src/exec.rs` routes ordinary CRUD onto the open tx
-# connection whenever `has_tx_for(app_id)` is true, with no notion of WHOSE
-# transaction it is. So an unrelated write joins a stranger's transaction and
-# dies with its rollback. It is the same root cause as the `cxOvl` defect fixed
-# in this pass (ambient state standing in for call context) but a different
-# consumer, and the correct fix tags each CRUD dispatch site with the async
-# scope captured at dispatch. Two verdicts fail here and `cxTotal` reads 3
-# instead of 4. Do NOT relax these to match the current behaviour -- see
-# docs/pilot/e2e-scenarios.md row 3.
+# RED from 2026-08-10 until #254 was fixed the same day: `exec.rs` routed
+# ordinary CRUD onto the open tx connection whenever `has_tx_for(app_id)` was
+# true, with no notion of WHOSE transaction it was, so an unrelated write
+# joined a stranger's transaction and died with its rollback (`bAfter:0`,
+# `cxTotal` 3). Same root cause as the `cxOvl` defect -- ambient state standing
+# in for call context -- in a different consumer. The fix captures the async
+# scope at each CRUD dispatch site (crates/plugin-db/src/tx_route.rs).
+# Do NOT relax these -- see docs/pilot/e2e-scenarios.md row 3.
+#
+# DEPLOYED ONLY, and that is the point of section 5: the dev tier still answers
+# `bAfter:0`. Routing is now correct on both tiers, but on SQLite there is
+# nowhere else to route TO -- `acquire_dedicated_client` returns a handle to
+# the SAME single writer connection the shared/autocommit path uses
+# (crates/plugin-db/src/backend/sqlite/mod.rs:514), so an ordinary write still
+# physically executes inside whatever transaction that connection is holding.
+# Root-caused, NOT worked around: closing it needs a second SQLite connection
+# (or a claim-wait, which can deadlock when a transaction awaits a promise
+# created before it opened). Left as a measured divergence.
 want cxPlain 'the aborting transaction rolled its own row back'          '"aAfter":0'
 want cxPlain 'the ordinary overlapping write reported success'           '"inserted":true'
 want cxPlain "an ordinary write is not undone by a stranger's rollback"  '"bAfter":1'
 want cxTotal 'exactly four concurrency-probe rows committed' '{"json":4}'
+
+# --- the CONVERSE: an op inside a transaction still reaches it --------------
+# A routing fix that severed in-transaction ops from their transaction would
+# leave every verdict above green (they only assert that unrelated work is
+# left alone) while quietly breaking transactions altogether. These are the
+# other half of the pair.
+#
+# txBranch: two writes issued on PARALLEL continuations inside one callback,
+# then the callback throws.
+#
+# `TRANSACTION_CONNECTION_BUSY` is not a disappointment here, it is THE PROOF.
+# A transaction owns one connection, so its ops cannot overlap; the branch that
+# loses the race is refused. That refusal can only happen if the branch was
+# routed to the transaction in the first place -- a branch that had fallen
+# through to the pool would have succeeded and autocommitted. So this verdict
+# is what establishes that a continuation forked inside the callback still
+# carries the transaction scope. Measured on both tiers, 2026-08-10.
+want txBranch 'a branch write reached the transaction, not the pool' '"code":"TRANSACTION_CONNECTION_BUSY"'
+# And nothing the branches wrote may survive the abort. This one ALSO covers
+# the settle path: `exec_settle_top_level` treats an already-drained slot as
+# "settled" and issues no ROLLBACK, so a branch still holding the client at
+# abort time can leave its row behind. That is what dev answers today
+# (`countAfter":1`, and the NEXT transaction then fails to BEGIN) -- see the
+# divergence in section 5.
+want txBranch 'writes on parallel branches left nothing behind' '"countAfter":0'
+# txOrphan: a write dispatched inside the callback but settling AFTER the
+# transaction committed. There is no correct connection for it; the outcome
+# that must not happen is a silent success. The in-tx row still commits.
+# CONTROL first: without it, an orphan promise that never ran would leave
+# orphanAfter at 0 and read as three confident greens.
+want txOrphan 'CONTROL: the orphaned write was actually started'  '"orphanStarted":1'
+want txOrphan 'the transaction itself committed'                     '"error":null'
+want txOrphan "the transaction's own row committed"                  '"txAfter":1'
+want txOrphan 'the orphaned write did NOT silently commit'           '"orphanAfter":0'
+# SCREAMING_CASE, not the native `transaction_scope_expired`: every native code
+# that reaches a creator through a COLLECTION op is re-stamped by
+# `canonicalErrorCode` (sdks/db/src/errors.ts:27) before the throw leaves the
+# isolate. Codes raised by `db.transaction()` itself are not (`txD10` above
+# asserts `savepoint_depth_exceeded` in native spelling) -- so the two halves of
+# the transaction surface hand creators two different casings. Asserted in the
+# spelling that actually arrives, with the inconsistency named rather than
+# smoothed over.
+want txOrphan 'the orphaned write was refused as an expired scope'   '"code":"TRANSACTION_SCOPE_EXPIRED"'
+want bxTotal 'exactly one transaction-scope row committed' '{"json":1}'
 
 # --- the isolation clause and the savepoints, read off the Postgres log ------
 # Everything above measures RESPONSES, and the responses cannot see an

@@ -61,6 +61,8 @@ export default defineApp({
     "rpc:todos.txParallel": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.txOverlap": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.txPlainWrite": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txBranchWrites": { auth: "anon", publiclyAccessible: true },
+    "rpc:todos.txOrphanedWrite": { auth: "anon", publiclyAccessible: true },
     "rpc:todos.txRaceStep": { auth: "anon", publiclyAccessible: true },
     "rpc:users.seed": { auth: "anon", publiclyAccessible: true },
     "rpc:users.getPair": { auth: "anon", publiclyAccessible: true },

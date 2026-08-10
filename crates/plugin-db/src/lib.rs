@@ -186,6 +186,14 @@ pub(crate) mod tx_scope;
 #[cfg(feature = "test-helpers")]
 pub mod tx_scope;
 
+// The tx-vs-pool routing decision, frozen at the V8 dispatch frame and
+// carried into the spawned future. Always `pub` (not feature-gated like
+// its neighbours): the `TxRoute` TYPE has to be nameable wherever the
+// `exec` entry points are, and its production constructor needs a
+// `&mut v8::PinScope`, so exposing the type opens nothing. See the
+// module docs for why a missed dispatch site cannot compile.
+pub mod tx_route;
+
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod wal_consumer;
 #[cfg(feature = "test-helpers")]
