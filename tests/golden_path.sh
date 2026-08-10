@@ -841,12 +841,47 @@ gp_close_step
 #
 # CROSS-CHECKED against a second, independent instrument, because a count read
 # out of the run it is meant to guard proves only that the run was self-
-# consistent. `grep -c 'pass "'` finds 26 call sites in this file. Two of them
+# consistent. `grep -c 'pass "'` counts the call sites in this file. Two of them
 # (`created app`, `deployed real vite .zship`) live in step 3's ZEROSHIP_TOKEN
 # arm and one (`dev-provisioned app`) in its else arm, so exactly one arm ever
-# fires: 26 - 2 = 24 without a token, 26 - 1 = 25 with one. The dynamic 24 and
-# the static 24 agree, and they disagree for different reasons if either is
-# wrong.
+# fires: static - 2 without a token, static - 1 with one. The two instruments
+# disagree for different reasons if either is wrong, which is the whole point.
+#
+# THE COMMAND NAMED ABOVE MUST EXCLUDE COMMENTS, and for years it did not.
+# `grep -c 'pass "'` matches this very block -- the sentence documenting the
+# instrument contains the pattern it searches for. So the documented command has
+# never returned the call-site count, and the gap grows every time someone
+# writes about it. Measured 2026-08-10:
+#
+#     commit      raw   call sites   floor   floor correct?
+#     c2adb8774    26      26        none    (no floor yet)
+#     0c852e2e1    27      26          24    yes, 26 - 2
+#     994bb679b    28      27          25    yes, 27 - 2
+#     62695f077    29      28          26    yes, 28 - 2
+#     08b0e09b2    30      29          26    one low, deliberately
+#
+# THE FLOOR WAS NEVER WRONG. Every value was derived from the true call-site
+# count; only the prose quoted a number the named command does not produce. The
+# one-low at HEAD is the deferred bump from 08b0e09b2, not drift.
+#
+# I MADE THE MISTAKE THIS INDUCES WHILE WRITING THIS COMMENT. Re-deriving with
+# the documented command gave 30, and 30 - 2 = 28 against a floor of 26, so I
+# drafted a paragraph reporting "two assertions of slack" in the gate. There is
+# none. The contaminated instrument turns an accurate floor into an apparent
+# defect, and the correction it suggests is to RAISE the floor -- which would
+# have made the gate falsely red on an honest run. A self-counting instrument is
+# worse than no second instrument, because it fails toward action.
+#
+# So the command to re-derive is, and the exclusion is not optional:
+#
+#     grep -v '^[[:space:]]*#' tests/golden_path.sh | grep -c 'pass "'
+#
+# The floor is then that count minus 2 (no token) or minus 1 (with one). At HEAD
+# that is 29 - 2 = 27. NOT APPLIED HERE: 27 is derived, and a full four-service
+# run to confirm the dynamic half was not available this pass. Raising a floor
+# from an unconfirmed derivation is the failure mode described two paragraphs
+# up. 26 stays until a clean run reports the dynamic total -- too low is
+# conservative and can never produce a false green.
 #
 # 24 IS THEREFORE THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where
 # a floor has to sit - the same reasoning run_billing_suite.sh applies to its
