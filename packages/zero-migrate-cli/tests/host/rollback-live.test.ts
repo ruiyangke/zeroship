@@ -43,6 +43,7 @@ const ADDON_PATH = resolve(
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const TABLE = "rollback_notes";
+const SEQUENCE = "rollback_counter";
 
 function spawnCli(args: readonly string[], cwd: string) {
   return spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
@@ -161,6 +162,84 @@ test("PostgreSQL: the CLI rolls an applied migration back and leaves it pending"
       },
     );
   } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
+/** Two migrations, where the second drops what the first created. Rolling back only the
+ *  drop has to re-create the sequence from the definition the EARLIER migration authored,
+ *  which is the only place that definition exists once the drop has run - the catalog no
+ *  longer has it, and the dropped migration's own text says nothing about how to rebuild it. */
+function scaffoldSequenceDrop(schema: string): string {
+  const dir = mkdtempSync(join(HERE, "rollback-live-seq-"));
+  writeFileSync(
+    join(dir, "20260101000000_create_counter.ts"),
+    `import { sequence } from "zero-migrate";
+export const name = "create_counter";
+export function up() {
+  sequence(${JSON.stringify(SEQUENCE)}).create({});
+}
+`,
+  );
+  writeFileSync(
+    join(dir, "20260101000001_drop_counter.ts"),
+    `import { sequence } from "zero-migrate";
+export const name = "drop_counter";
+export function up() {
+  sequence(${JSON.stringify(SEQUENCE)}).drop({});
+}
+`,
+  );
+  writeFileSync(join(dir, "policy.toml"), noInjectPolicy(schema));
+  return dir;
+}
+
+test("PostgreSQL: rolling back a dropSequence rebuilds it from the migration that created it", async (t) => {
+  const client = await connectLivePg(t);
+  if (!client) return;
+
+  const schema = uniqueSchema("rb_live_seq");
+  const metaSchema = `${schema}_migrations`;
+  const sequenceExists = async (): Promise<boolean> => {
+    const result = await client.query(
+      `SELECT 1 FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`,
+      [schema, SEQUENCE],
+    );
+    return result.rows.length > 0;
+  };
+
+  let dir: string | undefined;
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    dir = scaffoldSequenceDrop(schema);
+
+    const applied = spawnCli([...baseArgs(schema, pgUrl()), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+    assert.equal(
+      await sequenceExists(),
+      false,
+      "both migrations ran, so the sequence is created and then dropped",
+    );
+
+    // Unwind ONLY the drop. The create stays applied, which is what makes the earlier
+    // envelope part of the history the inverse is reconstructed from rather than
+    // something the rollback is also undoing.
+    const rolledBack = spawnCli(
+      [...baseArgs(schema, pgUrl()), "rollback", "--steps", "1", "--approve"],
+      dir,
+    );
+    assert.equal(rolledBack.status, 0, `rollback failed: ${rolledBack.stderr}`);
+    assert.ok(
+      await sequenceExists(),
+      "the reversed dropSequence rebuilds the sequence the earlier migration authored",
+    );
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
     await client
       .query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
