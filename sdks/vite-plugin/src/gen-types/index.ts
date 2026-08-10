@@ -82,11 +82,32 @@ export async function genTypesFromSchemaFile(
     // (the 7 system columns + [id] PK + system indexes). The SAME ceiling on both
     // sources keeps the descriptor + envelope outputs byte-identical.
     charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
-    // The RUNTIME DESCRIPTOR is dialect-neutral - it carries types, idPrefix and
-    // mask facets, never DDL - so this picks the dialect the engine renders
-    // through, not the dialect the output is for. `postgres` is the platform
-    // tier; the SQLite dev tier consumes the same descriptor for typing only.
-    // Required by the engine since the vendored pin moved.
+    // `postgres` is the platform tier; the SQLite dev tier consumes the same
+    // descriptor for typing only. Required by the engine since the vendored pin
+    // moved.
+    //
+    // THIS CONSTANT IS SAFE BY A CONDITION, NOT BY CONSTRUCTION, and the comment
+    // that used to sit here got that wrong. It claimed the descriptor is
+    // "dialect-neutral - it carries types, idPrefix and mask facets, never DDL".
+    // The second half is true; the first half does not follow from it and is
+    // false in general. The dialect does not change how a column RENDERS here -
+    // it changes WHICH COLUMNS EXIST, before rendering, because the fold selects
+    // `Op::Dialectal` legs. A history authored with `dialect({ pg, mysql })`
+    // yields a different column set per target, and the descriptor lists columns.
+    // (Established by zero-migrate, ZERO-MIGRATE-2026-08-10-192, citing the
+    // `dialect` field contract and two live tests that fold one history under two
+    // dialects and match each against that database's real catalog.)
+    //
+    // The condition: NO migration in this repo authors a dialectal leg. Measured
+    // 2026-08-10 - zero `dialect(` call sites across all 16 files under
+    // db/migrations-ts/ and examples/*/migrations/. While that holds, folding
+    // through `postgres` is exactly right.
+    //
+    // Nothing enforces it. `emitDialectal` is exposed on our own op surface
+    // (sdks/migrate/src/ops.ts:525), so the first migration to use it makes this
+    // constant silently wrong for the SQLite dev tier - a column set that the dev
+    // database does not have. If you are adding a dialectal leg, this line is the
+    // thing that breaks, and it will not tell you.
     dialect: "postgres",
   });
   const runtimeJson = unwrap(reply, "manual schema source");
