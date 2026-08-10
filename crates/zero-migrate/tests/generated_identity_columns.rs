@@ -419,3 +419,36 @@ fn fold_carries_generated_and_identity_column_facets() {
     let id = table.columns.iter().find(|c| c.name == "id").unwrap();
     assert_eq!(id.identity, Some(IdentityCol { always: false }));
 }
+
+// The charter injects its system string columns as a BOUNDED `String { length: 255 }`
+// so MySQL can key them, and MySQL is the dialect that reasoning exists for. The
+// Postgres and SQLite renderings of those columns are pinned above; this pins the
+// MySQL one, which was the only arm nothing asserted.
+//
+// The second assertion is the specific regression: `mysql_ddl_type` maps an
+// UNBOUNDED `text` to `VARCHAR(191)`, and only an early return on the declared
+// length keeps these columns off that arm. If that ordering is ever reversed, the
+// bound silently narrows and every id longer than 191 truncates.
+#[test]
+fn mysql_renders_the_injected_system_columns_as_bounded_varchar() {
+    let up = lower_create(
+        SqlDialect::Mysql,
+        create_table(vec![col("qty", ColType::Int)], None),
+    )
+    .unwrap();
+    assert_eq!(
+        up,
+        "CREATE TABLE `app`.`line_items` (`created_at` DATETIME(6) NOT NULL, \
+         `created_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, \
+         `deleted_at` DATETIME(6), \
+         `id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs PRIMARY KEY NOT NULL, \
+         `qty` INT, \
+         `updated_at` DATETIME(6) NOT NULL, \
+         `updated_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, \
+         `version` INT NOT NULL)",
+    );
+    assert!(
+        !up.contains("VARCHAR(191)"),
+        "an injected system column must not fall onto the unbounded-text arm: {up}"
+    );
+}
