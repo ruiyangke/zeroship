@@ -89,6 +89,14 @@ MUTATE="${MUTATE:-none}"
 # Must match examples/env-probe/src/index.ts. Re-asserted against that file
 # below so the pair cannot drift silently -- a drifted name would make every
 # leak assertion trivially green.
+# The opt-in secret layer. Secrets are NOT surfaced by being set: only names
+# placed in the expose list via `PUT /api/apps/:id/env/expose` reach the
+# isolate (crates/control/src/env_handlers.rs:265). Two secrets differing in
+# exactly that one respect turn "a secret did not arrive" from an assumption
+# into a measurement: EXPOSED must appear, HIDDEN must not. Before this, no
+# harness had populated the layer at all, so nothing was known either way.
+SECRET_EXPOSED_KEY="ZS_SECRET_EXPOSED"
+SECRET_HIDDEN_KEY="ZS_SECRET_HIDDEN"
 CANARY_KEY="ZS_LEAK_PROBE"
 CONTROL_KEY="ZS_ENV_CONTROL"
 FIXTURE_MARKER="ZSENVP-3c9d-fixture"
@@ -262,6 +270,22 @@ vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_
 [ "$vc" = "204" ] && pass "deployed app var $CONTROL_KEY (HTTP $vc)" \
   || { fail "could not set app var $CONTROL_KEY (HTTP $vc) -- the positive control is unavailable"; }
 
+# THE OPT-IN SECRET LAYER: two secrets, one opted into the expose list and one
+# not. Setting a secret is not the same as exposing it.
+for k in "$SECRET_EXPOSED_KEY" "$SECRET_HIDDEN_KEY"; do
+  sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/secrets" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+    -d "{\"key\":\"$k\",\"value\":\"secret-value-for-$k\"}")"
+  [ "$sc" = "204" ] && pass "stored secret $k (HTTP $sc)" \
+    || fail "could not store secret $k (HTTP $sc) -- the secret-layer arms below are vacuous"
+done
+xc="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/env/expose" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -d "{\"keys\":[\"$SECRET_EXPOSED_KEY\"]}")"
+[ "$xc" = "200" ] || [ "$xc" = "204" ] \
+  && pass "opted $SECRET_EXPOSED_KEY into the expose list, left $SECRET_HIDDEN_KEY out (HTTP $xc)" \
+  || fail "could not set the expose list (HTTP $xc) -- cannot tell an unexposed secret from a broken expose call"
+
 if [ "$MUTATE" = "shadow-app-id" ]; then
   # THE LAYERING QUESTION, not a red-before-green. `crates/worker/src/cache.rs`
   # injects `APP_ID` as a worker-internal var; `crates/runtime/src/core/init.rs`
@@ -334,6 +358,25 @@ for s in appEnv processEnv processEnvIndirect globalEnv; do
     CONTROLS_OK=0
   fi
 done
+
+# THE OPT-IN SECRET LAYER, measured rather than assumed. Both secrets were
+# stored; only one was opted into the expose list. If the exposed one is absent
+# the layer does not work; if the hidden one is present the opt-in is not a
+# gate. Reported as observations first so a surprise reads as data, not noise.
+for s in appEnv processEnv processEnvIndirect globalEnv; do
+  has_exposed="$(node -e 'const r=require(process.argv[1]);const k=(((r.json||r)[process.argv[2]])||{}).keys||[];process.stdout.write(k.includes(process.argv[3])?"yes":"no")' "$WORK/deployed.json" "$s" "$SECRET_EXPOSED_KEY" 2>/dev/null || echo "err")"
+  has_hidden="$(node -e 'const r=require(process.argv[1]);const k=(((r.json||r)[process.argv[2]])||{}).keys||[];process.stdout.write(k.includes(process.argv[3])?"yes":"no")' "$WORK/deployed.json" "$s" "$SECRET_HIDDEN_KEY" 2>/dev/null || echo "err")"
+  echo "    $s: exposed-secret-present=$has_exposed  hidden-secret-present=$has_hidden"
+  if [ "$has_hidden" = "yes" ]; then
+    fail "OPT-IN BREACH: deployed $s exposes $SECRET_HIDDEN_KEY, which was never added to the expose list"
+  fi
+done
+EXPOSED_ANY="$(node -e 'const r=require(process.argv[1]);const o=(r.json||r);const k=process.argv[2];process.stdout.write(["appEnv","processEnv","processEnvIndirect","globalEnv"].some(s=>(((o[s])||{}).keys||[]).includes(k))?"yes":"no")' "$WORK/deployed.json" "$SECRET_EXPOSED_KEY" 2>/dev/null || echo "err")"
+if [ "$EXPOSED_ANY" = "yes" ]; then
+  pass "EXPOSED HALF DELIVERS: $SECRET_EXPOSED_KEY reached the deployed app on at least one surface (this says nothing about the hidden one -- the per-surface loop above is what judges the gate)"
+else
+  fail "OPT-IN SECRET LAYER DOES NOT DELIVER: $SECRET_EXPOSED_KEY was stored AND opted into the expose list, yet reached no deployed surface. The hidden secret is correctly absent, so this is not the opt-in gate working -- it is the exposed half not arriving. docs/pilot/e2e-scenarios.md describes this as layer 2 of the deployed env; on this evidence that description is aspirational."
+fi
 
 # WHY A SURFACE CAN READ EMPTY. `crates/runtime/src/core/init.rs` sets
 # `process.env` and `globalThis.__env__` to THE SAME V8 object, and that is the
