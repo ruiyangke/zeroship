@@ -151,6 +151,25 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
 /// atomic `UPDATE ... RETURNING` so concurrent requests can't race the
 /// sliding window.
 ///
+/// **NOT the request path, and not what enforces revocation.** This has no
+/// production caller: since slice R1b the per-request identity check verifies
+/// the signed stateless cookie locally and gates it on the per-app family
+/// marker (`is_family_revoked_since(client_id, pws_, iat)`, an uncached
+/// `SELECT EXISTS` on every request — see
+/// `crate::router::auth::resolve_app_session_user_header_inner`).
+/// `gateway_sessions` is the AUDIT and visibility record; the family marker is
+/// the enforcement truth. Every caller of this function is a gateway
+/// integration test using it as an oracle to assert that a revoke actually
+/// wrote `revoked_at`.
+///
+/// Stated because the wording above invites the opposite reading. "Valid means
+/// ... not revoked" on a function named `validate` reads like THE revocation
+/// gate, and reading it that way is how you conclude the gate is missing when
+/// this turns out to be uncalled — the absence of THIS mechanism is not the
+/// absence of the property. Both revoke paths (`revoke_app_sessions_for_sid`
+/// and `revoke_app_sessions_for_user`) feed `teardown_per_app_user`, which
+/// records the family marker the hot path actually reads.
+///
 /// # Errors
 ///
 /// [`GatewayError::Db`] on PG failure.
