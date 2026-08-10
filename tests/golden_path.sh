@@ -211,6 +211,18 @@ zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
     fail "sdks/vite-plugin/dist is stale (ZS_FRESHNESS_STRICT=1)"; exit 1;
   }
 
+# The state-dir-lock marker is declared once in Rust and once in TypeScript, and
+# the dev banner picks between two contradictory remedies based on the TS copy.
+# Both crate suites pass if only one spelling is edited - neither can see the
+# other - so this is the only comparison. Exits 2 when it cannot find a
+# declaration, because a grep that matches nothing is how a gate goes quietly
+# green. Self-test: tests/lib/state_dir_lock_marker.sh --selftest
+bash "$ROOT/tests/lib/state_dir_lock_marker.sh" || {
+  rc=$?
+  [ "$rc" = "2" ] && { fail "state-dir-lock marker gate could not run"; exit 2; }
+  fail "state-dir-lock marker differs between Rust and TypeScript"; exit 1;
+}
+
 # NOT covered here, and worth knowing: the RUST binaries this script starts are
 # unchecked. `zs_check_binary_freshness` is the function for that and takes the
 # binary directory plus names; wiring it needs this script's binary list, which
