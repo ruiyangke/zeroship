@@ -426,7 +426,27 @@ else
         pass "node-compat: openai-demo ping → 200 'pong' over the worker (openai SDK + node:buffer/Buffer/process initialized in V8 with the OPENAI_API_KEY secret)"
       elif [ "$SERVE_OK" = "yes" ]; then
         pass "node-compat PROVEN GOOD: openai-demo ping → 200 'pong' under \`zeroship serve\` with OPENAI_API_KEY in env (openai SDK + node:buffer/Buffer/process init clean in V8)"
-        known "EXPECTED (not a defect): the same bundle over the WORKER path → HTTP $OAI_CODE, because this harness sets the secret but never opts it into the expose list (PUT /api/apps/{id}/env/expose). Secrets are opt-in by design, so the key is absent on the worker and the app cannot initialise. To turn this into a real test of the expose layer, add the key to the expose list and assert it arrives, with a second unexposed secret as the control. body: $(echo "$OAI_BODY" | head -c 120)"
+        # This arm used to be a `known` reading "EXPECTED (not a defect)",
+        # which inflated the known-fail counter with something that is not a
+        # defect at all (task #256: that counter carried four incompatible
+        # meanings). But it could not simply become a `pass` either: it
+        # ASSERTED a cause it never checked. The 503 body stops at
+        # "module init failed: Evaluate reje..." and never names a credential,
+        # so "the key is absent because it was not exposed" was an inference
+        # presented as a reason.
+        #
+        # So prove it instead. The worker log is where the cause surfaces, and
+        # `Missing credentials` is the harness's own existing vocabulary for it
+        # (the else-branch below already greps for exactly that). If the cause
+        # is confirmed, this is a real assertion about opt-in secrets working
+        # as designed and earns a pass. If it is not, the premise was wrong and
+        # that is a finding, not a footnote.
+        OAI_CAUSE="$(grep -ioE "Missing credentials|OPENAI_API_KEY" "$WORK/worker.log" 2>/dev/null | tail -1)"
+        if [ -n "$OAI_CAUSE" ]; then
+          pass "opt-in secrets hold on the worker: openai-demo → HTTP $OAI_CODE and the worker log names the cause ($OAI_CAUSE). The harness sets OPENAI_API_KEY but never adds it to the expose list (PUT /api/apps/{id}/env/expose), so it is absent in-isolate by design and module init cannot complete"
+        else
+          fail "openai-demo failed over the worker (HTTP $OAI_CODE) and the worker log does NOT name a missing credential, so the 'not exposed' explanation this harness has carried is unproven. Something else broke module init. body: $(echo "$OAI_BODY" | head -c 160)"
+        fi
       else
         ERR="$(grep -iEo "Cannot find module '[^']*'|node:[a-z]+ .*not|ReferenceError: [A-Za-z]+ is not defined|Missing credentials" "$WORK/worker.log" "$WORK/oai_serve.log" 2>/dev/null | tail -1)"
         known "node-compat: openai-demo ping → worker HTTP $OAI_CODE, serve=$SERVE_OK; ${ERR:-$(echo "$OAI_BODY" | head -c 140)} — module-init finding for the pilot"
