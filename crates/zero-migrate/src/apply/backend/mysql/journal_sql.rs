@@ -286,21 +286,34 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     Ok(())
 }
 
+/// Every journal identity column that must compare byte-for-byte.
+///
+/// A migration version read under a case-insensitive collation could match a version
+/// it is not, so each of these carries `utf8mb4_bin` and
+/// [`ensure_binary_identity_columns`] repairs any that does not.
+///
+/// Shared with the test that asserts the repair rather than mirrored into it: a
+/// hand-copied second list is a list that silently stops covering a table somebody
+/// adds here, which is how the rollback marker's own column nearly shipped unchecked.
+pub const BINARY_IDENTITY_COLUMNS: [(&str, &str); 10] = [
+    ("schema_migrations", "version"),
+    ("schema_migrations", "checksum"),
+    ("schema_migrations_supersedes", "squash_version"),
+    ("schema_migrations_supersedes", "superseded_version"),
+    ("schema_migrations_inflight", "version"),
+    ("schema_migrations_inflight", "checksum"),
+    ("schema_migrations_rollback_inflight", "version"),
+    ("schema_migrations_rollback_inflight", "checksum"),
+    ("schema_migrations_recovery", "version"),
+    ("schema_migrations_recovery", "checksum"),
+];
+
 async fn ensure_binary_identity_columns<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     meta: &str,
 ) -> Result<(), JournalError> {
-    const EXPECTED: [(&str, &str); 8] = [
-        ("schema_migrations", "version"),
-        ("schema_migrations", "checksum"),
-        ("schema_migrations_supersedes", "squash_version"),
-        ("schema_migrations_supersedes", "superseded_version"),
-        ("schema_migrations_inflight", "version"),
-        ("schema_migrations_inflight", "checksum"),
-        ("schema_migrations_recovery", "version"),
-        ("schema_migrations_recovery", "checksum"),
-    ];
+    const EXPECTED: [(&str, &str); 10] = BINARY_IDENTITY_COLUMNS;
     let rows = conn
         .query(
             "SELECT TABLE_NAME AS table_name,
@@ -314,6 +327,8 @@ async fn ensure_binary_identity_columns<D: SqlSession>(
                   OR (TABLE_NAME = 'schema_migrations_supersedes'
                       AND COLUMN_NAME IN ('squash_version', 'superseded_version'))
                   OR (TABLE_NAME = 'schema_migrations_inflight'
+                      AND COLUMN_NAME IN ('version', 'checksum'))
+                  OR (TABLE_NAME = 'schema_migrations_rollback_inflight'
                       AND COLUMN_NAME IN ('version', 'checksum'))
                   OR (TABLE_NAME = 'schema_migrations_recovery'
                       AND COLUMN_NAME IN ('version', 'checksum')))

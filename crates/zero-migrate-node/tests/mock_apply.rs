@@ -87,32 +87,25 @@ impl MockDispatch {
         if sql.contains("COLLATION_NAME AS collation_name")
             && sql.contains("schema_migrations_inflight")
         {
-            return [
-                ("schema_migrations", "version"),
-                ("schema_migrations", "checksum"),
-                ("schema_migrations_supersedes", "squash_version"),
-                ("schema_migrations_supersedes", "superseded_version"),
-                ("schema_migrations_inflight", "version"),
-                ("schema_migrations_inflight", "checksum"),
-                ("schema_migrations_recovery", "version"),
-                ("schema_migrations_recovery", "checksum"),
-            ]
-            .into_iter()
-            .map(|(table, column)| JsRow {
-                columns: vec![
-                    "table_name".into(),
-                    "column_name".into(),
-                    "character_set_name".into(),
-                    "collation_name".into(),
-                ],
-                cells: vec![
-                    text_cell(table),
-                    text_cell(column),
-                    text_cell("utf8mb4"),
-                    text_cell("utf8mb4_bin"),
-                ],
-            })
-            .collect();
+            // The engine's own list, not a copy: a journal table added there must not
+            // be able to go unanswered here.
+            return zero_migrate::apply::backend::mysql::BINARY_IDENTITY_COLUMNS
+                .into_iter()
+                .map(|(table, column)| JsRow {
+                    columns: vec![
+                        "table_name".into(),
+                        "column_name".into(),
+                        "character_set_name".into(),
+                        "collation_name".into(),
+                    ],
+                    cells: vec![
+                        text_cell(table),
+                        text_cell(column),
+                        text_cell("utf8mb4"),
+                        text_cell("utf8mb4_bin"),
+                    ],
+                })
+                .collect();
         }
         Vec::new()
     }

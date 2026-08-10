@@ -37,6 +37,12 @@ pub(crate) mod backfill_sql;
 pub(crate) mod drift_sql;
 pub(crate) mod identity_sql;
 pub(crate) mod journal_sql;
+
+/// The journal identity columns that must compare byte-for-byte, re-exported so a
+/// host mocking this journal answers the collation probe from the same list the
+/// bootstrap checks. Two hand-copied mirrors of it already drifted the moment a
+/// table was added.
+pub use journal_sql::BINARY_IDENTITY_COLUMNS;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
@@ -1481,6 +1487,8 @@ mod render_tests {
                     ("schema_migrations_supersedes", "superseded_version"),
                     ("schema_migrations_inflight", "version"),
                     ("schema_migrations_inflight", "checksum"),
+                    ("schema_migrations_rollback_inflight", "version"),
+                    ("schema_migrations_rollback_inflight", "checksum"),
                     ("schema_migrations_recovery", "version"),
                     ("schema_migrations_recovery", "checksum"),
                 ]
@@ -4429,16 +4437,9 @@ mod render_tests {
             .expect("legacy journal upgrades safely");
 
         let all = rec.log.borrow().join("\n");
-        for (table, column) in [
-            ("schema_migrations", "version"),
-            ("schema_migrations", "checksum"),
-            ("schema_migrations_supersedes", "squash_version"),
-            ("schema_migrations_supersedes", "superseded_version"),
-            ("schema_migrations_inflight", "version"),
-            ("schema_migrations_inflight", "checksum"),
-            ("schema_migrations_recovery", "version"),
-            ("schema_migrations_recovery", "checksum"),
-        ] {
+        // Iterate the production list rather than a copy of it, so a table added to
+        // the upgrade set cannot be added without this test demanding its repair.
+        for (table, column) in journal_sql::BINARY_IDENTITY_COLUMNS {
             assert!(
                 all.contains(&format!(
                     "ALTER TABLE `proj_x_migrations`.`{table}` MODIFY COLUMN `{column}` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL"
