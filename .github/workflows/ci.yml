@@ -89,11 +89,20 @@ jobs:
           done
           missing=0
           found=0
+          # The citation scanner and its self-test are excluded for the same
+          # reason the scanner excludes them from its own sweep: both spell out
+          # paths that deliberately do not exist - examples in one, a planted
+          # probe in the other - so scanning them reports a tool describing a
+          # path as a file citing one. The self-test's doc-side probe
+          # (`docs/reference/zz-…-probe.md`) is exactly such a path, and it
+          # failed this step the moment it was added.
           for p in $(grep -rhoP '(?<![A-Za-z0-9_/.-])(?:\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
               --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
               --include='*.toml' --include='*.sh' \
               --exclude-dir=wpt --exclude-dir=dist \
               --exclude-dir=node_modules --exclude-dir=target \
+              --exclude=source_citation_scan.sh \
+              --exclude=source_citation_selftest.sh \
               $ROOTS 2>/dev/null \
             | sed 's|^\(\.\./\)*||' | sort -u); do
             found=$((found + 1))
@@ -140,11 +149,21 @@ jobs:
         run: tests/lib_measurement_integrity_selftest.sh
       - name: Doc links resolve
         run: tests/run_doc_gate.sh
-      # The source-path half of the citation checks above. That step resolves
-      # comments naming a `docs/**.md` file; this one resolves comments naming a
-      # source file, which rot identically and are read the same way - as "the
-      # justification is over there" - so a citation pointing at a file that
-      # moved stops the reader looking and nothing notices. One sweep found 82.
+      # The source-path half of the citation checks above, in BOTH directions.
+      # The step above resolves comments naming a `docs/**.md` file. This one
+      # resolves every citation that NAMES A SOURCE FILE, whether it was written
+      # in source or in a doc - they rot identically and are read the same way,
+      # as "the justification is over there", so a citation pointing at a file
+      # that moved stops the reader looking and nothing notices. One sweep of
+      # the source side found 82; the doc side, unguarded until 2026-08-10,
+      # opened at 116 unresolvable of 943.
+      #
+      # The doc half deliberately does not cover pre-ship proposals, plans,
+      # ADRs, review reports, `archive/`, or any dated `YYYY-MM-DD-*.md` record.
+      # Those name a file they intend to create or one that existed at a past
+      # HEAD; requiring them to resolve would forbid designing before building
+      # and would turn a record of the past into a lie about the present. The
+      # script's header carries the full reasoning and the measurements.
       #
       # The script carries its own resolution rules and the reasons each exists;
       # they were measured against this tree rather than assumed, and getting any

@@ -153,29 +153,17 @@ compose; Docker Compose refuses to take ownership of that pre-existing network.
 
 ## Sandbox Acceptance Test
 
-Run the no-OpenAI Phase 2 acceptance harness:
+The end-to-end acceptance harness that drove a real Docker sandbox against this
+registry left with the sandbox backend: both it and the sandbox bring-up script
+it called now live in the standalone `zeroship-sandbox` project. Run it from
+that checkout, pointed at the Verdaccio started above.
 
-```bash
-deploy/scripts/e2e-private-registry-sandbox.sh
-```
+What it covers there, for reference: publish the SDKs to Verdaccio, create a
+sandbox through the real backend client, and run `pnpm install` plus `pnpm build`
+for a minimal Vite app importing from `@zeroship/ui` - asserting that the sandbox
+workspace `.npmrc` carries only the scoped `@zeroship` line, that
+`pnpm config get @zeroship:registry` resolves to Verdaccio, and that the build
+output contains ZeroShip UI classes such as `zs-theme-root` or `zs-button`.
 
-The harness starts/reuses compose Verdaccio, creates a temporary publish user,
-runs `pnpm publish:sdks`, starts the real Docker sandbox controller via
-`tests/sandbox_up.sh`, creates a sandbox through Builder's real backend client,
-and runs the sandbox's real `pnpm install --frozen-lockfile || pnpm install`
-plus `pnpm build` for a minimal Vite app importing `ThemeProvider`, `Card`, and
-`Button` from `@zeroship/ui`.
-
-The test asserts:
-
-- `.npmrc` in the sandbox workspace contains only the scoped `@zeroship` registry line.
-- `pnpm config get @zeroship:registry` inside the sandbox points at Verdaccio.
-- `pnpm view @zeroship/ui@0.1.0 dist.tarball` returns the Verdaccio tarball URL.
-- `node_modules/@zeroship/ui/package.json` resolves to `@zeroship/ui@0.1.0`.
-- Vite build output contains ZeroShip UI theme/component classes such as `zs-theme-root` or `zs-button`.
-
-The full run log is written to:
-
-```bash
-.zeroship/private-registry-e2e/logs/private-registry-sandbox.log
-```
+The registry side of that flow is exercisable from this repo alone with the
+`pnpm publish:sdks` and throwaway-consumer steps above.

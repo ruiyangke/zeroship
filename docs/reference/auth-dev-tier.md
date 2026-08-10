@@ -143,7 +143,7 @@ session cookie + an identity projection, never a token. Two surfaces:
    helper) and `currentUser()` (the `zeroship` module / `@zeroship/server`). In
    prod these are fed by the gateway's request-bound `ZeroShip-User` header
    (`base64(JSON).<request_id>.<iat>.<hex-hmac>`, signed with the worker key —
-   `crates/core/src/auth.rs`, `crates/gateway/src/oidc_rp.rs`). The worker
+   `crates/core/src/auth/mod.rs`, `crates/gateway/src/oidc_rp.rs`). The worker
    verifies + decodes it into `user_json` and threads it through
    `Runtime::call_fetch_handler_with_user`, which populates BOTH the
    `env.auth` per-request state (`crate::auth::set_request_user`) and the RPC

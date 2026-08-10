@@ -18,9 +18,9 @@ App runtime
     -> runtime (`crates/runtime`)
     -> env.{db,kv,storage} plugins
 
-Builder sandbox
+Builder sandbox (NOT in this repo)
   Editor / operator traffic
-    -> sandbox controller (`crates/sandbox`)
+    -> sandbox controller (standalone `zeroship-sandbox` project)
     -> backend runtime (docker, k8s, or nomad-ch)
 ```
 
@@ -37,7 +37,11 @@ Builder sandbox
 | DB plugin | `crates/plugin-db` | `env.db.*` |
 | KV plugin | `crates/plugin-kv` | `env.kv.*` |
 | Storage plugin | `crates/plugin-storage` | `env.storage.*` |
-| Sandbox | `crates/sandbox` | Builder sandbox lifecycle, preview proxy, pg-backed sandbox state, snapshot/restore wiring |
+
+The sandbox/preview backend used to be a crate here. It is not: it was extracted
+to the standalone `zeroship-sandbox` project and is not built by this repo. The
+control plane reaches it over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`), and it shares
+this deployment's Postgres through the `sandbox_*` roles.
 
 ## End-user request path
 
@@ -80,7 +84,7 @@ For SDK-facing contracts:
 - [Control plane architecture](../architecture/control-plane.md): app deploy lifecycle, route registry, and metadata updates.
 - [Runtime architecture](../architecture/runtime.md): V8 execution, async model, native host bridges, and request execution.
 - [Blob store and bundle storage](../architecture/blob-store.md): `BlobStore`, `.zship` blobs, and object layout.
-- [Builder sandbox](../architecture/builder.md): the `crates/sandbox` service — live dev sandboxes, preview proxying, and snapshot/restore.
+- [Builder sandbox](../architecture/builder.md): where the sandbox/preview backend went, and the seam this repo still owns.
 
 ## Current architecture notes
 
