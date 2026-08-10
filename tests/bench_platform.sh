@@ -185,7 +185,31 @@ run_bench "Gateway health (no V8)" "http://localhost:8000/health" "$LUA_RPC"
 
 echo ""
 echo "  Detailed latency (full pipeline):"
-wrk -t4 -c50 -d10s -s "$LUA_GATE" http://localhost:8000/apps/bench/rpc 2>&1 | grep "Latency"
+# This block is the MOST quotable output in the file -- a latency distribution
+# for the full pipeline -- and it was the last unguarded one. It ran
+# `wrk ... 2>&1 | grep "Latency"`, which has two failure modes that both look
+# like success: a run where every request 404s prints a perfectly good-looking
+# distribution (of the failure path, which is cheap, so it reads FAST), and a
+# run where nothing is listening prints NOTHING AT ALL under the header,
+# because `unable to connect` does not match "Latency".
+#
+# I left this alone in d9be83516 on the reasoning that it "feeds no printed
+# throughput number". That was wrong -- latency is exactly the number someone
+# quotes -- so it is guarded here on the same terms as run_bench.
+detail=$(wrk -t4 -c50 -d10s -s "$LUA_GATE" http://localhost:8000/apps/bench/rpc 2>&1)
+detail_bad=$(echo "$detail" | grep -oE 'Non-2xx or 3xx responses: [0-9]+' | grep -oE '[0-9]+$')
+if echo "$detail" | grep -qi 'unable to connect\|connection refused'; then
+    echo "    UNREACHABLE -- nothing measured"
+    echo "FAIL: detailed latency -- wrk could not connect; no distribution was produced." >&2
+    BENCH_BAD=$((${BENCH_BAD:-0} + 1))
+elif [ -n "$detail_bad" ] && [ "$detail_bad" -gt 0 ]; then
+    echo "$detail" | grep "Latency"
+    echo "    <- ${detail_bad} NON-2xx: the distribution above is the FAILURE path"
+    echo "FAIL: detailed latency -- ${detail_bad} non-2xx responses; do not quote this." >&2
+    BENCH_BAD=$((${BENCH_BAD:-0} + 1))
+else
+    echo "$detail" | grep "Latency"
+fi
 
 rm "$LUA_RPC" "$LUA_GATE"
 echo ""
