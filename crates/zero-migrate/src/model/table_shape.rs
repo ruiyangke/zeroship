@@ -276,23 +276,59 @@ pub fn resolve_create_table_policy(
     default_schema: &str,
 ) -> Result<MigrationIr, TableShapeError> {
     let mut out = ir.clone();
-    for op in &mut out.ops {
-        let Op::CreateTable {
-            name,
-            columns,
-            primary_key,
-            indexes,
-            schema,
-            ..
-        } = op
-        else {
-            continue;
-        };
-        let object = object_for_create(name, schema.as_deref(), default_schema);
-        let resolved = ResolvedInject::for_object(effective, &object)?;
-        resolve_create_table(name, columns, primary_key, indexes, &resolved)?;
-    }
+    resolve_create_table_ops(&mut out.ops, effective, default_schema)?;
     Ok(out)
+}
+
+/// Resolve every `CreateTable` in `ops`, descending into `Op::Dialectal` legs.
+///
+/// EVERY leg, not the selected one - the opposite of the rule the fold and the other
+/// op walkers follow, and the difference is load-bearing. This function takes no
+/// dialect: it produces the RESOLVED IR that the checksum is folded over, so the
+/// injected shape has to be identical on every target. Resolving only one leg would
+/// make a migration's identity depend on which database it was authored against, and
+/// the same file would carry a different checksum per dialect.
+///
+/// Skipping legs entirely, which is what this did before, meant a table declared
+/// inside `dialect({ pg, ... })` came out author-shaped while its top-level twin got
+/// the charter's mandatory columns and pinned key. The injected shape IS the
+/// confinement, so the wrapper was a way to author a table the charter never saw.
+///
+/// One level deep is complete: a leg cannot itself hold a wrapper, refused by the
+/// validator and by the fold.
+fn resolve_create_table_ops(
+    ops: &mut [Op],
+    effective: &EffectivePolicy,
+    default_schema: &str,
+) -> Result<(), TableShapeError> {
+    for op in ops {
+        match op {
+            Op::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => {
+                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+                    resolve_create_table_ops(leg, effective, default_schema)?;
+                }
+            }
+            Op::CreateTable {
+                name,
+                columns,
+                primary_key,
+                indexes,
+                schema,
+                ..
+            } => {
+                let object = object_for_create(name, schema.as_deref(), default_schema);
+                let resolved = ResolvedInject::for_object(effective, &object)?;
+                resolve_create_table(name, columns, primary_key, indexes, &resolved)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn resolve_create_table(
