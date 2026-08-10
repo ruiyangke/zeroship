@@ -64,6 +64,25 @@ pub enum TableShapeError {
         /// Authored identifier token.
         name: String,
     },
+    /// A policy-pinned primary key names a column the resolved table does not have.
+    ///
+    /// The pin and the injected columns are separate fields precisely so a key can
+    /// span an author-declared column, so the two cannot be checked against each
+    /// other until both are merged. Refused here rather than at the policy loader,
+    /// which sees only the rule's own columns and would reject a legitimate key over
+    /// an author-owned one.
+    #[error(
+        "createTable {table:?} pins primary key column {column:?}, which neither the policy \
+         injects nor the migration declares. A pinned key may name an injected column or an \
+         author-declared one; it cannot name a column nothing creates, because the database \
+         would reject the CREATE TABLE."
+    )]
+    PinnedPrimaryKeyColumnMissing {
+        /// Table being resolved.
+        table: String,
+        /// The pinned column with no definition in the resolved shape.
+        column: String,
+    },
     /// A policy-pinned primary key would silently discard an author PK.
     #[error(
         "createTable {table:?} declares an author primaryKey under a policy-pinned table shape"
@@ -338,7 +357,21 @@ fn resolve_create_table(
     );
     *columns = resolved_columns;
 
+    // The pin names columns; nothing until now has required those columns to exist.
+    // A rule pinning a name neither side creates used to resolve cleanly and hand the
+    // database a PRIMARY KEY over a column the table does not have, which it discovers
+    // at apply, after the policy sealed and the plan was approved. Ask once, here,
+    // where the injected and author-declared columns have just been merged - the
+    // single point where a key spanning both is checkable at all.
     if let Some(pk) = &inject.primary_key {
+        for column in pk {
+            if !columns.iter().any(|resolved| resolved.name == *column) {
+                return Err(TableShapeError::PinnedPrimaryKeyColumnMissing {
+                    table: table.to_string(),
+                    column: column.clone(),
+                });
+            }
+        }
         *primary_key = Some(pk.clone());
     }
 
@@ -793,6 +826,92 @@ mod tests {
             .replace("ix_updated_at", "renamed_updated_at_idx")
             .replace("ix_created_by", "renamed_created_by_idx");
         effective_policy_from_charter_toml(&toml).expect("equivalent-shape charter composes")
+    }
+
+    /// A pinned primary key naming a column no one creates is refused, instead of
+    /// emitting a PRIMARY KEY over a column the table does not have.
+    ///
+    /// The pin and the columns are separate fields, which is what lets a key span an
+    /// author-declared column. Nothing tied the two together, so a rule could pin a
+    /// name the merged shape never contains and the database saw the invalid DDL
+    /// first - after the policy sealed and the plan was approved.
+    #[test]
+    fn a_pinned_primary_key_over_a_column_nothing_creates_is_refused() {
+        let effective = effective_policy_from_charter_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["tenant_id"]
+author_primary_key = "allow"
+"#,
+        )
+        .expect("a pin-only rule composes");
+
+        let error = resolve_create_table_policy(&ir(vec![text_col("title")], None), &effective)
+            .expect_err("a pin over a column nothing creates must be refused");
+        assert!(
+            error.to_string().contains("tenant_id"),
+            "the refusal must name the missing column: {error}"
+        );
+    }
+
+    /// A pinned key MAY name a column the author declares rather than one the policy
+    /// injects. The renderer keeps the table-level primary-key form precisely so a
+    /// key over an author-owned column stays expressible, so a membership check that
+    /// only consulted the injected columns would reject a shape the engine supports.
+    #[test]
+    fn a_pinned_primary_key_may_name_an_author_declared_column() {
+        let effective = effective_policy_from_charter_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["sku"]
+author_primary_key = "allow"
+"#,
+        )
+        .expect("a pin over an author column composes");
+
+        let out = resolve_create_table_policy(&ir(vec![text_col("sku")], None), &effective)
+            .expect("a pin naming an author-declared column resolves");
+        let Op::CreateTable { primary_key, .. } = &out.ops[0] else {
+            panic!("the resolved op is still a createTable");
+        };
+        assert_eq!(primary_key.as_deref(), Some(&["sku".to_string()][..]));
+    }
+
+    /// A composite key spanning an injected column and an author-declared one is the
+    /// shape that makes the two-field representation worth keeping, so it has to
+    /// survive the membership check.
+    #[test]
+    fn a_composite_pin_may_span_an_injected_and_an_author_column() {
+        let effective = effective_policy_from_charter_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["tenant_id", "sku"]
+author_primary_key = "allow"
+columns = [
+  { name = "tenant_id", type = "text", nullable = false },
+]
+"#,
+        )
+        .expect("a composite pin composes");
+
+        let out = resolve_create_table_policy(&ir(vec![text_col("sku")], None), &effective)
+            .expect("a composite pin spanning both sources resolves");
+        let Op::CreateTable { primary_key, .. } = &out.ops[0] else {
+            panic!("the resolved op is still a createTable");
+        };
+        assert_eq!(
+            primary_key.as_deref(),
+            Some(&["tenant_id".to_string(), "sku".to_string()][..])
+        );
     }
 
     #[test]
