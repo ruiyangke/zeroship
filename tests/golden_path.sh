@@ -110,7 +110,7 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 # expansion, which zsh does not do. Under zsh the list collapses to one bogus
 # id and the check reports every step missing - loud, not silently green, which
 # is the intended direction for a check that cannot run.
-GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 10"
+GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 10 11"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -1438,6 +1438,283 @@ else
   fi
 fi
 
+# --- 11. `sort({ id })` must be creation order on BOTH tiers (#236 / #255) ---
+#
+# THE CLAIM UNDER TEST, and it is ABSOLUTE, not a tier disagreement. A typed id
+# is `<prefix>_<base62(uuidv7)>`, so its BYTE order IS its creation order --
+# that is the entire reason `sort({ id: -1 })` is spelled "newest first" in
+# every example and doc we ship. Whether a backend honours that depends on the
+# collation the `id` column sorts under. SQLite sorts `BINARY`. Postgres sorts
+# under the DATABASE collation, `en_US.utf8`, which orders base62's uppercase
+# and lowercase runs differently from bytes. So dev is right and deployed is
+# wrong, and each tier is judged against the byte order of its OWN ids rather
+# than against the other tier -- a relative check alone would call two
+# identically-broken tiers "agreed".
+#
+# WHY THIS IS CONSTRUCTED AND NOT SAMPLED, which is the whole difficulty. The
+# base62 digit that discriminates two ids encodes the clock, so it sweeps the
+# alphabet as real time passes: for whole stretches of wall-clock the
+# discriminating characters are one case (order agrees, any assertion passes)
+# and for whole stretches they are mixed case (order disagrees, the same
+# assertion fails). Measured: ids 100ms apart diverged in 42 of 50 batches with
+# adjacent batches agreeing 45/49 against 35.8 expected under independence
+# (docs/pilot/e2e-scenarios.md, "#236 collation divergence"). A test that mints
+# six rows and checks their order is therefore GREEN MOST OF THE TIME AT HEAD,
+# and re-running a red is NOT evidence it was spurious. #239 is exactly that
+# trap.
+#
+# So this step does not assert on a hoped-for property. It mints a population,
+# then PROVES the population is discriminating before asserting on it: at least
+# one pair of ids must sort differently under bytes than under `en_US`. If no
+# such pair exists the step FAILS -- loudly, as "could not construct the case"
+# -- rather than reporting a green that means nothing.
+#
+# THE `en_US` MODEL IS NOT MINE, IT IS MEASURED. `Intl.Collator("en-US")` is
+# used as the stand-in because it needs no host locale. It was checked against
+# both of the things it stands for, on this exact id shape (2026-08-10):
+#
+#   ids           todo_...K19  todo_...K1Z  todo_...K1a  todo_...K1z
+#   byte / C      19 1Z 1a 1z
+#   PG en_US.utf8 19 1a 1z 1Z   (docker exec psql, ORDER BY id)
+#   glibc sort    19 1a 1z 1Z   (LC_ALL=en_US.UTF-8 sort)
+#   Intl.Collator 19 1a 1z 1Z
+#
+# All three non-byte orderings agree, so the guard below models Postgres rather
+# than merely modelling itself.
+#
+# WHY db-todos AND NOT THE SCAFFOLD. Step 10's app answers 401 deployed (it
+# ships no policy), so no env.db operation of it is observable on the deployed
+# tier. db-todos is anon by policy, has migrations, and its `todos.list` already
+# sorts `{ id: -1 }` -- the surface a creator would actually use.
+step 11 "env.db ordering: sort({id}) is creation order on both tiers"
+DB_APP="dbtodos"
+DB_ZSHIP="$TODOS/dist/app.zship"
+DB_DEP_READY=0
+
+if [ -z "${SC_PAT:-}" ] || [ -z "${SC_CREATOR:-}" ]; then
+  fail "step 10 minted no PAT, so the deployed half of the ordering check cannot run"
+elif ! ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos-build.log 2>&1 || [ ! -f "$DB_ZSHIP" ]; then
+  fail "examples/db-todos does not build: $(tail -5 /tmp/gp-dbtodos-build.log | tr '\n' ' ')"
+else
+  pass "db-todos builds through the real vite-plugin ($(du -k "$DB_ZSHIP" | cut -f1)KB)"
+  DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
+  DB_APP_ID=$(echo "$DB_OUT" | awk -F= '$1 == "app_id" { print $2 }')
+  DB_API_KEY=$(echo "$DB_OUT" | awk -F= '$1 == "api_key" { print $2 }')
+  if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
+    fail "could not provision db-todos: ${DB_OUT:0:200}"
+  else
+    # Same creator as step 10, so the PAT already minted is accepted; only the
+    # membership row is per-app. Migrations travel through zeroship-migrated --
+    # a hand-rolled CREATE TABLE here would create the table with whatever
+    # collation THIS script chose, which is precisely the thing under test.
+    docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$TODOS/migrations" >/tmp/gp-dbtodos-ir.json 2>/tmp/gp-dbtodos-ir.log <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+    DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
+      "http://localhost:$MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+      --data-binary @/tmp/gp-dbtodos-ir.json)"
+    DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
+    if [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+      pass "db-todos migrations applied through zeroship-migrated (applied=$DB_APPLIED ops)"
+      DB_DEP_READY=1
+      sleep 6   # gateway route-sync poll
+    else
+      fail "zeroship-migrated could not apply db-todos' migrations (http=$DB_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos-apply.json)"
+    fi
+  fi
+fi
+
+# One RPC helper for both tiers: same method, same body, only the base URL and
+# the api-key header differ.
+ord_call() { # base auth-header wireid json -> body
+  local base="$1" hdr="$2" id="$3" body="$4"
+  curl -s -m 25 ${hdr:+-H "$hdr"} -X POST -H 'content-type: application/json' \
+    "$base/__zeroship/v1/$id" -d "{\"json\":$body}" 2>/dev/null
+}
+ord_id() { printf '%s' "$1" | sed -nE 's/.*"id":"([^"]+)".*/\1/p' | head -1; }
+
+# Mint ORD_N rows through `todos.create` (the platform mints every id -- nothing
+# here supplies one) and print the ids one per line, in creation order.
+#
+# ORD_N IS A MEASUREMENT, and ORD_ROUNDS is why it is not the whole story. A
+# population can only expose a collation defect if two of its ids sort
+# differently under bytes than under `en_US`, and how often that happens depends
+# entirely on how many you mint (5000 simulated populations at the observed mint
+# cadence):
+#
+#     ids     2      6     12     24     48
+#     disc  14.7%  58.8%  88.5%  99.1%  100.0%
+#
+# #239 minted SIX. Four runs in ten of that fixture could not have failed however
+# broken the backend was, which is why its red looked spurious on re-run.
+#
+# 24 IS NOT ENOUGH EITHER, and this is measured on THIS gate rather than
+# simulated: in 2 of 5 four-service runs the DEPLOYED population of 24 was NOT
+# discriminating. In the run before the top-up existed, that printed
+# `deployed: ordered` and `dev and deployed AGREE` over a platform two other
+# runs had just proved wrong -- the false green this whole step exists to
+# prevent, reproduced live. So the population TOPS UP until it can discriminate,
+# and only then is anything asserted about ordering. The run after the top-up
+# landed hit the same non-discriminating draw, minted 24 more, and reported the
+# real red; the note is left in the log (`... cannot discriminate ...; minting 24
+# more`) so a reader can see when it fired.
+ORD_N=24
+ORD_ROUNDS=4
+ord_mint() { # base auth-header userid -> ids, one per line
+  local base="$1" hdr="$2" uid="$3" i out
+  for i in $(seq 1 "$ORD_N"); do
+    out="$(ord_call "$base" "$hdr" todos.create "{\"userId\":\"$uid\",\"title\":\"ord-$i\"}")"
+    # `printf '%s\n'`, not a bare `ord_id`: the sed inside it inherits its
+    # input's missing trailing newline, so 24 ids would arrive as one 648-byte
+    # line and the verdict would read a population of 1. Measured, not guessed.
+    printf '%s\n' "$(ord_id "$out")"
+  done
+}
+
+# The whole verdict for one tier, computed in node from two inputs: the ids in
+# CREATION order and the ids in the order `todos.list` returned them.
+#
+#   discriminating  does this population contain a pair that bytes and en_US
+#                   order differently? If not, the assertion below cannot fail
+#                   however broken the backend is, and the step says so.
+#   ordered         did `sort({id:-1})` return byte-DESCENDING order?
+#
+# Creation order is printed too, but is NOT what `ordered` is judged against:
+# `uuid::Uuid::now_v7` randomises the low 74 bits, so two ids minted inside one
+# millisecond may legitimately come back in either order. Byte order is the
+# claim -- it is what makes an id time-ordered in the first place.
+ord_verdict() { # creation-order-file returned-order-file -> "<ordered> <discriminating> <detail>"
+  node -e '
+const fs = require("fs");
+const [mintedF, gotF] = process.argv.slice(1);
+const rd = (f) => fs.readFileSync(f, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
+const minted = rd(mintedF), got = rd(gotF);
+if (minted.length === 0) { console.log("no-ids no-ids nothing was minted"); process.exit(0); }
+if (got.length !== minted.length) {
+  console.log(`readback-mismatch unknown minted ${minted.length}, list returned ${got.length}`);
+  process.exit(0);
+}
+const byteDesc = [...minted].sort().reverse();
+const coll = new Intl.Collator("en-US");
+const localeDesc = [...minted].sort(coll.compare).reverse();
+const discriminating = JSON.stringify(byteDesc) !== JSON.stringify(localeDesc);
+const ordered = JSON.stringify(got) === JSON.stringify(byteDesc);
+// Name the first place the returned order departs from byte order, with the
+// characters that decide it -- that is what turns a red into a diagnosis.
+let detail = "byte order";
+if (!ordered) {
+  const i = got.findIndex((v, k) => v !== byteDesc[k]);
+  const a = got[i] ?? "", b = byteDesc[i] ?? "";
+  let p = 0; while (p < a.length && a[p] === b[p]) p++;
+  detail = `position ${i}: got ${a} expected ${b} (differ at char ${p}: ` +
+           `${JSON.stringify(a[p] ?? "")} vs ${JSON.stringify(b[p] ?? "")})`;
+}
+console.log(`${ordered ? "ordered" : "NOT-ordered"} ${discriminating ? "discriminating" : "NOT-discriminating"} ${detail}`);
+' "$1" "$2"
+}
+
+# Drive one tier end to end. Kept as a function so the two tiers cannot drift
+# into running different sequences -- the single most common way a
+# dev-vs-deployed comparison stops comparing.
+ord_discriminating() { # ids-file -> exit 0 when bytes and en_US order it differently
+  node -e '
+const fs = require("fs");
+const ids = fs.readFileSync(process.argv[1], "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
+const coll = new Intl.Collator("en-US");
+const differs = JSON.stringify([...ids].sort()) !== JSON.stringify([...ids].sort(coll.compare));
+process.exit(differs ? 0 : 1);
+' "$1"
+}
+
+ord_tier() { # label base auth-header outfile -> writes "<ordered> <discriminating> <detail>"
+  local label="$1" base="$2" hdr="$3" out="$4" tag seed uid round
+  tag="ord-$$-${RANDOM}"
+  seed="$(ord_call "$base" "$hdr" users.seed "{\"email\":\"$tag@example.com\",\"name\":\"Ord\",\"handle\":\"$tag\"}")"
+  uid="$(ord_id "$seed")"
+  if [ -z "$uid" ]; then
+    printf 'seed-failed seed-failed %s\n' "${seed:0:150}" > "$out"
+    return 1
+  fi
+  : > "/tmp/gp-ord-$label.minted"
+  for round in $(seq 1 "$ORD_ROUNDS"); do
+    ord_mint "$base" "$hdr" "$uid" >> "/tmp/gp-ord-$label.minted"
+    ord_discriminating "/tmp/gp-ord-$label.minted" && break
+    echo "  $label: $(( round * ORD_N )) ids cannot discriminate a collation; minting $ORD_N more"
+  done
+  ord_call "$base" "$hdr" todos.list "{\"userId\":\"$uid\"}" \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const r=o.json??o;if(!Array.isArray(r))throw 0;process.stdout.write(r.map(x=>x.id).join("\n"))}catch{process.stdout.write("")}})' \
+    > "/tmp/gp-ord-$label.got"
+  ord_verdict "/tmp/gp-ord-$label.minted" "/tmp/gp-ord-$label.got" > "$out"
+}
+
+ORD_DEV_BASE="http://localhost:$DB_RT"
+ORD_DEP_BASE="http://localhost:$GATE_PORT/apps/$DB_APP"
+ORD_DEV_V=""; ORD_DEP_V=""
+
+if [ "$(http_status "$ORD_DEV_BASE/__zeroship/v1/todos.list")" = "000" ]; then
+  fail "the db-todos dev runtime from step 9 is not answering on :$DB_RT; the dev half of the ordering check did not run"
+else
+  ord_tier dev "$ORD_DEV_BASE" "" /tmp/gp-ord-dev.verdict
+  ORD_DEV_V="$(cat /tmp/gp-ord-dev.verdict)"
+  echo "  dev      : $ORD_DEV_V"
+  case "$ORD_DEV_V" in
+    *NOT-discriminating*)
+      fail "dev: even $((ORD_ROUNDS * ORD_N)) minted ids contain NO pair that bytes and en_US order
+      differently, so the ordering assertion could not have failed however broken the
+      backend was. This is a FAILED SETUP, not a passing check. If it recurs, the id
+      alphabet or the mint cadence changed and this probe needs rebuilding." ;;
+    ordered*)
+      pass "dev: sort({id:-1}) returned byte order over a population that discriminates collations" ;;
+    *)
+      fail "dev: sort({id:-1}) did NOT return byte order -- $ORD_DEV_V" ;;
+  esac
+fi
+
+if [ "$DB_DEP_READY" -ne 1 ]; then
+  fail "db-todos never became drivable through the gateway; the deployed half of the ordering check did not run"
+else
+  ord_tier dep "$ORD_DEP_BASE" "X-Api-Key: $DB_API_KEY" /tmp/gp-ord-dep.verdict
+  ORD_DEP_V="$(cat /tmp/gp-ord-dep.verdict)"
+  echo "  deployed : $ORD_DEP_V"
+  case "$ORD_DEP_V" in
+    *NOT-discriminating*)
+      fail "deployed: even $((ORD_ROUNDS * ORD_N)) minted ids contain NO pair that bytes and en_US
+      order differently, so the ordering assertion could not have failed. FAILED SETUP,
+      not a pass." ;;
+    ordered*)
+      pass "deployed: sort({id:-1}) returned byte order over a population that discriminates collations" ;;
+    *)
+      fail "deployed: sort({id:-1}) is NOT creation order -- $ORD_DEP_V
+      The deployed \`id\` column is created by zeroship-migrated and inherits the
+      database collation (en_US.utf8); SQLite sorts BINARY. Fix is COLLATE \"C\"
+      on typed-id text columns in the DDL. See #255 and
+      docs/reference/sqlite-divergences.md." ;;
+  esac
+fi
+
+# The RELATIVE half, which is the seam this file exists for. Reported separately
+# from the two absolute verdicts above because it answers a different question,
+# and because a defect BOTH tiers shared would leave this line green.
+if [ -n "$ORD_DEV_V" ] && [ -n "$ORD_DEP_V" ]; then
+  if [ "${ORD_DEV_V%% *}" = "${ORD_DEP_V%% *}" ]; then
+    pass "dev and deployed AGREE on id ordering (${ORD_DEV_V%% *})"
+  else
+    fail "dev and deployed DIVERGE on id ordering -- dev=${ORD_DEV_V%% *} deployed=${ORD_DEP_V%% *}
+      dev      : $ORD_DEV_V
+      deployed : $ORD_DEP_V"
+  fi
+fi
+
 gp_close_step
 
 # --- The verdict, and the two guards against a green run over nothing -------
@@ -1561,7 +1838,32 @@ gp_close_step
 # outcome; under a loop it under-counts, and a floor derived from it would sit
 # below the real total and stop catching anything. Both numbers here are read
 # off runs instead: 43 unmutated, 49 under MUTATE_SCAFFOLD_POLICY=1.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-43}"
+# RAISED 43 -> 46 on 2026-08-10 when step 11 (env.db id ordering, #236/#255)
+# landed. Read off three full four-service runs, not derived:
+#
+#     run 1   46 passed, 8 failed     step 11: 5 outcome(s)
+#     run 3   46 passed, 8 failed     step 11: 5 outcome(s)
+#     run 2   47 passed, 7 failed     step 11: 5 outcome(s)   <- see below
+#
+# Steps 1-10 were byte-identical across all three (2,6,1,2,1,7,7,3,6,14), so the
+# +3 is step 11's three green outcomes: db-todos builds, its migrations apply
+# through zeroship-migrated, and the DEV tier returns byte order. The two reds
+# are the deployed tier and the tier diff, and they are THE DELIVERABLE, exactly
+# like step 10's six.
+#
+# RUN 2 IS WHY THE FLOOR IS 46 AND NOT 47, and it is worth more than the number.
+# It scored one higher because its deployed population of 24 ids happened to be
+# NON-discriminating: no pair of them sorts differently under bytes than under
+# `en_US`, so the ordering check could not have failed, and the tier-diff line
+# passed over a platform that two other runs proved wrong. The guard caught it
+# and called it a failed setup - and the harness now tops the population up
+# (ORD_ROUNDS) rather than accepting one. A gate that scores HIGHER when it
+# measures LESS is the failure mode this floor exists to make visible.
+#
+# WHEN THE ENGINE GAINS A COLLATION SLOT (#255) the deployed verdict and the
+# diff both go green with no edit here, and the total becomes 48 passed, 6
+# failed (step 10's scaffold six). Raising the floor to 48 is that change's job.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-46}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -1589,6 +1891,10 @@ if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
   echo "        That is the defect, not a broken gate. See docs/pilot/e2e-scenarios.md."
+  echo "  NOTE: step 11's two reds are RED AT HEAD BY DESIGN too -- the deployed \`id\` column is"
+  echo "        created by zeroship-migrated and inherits the database collation, so ORDER BY id"
+  echo "        is not creation order there. Blocked on the engine (#255); see the mail"
+  echo "        ZEROSHIP-2026-08-10-189 in ~/.claude/inter-projects.md."
 fi
 echo "============================================"
 
