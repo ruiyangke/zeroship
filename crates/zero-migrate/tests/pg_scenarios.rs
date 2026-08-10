@@ -394,6 +394,130 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// The backfill session render refuses a timeout budget that resolves to zero,
+/// which PostgreSQL reads as "no limit" rather than as a tight budget.
+///
+/// The zero here comes from the executor configuration rather than from a
+/// migration flag: `ExecutorConfig::statement_timeout_ms` is `Duration::as_millis`,
+/// so a sub-millisecond duration truncates to zero whole milliseconds. That is a
+/// budget no IR load gate can see, because no IR is involved.
+///
+/// The finite control is the same table, the same spec and the same call one line
+/// down, differing only in the budget, so a refusal here means the budget caused it
+/// and not the fixture.
+#[compio::test]
+async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
+    use std::time::Duration;
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".zero_budget (\
+                id bigint PRIMARY KEY, value text NOT NULL\
+            ); \
+             INSERT INTO \"{schema}\".zero_budget (id, value) VALUES (1, 'seed')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create zero-budget backfill target");
+
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "zero_budget".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_contract: None,
+        batch_size: 10,
+        set_clause: r#""value" = 'filled'"#.into(),
+        per_row: BTreeMap::new(),
+        filter: None,
+        name: "fill zero budget".into(),
+    };
+
+    let mut zero_cfg = cfg.clone();
+    zero_cfg.pg.statement_timeout = Duration::from_micros(500);
+    assert_eq!(
+        zero_cfg.statement_timeout_ms(),
+        0,
+        "a sub-millisecond duration must be the zero the render would emit"
+    );
+    let refused_version = MigrationId::generate();
+    let refused_checksum = step_checksum("zero budget backfill");
+    let err = backend
+        .run_backfill_step(
+            &zero_cfg,
+            &refused_version,
+            &refused_checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("a backfill that would run with statement_timeout = 0 must be refused");
+    assert!(
+        matches!(err, ApplyError::IndefiniteTimeout(_)),
+        "the refusal must name the indefinite budget: {err:?}"
+    );
+    let untouched: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".zero_budget WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read refused backfill target")
+        .try_get("value")
+        .expect("decode refused backfill target");
+    assert_eq!(
+        untouched, "seed",
+        "the refusal must land before any row is written"
+    );
+
+    let finite_version = MigrationId::generate();
+    let finite_checksum = step_checksum("finite budget backfill");
+    backend
+        .run_backfill_step(
+            &cfg,
+            &finite_version,
+            &finite_checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("the same backfill applies under a finite budget");
+    let filled: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".zero_budget WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read finite backfill target")
+        .try_get("value")
+        .expect("decode finite backfill target");
+    assert_eq!(filled, "filled", "the finite control must write the row");
+
+    drop_schemas(&session, &cfg).await;
+}
+
 #[compio::test]
 async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     use zero_migrate::driver::SqlSession;

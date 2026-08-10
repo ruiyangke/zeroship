@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec};
 use crate::apply::executor::ApplyError;
 use crate::apply::journal::{self, JournalError};
+use crate::apply::timeout::resolve_timeout_ms;
 use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, Row, SqlSession};
@@ -1745,7 +1746,21 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
         .collect()
 }
 
-fn batch_session_sql(cfg: &ExecutorConfig, spec: &BackfillSpec) -> Result<String, ApplyError> {
+/// The per-batch session envelope.
+///
+/// Both budgets go through [`resolve_timeout_ms`] rather than being interpolated
+/// from the config getters directly. A backfill step carries no per-migration
+/// override, so the values come from the executor config either way - but
+/// `ExecutorConfig::statement_timeout_ms` is an `as_millis()` truncation, so a
+/// sub-millisecond `Duration` arrives here as `0`, and `SET LOCAL
+/// statement_timeout = 0` is how PostgreSQL spells NO LIMIT. Interpolating turned
+/// a config meaning "fail fast" into "wait forever" on this path alone: every
+/// sibling render already asks the resolver, including the MySQL backfill.
+fn batch_session_sql(
+    cfg: &ExecutorConfig,
+    version: &MigrationId,
+    spec: &BackfillSpec,
+) -> Result<String, ApplyError> {
     Ok(format!(
         "{AUTHOR_SQL_LITERAL_MODE} \
          {CURSOR_SESSION_SETTINGS} \
@@ -1753,8 +1768,22 @@ fn batch_session_sql(cfg: &ExecutorConfig, spec: &BackfillSpec) -> Result<String
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
         quote_ident(&spec.schema)?,
-        cfg.statement_timeout_ms(),
-        cfg.lock_timeout_ms(),
+        resolve_timeout_ms(
+            version.as_str(),
+            "statement_timeout",
+            None,
+            "timeout_ms",
+            cfg.statement_timeout_ms(),
+            "pg.statement_timeout",
+        )?,
+        resolve_timeout_ms(
+            version.as_str(),
+            "lock_timeout",
+            None,
+            "lock_timeout_ms",
+            cfg.lock_timeout_ms(),
+            "pg.lock_timeout",
+        )?,
     ))
 }
 
@@ -1810,7 +1839,7 @@ async fn initialize_progress<D: SqlSession>(
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.batch("BEGIN").await?;
     let result = async {
-        conn.batch(&batch_session_sql(cfg, spec)?).await?;
+        conn.batch(&batch_session_sql(cfg, version, spec)?).await?;
         validate_target_under_lock(conn, cfg, spec, cursor, allowed_engine_trigger, None).await?;
 
         if let Some(guard) = guard {
@@ -1962,7 +1991,7 @@ async fn run_batch<D: SqlSession>(
 ) -> Result<(u64, u64, Option<CursorTuple>), ApplyError> {
     conn.batch("BEGIN").await?;
     let result = async {
-        conn.batch(&batch_session_sql(cfg, spec)?).await?;
+        conn.batch(&batch_session_sql(cfg, version, spec)?).await?;
         lock_and_validate_progress(
             conn,
             cfg,
@@ -2130,7 +2159,7 @@ async fn finish_backfill<D: SqlSession>(
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.batch("BEGIN").await?;
     let result = async {
-        conn.batch(&batch_session_sql(cfg, spec)?).await?;
+        conn.batch(&batch_session_sql(cfg, version, spec)?).await?;
         let row = read_progress_row(conn, cfg, version.as_str(), true)
             .await?
             .ok_or_else(|| backend_error("progress row disappeared during completion"))?;
