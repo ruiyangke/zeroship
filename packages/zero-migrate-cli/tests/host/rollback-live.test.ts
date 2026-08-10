@@ -45,11 +45,14 @@ const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const TABLE = "rollback_notes";
 const SEQUENCE = "rollback_counter";
 
-function spawnCli(args: readonly string[], cwd: string) {
+function spawnCli(args: readonly string[], cwd: string, timeoutMs?: number) {
   return spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, ...args], {
     encoding: "utf8",
     cwd,
     env: { ...process.env, ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, DATABASE_URL: "" },
+    // Only the PostgreSQL lock arm passes this. Its subject is a command that never
+    // returns, so the test needs its own deadline rather than a result to inspect.
+    ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
   });
 }
 
@@ -395,6 +398,70 @@ test("PostgreSQL: a guarded create is not trusted to rebuild what a later drop r
     await client
       .query(
         `DROP SCHEMA IF EXISTS "${authored}" CASCADE; DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
+test("PostgreSQL: a rollback whose project lock is held waits instead of failing", async (t) => {
+  const client = await connectLivePg(t);
+  if (!client) return;
+
+  const schema = uniqueSchema("rb_lock_pg");
+  const metaSchema = `${schema}_migrations`;
+  const holder = await connectLivePg(t);
+  if (!holder) {
+    await client.end().catch(() => {});
+    return;
+  }
+
+  let dir: string | undefined;
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    dir = scaffold(schema);
+
+    const applied = spawnCli([...baseArgs(schema, pgUrl()), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+
+    // The engine's own acquire, run verbatim rather than re-derived: the key is
+    // `hashtext(project_id)` (crates/zero-migrate/src/apply/backend/postgres/session.rs:60-74)
+    // and the CLI passes the project SCHEMA as the project id
+    // (packages/zero-migrate-cli/src/index.ts:544).
+    await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
+
+    // `pg_advisory_lock` has no timeout, so this rollback never returns. The deadline
+    // belongs to the TEST, not the command: awaiting it would hang the suite rather than
+    // fail it. Being killed mid-wait IS the observation - a CLI that had acquired the
+    // lock would have finished in well under this budget, as the arms above do.
+    const blocked = spawnCli(
+      [...baseArgs(schema, pgUrl()), "rollback", "--all", "--approve"],
+      dir,
+      6000,
+    );
+    assert.equal(
+      blocked.signal,
+      "SIGTERM",
+      `the rollback should still have been waiting when the deadline hit; it exited ` +
+        `with status ${blocked.status} instead: ${blocked.stderr}`,
+    );
+
+    // Releasing lets the same command through, which is what proves the wait was the
+    // lock rather than anything else about this scenario.
+    await holder.query(`SELECT pg_advisory_unlock(hashtext($1)::bigint)`, [schema]);
+    const afterRelease = spawnCli(
+      [...baseArgs(schema, pgUrl()), "rollback", "--all", "--approve"],
+      dir,
+      30000,
+    );
+    assert.equal(afterRelease.status, 0, `rollback after release failed: ${afterRelease.stderr}`);
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    await holder.query(`SELECT pg_advisory_unlock_all()`).catch(() => {});
+    await holder.end().catch(() => {});
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
       )
       .catch(() => {});
     await client.end().catch(() => {});
