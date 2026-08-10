@@ -159,21 +159,28 @@ impl AuthLevel {
 /// gating (mutations refuse `GET`) and the wire shape (streams use SSE,
 /// subscriptions use WebSocket).
 ///
-/// ## Wire back-compat for `Action`
+/// ## Why `kind` is optional, and what `None` actually means
 ///
-/// `Action` is the B3 capability-scoped variant (no DB-write surface
-/// for `query`, no `fetch` for `mutation`, full surface for `action`).
+/// `Action` is the capability-scoped variant (no DB-write surface for
+/// `query`, no `fetch` for `mutation`, full surface for `action`).
+///
 /// `ResourceEntry::kind` is `Option<ProcedureKind>` with
-/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so
-/// **old manifests with no `kind` field continue to parse as `None`**.
-/// Consumers treat `None` and `Some(Action)` identically: no method
-/// restriction, no CSRF/idempotency gating (action is most permissive).
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`. The
+/// vite-plugin emitter ALWAYS writes it — `kind` is a required field of
+/// its `WireResource` and `autoDeriveRpcEntry` assigns it
+/// unconditionally (`sdks/vite-plugin/src/manifest.ts`). Omitting it for
+/// `action(...)` was a defect, not a convention: an absent kind left an
+/// action reachable over `GET` with no origin check, which is why that
+/// emitter carries a comment saying every capability reaches the wire.
 ///
-/// The vite-plugin manifest emitter currently OMITS `kind` for
-/// `action(...)` procedures (writes nothing rather than
-/// `kind: "action"`) — this stays valid. When a future emitter starts
-/// writing `kind: "action"` explicitly, deserialisation will produce
-/// `Some(Action)` and the gates handle it identically.
+/// So `None` does NOT mean "action". It means the manifest was authored
+/// by hand — a raw-JS deploy — and declared no capability. The emitter
+/// side is explicit that unknown and action are NOT gated alike.
+/// `crates/gateway/src/router/dispatch.rs` currently admits `None` into
+/// the idempotency dedupe path as though it were `Action`, which
+/// contradicts that. Whether an undeclared capability should get response
+/// caching is an open call, tracked as task #202; nothing here should be
+/// read as settling it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcedureKind {

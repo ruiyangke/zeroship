@@ -1431,9 +1431,12 @@ async fn execute_resource_tree(
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
     //
-    //    `Some(Action)` and `None` route identically — action is the
-    //    most permissive variant and the current manifest emitter omits
-    //    `kind` for it. Both forms must continue to gate the same way.
+    //    `None` is NOT matched here, but it is not unguarded either: RPC
+    //    dispatch is a POST, so the method arm below catches it. A
+    //    kind-less procedure reachable over GET would fall through, which
+    //    is exactly the hole the vite emitter closed by always writing
+    //    `kind` (see `ProcedureKind` in crates/bundle/src/rule.rs). `None`
+    //    now only reaches here from a hand-authored raw-JS manifest.
     if matches!(policy.kind, Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action))
         || req.method() == ntex::http::Method::POST
         || req.method() == ntex::http::Method::PUT
@@ -1490,9 +1493,16 @@ async fn execute_resource_tree(
     //    Only mutations enter the dedupe path. Queries are inherently
     //    safe; streams and subscriptions do not use dedupe either.
     //
-    //    `Some(Action)` is treated as `None` here — both mean "no kind
-    //    restriction"; the manifest emitter omits `kind` for action
-    //    procedures but a future emitter may write it explicitly.
+    //    `None` is admitted alongside `Some(Action)`. The stated reason
+    //    used to be that the emitter omits `kind` for actions; it does
+    //    not, and never should — it writes every capability precisely so
+    //    that unknown and action are distinguishable. `None` therefore
+    //    means "hand-authored manifest declared no capability", and
+    //    admitting it here treats an undeclared procedure as the most
+    //    permissive one, which is the opposite of how the CSRF guard
+    //    above reads it. No test constructs `kind: None` on this path.
+    //    Tracked as task #202; left as-is because narrowing it changes
+    //    what raw-JS deploys get, which is a contract call.
     let idempotency_handle = if policy.idempotent
         && matches!(
             policy.kind,
