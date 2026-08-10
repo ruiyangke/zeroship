@@ -462,11 +462,16 @@ jobs:
       # fix a generator that refuses to generate. Whoever regenerates on this
       # note alone will see them still red.
       #
-      # Regenerate WITH CARE even for the drift ones: the fresh env.db.ts is
-      # emptier than the committed artifact (a bare `//` where the
-      # @zeroship/db import belongs), so the gate is right that they differ
-      # and wrong about which side is correct. Fix the renderer first. See
-      # task #220.
+      # The 2 drift ones are ordinary staleness and regenerating is correct.
+      # Do NOT read the gate's "first divergence" as the whole story: it
+      # reports one line, and for env.db.ts that line is a `//` against the
+      # committed `import ... from "@zeroship/db"`, which LOOKS like the
+      # generator emitting less. It is not. The renderer's header comment
+      # gained a paragraph, so every following line is offset and the first
+      # mismatch lands mid-header. The schema.runtime.json one is the same
+      # shape: a trailing comma, because the ceiling now declares a default
+      # for `version` (17cd17b46) that the committed artifacts predate.
+      # See task #220.
       #
       # The @zeroship/migrate line above is unverified by me and left as
       # written; only the vite-plugin claim was measured.
