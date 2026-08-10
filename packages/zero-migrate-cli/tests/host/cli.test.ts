@@ -16,6 +16,8 @@ import {
   pendingMigrationsForPlan,
   resolveNetworkSecurity,
   resolvePendingVersion,
+  rollbackTargetFromArgs,
+  formatRollbackHuman,
   statusExitCode,
   statusIsDirty,
 } from "../../src/cli.js";
@@ -398,6 +400,77 @@ test("CLI resolve parses commit and rollback and enforces its guards", () => {
   }
 });
 
+test("rollback demands exactly one target and rejects a bad step count", () => {
+  assert.deepEqual(rollbackTargetFromArgs({ rollbackAll: true }), { kind: "all" });
+  assert.deepEqual(rollbackTargetFromArgs({ rollbackAll: false, rollbackSteps: "2" }), {
+    kind: "steps",
+    steps: 2,
+  });
+  assert.deepEqual(
+    rollbackTargetFromArgs({ rollbackAll: false, rollbackTo: "mig_00000000000000000001" }),
+    { kind: "toVersion", version: "mig_00000000000000000001" },
+  );
+
+  // No default: unwinding "some" of a schema has no safe fallback.
+  assert.throws(() => rollbackTargetFromArgs({ rollbackAll: false }), /needs a target/);
+  // Two targets means the operator meant one of them, and choosing for them would
+  // unwind the wrong amount.
+  assert.throws(
+    () => rollbackTargetFromArgs({ rollbackAll: true, rollbackSteps: "1" }),
+    /takes one target/,
+  );
+  for (const steps of ["-1", "1.5", "two", ""]) {
+    assert.throws(
+      () => rollbackTargetFromArgs({ rollbackAll: false, rollbackSteps: steps }),
+      /non-negative whole number/,
+      `--steps ${JSON.stringify(steps)} must be refused`,
+    );
+  }
+});
+
+test("rollback refuses without a target or without approval, before touching a database", () => {
+  // A bogus URL: reaching the driver at all would fail differently, so these
+  // refusals landing first is what proves they precede the connection.
+  const url = "postgres://user:secret@127.0.0.1:1/none";
+
+  const noTarget = runCli("rollback", `--database-url=${url}`, "--approve");
+  assert.equal(noTarget.status, 1);
+  assert.match(noTarget.stderr, /rollback needs a target/);
+  assert.doesNotMatch(noTarget.stderr, /secret/);
+
+  const noApprove = runCli("rollback", `--database-url=${url}`, "--all");
+  assert.equal(noApprove.status, 1);
+  assert.match(noApprove.stderr, /needs --approve/);
+
+  const bothTargets = runCli("rollback", `--database-url=${url}`, "--all", "--steps=1", "--approve");
+  assert.equal(bothTargets.status, 1);
+  assert.match(bothTargets.stderr, /takes one target/);
+});
+
+test("the rollback-only flags are refused on every other command", () => {
+  for (const flag of ["--all", "--steps=1", "--to=mig_1", "--force", "--backup-acknowledged"]) {
+    const result = runCli("status", flag, "--database-url=postgres://u@127.0.0.1:1/n");
+    assert.equal(result.status, 1, `${flag} must not be accepted by status`);
+    assert.match(result.stderr, /only valid with rollback/);
+  }
+});
+
+test("the rollback operator lines report reversed, skipped, and empty runs", () => {
+  assert.equal(
+    formatRollbackHuman({ rolledBack: ["mig_a", "mig_b"], skippedIrreversible: [] }),
+    "rollback: 2 rolled back\n  reversed mig_a\n  reversed mig_b\n",
+  );
+  assert.match(
+    formatRollbackHuman({ rolledBack: [], skippedIrreversible: ["mig_c"] }),
+    /skipped mig_c \(declares no down; crossed under --force\)/,
+  );
+  // An empty run is not a silent success: nothing in range must say so.
+  assert.match(
+    formatRollbackHuman({ rolledBack: [], skippedIrreversible: [] }),
+    /nothing was applied in the requested range/,
+  );
+});
+
 test("removed CLI verbs are unknown and absent from help", () => {
   for (const command of ["preview", "resolve-pending"]) {
     const result = runCli(command);
@@ -510,9 +583,10 @@ test("CLI help documents the v2 surface, config, and dialect rule", () => {
   assert.match(help.stdout, /--commit/);
   assert.match(help.stdout, /--rollback/);
   assert.match(help.stdout, /--strict/);
-  assert.match(help.stdout, /no down command and no clean command/);
-  assert.match(help.stdout, /plan and apply support PostgreSQL, MySQL 8, and SQLite/);
-  assert.match(help.stdout, /status supports PostgreSQL\s+and MySQL 8/);
+  assert.match(help.stdout, /rollback reverses\napplied migrations from their authored down; there is no clean command/);
+  assert.match(help.stdout, /zero-migrate rollback \(--to <version> \| --steps <n> \| --all\)/);
+  assert.match(help.stdout, /plan, apply and rollback support PostgreSQL, MySQL 8, and SQLite/);
+  assert.match(help.stdout, /status supports\s+PostgreSQL and MySQL 8/);
   assert.doesNotMatch(help.stdout, /\u2014|host driver seam|addon|in-process/);
 
   const liveDialect = runCli("plan", "--dialect=postgres");

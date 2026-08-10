@@ -27,6 +27,8 @@ import {
   type MigrateAddon,
   type AddonHostDriver,
   type ApplyReply,
+  type RollbackReply,
+  type RollbackTargetDto,
   type StatusReply,
   type HistoryReply,
   type LoadVerifyReply,
@@ -147,7 +149,7 @@ export type ApplyOutcome = ApplyReply;
  * not protect plain JavaScript callers. */
 function assertExplicitPolicy(
   value: unknown,
-  verb: "apply" | "status" | "history" | "resolvePending",
+  verb: "apply" | "rollback" | "status" | "history" | "resolvePending",
 ): asserts value is readonly string[] {
   if (
     !Array.isArray(value) ||
@@ -209,6 +211,102 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
       appliedBy: opts.appliedBy ?? "host",
+    });
+  } finally {
+    await close();
+  }
+}
+
+/** Options for unwinding applied migrations. */
+export interface HostRollbackOptions {
+  /** The complete ordered authored migration set, oldest first. A rollback
+   *  reconstructs each `down` from its authored envelope, so a migration missing
+   *  here has no reverse SQL and the unwind refuses rather than skipping it. */
+  migrations: readonly MigrationModule[];
+  /** Optional recorder name fallbacks aligned one-for-one with `migrations`. */
+  nameFallbacks?: readonly (string | undefined)[];
+  /** The app id that authored the migrations. It reproduces the plan identities
+   *  the deploy journaled, so it must match what applied them. */
+  ownerApp: string;
+  /** The confined project schema the lower pins ops to. */
+  projectSchema: string;
+  /** The target DB driver. */
+  driver: DriverConfig;
+  /** The project's `{ table: owner_app }` registry. Defaults to `{}`. */
+  registry?: Record<string, string>;
+  /** Required ordered table-shape policy documents, identical to apply's. The
+   *  guard over each `down` is composed from these. */
+  policy: readonly string[];
+  /** The migrator role to `SET ROLE` under. Not accepted for SQLite. */
+  migratorRole?: string;
+  /** How far to unwind. Required: there is no default, because every default is
+   *  a guess about how much of a schema to remove. */
+  target: RollbackTargetDto;
+  /** Whether the teardown is approved. A `down` is destructive by construction,
+   *  so the engine refuses without it. Default `false`. */
+  approved?: boolean;
+  /** Skip a migration that declares no `down` instead of refusing. Honored only
+   *  with `backupAcknowledged`. Default `false`. */
+  force?: boolean;
+  /** Acknowledge that a backup exists. Default `false`. */
+  backupAcknowledged?: boolean;
+  /** The audit label recorded with the `rolled_back` events. Default `"host"`. */
+  appliedBy?: string;
+}
+
+/** The typed `rollback` reply - re-exported from the generated addon DTOs. */
+export type RollbackOutcome = RollbackReply;
+
+/**
+ * Author every envelope (pure JS) then drive the addon's rollback path.
+ * PostgreSQL and MySQL go over the host-driver `rollback` seam; SQLite goes to
+ * bundled rusqlite through `rollbackSqlite`. Network sessions are always closed.
+ *
+ * Unlike `apply`, this takes the WHOLE authored set rather than one migration and
+ * its priors: the versions being unwound are already applied, so there is no
+ * current envelope to distinguish, and the engine needs every candidate's `down`
+ * in one set to refuse coherently.
+ */
+export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutcome> {
+  assertExplicitPolicy(opts.policy, "rollback");
+  const addon = loadAddon();
+  if (
+    opts.nameFallbacks !== undefined &&
+    opts.nameFallbacks.length !== opts.migrations.length
+  ) {
+    throw new Error(
+      "zero-migrate-cli: rollback nameFallbacks must match migrations length",
+    );
+  }
+  const envelopes = opts.migrations.map((migration, index) =>
+    authorEnvelope(addon, migration, opts.nameFallbacks?.[index]),
+  );
+  const shared = {
+    ownerApp: opts.ownerApp,
+    projectSchema: opts.projectSchema,
+    registry: opts.registry ?? {},
+    envelopes,
+    charterLayers: [...opts.policy],
+    target: opts.target,
+    approved: opts.approved ?? false,
+    force: opts.force ?? false,
+    backupAcknowledged: opts.backupAcknowledged ?? false,
+    appliedBy: opts.appliedBy ?? "host",
+  };
+
+  if (opts.driver.kind === "sqlite") {
+    return await addon.rollbackSqlite(opts.driver.appPath, opts.driver.journalPath, {
+      ...shared,
+      dialect: "sqlite",
+    });
+  }
+
+  const { hostDriver, close } = await openSession(opts.driver);
+  try {
+    return await addon.rollback(hostDriver, {
+      ...shared,
+      migratorRole: opts.migratorRole,
+      dialect: dialectOf(opts.driver),
     });
   } finally {
     await close();

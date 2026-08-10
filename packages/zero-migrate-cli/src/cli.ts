@@ -28,12 +28,14 @@ import {
   history,
   previewSql,
   resolvePending,
+  rollback,
   statusEnvelopes,
   currentIrVersion,
   type DriverConfig,
   type NetworkSecurityOptions,
+  type RollbackOutcome,
 } from "./index.js";
-import { loadAddon, type StatusReply } from "./addon.js";
+import { loadAddon, type RollbackTargetDto, type StatusReply } from "./addon.js";
 import { resolveCliConfig, type CliConfigValues } from "./config.js";
 import {
   buildEnvelope,
@@ -151,6 +153,16 @@ interface Args {
   resolveCommit: boolean;
   /** Resolve the pending rename by keeping the old column. */
   resolveRollback: boolean;
+  /** `rollback --to <version>`: unwind everything applied after this version. */
+  rollbackTo?: string;
+  /** `rollback --steps <n>`: unwind the n most recently applied migrations. */
+  rollbackSteps?: string;
+  /** `rollback --all`: unwind every applied migration. */
+  rollbackAll: boolean;
+  /** `rollback --force`: cross a migration that declares no down by skipping it. */
+  force: boolean;
+  /** `rollback --backup-acknowledged`: the operator states a backup exists. */
+  backupAcknowledged: boolean;
   /** Explicit config file and environment selectors. */
   configPath?: string;
   environment?: string;
@@ -175,6 +187,9 @@ function parseArgs(argv: string[]): Args {
     strict: false,
     resolveCommit: false,
     resolveRollback: false,
+    rollbackAll: false,
+    force: false,
+    backupAcknowledged: false,
     databaseUrlFromFlag: false,
     explicitConfig: {},
   };
@@ -290,6 +305,24 @@ function parseArgs(argv: string[]): Args {
         rejectInlineVal();
         args.resolveRollback = true;
         break;
+      case "to":
+        args.rollbackTo = takeVal();
+        break;
+      case "steps":
+        args.rollbackSteps = takeVal();
+        break;
+      case "all":
+        rejectInlineVal();
+        args.rollbackAll = true;
+        break;
+      case "force":
+        rejectInlineVal();
+        args.force = true;
+        break;
+      case "backup-acknowledged":
+        rejectInlineVal();
+        args.backupAcknowledged = true;
+        break;
       case "version":
         rejectInlineVal();
         versionRequested = true;
@@ -342,10 +375,11 @@ function parseArgs(argv: string[]): Args {
     args.command !== "plan" &&
     args.command !== "apply" &&
     args.command !== "status" &&
+    args.command !== "rollback" &&
     args.command !== "resolve"
   ) {
     throw new CliError(
-      "flag --registry is only valid with lint, plan, apply, status, or resolve",
+      "flag --registry is only valid with lint, plan, apply, status, rollback, or resolve",
     );
   }
   if (
@@ -355,14 +389,31 @@ function parseArgs(argv: string[]): Args {
     args.command !== "apply" &&
     args.command !== "status" &&
     args.command !== "history" &&
+    args.command !== "rollback" &&
     args.command !== "resolve"
   ) {
     throw new CliError(
-      "flag --policy is only valid with lint, plan, apply, status, history, or resolve",
+      "flag --policy is only valid with lint, plan, apply, status, history, rollback, or resolve",
     );
   }
-  if (args.journalPath !== undefined && args.command !== "apply") {
-    throw new CliError("flag --journal is only valid with apply");
+  if (
+    args.journalPath !== undefined &&
+    args.command !== "apply" &&
+    args.command !== "rollback"
+  ) {
+    throw new CliError("flag --journal is only valid with apply or rollback");
+  }
+  if (
+    (args.rollbackTo !== undefined ||
+      args.rollbackSteps !== undefined ||
+      args.rollbackAll ||
+      args.force ||
+      args.backupAcknowledged) &&
+    args.command !== "rollback"
+  ) {
+    throw new CliError(
+      "flags --to, --steps, --all, --force, and --backup-acknowledged are only valid with rollback",
+    );
   }
   return args;
 }
@@ -967,6 +1018,109 @@ async function runApply(args: Args): Promise<number> {
   return 0;
 }
 
+/**
+ * Turn the three target flags into the one target the addon takes.
+ *
+ * Exactly one is required. Zero is refused because there is no safe default for
+ * how much of a schema to tear down, and more than one because the operator meant
+ * one of them and picking for them would unwind the wrong amount. Kept pure so
+ * both rules stay host-testable without a database.
+ */
+export function rollbackTargetFromArgs(args: {
+  rollbackTo?: string;
+  rollbackSteps?: string;
+  rollbackAll: boolean;
+}): RollbackTargetDto {
+  const chosen = [
+    args.rollbackTo !== undefined ? "--to" : undefined,
+    args.rollbackSteps !== undefined ? "--steps" : undefined,
+    args.rollbackAll ? "--all" : undefined,
+  ].filter((flag): flag is string => flag !== undefined);
+  if (chosen.length === 0) {
+    throw new CliError(
+      "rollback needs a target: --to <version>, --steps <n>, or --all",
+    );
+  }
+  if (chosen.length > 1) {
+    throw new CliError(
+      `rollback takes one target, but ${chosen.join(" and ")} were both given`,
+    );
+  }
+  if (args.rollbackTo !== undefined) {
+    return { kind: "toVersion", version: args.rollbackTo };
+  }
+  if (args.rollbackSteps !== undefined) {
+    // `Number("")` is 0 and `Number(" 2 ")` is 2, so the digits are checked before
+    // the conversion: `--steps=` must not read as a silent no-op unwind.
+    const steps = /^\d+$/.test(args.rollbackSteps) ? Number(args.rollbackSteps) : NaN;
+    if (!Number.isInteger(steps)) {
+      throw new CliError(
+        `flag --steps needs a non-negative whole number; got ${JSON.stringify(args.rollbackSteps)}`,
+      );
+    }
+    return { kind: "steps", steps };
+  }
+  return { kind: "all" };
+}
+
+/** Unwind applied migrations, newest first, down to the requested target. */
+async function runRollback(args: Args): Promise<number> {
+  if (!args.databaseUrl) {
+    throw new CliError(
+      "missing database URL (pass --database-url or set DATABASE_URL)",
+    );
+  }
+  const target = rollbackTargetFromArgs(args);
+  if (!args.approved) {
+    throw new CliError(
+      "rollback runs the reverse SQL of applied migrations, so it needs --approve",
+    );
+  }
+  const driver = driverFor(args.databaseUrl, args.journalPath, args.security);
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
+  const registry = await loadRegistry(args.registryPath);
+  const files = await discover(args.dir);
+  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
+  const loaded = await importMigrations(files);
+  assertUniqueMigrationNames(loaded);
+  // The WHOLE authored set goes over, not a prefix: the addon reconstructs each
+  // `down` from its envelope, and a migration left out has no reverse SQL, which
+  // the engine reports as a refusal rather than a skip.
+  const outcome = await rollback({
+    migrations: loaded.map((entry) => entry.migration),
+    nameFallbacks: loaded.map((entry) => entry.file.label),
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    driver,
+    registry,
+    policy: charterLayers,
+    target,
+    approved: args.approved,
+    force: args.force,
+    backupAcknowledged: args.backupAcknowledged,
+  });
+  process.stdout.write(
+    args.json
+      ? `${JSON.stringify(outcome, null, 2)}\n`
+      : `${formatRollbackHuman(outcome)}`,
+  );
+  return 0;
+}
+
+/** The operator lines for a completed rollback. */
+export function formatRollbackHuman(outcome: RollbackOutcome): string {
+  const lines = [`rollback: ${outcome.rolledBack.length} rolled back`];
+  for (const version of outcome.rolledBack) lines.push(`  reversed ${version}`);
+  for (const version of outcome.skippedIrreversible) {
+    lines.push(`  skipped ${version} (declares no down; crossed under --force)`);
+  }
+  if (outcome.rolledBack.length === 0 && outcome.skippedIrreversible.length === 0) {
+    lines.push("  nothing was applied in the requested range");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 /** How much of a lock holder's current statement the operator line shows. */
 const HOLDER_QUERY_LIMIT = 200;
 
@@ -1257,6 +1411,7 @@ Usage:
   zero-migrate lint [--dir <dir>] [--dialect <name>] [--explain] [--registry <file>] [--policy <file> ...] [--json]
   zero-migrate plan [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--json]
   zero-migrate apply [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--journal <path>] [--registry <file>] [--approve]
+  zero-migrate rollback (--to <version> | --steps <n> | --all) --approve [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--journal <path>] [--registry <file>] [--force --backup-acknowledged] [--json]
   zero-migrate status [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--strict] [--json]
   zero-migrate resolve <migration> (--commit | --rollback) --approve [--database-url <url>] [--policy <file> ...] [--registry <file>]
   zero-migrate history [--database-url <url>] [--policy <file> ...] [--json]
@@ -1280,6 +1435,12 @@ Flags:
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
   --approve             Approve reviewed destructive changes and backfills
+  --to <version>        rollback: unwind everything applied after this version
+  --steps <n>           rollback: unwind the n most recently applied migrations
+  --all                 rollback: unwind every applied migration
+  --force               rollback: cross a migration with no down by skipping it
+                        (needs --backup-acknowledged too)
+  --backup-acknowledged rollback: state that a backup exists before forcing
   --commit              Resolve an online rename and keep the new column
   --rollback            Resolve an online rename and keep the old column
   --explain             lint: include rendered SQL for selected dialects
@@ -1295,8 +1456,9 @@ zero-migrate.toml environment, then default. DATABASE_URL remains the URL fallba
 Set ZERO_MIGRATE_LOG=1 for engine diagnostics on stderr (off by default; they never
 touch the single JSON document --json writes to stdout).
 Only lint accepts --dialect; live commands derive it from the URL. lint is offline.
-plan and apply support PostgreSQL, MySQL 8, and SQLite; status supports PostgreSQL
-and MySQL 8; history and resolve are PostgreSQL-only. There is no down command and no clean command.
+plan, apply and rollback support PostgreSQL, MySQL 8, and SQLite; status supports
+PostgreSQL and MySQL 8; history and resolve are PostgreSQL-only. rollback reverses
+applied migrations from their authored down; there is no clean command.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */
@@ -1336,6 +1498,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runLivePlan(args);
       case "apply":
         return await runApply(args);
+      case "rollback":
+        return await runRollback(args);
       case "status":
         return await runStatus(args);
       case "history":

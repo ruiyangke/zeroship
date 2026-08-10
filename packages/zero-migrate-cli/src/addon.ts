@@ -29,8 +29,11 @@ import type {
   StatusRequest,
   StatusIrRequest,
   ResolvePendingRequest,
+  RollbackRequest,
+  RollbackTargetDto,
   HistoryRequest,
   ApplyReply,
+  RollbackReply,
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
@@ -43,8 +46,11 @@ export type {
   StatusRequest,
   StatusIrRequest,
   ResolvePendingRequest,
+  RollbackRequest,
+  RollbackTargetDto,
   HistoryRequest,
   ApplyReply,
+  RollbackReply,
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
@@ -111,6 +117,17 @@ export interface MigrateAddon {
     journalPath: string,
     req: StatusIrRequest,
   ): Promise<StatusReply>;
+
+  /** Unwind applied migrations over the host driver, reconstructing each `down`
+   *  from its authored envelope. Resolves to a typed `RollbackReply`. */
+  rollback(hostDriver: AddonHostDriver, req: RollbackRequest): Promise<RollbackReply>;
+
+  /** Rollback through the addon's bundled in-process rusqlite backend. */
+  rollbackSqlite(
+    appPath: string,
+    journalPath: string,
+    req: RollbackRequest,
+  ): Promise<RollbackReply>;
 
   /** Complete or abort one outstanding PostgreSQL online rename. */
   resolvePending(
