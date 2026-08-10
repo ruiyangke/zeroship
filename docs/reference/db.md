@@ -1038,8 +1038,26 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 
 The field names are **reserved**. Declaring a user field named `id`,
 `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, or
-`deleted_at` rejects at deploy time with `code: "RESERVED_SYSTEM_FIELD_NAME"`
-and a hint listing the reserved set. The one sanctioned exception is
+`deleted_at` is rejected — but **not at deploy time, and not always with a
+readable error**. Deploy succeeds. What you get instead, measured:
+
+- The app **builds and boots clean**. Nothing warns.
+- Every `env.db` call then fails with a `500`, from schema validation:
+  `collection '<name>' declares field '<field>', which collides with an
+  injected policy column`.
+
+There is a friendlier `code: "RESERVED_SYSTEM_FIELD_NAME"` with a hint listing
+the reserved set, but it is raised by the boot-time schema installer, not by
+deploy, and the validation above can refuse the schema before you ever see it.
+Treat the reserved set as something to avoid up front rather than something the
+platform will tell you about at a useful moment.
+
+Which layer owns this rejection is being reworked: the reserved-name list is
+going away in favour of the injected-column policy as the single authority. The
+names above stay reserved either way — only the mechanism and the error you see
+will change.
+
+The one sanctioned exception is
 `id: t.id("prefix")`, which declares the typed-id prefix for the system
 `id` column rather than overriding it — see
 [Typed-id prefixes](#typed-id-prefixes).
