@@ -114,6 +114,19 @@ pub struct ErrorExtras<'a> {
 /// ticket for the exposure. Do not restore the equivalence claim; if the two
 /// are ever made to agree, say which one moved.
 ///
+/// THIS function is what a deployed vite-built app's RPC error actually goes
+/// through, and the evidence is the `request_id` format, not a reading of the
+/// call graph. A vite-built app DOES install the TS handler as `default.fetch`
+/// on both tiers (`sdks/vite-plugin/src/rpc-registry.ts` generates the
+/// synthetic entry and calls `createFetchHandler`), so
+/// `fetch-handler.ts`'s own 5xx rail is reachable in principle. It did not
+/// serve the constraint errors measured by `tests/e2e_dev_vs_deployed_db.sh`:
+/// its `newRequestId()` returns a UUID, and those bodies carried
+/// `"request_id":"5"` / `"6"` — the u64 counter below. The two emit an
+/// identical body shape when there is no code, so the id format is the only
+/// thing that distinguishes them. An RPC throw therefore escapes the TS catch
+/// and lands here.
+///
 /// Two independent rails, both client-visible boundaries:
 ///
 /// 1. **5xx body sanitization.** Production clients get a fixed response
