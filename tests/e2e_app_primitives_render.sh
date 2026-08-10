@@ -48,7 +48,7 @@ export PG_CONTAINER="zs-e2e-render-pg"
 
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 
-PASS=0; FAIL=0; KNOWN=0
+PASS=0; FAIL=0; KNOWN=0; SKIPPED=0
 WORK=""
 
 pass()  { PASS=$((PASS+1));  echo "  ✓ $1"; }
@@ -118,7 +118,7 @@ OAI_ZSHIP="$ROOT/examples/openai-demo/dist/app.zship"
 echo ""
 echo "=== Scenario 1: SSG (ssg-docs) — prerendered HTML, worker == null ==="
 if [ ! -f "$SSG_ZSHIP" ]; then
-  known "SKIP ssg-docs — missing $SSG_ZSHIP (build: cd examples/ssg-docs && pnpm install && pnpm build)"
+  e2e_skipped "ssg-docs — missing $SSG_ZSHIP (build: cd examples/ssg-docs && pnpm install && pnpm build)"
 else
   # manifest assertion: no V8 at runtime. The serialized .zship manifest OMITS
   # the `worker` key entirely for a worker-less app (vs. SSR/CSR which carry a
@@ -166,7 +166,7 @@ fi
 echo ""
 echo "=== Scenario 2: SSR (ssr-blog) — per-request HTML rendered in V8 ==="
 if [ ! -f "$SSR_ZSHIP" ]; then
-  known "SKIP ssr-blog — missing $SSR_ZSHIP (build: cd examples/ssr-blog && pnpm install && pnpm build)"
+  e2e_skipped "ssr-blog — missing $SSR_ZSHIP (build: cd examples/ssr-blog && pnpm install && pnpm build)"
 else
   if deploy_app "ssr-blog-e2e" "$SSR_ZSHIP"; then
     pass "deployed ssr-blog ($APP_ID)"
@@ -202,7 +202,7 @@ fi
 echo ""
 echo "=== Scenario 3: CSR (csr-todo) — SPA shell + static asset + SPA fallback ==="
 if [ ! -f "$CSR_ZSHIP" ]; then
-  known "SKIP csr-todo — missing $CSR_ZSHIP (build: cd examples/csr-todo && pnpm install && pnpm build)"
+  e2e_skipped "csr-todo — missing $CSR_ZSHIP (build: cd examples/csr-todo && pnpm install && pnpm build)"
 else
   # discover the built JS asset path from the manifest
   CSR_ASSET="$(zstd -dq -c "$CSR_ZSHIP" | tar -xO manifest.json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s).assets;const k=Object.keys(a).find(p=>p.startsWith("/assets/")&&p.endsWith(".js"));console.log(k||"")}catch(e){console.log("")}})')"
@@ -270,7 +270,7 @@ if [ -f "$CSR_ZSHIP" ]; then
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const arr=Array.isArray(o)?o:(o.apps||o.items||[]);const a=arr.find(x=>x.name==="csr-todo-e2e");console.log(a?a.id:"")}catch(e){console.log("")}})')"
 fi
 if [ -z "$CSR_APP_ID" ]; then
-  known "SKIP RPC stream — csr-todo not deployed / app id not resolvable"
+  e2e_skipped "RPC stream — csr-todo not deployed / app id not resolvable"
 else
   # /dispatch decodes a length-prefixed binary frame, not a JSON envelope with
   # the body inline; the accept header belongs in the frame metadata, not on
@@ -316,7 +316,7 @@ echo "=== Scenario 5a: fetch egress (weather-proxy.js via zeroship serve) ==="
 WP="$ROOT/examples/weather-proxy.js"
 SERVE_PORT=3210
 if [ ! -f "$WP" ]; then
-  known "SKIP weather-proxy — missing $WP"
+  e2e_skipped "weather-proxy — missing $WP"
 else
   "$BIN/zeroship" serve "$WP" --port $SERVE_PORT > "$WORK/serve_wp.log" 2>&1 &
   WP_PID=$!; PIDS+=($WP_PID)
@@ -365,7 +365,7 @@ done
 [ -z "$OAI_KEY" ] && OAI_KEY="sk-e2e-placeholder-node-compat-probe"
 
 if [ ! -f "$OAI_ZSHIP" ]; then
-  known "SKIP openai-demo — missing $OAI_ZSHIP (build: cd examples/openai-demo && pnpm install && pnpm build)"
+  e2e_skipped "openai-demo — missing $OAI_ZSHIP (build: cd examples/openai-demo && pnpm install && pnpm build)"
 else
   # create app, set the OPENAI_API_KEY secret, THEN deploy (so the first
   # isolate load hydrates env with the key already present).
@@ -438,8 +438,5 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo ""
-echo "============================================"
-echo "  Results: $PASS passed, $FAIL failed, $KNOWN known/skip"
-echo "============================================"
-[ $FAIL -eq 0 ] && exit 0 || exit 1
+e2e_verdict
+exit $?
