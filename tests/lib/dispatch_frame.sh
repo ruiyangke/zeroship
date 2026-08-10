@@ -29,14 +29,22 @@
 # the args as {"json": <args>}, matching how the dispatcher unwraps input.
 # ============================================================================
 
+#   zs_write_frame <outfile> <method> <url> <body> [headers-json]
+#
+# headers-json is an optional [["name","value"],...] array; it defaults to a
+# single content-type: application/json. Pass it when a procedure needs more,
+# e.g. `accept: text/event-stream` for a streaming RPC — those headers belong
+# in the frame metadata, not on the outer POST to /dispatch.
 zs_write_frame() {
     node -e '
 const fs = require("node:fs");
-const [out, method, url, body] = process.argv.slice(1);
+const [out, method, url, body, headersJson] = process.argv.slice(1);
 const meta = Buffer.from(JSON.stringify({
   method,
   url,
-  headers: [["content-type", "application/json"]],
+  headers: headersJson
+    ? JSON.parse(headersJson)
+    : [["content-type", "application/json"]],
 }), "utf8");
 const len = Buffer.alloc(4);
 len.writeUInt32LE(meta.length, 0);
