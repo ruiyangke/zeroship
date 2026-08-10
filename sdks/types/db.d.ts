@@ -460,9 +460,18 @@ interface ZeroshipDb {
    * instead of a fresh `BEGIN` (nested-tx via implicit savepoint; depth
    * cap 8 → `savepoint_depth_exceeded`).
    *
-   * `opts.isolationLevel` accepts `"readCommitted"` / `"repeatableRead"`
-   * / `"serializable"` (and the matching SQL strings); honoured on the
-   * outermost `BEGIN` only.
+   * `opts.isolationLevel` is a {@link ZeroshipIsolationLevel} (the SQL-spaced
+   * lowercase form - `"read uncommitted"` | `"read committed"` |
+   * `"repeatable read"` | `"serializable"`); honoured on the outermost
+   * `BEGIN` only. This type used to declare its own three-value camelCase
+   * literal (`"readCommitted" | "repeatableRead" | "serializable"`), which
+   * disagreed with `ZeroshipIsolationLevel` on both spelling and count - it
+   * dropped `readUncommitted` entirely even though the runtime accepts it
+   * (measured 2026-08-10, task #245). The runtime's `normalize_isolation_level`
+   * (`crates/plugin-db/src/v8_classes/db.rs`) also accepts the camelCase and
+   * uppercase SQL forms, but `ZeroshipIsolationLevel` is the one published
+   * type - see its doc comment in `shared.d.ts` - so this signature matches
+   * that rather than inventing a second accepted-but-undocumented union.
    *
    * This is the low-level native primitive. The `@zeroship/db` SDK wraps
    * it as `env.db.transaction(fn): Promise<Result<R>>` (the
@@ -472,7 +481,7 @@ interface ZeroshipDb {
   transaction<R>(
     callback: (tx: ZeroshipTxView) => R | Promise<R>,
     opts?: {
-      isolationLevel?: "readCommitted" | "repeatableRead" | "serializable";
+      isolationLevel?: ZeroshipIsolationLevel;
     },
   ): Promise<R>;
 
