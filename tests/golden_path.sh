@@ -493,6 +493,51 @@ echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   de
   && pass "deployed does NOT reject on size what dev refuses (1 MiB+1 -> $DEP_1MIB)" \
   || fail "deployed also answered 413 at 1 048 577 bytes; the documented 4 MiB cap is not in force"
 
+# UPPER BRACKET. Without this the pair above only shows the deployed cap is
+# ABOVE 1 MiB -- it could be anywhere, including absent.
+#
+# STATUS CODE IS THE WRONG INSTRUMENT HERE, and finding that out is what this
+# block is for. There are TWO caps on the deployed path with DIFFERENT answers:
+#
+#   the per-resource manifest cap  -> 413 + a JSON envelope, from the
+#                                     `execute_resource_tree` early-return arm
+#                                     (crates/gateway/src/router/dispatch.rs)
+#   the transport cap, 4 MiB       -> ntex's own response to a PayloadConfig
+#                                     overflow, which gateway/src/main.rs calls
+#                                     "a bare framework 400"
+#
+# So an over-4-MiB body and a merely-malformed body BOTH answer 400, and no
+# assertion on the status alone can tell them apart. The BODY discriminates: the
+# app's own rejection carries a JSON error envelope, a transport overflow does
+# not. Asserted on emptiness rather than on 413, because 413 is what the OTHER
+# cap produces -- an assertion expecting it here would encode a doc sentence
+# (`runtime-limits.md`: "Over the cap, the caller gets 413") that describes the
+# resource arm, not this one.
+head -c 4194305 /dev/zero | tr '\0' 'a' > "$BODYCAP_TMP/over4mib.bin"
+DEP_4MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
+  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+DEP_4MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
+  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null | head -c 120)
+DEP_1MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
+  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null | head -c 120)
+
+echo "    body cap: deployed(4MiB+1) -> $DEP_4MIB  body=[$DEP_4MIB_BODY]"
+echo "    body cap: deployed(1MiB+1) body=[$DEP_1MIB_BODY]"
+
+# The 4 MiB body must not be SERVED. Whatever the status, a 2xx here would mean
+# the transport cap is absent and a creator can post arbitrary bytes.
+case "$DEP_4MIB" in
+  2??) fail "deployed ACCEPTED 4 194 305 bytes (HTTP $DEP_4MIB); the 4 MiB transport cap is not in force" ;;
+  *)   pass "deployed refuses a body over its 4 MiB transport cap (HTTP $DEP_4MIB)" ;;
+esac
+
+# THE DISCRIMINATOR: the two rejections must not be the same rejection. If the
+# over-cap body produced the app's own JSON envelope, the transport cap never
+# fired and the app parsed 4 MiB of garbage.
+[ "$DEP_4MIB_BODY" != "$DEP_1MIB_BODY" ] \
+  && pass "the over-cap rejection differs from the malformed-body rejection (transport cap fired)" \
+  || fail "4 MiB+1 and 1 MiB+1 produced IDENTICAL responses; the transport cap did not fire and the app parsed both"
+
 rm -rf "$BODYCAP_TMP"
 
 # --- 7. A dev runtime that never starts must be LOUD, not silently looping ---

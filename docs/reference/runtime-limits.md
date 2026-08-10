@@ -82,9 +82,25 @@ multiplied by in-flight concurrency is therefore the worst-case footprint,
 which is what keeps this number modest. Large uploads belong in `env.storage`,
 where the bytes go straight to object storage instead.
 
-Over the cap, the caller gets `413` with a JSON body. A bare `400` from the
-HTTP layer would mean the limit was applied by the framework's own default
-rather than by this one.
+Over the cap, the caller gets **`400` with the plain-text body
+`A payload reached size limit.`** — measured against a live gateway at
+4 194 305 bytes. It is not a `413`, and it carries no JSON envelope: the 4 MiB
+limit is applied by the transport layer, which answers in its own words.
+
+**A `413` on this path means a different limit fired.** The gateway also
+enforces a per-resource cap declared in the manifest, and *that* one returns
+`413` with a JSON error envelope. The two are distinguishable by the body, not
+by the status:
+
+| what fired | status | body |
+| --- | --- | --- |
+| the 4 MiB transport cap | `400` | `A payload reached size limit.` |
+| a per-resource manifest cap | `413` | JSON error envelope |
+| your app rejecting the payload | `400` | your app's JSON, e.g. `{"message":"invalid JSON body",...}` |
+
+Note the first and third share a status. If you are diagnosing a rejected
+upload, read the body — a `400` alone does not tell you whether the platform
+refused the bytes or your handler did.
 
 ### `zeroship serve` caps bodies at 1 MiB, not 4
 
