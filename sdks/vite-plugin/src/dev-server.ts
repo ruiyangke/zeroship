@@ -292,6 +292,7 @@ async function applyDevSqliteMigrations(
   root: string,
   migrations: DevServerOptions["migrations"],
   descriptorJson: string | undefined,
+  databaseUrl: string,
 ): Promise<void> {
   const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
   if (!existsSync(migrationsDir)) return; // not a migration-first app
@@ -312,7 +313,12 @@ async function applyDevSqliteMigrations(
   }
 
   try {
-    const reply = await applyMigrationsToDevSqlite({ root, migrationsDir, collections });
+    const reply = await applyMigrationsToDevSqlite({
+      root,
+      migrationsDir,
+      collections,
+      databaseUrl,
+    });
     const applied = reply.applied?.length ?? 0;
     const skipped = reply.skipped?.length ?? 0;
     // Report the COUNTS, not "ok". `applied=0 skipped=0` on a fresh database
@@ -561,7 +567,21 @@ export function devServerPlugin(
           // runtime is spawned (spawnRuntime awaits this same promise), so dev
           // matches prod: a migration process creates the schema ahead of the
           // worker, and the worker only reads it.
-          await applyDevSqliteMigrations(root, options.migrations, json);
+          //
+          // The DATABASE_URL is resolved HERE and handed to the apply, using
+          // the same `resolveDatabaseUrl` + the same three inputs that
+          // `spawnRuntime` uses below. Sharing the resolution is the point: the
+          // apply must write to the file the worker opens, and `DATABASE_URL`
+          // is overridable (shell, then `.env`, then the dev default). A
+          // hardcoded `.zeroship` silently applied to the wrong file whenever a
+          // caller redirected it -- see `devSqliteDir`.
+          if (!devDb) devDb = resolveDevDatabase(root);
+          const { databaseUrl } = resolveDatabaseUrl(
+            process.env,
+            parseDotenvVars(root),
+            devDb.databaseUrl,
+          );
+          await applyDevSqliteMigrations(root, options.migrations, json, databaseUrl);
         });
       }
 
