@@ -177,6 +177,15 @@ pub(crate) mod transaction;
 #[cfg(feature = "test-helpers")]
 pub mod transaction;
 
+// Async-scoped transaction marker. Read by `transaction` to tell a
+// genuinely NESTED `transaction()` call from one that merely overlaps
+// another in time; see the module docs for the defect that distinction
+// closes.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod tx_scope;
+#[cfg(feature = "test-helpers")]
+pub mod tx_scope;
+
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod wal_consumer;
 #[cfg(feature = "test-helpers")]

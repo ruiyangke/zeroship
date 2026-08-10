@@ -12,9 +12,13 @@
 //! * [`crate::context::with`] / [`crate::context::with_mut`] are
 //!   the only entry points; every consumer goes through them.
 //! * `*_tx_*` methods coordinate the tx-state slots (`tx_conn`,
-//!   `savepoint_depth`) so the single-connection model the transaction
-//!   orchestrator relies on holds (one BEGIN per isolate, nested
-//!   `SAVEPOINT`s reusing the same connection).
+//!   `savepoint_depth`, `tx_claims`) so the single-connection model the
+//!   transaction orchestrator relies on holds (one BEGIN per app per
+//!   isolate, nested `SAVEPOINT`s reusing the same connection). The
+//!   `tx_claims` set is what makes "one BEGIN" true: it is held from
+//!   before the BEGIN until after the settle, covering the window in
+//!   which `tx_conn` is still empty and two overlapping `transaction()`
+//!   calls used to both read it as free.
 //! * Pending broker emits live on the context; the queue is drained by
 //!   the transaction settle path (`drain_pending_emits_on_commit`) and
 //!   cleared on ROLLBACK / fresh BEGIN.
@@ -136,8 +140,14 @@ pub struct IsolateDbContext {
     /// lets A and B each hold their own concurrent tx without clobbering
     /// (B's BEGIN does not abort A's).
     ///
-    /// V8 is single-threaded per isolate, so a given app still has at
-    /// most one entry. Postgres stores a raw [`Client`] rather than
+    /// A given app has at most one entry — but that is enforced by
+    /// [`Self::tx_claims`], NOT by V8 being single-threaded. An earlier
+    /// version of this comment claimed the latter; it is false and it is
+    /// why two overlapping `transaction()` calls were able to reach
+    /// [`Self::install_tx_client`] together. Single-threaded means one
+    /// executing frame at a time, not one in-flight transaction.
+    ///
+    /// Postgres stores a raw [`Client`] rather than
     /// `compio_postgres::Transaction<'_>` because the latter borrows the
     /// former and cannot live in thread-local state. SQLite stores a
     /// [`SqliteSessionHandle`] pointing at the single writer actor; the
@@ -145,14 +155,44 @@ pub struct IsolateDbContext {
     /// rather than relying on handle drop.
     tx_conns: HashMap<String, TxConnection>,
 
+    /// Apps that currently OWN the right to a top-level transaction,
+    /// **keyed by owning `app_id`**.
+    ///
+    /// Distinct from [`Self::tx_conns`], and the distinction is the point.
+    /// `tx_conns` is populated only once `BEGIN` has come back, so between
+    /// `transaction()` being called and its `BEGIN` completing the slot
+    /// reads EMPTY. Two `db.transaction()` calls in one JS turn both
+    /// landed in that window, both took the top-level path, and the second
+    /// `install_tx_client` evicted the first app's live connection
+    /// (measured on Postgres 2026-08-10: two `BEGIN`s, one dropped
+    /// mid-transaction client, one `COMMIT` covering both bodies).
+    ///
+    /// The claim is taken BEFORE the `BEGIN` runs and held until the
+    /// matching `COMMIT`/`ROLLBACK` has settled, so it covers the whole
+    /// lifetime rather than the connection's. A second top-level
+    /// transaction for the same app parks on [`Self::tx_waiters`] instead
+    /// of racing.
+    tx_claims: HashSet<String>,
+
+    /// Wakers parked on [`Self::tx_claims`], **keyed by owning `app_id`**.
+    ///
+    /// SEC-1: keyed by app for the same reason every other map here is —
+    /// app B releasing its transaction must not wake, or fail to wake,
+    /// app A's waiters. Woken en masse rather than one at a time: a waker
+    /// can be registered more than once across polls, so popping a single
+    /// entry risks waking a stale duplicate and leaving a live waiter
+    /// asleep forever. Each woken future re-checks the claim and re-parks
+    /// if it lost.
+    tx_waiters: HashMap<String, Vec<std::task::Waker>>,
+
     /// Number of nested `SAVEPOINT`s open within each
     /// app's active explicit transaction, **keyed by owning `app_id`**
     /// (SEC-1: a shared counter would let one app's savepoint
     /// bookkeeping corrupt another's `zs_sp_<N>` naming). A missing
     /// entry (or `0`) means either no transaction is active for that
     /// app, or the only open transaction is the outermost one (the
-    /// `BEGIN`). Each nested `env.db.transaction(...)` call that finds
-    /// `has_tx_for(app) == true` emits `SAVEPOINT zs_sp_<depth+1>` and
+    /// `BEGIN`). Each nested `env.db.transaction(...)` call — nested by
+    /// ASYNC SCOPE, see [`crate::tx_scope`] — emits `SAVEPOINT zs_sp_<depth+1>` and
     /// increments this; the matching `RELEASE SAVEPOINT` /
     /// `ROLLBACK TO SAVEPOINT` decrements it.
     ///
@@ -303,6 +343,8 @@ impl IsolateDbContext {
             db_url: None,
             registered_models: HashSet::new(),
             tx_conns: HashMap::new(),
+            tx_claims: HashSet::new(),
+            tx_waiters: HashMap::new(),
             savepoint_depths: HashMap::new(),
             pending_emits: HashMap::new(),
             running_consumers: HashSet::new(),
@@ -637,10 +679,45 @@ impl IsolateDbContext {
         self.tx_conns.contains_key(app_id)
     }
 
+    /// Take `app_id`'s top-level-transaction claim if it is free.
+    /// `true` means this caller now owns it and MUST release it via
+    /// [`Self::release_tx_claim`] when its transaction settles.
+    ///
+    /// Check-and-set in one `&mut self` borrow, which is what makes it
+    /// atomic: the isolate is single-threaded, so no other op can run
+    /// between the read and the write.
+    pub(crate) fn try_claim_tx(&mut self, app_id: &str) -> bool {
+        self.tx_claims.insert(app_id.to_string())
+    }
+
+    /// `true` if some top-level transaction for `app_id` is in flight —
+    /// including one whose `BEGIN` has not landed yet, which is the
+    /// window [`Self::has_tx_for`] cannot see.
+    pub(crate) fn tx_claimed_by(&self, app_id: &str) -> bool {
+        self.tx_claims.contains(app_id)
+    }
+
+    /// Release `app_id`'s claim and wake everything parked on it.
+    pub(crate) fn release_tx_claim(&mut self, app_id: &str) {
+        self.tx_claims.remove(app_id);
+        if let Some(waiters) = self.tx_waiters.remove(app_id) {
+            for waker in waiters {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Park a waker on `app_id`'s claim.
+    pub(crate) fn push_tx_waiter(&mut self, app_id: &str, waker: std::task::Waker) {
+        self.tx_waiters.entry(app_id.to_string()).or_default().push(waker);
+    }
+
     /// Park a connection in `app_id`'s transaction slot. Returns the
     /// previous occupant for that app, if any (callers should ensure
-    /// this is `None` — every begin path checks [`Self::has_tx_for`]
-    /// first). A different app's parked tx is never disturbed (SEC-1).
+    /// this is `None` — every top-level begin path holds `app_id`'s
+    /// claim from [`Self::try_claim_tx`] first, which is what keeps two
+    /// in-flight `BEGIN`s from reaching here). A different app's parked
+    /// tx is never disturbed (SEC-1).
     pub(crate) fn install_tx_client(
         &mut self,
         app_id: &str,
