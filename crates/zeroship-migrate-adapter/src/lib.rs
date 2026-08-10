@@ -44,6 +44,18 @@
 //!   reference catalogs, and the SQLite repeat-rename refusal. All three ungated
 //!   doors run them, because `lower` and `lower_plan` both delegate to
 //!   `lower_steps`.
+//! - VENDOR CAPABILITY authority. `lower_steps` -> `lower_op_into_steps` ->
+//!   `lower_one_op` -> `enforce_vendor_capability_at_lower`, which asks
+//!   `policy_grants_capability` against the `EffectivePolicy` the `IrAuthor`
+//!   already holds. Chain walked edge by edge, not inferred from adjacency.
+//!
+//!   Worth knowing why this one is easy to miss: the lowering copy shares no
+//!   name with the loader's. The loader routes the same question through a value
+//!   called `vendor_authority`; lowering spells it
+//!   `enforce_vendor_capability_at_lower` + `policy_grants_capability`. A search
+//!   for "vendor" finds the loader's accessor and misses the enforcement - a
+//!   plausible non-zero result pointing at the wrong thing, which is worse than
+//!   an empty one.
 //!
 //! **Believed loader-only.** These need the deploying app, the project registry
 //! and the vendor authority that only the loader's CALLER holds, so a lower-side
@@ -60,10 +72,10 @@
 //!
 //! NOT ESTABLISHED EITHER WAY, and deliberately not asserted: whether the
 //! remaining `validate_ir_authorized` behaviours - invalid schema ident, illegal
-//! guard direction, embedded-expression rejection, vendor authority - have
-//! lower-side equivalents. Confinement did, and it was the most alarming item on
-//! the original list, so absence should not be inferred for the rest without
-//! finding the behaviour rather than the symbol.
+//! guard direction, embedded-expression rejection - have lower-side equivalents.
+//! Confinement and vendor authority BOTH did, and confinement was the most
+//! alarming item on the original list, so absence must not be inferred for the
+//! rest without finding the behaviour rather than the symbol.
 //!
 //! Deserializing IR directly is fine as a PRE-PASS - `crates/migrated`
 //! deserializes to resolve table-shape policy and re-serializes, then hands the
